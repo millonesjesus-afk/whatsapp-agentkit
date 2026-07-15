@@ -505,6 +505,17 @@ def _pagina(
                 </form>
             </div>
         </nav>"""
+    # Precalculado fuera del f-string de abajo: Python 3.11 (la versión del
+    # Dockerfile de producción) no permite backslashes dentro de una
+    # expresión {} de un f-string — a diferencia de versiones más nuevas de
+    # Python, donde este mismo código compila sin avisar nada.
+    boton_filtros_movil = (
+        '<button type="button" class="btn btn-primary rounded-circle btn-filtros-movil shadow" '
+        'style="position:fixed;bottom:20px;left:16px;width:50px;height:50px;z-index:1400" '
+        "onclick=\"document.getElementById('rail-estados') && document.getElementById('rail-estados').classList.add('abierto')\">"
+        '<i class="bi bi-funnel-fill"></i></button>'
+        if usuario and not es_chat else ''
+    )
     return f"""<!DOCTYPE html>
 <html lang="es">
 <head>
@@ -519,7 +530,7 @@ def _pagina(
 <body class="{'pagina-chat' if es_chat else ''}">
 <div id="barra-carga"></div>
 {topbar}
-{'<button type="button" class="btn btn-primary rounded-circle btn-filtros-movil shadow" style="position:fixed;bottom:20px;left:16px;width:50px;height:50px;z-index:1400" onclick="document.getElementById(\'rail-estados\') && document.getElementById(\'rail-estados\').classList.add(\'abierto\')"><i class="bi bi-funnel-fill"></i></button>' if usuario and not es_chat else ''}
+{boton_filtros_movil}
 <div id="contenido-app">{cuerpo}</div>
 {BOOTSTRAP_JS}
 <script>
