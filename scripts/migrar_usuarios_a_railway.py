@@ -11,6 +11,13 @@ DATABASE_URL desde la pestaña "Variables" del servicio Postgres):
 import asyncio
 import os
 import sqlite3
+import sys
+from pathlib import Path
+
+# Permite correr este script directo (python scripts/archivo.py) sin que
+# Python se queje de no encontrar el paquete `agent` — por defecto solo
+# busca imports relativos a la carpeta del script, no a la raíz del proyecto.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
 
