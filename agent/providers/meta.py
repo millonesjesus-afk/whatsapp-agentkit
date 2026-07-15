@@ -2,6 +2,8 @@
 # Generado por AgentKit
 
 import os
+import hmac
+import hashlib
 import logging
 import httpx
 from fastapi import Request
@@ -17,7 +19,24 @@ class ProveedorMeta(ProveedorWhatsApp):
         self.access_token = os.getenv("META_ACCESS_TOKEN")
         self.phone_number_id = os.getenv("META_PHONE_NUMBER_ID")
         self.verify_token = os.getenv("META_VERIFY_TOKEN", "agentkit-verify")
+        self.app_secret = os.getenv("META_APP_SECRET")
         self.api_version = "v21.0"
+
+    async def verificar_firma(self, request: Request, body: bytes) -> bool:
+        """Verifica la firma HMAC-SHA256 que Meta envía en X-Hub-Signature-256,
+        para confirmar que el webhook realmente viene de Meta y no de un tercero."""
+        if not self.app_secret:
+            logger.warning(
+                "META_APP_SECRET no configurado — el webhook NO está verificando "
+                "la firma de Meta. Configúralo antes de ir a producción."
+            )
+            return True
+        firma_header = request.headers.get("x-hub-signature-256", "")
+        if not firma_header.startswith("sha256="):
+            return False
+        firma_esperada = hmac.new(self.app_secret.encode(), body, hashlib.sha256).hexdigest()
+        firma_recibida = firma_header.removeprefix("sha256=")
+        return hmac.compare_digest(firma_esperada, firma_recibida)
 
     async def validar_webhook(self, request: Request) -> dict | int | None:
         """Meta requiere verificación GET con hub.verify_token."""
@@ -45,8 +64,35 @@ class ProveedorMeta(ProveedorWhatsApp):
                         mensaje_id=msg.get("id", ""),
                         es_propio=False,  # Meta solo envía mensajes entrantes
                         tipo=tipo,
+                        # Presente solo si el cliente llegó desde un anuncio de
+                        # Click-to-WhatsApp (Meta Ads) — trae source_id, headline, etc.
+                        referral=msg.get("referral"),
                     ))
         return mensajes
+
+    async def marcar_leido_y_escribiendo(self, mensaje_id: str) -> bool:
+        """Marca el mensaje como leído (doble check azul) y activa el
+        indicador de 'escribiendo...' en WhatsApp mientras Gabi genera la
+        respuesta — dura hasta 25s o hasta que se envíe el siguiente mensaje,
+        que alcanza de sobra para una llamada típica a Claude."""
+        if not self.access_token or not self.phone_number_id or not mensaje_id:
+            return False
+        url = f"https://graph.facebook.com/{self.api_version}/{self.phone_number_id}/messages"
+        headers = {
+            "Authorization": f"Bearer {self.access_token}",
+            "Content-Type": "application/json",
+        }
+        payload = {
+            "messaging_product": "whatsapp",
+            "status": "read",
+            "message_id": mensaje_id,
+            "typing_indicator": {"type": "text"},
+        }
+        async with httpx.AsyncClient() as client:
+            r = await client.post(url, json=payload, headers=headers)
+            if r.status_code != 200:
+                logger.warning(f"No se pudo marcar leído/escribiendo: {r.status_code} — {r.text}")
+            return r.status_code == 200
 
     async def enviar_mensaje(self, telefono: str, mensaje: str) -> bool:
         """Envía mensaje via Meta WhatsApp Cloud API."""

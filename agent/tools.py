@@ -12,8 +12,13 @@ import re
 import csv
 import glob
 import logging
+from datetime import datetime, time
+from zoneinfo import ZoneInfo
 
 logger = logging.getLogger("agentkit")
+
+TZ_LIMA = ZoneInfo("America/Lima")
+DIAS_ES = ["lunes", "martes", "miércoles", "jueves", "viernes", "sábado", "domingo"]
 
 KNOWLEDGE_DIR = "knowledge"
 # Este proyecto usa únicamente el canal propio (no nuevos suministros)
@@ -23,6 +28,17 @@ ARCHIVOS_CATALOGO = [
 PLAZOS_A_MOSTRAR = ("12", "24", "36")
 
 _catalogo_cache: list[dict] | None = None
+
+# Duplicado real confirmado entre proveedores distintos (revisado con Jesús
+# el 10/07/2026): mismo modelo LG WT16OBVTB 16KG, pero listado dos veces con
+# precio distinto. La fila de GRUPO MERPES (S/2569, sin CODIGO HANA asignado
+# aún — "EN CREACIÓN") se excluye a favor de la de PERU SMART SAC (S/1871,
+# código 4501885). No se usa CODIGO HANA como clave porque "EN CREACIÓN" se
+# repite en otras 17 filas no relacionadas — se identifica por proveedor +
+# descripción exacta, que sí es única para esta fila.
+FILAS_DUPLICADAS_EXCLUIDAS = {
+    ("GRUPO MERPES PERU S.A.C.", "LAVADORA LG WT16OBVTB 16KG NEGRO"),
+}
 
 
 def _cargar_catalogo() -> list[dict]:
@@ -39,29 +55,56 @@ def _cargar_catalogo() -> list[dict]:
         with open(ruta, "r", encoding="utf-8") as f:
             productos.extend(csv.DictReader(f))
 
+    productos = [
+        p for p in productos
+        if (p.get("PROVEEDOR", "").strip(), p.get("DESCRIPCIÓN", "").strip()) not in FILAS_DUPLICADAS_EXCLUIDAS
+    ]
+
     _catalogo_cache = productos
     return productos
 
 
-def buscar_productos(mensaje: str, limite: int = 5) -> list[dict]:
+def _precio_float(producto: dict) -> float:
+    """Convierte el precio del producto a float para poder ordenar; los que
+    no tengan un precio válido quedan al final."""
+    try:
+        return float(producto.get("PRECIO", ""))
+    except (TypeError, ValueError):
+        return float("inf")
+
+
+def buscar_productos(mensaje: str, limite: int = 8, excluir_codigos: set[str] | None = None) -> list[dict]:
     """
     Busca productos del catálogo cuyo tipo, sub tipo o marca aparezcan
     mencionados en el mensaje del cliente. Prioriza coincidencias de marca
     (señal más específica) por sobre coincidencias genéricas de tipo, para
     que mencionar una marca puntual (ej. "Rheem") no quede opacado por
     productos de otras marcas que solo comparten el tipo (ej. "terma").
+    Dentro de un mismo nivel de relevancia, ordena de menor a mayor precio,
+    para que preguntas como "la más barata" o "la segunda más barata" se
+    puedan responder de forma consistente por posición.
 
     Args:
         mensaje: mensaje del cliente (ej: "quiero una terma a gas Rheem")
         limite: máximo de resultados a retornar
+        excluir_codigos: códigos de material (CODIGO HANA) a excluir de la
+            búsqueda general — se usa para que un precio promocional
+            reservado a una campaña específica (ej. la Terma a S/419.90 de
+            "SMS Terma a gas") no aparezca como oferta general a cualquier
+            cliente que mencione "terma" sin venir de esa campaña.
 
     Returns:
         Lista de productos coincidentes con sus datos de precio y cuotas,
-        ordenados de mayor a menor relevancia.
+        ordenados de mayor a menor relevancia y, dentro de eso, de menor a
+        mayor precio.
     """
     mensaje = mensaje.lower()
+    excluir_codigos = excluir_codigos or set()
     candidatos = []
     for producto in _cargar_catalogo():
+        if producto.get("CODIGO HANA", "") in excluir_codigos:
+            continue
+
         tipo = producto.get("TIPO", "").lower()
         sub_tipo = producto.get("SUB TIPO", "").lower()
         marca = producto.get("MARCA", "").lower()
@@ -77,8 +120,85 @@ def buscar_productos(mensaje: str, limite: int = 5) -> list[dict]:
         if score > 0:
             candidatos.append((score, producto))
 
-    candidatos.sort(key=lambda item: item[0], reverse=True)
+    candidatos.sort(key=lambda item: (-item[0], _precio_float(item[1])))
     return [producto for _, producto in candidatos[:limite]]
+
+
+def obtener_producto_por_codigo(codigo: str) -> dict | None:
+    """
+    Busca un producto del catálogo por su código único de material (CODIGO
+    HANA), la lista de precios oficial. Se usa para que las campañas
+    (agent/campanas.py) referencien un producto real por código en vez de
+    texto libre — así el precio de la promo nunca queda desincronizado de
+    la lista de precios vigente.
+    """
+    codigo = (codigo or "").strip()
+    if not codigo:
+        return None
+    for producto in _cargar_catalogo():
+        if producto.get("CODIGO HANA", "").strip() == codigo:
+            return producto
+    return None
+
+
+_PATRON_SUFIJOS_COMBO = re.compile(
+    r"\s*\+\s*(CONEXI[ÓO]N|COMBO|DUCTER[ÍI]A[^+]*|PUNTO ADICIONAL[^+]*|RACK|KIT DE INSTALACI[ÓO]N)",
+    re.IGNORECASE,
+)
+
+
+def _modelo_base(descripcion: str) -> str:
+    """Quita sufijos de instalación/combo/accesorios (+CONEXIÓN, +COMBO,
+    +DUCTERÍA, +PUNTO ADICIONAL, +RACK...) para comparar el modelo base del
+    producto, independientemente de qué combinación de instalación incluya."""
+    sin_sufijos = _PATRON_SUFIJOS_COMBO.sub("", descripcion.strip().upper())
+    return re.sub(r"\s+", " ", sin_sufijos).strip()
+
+
+def obtener_familia_producto(codigo_material: str) -> list[dict]:
+    """
+    Dado el código de un producto, retorna todas las variantes de combo/
+    instalación del MISMO modelo base (misma marca, mismo proveedor, misma
+    descripción sin contar +CONEXIÓN/+COMBO/+DUCTERÍA/etc.) Y el mismo nivel
+    de fee (FEE PRV/FEE CLDA), ordenadas de menor a mayor precio, incluyendo
+    el producto original.
+
+    El filtro por fee es clave: en varios modelos (ej. Secadora Rinnai 10Kg)
+    el catálogo trae DOS listas de precio paralelas para las mismas
+    combinaciones de instalación — una con fee más bajo (la promocional) y
+    otra con fee estándar (la regular, más cara). No son duplicados: son dos
+    estructuras de precio distintas. Si no se filtrara por fee, la familia
+    promocional se mezclaría con la regular y ambas quedarían ocultas para
+    el cliente equivocado.
+
+    Se usa para que una campaña vinculada a un código específico (ej. la
+    Secadora Rinnai 10Kg + Combo a S/3299) también reconozca como parte de
+    su promoción las demás combinaciones de instalación del mismo modelo Y
+    mismo nivel de fee (sin combo, +conexión, +conexión+combo, etc.), y así
+    Gabi pueda cotizar bien si el cliente de esa campaña pide una variante
+    distinta — sin tocar la línea de precio regular, que queda visible para
+    el resto de clientes.
+    """
+    ancla = obtener_producto_por_codigo(codigo_material)
+    if ancla is None:
+        return []
+
+    marca = ancla.get("MARCA", "").strip().upper()
+    proveedor = ancla.get("PROVEEDOR", "").strip().upper()
+    base = _modelo_base(ancla.get("DESCRIPCIÓN", ""))
+    fee_prv = ancla.get("FEE PRV", "").strip()
+    fee_clda = ancla.get("FEE CLDA", "").strip()
+
+    familia = [
+        p for p in _cargar_catalogo()
+        if p.get("MARCA", "").strip().upper() == marca
+        and p.get("PROVEEDOR", "").strip().upper() == proveedor
+        and _modelo_base(p.get("DESCRIPCIÓN", "")) == base
+        and p.get("FEE PRV", "").strip() == fee_prv
+        and p.get("FEE CLDA", "").strip() == fee_clda
+    ]
+    familia.sort(key=_precio_float)
+    return familia
 
 
 def formatear_producto(producto: dict) -> str:
@@ -107,7 +227,7 @@ def _dividir_en_parrafos(contenido: str, min_len: int = 20) -> list[str]:
     return [linea.strip() for linea in contenido.split("\n") if len(linea.strip()) >= min_len]
 
 
-def buscar_en_knowledge(mensaje: str, limite: int = 4) -> str:
+def buscar_en_knowledge(mensaje: str, limite: int = 7) -> str:
     """
     Busca, a nivel de párrafo, los fragmentos de /knowledge (base de
     conocimiento, contrato, speech, resumen del programa) que compartan más
@@ -138,26 +258,46 @@ def buscar_en_knowledge(mensaje: str, limite: int = 4) -> str:
     return "\n---\n".join(secciones)
 
 
-def obtener_horario_derivacion() -> dict:
-    """Retorna el horario de atención de los asesores humanos para derivación."""
+def obtener_estado_horario_atencion() -> dict:
+    """
+    Calcula si AHORA MISMO (hora real de Lima) se está dentro del horario de
+    atención de los asesores humanos. Un modelo de lenguaje no tiene reloj
+    propio — sin esto, no hay forma de que Gabi sepa si un asesor está
+    disponible en este momento o no.
+    """
+    ahora = datetime.now(TZ_LIMA)
+    dia_semana = ahora.weekday()  # 0=lunes … 6=domingo
+    hora_actual = ahora.time()
+
+    if dia_semana <= 5:  # lunes a sábado
+        dentro = time(8, 0) <= hora_actual < time(19, 0)
+    else:  # domingo
+        dentro = False
+
     return {
-        "lunes_a_viernes": "8:00am - 7:00pm",
-        "sabados": "8:00am - 6:00pm",
-        "domingos": "sin atención de asesores",
+        "dentro_de_horario": dentro,
+        "fecha_hora_lima": f"{DIAS_ES[dia_semana]} {ahora.strftime('%d/%m/%Y')}, {ahora.strftime('%H:%M')} (hora de Lima)",
     }
 
 
-def obtener_contexto_relevante(mensaje: str) -> str:
+def obtener_contexto_relevante(mensaje: str, excluir_codigos: set[str] | None = None) -> str:
     """
     Punto de entrada usado por brain.py: combina resultados del catálogo de
     productos y de la base de conocimiento relacionados al mensaje del cliente.
     """
     secciones = []
 
-    productos = buscar_productos(mensaje)
+    productos = buscar_productos(mensaje, excluir_codigos=excluir_codigos)
     if productos:
-        productos_texto = "\n\n".join(formatear_producto(p) for p in productos)
-        secciones.append(f"Productos del catálogo relacionados:\n{productos_texto}")
+        productos_texto = "\n\n".join(
+            f"{i}. {formatear_producto(p)}" for i, p in enumerate(productos, 1)
+        )
+        secciones.append(
+            "Productos del catálogo relacionados (numerados y ordenados de menor a "
+            "mayor precio dentro de cada nivel de relevancia; usa esta numeración "
+            "para responder de forma consistente a preguntas como \"la más barata\" "
+            f"[opción 1] o \"la segunda más barata\" [opción 2]):\n{productos_texto}"
+        )
 
     conocimiento = buscar_en_knowledge(mensaje)
     if conocimiento:

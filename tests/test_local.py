@@ -60,7 +60,7 @@ async def main():
 
         # Generar respuesta
         print("\nGabi: ", end="", flush=True)
-        respuesta = await generar_respuesta(mensaje, historial)
+        respuesta, _hubo_error = await generar_respuesta(mensaje, historial)
         print(respuesta)
         print()
 

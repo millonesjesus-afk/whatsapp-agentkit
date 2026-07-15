@@ -19,6 +19,7 @@ class MensajeEntrante:
     mensaje_id: str     # ID único del mensaje
     es_propio: bool     # True si lo envió el agente (se ignora)
     tipo: str = "text"  # "text" o el tipo original (audio, image, document, etc.)
+    referral: dict | None = None  # Datos del anuncio de origen (Meta Click-to-WhatsApp), si aplica
 
 
 class ProveedorWhatsApp(ABC):
@@ -37,3 +38,15 @@ class ProveedorWhatsApp(ABC):
     async def validar_webhook(self, request: Request) -> dict | int | None:
         """Verificación GET del webhook (solo Meta la requiere). Retorna respuesta o None."""
         return None
+
+    async def verificar_firma(self, request: Request, body: bytes) -> bool:
+        """Verifica que el webhook POST realmente venga del proveedor (firma/HMAC).
+        Por defecto no verifica — cada proveedor que lo soporte debe sobreescribirlo."""
+        return True
+
+    async def marcar_leido_y_escribiendo(self, mensaje_id: str) -> bool:
+        """Marca el mensaje entrante como leído y muestra el indicador de
+        'escribiendo...' en WhatsApp mientras se genera la respuesta (puede
+        tardar unos segundos por la llamada al modelo). No-op por defecto —
+        cada proveedor que lo soporte debe sobreescribirlo."""
+        return False
