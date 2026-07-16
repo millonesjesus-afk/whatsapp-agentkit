@@ -1879,14 +1879,28 @@ async def detalle_lead(
         </div>
         """
 
+    # El interés va directo en la cabecera (no solo en el resumen lateral)
+    # porque en la vista filtrada por asesor el resumen queda detrás de un
+    # botón (offcanvas, para no apretar el layout a 4 columnas) — sin esto,
+    # el dato más importante para responder quedaba a un clic de distancia.
+    interes_linea = ""
+    if lead.get("interes"):
+        interes_linea = (
+            f'<div class="text-muted text-truncate" style="font-size:.72rem" title="{html.escape(lead["interes"])}">'
+            f'<i class="bi bi-tag-fill"></i> {html.escape(lead["interes"])}</div>'
+        )
+
     panel = f"""
     <div class="chat-header-fijo d-flex align-items-center justify-content-between gap-2">
         <div class="d-flex align-items-center gap-2 overflow-hidden">
             <a href="/dashboard" class="btn-volver-movil text-dark" data-ajax="1"><i class="bi bi-arrow-left fs-5"></i></a>
             {_avatar(nombre_mostrado, 32)}
-            <div class="text-truncate">
-                <span class="fw-semibold">{html.escape(nombre_mostrado)}</span>
-                <span class="text-muted small">&middot; {html.escape(telefono)}</span>
+            <div class="overflow-hidden lh-sm">
+                <div class="text-truncate">
+                    <span class="fw-semibold">{html.escape(nombre_mostrado)}</span>
+                    <span class="text-muted small">&middot; {html.escape(telefono)}</span>
+                </div>
+                {interes_linea}
             </div>
         </div>
         {boton_resumen}
