@@ -10,7 +10,7 @@ Casi todas las termas a gas residenciales del catálogo (5.5 a 20 litros) son de
 
 Para 1 a 2 personas en el hogar, con un solo punto de agua caliente en uso a la vez (una ducha), se recomienda una terma de 5.5 a 6 litros por minuto. Caso típico: departamento pequeño, estudio, vivienda unipersonal.
 
-Para 2 a 3 personas, con uso ocasional de 2 puntos simultáneos (ducha y cocina, o ducha y lavatorio), se recomienda una terma de 8 a 10 litros por minuto.
+Para 2 a 3 personas, con uso ocasional de 2 puntos simultáneos (ducha y cocina, ducha y lavatorio, o ducha y lavadero de ropa), se recomienda una terma de 7 a 10 litros por minuto — las de 7-8 L/min (ej. Rotoplas Multiflow 7L, Rheem 8L) alcanzan para cubrir dos puntos así en simultáneo, aunque si el cliente busca más margen de comodidad o prevé sumar más puntos de agua caliente a futuro, vale la pena ofrecerle una opción de mayor capacidad (10-12 litros por minuto).
 
 Para 3 a 4 personas, familia pequeña o mediana con uso normal y algo de simultaneidad, se recomienda una terma de 10 a 12 litros por minuto.
 
@@ -22,7 +22,7 @@ Referencia de marca Rotoplas: la terma de 5.5L está pensada para familias peque
 
 ## Puntos de agua caliente — consumo de referencia
 
-Una ducha consume aproximadamente 7 a 10 litros por minuto (algunas duchas de alta presión hasta 20 L/min). Un lavatorio o lavamanos consume aproximadamente 4 a 5 litros por minuto. Un grifo de cocina consume aproximadamente 2 a 5 litros por minuto. Si el cliente va a usar 2 puntos de agua caliente a la vez (por ejemplo 2 duchas, o una ducha y la cocina), conviene recomendar al menos 14 litros por minuto, especialmente en Lima donde el agua de red suele llegar fría (18-20°C, más fría en invierno).
+Una ducha consume aproximadamente 7 a 10 litros por minuto (algunas duchas de alta presión hasta 20 L/min). Un lavatorio o lavamanos consume aproximadamente 4 a 5 litros por minuto. Un lavadero de ropa (lavado a mano) consume aproximadamente 4 a 6 litros por minuto, similar a un lavatorio. Un grifo de cocina consume aproximadamente 2 a 5 litros por minuto. Si el cliente va a usar 2 puntos de agua caliente a la vez (por ejemplo 2 duchas, o una ducha y la cocina), conviene recomendar al menos 14 litros por minuto, especialmente en Lima donde el agua de red suele llegar fría (18-20°C, más fría en invierno).
 
 ## Termotanques de acumulación (si el cliente pregunta por un modelo grande tipo tanque)
 
