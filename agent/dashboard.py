@@ -2229,13 +2229,37 @@ TIPOS_DETECCION = {
 
 
 @router.get("/campanas", response_class=HTMLResponse)
-async def gestionar_campanas(request: Request, usuario: dict = Depends(_usuario_actual)):
+async def gestionar_campanas(request: Request, usuario: dict = Depends(_usuario_actual), creada: int | None = None):
     if usuario["rol"] != "admin":
         raise HTTPException(status_code=403, detail="Solo un administrador puede gestionar campañas")
 
     sidebar = await _renderizar_sidebar(usuario, telefono_activo=None)
     campanas = await listar_campanas()
     conteos = {c["campana"]: c for c in await contar_leads_por_campana()}
+
+    banner_html = ""
+    if creada:
+        campana_nueva = next((c for c in campanas if c["id"] == creada), None)
+        if campana_nueva:
+            if campana_nueva.get("texto_saludo"):
+                link_nueva = generar_link_whatsapp(campana_nueva["texto_saludo"])
+                banner_html = f"""
+                <div class="alert alert-success py-2 px-3 mb-3 d-flex align-items-center gap-2">
+                    <i class="bi bi-check-circle-fill"></i>
+                    <div class="flex-grow-1">
+                        <strong>Campaña &ldquo;{html.escape(campana_nueva['nombre'])}&rdquo; creada.</strong> Enlace de WhatsApp listo para compartir:
+                        <div class="input-group input-group-sm mt-1" style="max-width:520px">
+                            <input type="text" class="form-control form-control-sm" value="{html.escape(link_nueva)}" readonly onclick="this.select()">
+                            <button class="btn btn-outline-secondary" type="button"
+                                onclick="navigator.clipboard.writeText(this.previousElementSibling.value); this.textContent='Copiado!'">Copiar</button>
+                        </div>
+                    </div>
+                </div>"""
+            else:
+                banner_html = (
+                    f'<div class="alert alert-success py-2 px-3 mb-3"><i class="bi bi-check-circle-fill"></i> '
+                    f'Campaña &ldquo;{html.escape(campana_nueva["nombre"])}&rdquo; creada.</div>'
+                )
 
     filas = []
     for c in campanas:
@@ -2267,6 +2291,13 @@ async def gestionar_campanas(request: Request, usuario: dict = Depends(_usuario_
                 f'</div>'
             )
 
+        # Modo manual arranca activo solo si ya tiene promo manual guardada y
+        # ningún código de catálogo — igual que en Cierre de venta, los dos
+        # bloques son mutuamente excluyentes (inputs disabled en el que no
+        # está activo, para que el POST solo mande uno de los dos).
+        rowid = str(c["id"])
+        manual_activo = bool(c.get("producto_promocional")) and not c.get("codigo_material")
+
         filas.append(f"""<tr>
             <td class="ps-3">
                 <div class="fw-semibold">{html.escape(c['nombre'])}</div>
@@ -2276,10 +2307,21 @@ async def gestionar_campanas(request: Request, usuario: dict = Depends(_usuario_
             <td class="text-muted">{conteos.get(c['nombre'], {}).get('total', 0)} leads / {conteos.get(c['nombre'], {}).get('vendidos', 0)} vendidos</td>
             <td>
                 {promo_html}
-                <form method="post" action="/dashboard/campanas/{c['id']}/editar" class="d-flex flex-column gap-1 mt-2" style="min-width:220px">
-                    <input type="text" name="codigo_material" class="form-control form-control-sm" value="{html.escape(c.get('codigo_material') or '')}" placeholder="Código de material (catálogo)">
-                    <input type="text" name="producto_promocional" class="form-control form-control-sm" value="{html.escape(c.get('producto_promocional') or '')}" placeholder="...o producto manual (sin código)">
-                    <input type="text" name="precio_promocional" class="form-control form-control-sm" value="{html.escape(c.get('precio_promocional') or '')}" placeholder="Precio manual (ej: S/ 419.90)">
+                <form method="post" action="/dashboard/campanas/{c['id']}/editar" class="d-flex flex-column gap-1 mt-2" style="min-width:240px">
+                    <div id="campana-producto-catalogo-{rowid}" style="{'display:none' if manual_activo else ''}">
+                        <div class="position-relative">
+                            <input type="text" id="campana-buscar-producto-{rowid}" class="form-control form-control-sm campana-buscar-producto" placeholder="Busca por marca, tipo o modelo..." autocomplete="off">
+                            <div id="campana-resultados-producto-{rowid}" class="list-group position-absolute w-100 shadow-sm campana-resultados-producto" style="z-index:10;display:none;max-height:220px;overflow-y:auto;"></div>
+                        </div>
+                        <div id="campana-seleccionado-{rowid}" class="small mt-1 campana-seleccionado" style="display:none"></div>
+                        <input type="hidden" name="codigo_material" id="campana-codigo-{rowid}" class="campana-codigo-hidden" value="{html.escape(c.get('codigo_material') or '')}" {'disabled' if manual_activo else ''}>
+                        <button type="button" class="btn btn-link btn-sm p-0 mt-1 campana-btn-manual" data-rowid="{rowid}">¿No está en la lista? Escribir manualmente</button>
+                    </div>
+                    <div id="campana-producto-manual-{rowid}" style="{'' if manual_activo else 'display:none;'}">
+                        <input type="text" name="producto_promocional" class="form-control form-control-sm mb-1 campana-manual-input" value="{html.escape(c.get('producto_promocional') or '')}" placeholder="Producto manual (sin código)" {'' if manual_activo else 'disabled'}>
+                        <input type="text" name="precio_promocional" class="form-control form-control-sm mb-1 campana-manual-input" value="{html.escape(c.get('precio_promocional') or '')}" placeholder="Precio manual (ej: S/ 419.90)" {'' if manual_activo else 'disabled'}>
+                        <button type="button" class="btn btn-link btn-sm p-0 campana-btn-catalogo" data-rowid="{rowid}">Volver a buscar en el catálogo</button>
+                    </div>
                     <button type="submit" class="btn btn-sm btn-outline-primary align-self-start">Guardar promo</button>
                 </form>
             </td>
@@ -2293,23 +2335,26 @@ async def gestionar_campanas(request: Request, usuario: dict = Depends(_usuario_
         </tr>""")
 
     opciones_tipo = "".join(f'<option value="{v}">{html.escape(t)}</option>' for v, t in TIPOS_DETECCION.items())
+    ids_filas_js = "".join(f"inicializarBuscadorCampana('{c['id']}');\n        " for c in campanas)
 
     panel = f"""
     {_titulo_seccion('bi-megaphone-fill', 'Gestionar campañas')}
     <p class="text-muted small mb-3">
         Cada campaña se detecta una sola vez, en el primer contacto del lead, y ya no cambia
-        durante la conversación. Si le pones un <strong>código de material</strong> (el de la
-        lista de precios), el producto y precio que ofrece Gabi se toman siempre en vivo del
-        catálogo vigente — no puede desincronizarse. El producto/precio manual es solo un
-        respaldo para promociones que no están en la lista de precios.
+        durante la conversación. Si eliges un <strong>producto del catálogo</strong>, el precio
+        que ofrece Gabi se toma siempre en vivo de la lista de precios vigente — no puede
+        desincronizarse. El producto/precio manual es solo un respaldo para promociones que no
+        están en la lista de precios.
     </p>
+    {banner_html}
 
-    <div class="card shadow-sm mb-4">
+    <div class="card leads-card shadow-sm mb-4">
+        <div class="barra-acento"></div>
         <div class="table-responsive">
-            <table class="table table-hover align-middle mb-0 small">
-                <thead style="background:#f8fafc">
-                    <tr class="text-uppercase text-muted" style="font-size:.7rem;letter-spacing:.04em">
-                        <th class="ps-3 py-3">Campaña / enlace de WhatsApp</th><th>Leads / Ventas</th><th>Promoción vigente</th><th class="pe-3">Estado</th>
+            <table class="table table-hover align-middle mb-0 tabla-ejecutiva">
+                <thead>
+                    <tr>
+                        <th class="ps-3">Campaña / enlace de WhatsApp</th><th>Leads / Ventas</th><th>Promoción vigente</th><th class="pe-3">Estado</th>
                     </tr>
                 </thead>
                 <tbody>{''.join(filas) or '<tr><td colspan="4" class="text-center text-muted py-4">Aún no hay campañas.</td></tr>'}</tbody>
@@ -2323,7 +2368,8 @@ async def gestionar_campanas(request: Request, usuario: dict = Depends(_usuario_
         la campaña automáticamente y para generar el enlace de WhatsApp listo para compartir (puedes
         acortarlo después en wa.link.com si lo necesitas para SMS).
     </p>
-    <div class="card shadow-sm">
+    <div class="card leads-card shadow-sm">
+        <div class="barra-acento"></div>
         <div class="card-body">
             <form method="post" action="/dashboard/campanas/nueva" class="row g-2">
                 <div class="col-md-3">
@@ -2342,17 +2388,22 @@ async def gestionar_campanas(request: Request, usuario: dict = Depends(_usuario_
                     <label class="form-label small text-muted mb-0">Patrón de detección (fragmento distintivo del saludo, o dato del anuncio de Meta)</label>
                     <input type="text" name="patron" id="input-patron" class="form-control form-control-sm" required placeholder="Se autocompleta con el saludo si lo dejas vacío">
                 </div>
-                <div class="col-md-3">
-                    <label class="form-label small text-muted mb-0">Código de material (catálogo)</label>
-                    <input type="text" name="codigo_material" class="form-control form-control-sm" placeholder="Ej: 4508841">
-                </div>
-                <div class="col-md-2">
-                    <label class="form-label small text-muted mb-0">...o producto manual</label>
-                    <input type="text" name="producto_promocional" class="form-control form-control-sm" placeholder="Sin código">
-                </div>
-                <div class="col-md-1">
-                    <label class="form-label small text-muted mb-0">Precio</label>
-                    <input type="text" name="precio_promocional" class="form-control form-control-sm" placeholder="Manual">
+                <div class="col-md-6">
+                    <label class="form-label small text-muted mb-0">Producto de la promoción (catálogo)</label>
+                    <div id="campana-producto-catalogo-nueva">
+                        <div class="position-relative">
+                            <input type="text" id="campana-buscar-producto-nueva" class="form-control form-control-sm campana-buscar-producto" placeholder="Busca por marca, tipo o modelo..." autocomplete="off">
+                            <div id="campana-resultados-producto-nueva" class="list-group position-absolute w-100 shadow-sm campana-resultados-producto" style="z-index:10;display:none;max-height:220px;overflow-y:auto;"></div>
+                        </div>
+                        <div id="campana-seleccionado-nueva" class="small mt-1 campana-seleccionado" style="display:none"></div>
+                        <input type="hidden" name="codigo_material" id="campana-codigo-nueva" class="campana-codigo-hidden">
+                        <button type="button" class="btn btn-link btn-sm p-0 mt-1 campana-btn-manual" data-rowid="nueva">¿No está en la lista? Escribir manualmente</button>
+                    </div>
+                    <div id="campana-producto-manual-nueva" style="display:none;">
+                        <input type="text" name="producto_promocional" class="form-control form-control-sm mb-1 campana-manual-input" placeholder="Producto manual (sin código)" disabled>
+                        <input type="text" name="precio_promocional" class="form-control form-control-sm mb-1 campana-manual-input" placeholder="Precio manual (ej: S/ 419.90)" disabled>
+                        <button type="button" class="btn btn-link btn-sm p-0 campana-btn-catalogo" data-rowid="nueva">Volver a buscar en el catálogo</button>
+                    </div>
                 </div>
                 <div class="col-12">
                     <button type="submit" class="btn btn-sm btn-primary">Crear campaña</button>
@@ -2367,11 +2418,108 @@ async def gestionar_campanas(request: Request, usuario: dict = Depends(_usuario_
         saludo.addEventListener('input', function() {{
             if (!patron.value.trim()) {{ patron.value = saludo.value.trim().toLowerCase(); }}
         }});
+
+        function escapar(texto) {{
+            var div = document.createElement('div');
+            div.textContent = texto || '';
+            return div.innerHTML;
+        }}
+
+        function inicializarBuscadorCampana(rowId) {{
+            var buscarInput = document.getElementById('campana-buscar-producto-' + rowId);
+            var resultadosBox = document.getElementById('campana-resultados-producto-' + rowId);
+            var seleccionadoBox = document.getElementById('campana-seleccionado-' + rowId);
+            var hiddenCodigo = document.getElementById('campana-codigo-' + rowId);
+            var bloqueCatalogo = document.getElementById('campana-producto-catalogo-' + rowId);
+            var bloqueManual = document.getElementById('campana-producto-manual-' + rowId);
+            if (!buscarInput) return;
+            var btnManual = bloqueCatalogo.querySelector('.campana-btn-manual');
+            var btnCatalogo = bloqueManual.querySelector('.campana-btn-catalogo');
+            var inputsManual = bloqueManual.querySelectorAll('.campana-manual-input');
+
+            function activarModoManual(manual) {{
+                bloqueCatalogo.style.display = manual ? 'none' : '';
+                bloqueManual.style.display = manual ? '' : 'none';
+                hiddenCodigo.disabled = manual;
+                inputsManual.forEach(function(i) {{ i.disabled = !manual; }});
+            }}
+            btnManual.addEventListener('click', function() {{ activarModoManual(true); }});
+            btnCatalogo.addEventListener('click', function() {{ activarModoManual(false); }});
+
+            var timeoutBusqueda;
+            buscarInput.addEventListener('input', function() {{
+                clearTimeout(timeoutBusqueda);
+                var q = buscarInput.value.trim();
+                if (q.length < 2) {{ resultadosBox.style.display = 'none'; return; }}
+                timeoutBusqueda = setTimeout(function() {{
+                    fetch('/dashboard/campanas/buscar-producto?q=' + encodeURIComponent(q))
+                        .then(function(r) {{ return r.json(); }})
+                        .then(function(productos) {{
+                            if (!productos.length) {{
+                                resultadosBox.innerHTML = '<div class="list-group-item small text-muted">Sin resultados en el catálogo</div>';
+                            }} else {{
+                                resultadosBox.innerHTML = productos.map(function(p) {{
+                                    return '<button type="button" class="list-group-item list-group-item-action small py-2" ' +
+                                        'data-codigo="' + escapar(p.codigo) + '" data-descripcion="' + escapar(p.descripcion) + '" ' +
+                                        'data-marca="' + escapar(p.marca) + '" data-precio="' + escapar(p.precio) + '">' +
+                                        '<strong>' + escapar(p.marca) + '</strong> — ' + escapar(p.descripcion) +
+                                        ' <span class="text-muted">S/ ' + escapar(p.precio) + '</span></button>';
+                                }}).join('');
+                            }}
+                            resultadosBox.style.display = 'block';
+                        }});
+                }}, 250);
+            }});
+
+            resultadosBox.addEventListener('click', function(ev) {{
+                var btn = ev.target.closest('button[data-codigo]');
+                if (!btn) return;
+                hiddenCodigo.value = btn.getAttribute('data-codigo');
+                seleccionadoBox.innerHTML = '<i class="bi bi-check-circle-fill text-success"></i> ' +
+                    escapar(btn.getAttribute('data-marca')) + ' — ' + escapar(btn.getAttribute('data-descripcion')) +
+                    ' &middot; S/ ' + escapar(btn.getAttribute('data-precio'));
+                seleccionadoBox.style.display = 'block';
+                buscarInput.value = '';
+                resultadosBox.style.display = 'none';
+                resultadosBox.innerHTML = '';
+            }});
+
+            document.addEventListener('click', function(ev) {{
+                if (ev.target !== buscarInput && !resultadosBox.contains(ev.target)) {{
+                    resultadosBox.style.display = 'none';
+                }}
+            }});
+        }}
+
+        inicializarBuscadorCampana('nueva');
+        {ids_filas_js}
     }})();
     </script>
     """
     cuerpo = f"""<div class="shell d-flex">{sidebar}<div class="main-pane flex-grow-1 p-4">{panel}</div></div>"""
     return _pagina("Gestionar campañas", usuario, cuerpo, request=request)
+
+
+@router.get("/campanas/buscar-producto")
+async def buscar_producto_campana(q: str = "", usuario: dict = Depends(_usuario_actual)):
+    """Autocompletar del catálogo real para el producto de una campaña — mismo
+    buscador que ya usa Gabi por chat y el Cierre de venta, para que la promo
+    siempre salga de la lista de precios vigente en vez de tipearla a mano."""
+    if usuario["rol"] != "admin":
+        raise HTTPException(status_code=403, detail="Solo un administrador puede gestionar campañas")
+    if len(q.strip()) < 2:
+        return JSONResponse([])
+    productos = buscar_productos(q, limite=8)
+    return JSONResponse([
+        {
+            "codigo": p.get("CODIGO HANA", ""),
+            "descripcion": p.get("DESCRIPCIÓN", ""),
+            "marca": p.get("MARCA", ""),
+            "proveedor": p.get("PROVEEDOR", ""),
+            "precio": p.get("PRECIO", ""),
+        }
+        for p in productos
+    ])
 
 
 @router.post("/campanas/nueva")
@@ -2392,12 +2540,12 @@ async def crear_campana_nueva(
     codigo_material = codigo_material.strip()
     if codigo_material and obtener_producto_por_codigo(codigo_material) is None:
         raise HTTPException(status_code=400, detail=f"El código de material '{codigo_material}' no existe en la lista de precios vigente")
-    await crear_campana(
+    campana_creada = await crear_campana(
         nombre=nombre.strip(), tipo_deteccion=tipo_deteccion, patron=patron.strip().lower(),
         texto_saludo=texto_saludo.strip(), codigo_material=codigo_material,
         producto_promocional=producto_promocional.strip(), precio_promocional=precio_promocional.strip(),
     )
-    return RedirectResponse(url="/dashboard/campanas", status_code=303)
+    return RedirectResponse(url=f"/dashboard/campanas?creada={campana_creada['id']}", status_code=303)
 
 
 @router.post("/campanas/{campana_id}/editar")
