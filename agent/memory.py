@@ -10,7 +10,7 @@ import os
 from datetime import datetime
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
-from sqlalchemy import String, Text, DateTime, select, Integer, Boolean, func
+from sqlalchemy import String, Text, DateTime, select, Integer, Boolean, func, case
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -586,7 +586,7 @@ async def contar_leads_por_campana() -> list[dict]:
         query = select(
             Lead.campana_origen,
             func.count().label("total"),
-            func.sum(func.iif(Lead.resultado == "vendido", 1, 0)).label("vendidos"),
+            func.sum(case((Lead.resultado == "vendido", 1), else_=0)).label("vendidos"),
         ).where(Lead.campana_origen.is_not(None)).group_by(Lead.campana_origen)
         result = await session.execute(query)
         return [
