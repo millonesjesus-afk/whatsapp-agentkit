@@ -1675,6 +1675,7 @@ def _script_chat_en_vivo(telefono: str, tiene_asesor: bool) -> str:
         let mediaRecorder = null;
         let fragmentosAudio = [];
         let grabando = false;
+        let iniciandoGrabacion = false;
         let segundosGrabados = 0;
         let intervaloGrabacion = null;
         let blobPendiente = null;
@@ -1880,8 +1881,18 @@ def _script_chat_en_vivo(telefono: str, tiene_asesor: bool) -> str:
                     detenerGrabacion();
                     return;
                 }
+                // Un doble clic (o un clic mientras el navegador aún está
+                // pidiendo permiso del micrófono) podía arrancar DOS
+                // grabaciones a la vez — la segunda pisaba la referencia
+                // compartida a la primera, que quedaba grabando sola en
+                // segundo plano sin forma de detenerla hasta que el propio
+                // navegador la cortara sola, mostrando la previsualización
+                // "de la nada" mucho después, sin un clic reciente al mic.
+                if (iniciandoGrabacion) return;
+                iniciandoGrabacion = true;
                 limpiarPrevisualizacion();
                 navigator.mediaDevices.getUserMedia({audio: true}).then(function(stream) {
+                    iniciandoGrabacion = false;
                     fragmentosAudio = [];
                     segundosGrabados = 0;
                     mediaRecorder = new MediaRecorder(stream);
@@ -1906,6 +1917,7 @@ def _script_chat_en_vivo(telefono: str, tiene_asesor: bool) -> str:
                         if (segundosGrabados >= DURACION_MAXIMA_AUDIO) detenerGrabacion();
                     }, 1000);
                 }).catch(function() {
+                    iniciandoGrabacion = false;
                     estadoAdjunto.style.display = 'block';
                     estadoAdjunto.textContent = 'No se pudo acceder al micrófono — revisa los permisos del navegador.';
                 });
