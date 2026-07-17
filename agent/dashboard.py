@@ -23,6 +23,7 @@ sin tocar main.py/brain.py.
 """
 
 import html
+import json
 import logging
 import os
 import secrets
@@ -30,7 +31,7 @@ import subprocess
 import tempfile
 import uuid
 import bcrypt
-from datetime import datetime
+from datetime import datetime, timedelta
 from fastapi import APIRouter, Depends, HTTPException, Form, Request, UploadFile, File
 from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse, Response, FileResponse
 
@@ -359,6 +360,17 @@ ESTILOS_PROPIOS = """
      muestra/oculta esta barra según haya o no una nota de voz pendiente
      terminaba sin efecto visual y la barra quedaba SIEMPRE visible. */
   .previsualizacion-audio-bar { display: flex; }
+
+  /* Banner para pedir permiso de notificaciones de escritorio — discreto,
+     arriba de todo, se descarta solo (el navegador ya recuerda la decisión
+     de Notification.requestPermission, así que no hace falta guardar nada
+     propio para no volver a mostrarlo). */
+  .banner-notificaciones {
+    position: fixed; top: 0; left: 0; right: 0; z-index: 1500;
+    background: var(--gaso-azul-osc); color: #fff;
+    padding: 10px 16px; display: flex; align-items: center; justify-content: center;
+    gap: 10px; font-size: .85rem; flex-wrap: wrap; text-align: center;
+  }
   .btn-volver-movil { display: none; text-decoration: none; }
   .btn-filtros-movil { display: none; }
   .btn-resumen-movil { display: none; }
@@ -501,6 +513,98 @@ def _titulo_seccion(icono: str, texto: str) -> str:
         f'<i class="bi {icono}" style="color:var(--gaso-azul)"></i>'
         f'<h5 class="mb-0 fw-semibold">{html.escape(texto)}</h5></div>'
     )
+
+
+def _script_notificaciones(usuario: dict | None) -> str:
+    """Notificaciones de escritorio (como WhatsApp Web) para un lead nuevo
+    asignado o un agendado a punto de tocar. Vive en el shell base de la
+    página (fuera de #contenido-app, junto al script de navegación AJAX),
+    no dentro de un chat — así el sondeo sigue corriendo sin importar qué
+    pantalla del panel esté mirando el asesor en ese momento."""
+    if not usuario:
+        return ""
+    username_js = json.dumps(usuario["username"])
+    return f"""
+    <script>
+    (function() {{
+        if (typeof Notification === 'undefined') return;
+
+        const claveLeads = 'gaso_notif_leads_' + {username_js};
+        const claveCitas = 'gaso_notif_citas_' + {username_js};
+
+        function leerSet(clave) {{
+            try {{ return new Set(JSON.parse(localStorage.getItem(clave) || '[]')); }}
+            catch (e) {{ return new Set(); }}
+        }}
+        function guardarSet(clave, valores) {{
+            localStorage.setItem(clave, JSON.stringify(Array.from(valores)));
+        }}
+
+        function mostrarBanner() {{
+            if (document.getElementById('banner-notif')) return;
+            const banner = document.createElement('div');
+            banner.id = 'banner-notif';
+            banner.className = 'banner-notificaciones';
+            banner.innerHTML = '<i class="bi bi-bell-fill"></i> Activa las notificaciones de escritorio para enterarte de leads nuevos y citas próximas sin tener el panel abierto.' +
+                ' <button type="button" class="btn btn-sm btn-light" id="btn-activar-notif">Activar</button>' +
+                ' <button type="button" class="btn-close btn-close-white" id="btn-cerrar-notif" aria-label="Cerrar"></button>';
+            document.body.appendChild(banner);
+            document.getElementById('btn-activar-notif').addEventListener('click', function() {{
+                Notification.requestPermission().then(function(permiso) {{
+                    banner.remove();
+                    if (permiso === 'granted') revisar();
+                }});
+            }});
+            document.getElementById('btn-cerrar-notif').addEventListener('click', function() {{ banner.remove(); }});
+        }}
+        if (Notification.permission === 'default') mostrarBanner();
+
+        function notificar(titulo, cuerpo, telefono) {{
+            if (Notification.permission !== 'granted') return;
+            const n = new Notification(titulo, {{ body: cuerpo, tag: 'gaso-' + telefono }});
+            n.onclick = function() {{
+                window.focus();
+                window.location.href = '/dashboard/lead/' + encodeURIComponent(telefono);
+            }};
+        }}
+
+        // A propósito NO se salta el sondeo si document.hidden es true — a
+        // diferencia del poll del chat, esta es la situación exacta en la
+        // que más sirve una notificación de escritorio: el asesor está en
+        // otra pestaña o con el navegador minimizado.
+        function revisar() {{
+            if (Notification.permission !== 'granted') return;
+            fetch('/dashboard/notificaciones.json')
+                .then(function(r) {{ return r.json(); }})
+                .then(function(datos) {{
+                    const vistosLeads = leerSet(claveLeads);
+                    const idsActuales = new Set();
+                    datos.leads_nuevos.forEach(function(l) {{
+                        idsActuales.add(l.telefono);
+                        if (!vistosLeads.has(l.telefono)) {{
+                            notificar('Nuevo lead asignado', l.nombre, l.telefono);
+                        }}
+                    }});
+                    guardarSet(claveLeads, idsActuales);
+
+                    const vistasCitas = leerSet(claveCitas);
+                    const idsCitas = new Set();
+                    datos.agendados_proximos.forEach(function(a) {{
+                        const clave = a.telefono + '|' + a.fecha_agendada;
+                        idsCitas.add(clave);
+                        if (!vistasCitas.has(clave)) {{
+                            notificar('Cita próxima con ' + a.nombre, 'A las ' + a.hora, a.telefono);
+                        }}
+                    }});
+                    guardarSet(claveCitas, idsCitas);
+                }})
+                .catch(function() {{}});
+        }}
+        revisar();
+        setInterval(revisar, 30000);
+    }})();
+    </script>
+    """
 
 
 def _pagina(
@@ -677,6 +781,7 @@ def _pagina(
     window.addEventListener('pageshow', terminar);
 }})();
 </script>
+{_script_notificaciones(usuario)}
 </body>
 </html>"""
 
@@ -2391,6 +2496,41 @@ async def mensajes_json(telefono: str, usuario: dict = Depends(_usuario_actual))
     _verificar_acceso_lead(usuario, lead)
     historial = await obtener_historial(telefono, limite=200)
     return JSONResponse(historial)
+
+
+@router.get("/notificaciones.json")
+async def notificaciones_json(usuario: dict = Depends(_usuario_actual)):
+    """Endpoint liviano para las notificaciones de escritorio (lead nuevo
+    asignado / agendado próximo) — lo sondea el shell base de la página,
+    no el chat, así funciona sin importar qué pantalla del panel esté
+    mirando el asesor. Solo lo que le corresponde a él mismo (no lo que ve
+    un admin/supervisor de vision total, para no saturarlo con lo de todos)."""
+    username = usuario["username"]
+    # fecha_agendada se guarda tal cual la tipeó el asesor en su navegador
+    # (hora de Perú, sin zona horaria) — Railway corre en UTC, así que hay
+    # que restar el offset acá para comparar peras con peras.
+    ahora_peru = datetime.utcnow() - timedelta(hours=5)
+    limite_peru = ahora_peru + timedelta(minutes=10)
+
+    leads = await listar_leads(asesor_asignado=username)
+    leads_nuevos = [
+        {"telefono": l["telefono"], "nombre": l["nombre"] or l["telefono"]}
+        for l in leads if not l["visto_asesor"]
+    ]
+
+    agendados = await listar_leads_agendados(asesor_asignado=username)
+    agendados_proximos = [
+        {
+            "telefono": a["telefono"],
+            "nombre": a["nombre"] or a["telefono"],
+            "fecha_agendada": a["fecha_agendada"].isoformat(),
+            "hora": a["fecha_agendada"].strftime("%H:%M"),
+        }
+        for a in agendados
+        if a["fecha_agendada"] and ahora_peru <= a["fecha_agendada"] <= limite_peru
+    ]
+
+    return JSONResponse({"leads_nuevos": leads_nuevos, "agendados_proximos": agendados_proximos})
 
 
 @router.post("/lead/{telefono}/responder")
