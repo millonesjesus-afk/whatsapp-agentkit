@@ -32,6 +32,7 @@ async_session = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit
 # para no duplicar la lista ni arriesgar que se desincronicen.
 RESULTADOS_CERRADOS = (
     "vendido", "no_interesado", "no_califica", "no_es_cliente_calidda", "otro", "consulta_atc",
+    "servicio_postventa", "cartera_fnb",
 )
 
 

@@ -25,7 +25,7 @@ import os
 import logging
 import urllib.parse
 
-from agent.memory import listar_campanas, asignar_campana_origen
+from agent.memory import listar_campanas, asignar_campana_origen, obtener_campana_por_nombre
 from agent.tools import obtener_producto_por_codigo, obtener_familia_producto, formatear_producto
 
 logger = logging.getLogger("agentkit")
@@ -160,7 +160,11 @@ CAMPANAS_INICIALES = [
     {
         "nombre": "SMS Secadora a gas",
         "tipo_deteccion": "texto_saludo",
-        "patron": "promoción de la secadora a gas rinnai",
+        # El patrón tiene que ser un fragmento REAL de texto_saludo — es lo
+        # que el cliente manda tal cual al tocar el wa.link, no un resumen
+        # de la campaña. (Bug encontrado: el patrón original no aparecía
+        # en el texto real, así que esta campaña nunca se detectaba).
+        "patron": "secadora a gas rinnai 10kg",
         # Código HANA 4504653 — "SECADORA 10 KG RINNAI + COMBO + RACK" a S/3299,
         # coincide exacto con el precio del SMS del correo del 15/05/2026.
         "codigo_material": "4504653",
@@ -172,7 +176,7 @@ CAMPANAS_INICIALES = [
     {
         "nombre": "SMS Terma a gas",
         "tipo_deteccion": "texto_saludo",
-        "patron": "promoción de la terma a gas rheem",
+        "patron": "terma rheem 8l",
         # Código HANA 4508841 — "TERMA RHEEM 8 LT TIRO NATURAL + CONEXIÓN" a
         # S/419.90, marcada "PROMOCIONAL MES" en la lista de precios vigente.
         "codigo_material": "4508841",
@@ -184,7 +188,7 @@ CAMPANAS_INICIALES = [
     {
         "nombre": "SMS Clientes próximos a habilitar gas",
         "tipo_deteccion": "texto_saludo",
-        "patron": "pronto habilitarán mi servicio de gas natural",
+        "patron": "tu gas natural ya está por llegar",
         "texto_saludo": (
             "¡Tu gas natural ya está por llegar! Equipa tu hogar con termas, cocinas, "
             "secadoras y más, financiado y sin inicial"
@@ -193,7 +197,7 @@ CAMPANAS_INICIALES = [
     {
         "nombre": "SMS Clientes que ya tienen gas",
         "tipo_deteccion": "texto_saludo",
-        "patron": "ya cuento con gas natural en casa",
+        "patron": "ya tienes gas natural",
         "texto_saludo": (
             "Ya tienes gas natural, ahora aprovéchalo más. Lleva termas, secadoras o "
             "un nuevo punto de gas financiado y sin inicial"
@@ -241,3 +245,31 @@ async def sembrar_campanas_iniciales():
     for datos in CAMPANAS_INICIALES:
         await crear_campana(**datos)
     logger.info(f"Sembradas {len(CAMPANAS_INICIALES)} campañas iniciales")
+
+
+# Nombre -> patrón correcto, para las 4 campañas que se sembraron con un
+# patrón que no era un fragmento real de su texto_saludo (por eso nunca se
+# detectaban — ver CAMPANAS_INICIALES arriba). Corre en cada arranque y no
+# hace nada si el patrón ya quedó bien (por este fix o porque alguien lo
+# corrigió a mano desde el panel) — no pisa ningún otro campo ni campañas
+# creadas después.
+PATRONES_CORREGIDOS = {
+    "SMS Secadora a gas": "secadora a gas rinnai 10kg",
+    "SMS Terma a gas": "terma rheem 8l",
+    "SMS Clientes próximos a habilitar gas": "tu gas natural ya está por llegar",
+    "SMS Clientes que ya tienen gas": "ya tienes gas natural",
+}
+
+
+async def corregir_patrones_desalineados():
+    """Arregla, en la tabla ya sembrada, el patrón de las campañas listadas
+    en PATRONES_CORREGIDOS si no coincide con el valor correcto — para que
+    el fix también aplique a una base de datos que ya tenía estas campañas
+    creadas con el patrón viejo (no solo a una instalación nueva)."""
+    from agent.memory import actualizar_campana
+
+    for nombre, patron_correcto in PATRONES_CORREGIDOS.items():
+        campana = await obtener_campana_por_nombre(nombre)
+        if campana and campana.get("patron") != patron_correcto:
+            await actualizar_campana(campana["id"], patron=patron_correcto)
+            logger.info(f"Patrón corregido para la campaña '{nombre}'")

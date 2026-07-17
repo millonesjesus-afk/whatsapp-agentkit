@@ -76,6 +76,7 @@ ETIQUETAS_FUNNEL = {
 RESULTADOS = [
     "agendado", "vendido", "no_interesado", "no_califica", "no_es_cliente_calidda",
     "producto_sin_stock", "otro", "consulta_atc", "sin_saldo",
+    "servicio_postventa", "cartera_fnb",
 ]
 # Los que NO están en RESULTADOS_CERRADOS (importado de memory.py) se
 # consideran "en seguimiento" — casos activos, con algo pendiente por
@@ -91,6 +92,8 @@ ETIQUETAS_RESULTADO = {
     "otro": "Otro",
     "consulta_atc": "Consulta ATC",
     "sin_saldo": "Sin saldo",
+    "servicio_postventa": "Servicio Postventa",
+    "cartera_fnb": "Cartera FNB",
 }
 MODALIDADES_PAGO = ["financiado", "contado"]
 CUOTAS_DISPONIBLES = ["12", "24", "36"]
@@ -108,6 +111,8 @@ COLOR_RESULTADO = {
     "otro": "#6b7280",
     "consulta_atc": "#7c3aed",
     "sin_saldo": "#d97706",
+    "servicio_postventa": "#0d9488",
+    "cartera_fnb": "#4f46e5",
 }
 
 # Estados de conversación para las pestañas de filtro del panel — dos grupos:

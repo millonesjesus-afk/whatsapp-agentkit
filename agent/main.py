@@ -26,7 +26,7 @@ from agent.providers import obtener_proveedor
 from agent.dashboard import router as dashboard_router, NoAutenticado
 from agent.notificaciones import notificar_lead_derivado
 from agent.asignacion import elegir_asesor_automatico
-from agent.campanas import detectar_y_asignar_campana, sembrar_campanas_iniciales
+from agent.campanas import detectar_y_asignar_campana, sembrar_campanas_iniciales, corregir_patrones_desalineados
 
 load_dotenv()
 
@@ -58,6 +58,7 @@ async def lifespan(app: FastAPI):
     """Inicializa la base de datos al arrancar el servidor."""
     await inicializar_db()
     await sembrar_campanas_iniciales()
+    await corregir_patrones_desalineados()
     logger.info("Base de datos inicializada")
     logger.info(f"Servidor AgentKit corriendo en puerto {PORT}")
     logger.info(f"Proveedor de WhatsApp: {proveedor.__class__.__name__}")
