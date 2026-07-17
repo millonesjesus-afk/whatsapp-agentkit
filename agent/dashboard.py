@@ -311,7 +311,8 @@ ESTILOS_PROPIOS = """
   .chat-mensajes-wrap { flex: 1 1 auto; min-height: 0; padding: .75rem 1.25rem 0; display: flex; flex-direction: column; }
   .chat-mensajes-wrap .card { flex: 1 1 auto; min-height: 0; margin: 0; }
   .chat-mensajes-wrap #chat { height: 100%; overflow-y: auto; }
-  .chat-reply-fijo { flex-shrink: 0; padding: .6rem 1.25rem; background: #fff; border-top: 1px solid #e2e8f0; }
+  .chat-reply-fijo { flex-shrink: 0; padding: .6rem 1.25rem; background: #fff; border-top: 1px solid #e2e8f0; transition: background-color .15s, box-shadow .15s; }
+  .chat-reply-fijo.zona-soltar-activa { background: #eaf7fd; box-shadow: inset 0 0 0 2px var(--gaso-azul); }
   .btn-volver-movil { display: none; text-decoration: none; }
   .btn-filtros-movil { display: none; }
   .btn-resumen-movil { display: none; }
@@ -1544,33 +1545,64 @@ def _script_chat_en_vivo(telefono: str, tiene_asesor: bool) -> str:
             });
         }
 
-        // Adjuntar archivo: el botón de clip solo abre el selector nativo;
-        // el envío real pasa cuando el usuario ya eligió un archivo.
+        // Adjuntar archivo: el botón de clip abre el selector nativo, pero
+        // subirYEnviarArchivo() es la función real de envío — la reusa tanto
+        // el selector como arrastrar-y-soltar sobre la barra de respuesta.
         const btnAdjuntar = document.getElementById('btn-adjuntar');
         const inputArchivo = document.getElementById('input-archivo');
         const estadoAdjunto = document.getElementById('estado-adjunto');
+        const zonaSoltar = document.querySelector('.chat-reply-fijo');
+
+        function subirYEnviarArchivo(archivo) {
+            if (!archivo || !estadoAdjunto) return;
+            const datos = new FormData();
+            datos.append('archivo', archivo);
+            datos.append('caption', input.value.trim());
+            input.value = '';
+            estadoAdjunto.style.display = 'block';
+            estadoAdjunto.textContent = 'Enviando ' + archivo.name + '...';
+            fetch('/dashboard/lead/' + encodeURIComponent(telefono) + '/enviar-archivo', {
+                method: 'POST',
+                body: datos
+            }).then(function(r) {
+                if (!r.ok) throw new Error('fallo el envio');
+                estadoAdjunto.style.display = 'none';
+                actualizar();
+            }).catch(function() {
+                estadoAdjunto.textContent = 'No se pudo enviar el archivo — verifica el tamaño/formato e intenta de nuevo.';
+            });
+        }
+
         if (btnAdjuntar && inputArchivo) {
             btnAdjuntar.addEventListener('click', function() { inputArchivo.click(); });
             inputArchivo.addEventListener('change', function() {
-                const archivo = inputArchivo.files[0];
-                if (!archivo) return;
-                const datos = new FormData();
-                datos.append('archivo', archivo);
-                datos.append('caption', input.value.trim());
-                input.value = '';
-                estadoAdjunto.style.display = 'block';
-                estadoAdjunto.textContent = 'Enviando ' + archivo.name + '...';
-                fetch('/dashboard/lead/' + encodeURIComponent(telefono) + '/enviar-archivo', {
-                    method: 'POST',
-                    body: datos
-                }).then(function(r) {
-                    if (!r.ok) throw new Error('fallo el envio');
-                    estadoAdjunto.style.display = 'none';
-                    inputArchivo.value = '';
-                    actualizar();
-                }).catch(function() {
-                    estadoAdjunto.textContent = 'No se pudo enviar el archivo — verifica el tamaño/formato e intenta de nuevo.';
-                });
+                subirYEnviarArchivo(inputArchivo.files[0]);
+                inputArchivo.value = '';
+            });
+        }
+
+        // Arrastrar y soltar un archivo directo sobre la barra de respuesta
+        // — mismo envío que el botón de clip, solo cambia cómo se eligió
+        // el archivo. preventDefault en dragover es obligatorio: sin eso el
+        // navegador abre/descarga el archivo en vez de disparar 'drop'.
+        if (zonaSoltar) {
+            let contadorDrag = 0;
+            zonaSoltar.addEventListener('dragenter', function(ev) {
+                ev.preventDefault();
+                contadorDrag++;
+                zonaSoltar.classList.add('zona-soltar-activa');
+            });
+            zonaSoltar.addEventListener('dragover', function(ev) { ev.preventDefault(); });
+            zonaSoltar.addEventListener('dragleave', function() {
+                contadorDrag = Math.max(0, contadorDrag - 1);
+                if (contadorDrag === 0) zonaSoltar.classList.remove('zona-soltar-activa');
+            });
+            zonaSoltar.addEventListener('drop', function(ev) {
+                ev.preventDefault();
+                contadorDrag = 0;
+                zonaSoltar.classList.remove('zona-soltar-activa');
+                const archivo = ev.dataTransfer.files[0];
+                if (archivo) subirYEnviarArchivo(archivo);
             });
         }
 
