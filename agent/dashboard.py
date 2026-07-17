@@ -2268,8 +2268,31 @@ async def _bloque_gestion_lead(telefono: str, lead: dict, usuario: dict) -> str:
                         {opciones_medio_contado}
                     </select>
                 </div>
-                <button type="submit" class="btn btn-sm btn-primary">Guardar venta</button>
+                <button type="button" class="btn btn-sm btn-primary" id="btn-guardar-venta">Guardar venta</button>
             </form>
+            <div class="modal fade" id="modal-confirmar-venta" tabindex="-1">
+                <div class="modal-dialog">
+                    <div class="modal-content">
+                        <div class="modal-header">
+                            <h5 class="modal-title"><i class="bi bi-bag-check-fill" style="color:var(--gaso-azul)"></i> Confirmar pedido</h5>
+                            <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Cerrar"></button>
+                        </div>
+                        <div class="modal-body">
+                            <div id="modal-venta-items"></div>
+                            <hr class="my-2">
+                            <div class="d-flex justify-content-between align-items-center fw-bold">
+                                <span>Total</span>
+                                <span id="modal-venta-total"></span>
+                            </div>
+                            <p class="text-muted small mt-3 mb-0">¿Confirmas que quieres registrar este pedido?</p>
+                        </div>
+                        <div class="modal-footer">
+                            <button type="button" class="btn btn-outline-secondary btn-sm" data-bs-dismiss="modal">Cancelar</button>
+                            <button type="button" class="btn btn-primary btn-sm" id="btn-confirmar-venta">Sí, guardar venta</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
             <script>
             (function() {{
                 var form = document.getElementById('form-venta');
@@ -2406,6 +2429,52 @@ async def _bloque_gestion_lead(telefono: str, lead: dict, usuario: dict) -> str:
 
                 selectModalidad.addEventListener('change', actualizar);
                 actualizar();
+
+                // Antes de guardar de verdad, un modal tipo "resumen de pedido"
+                // (como en retail) con cada producto, su precio y el total —
+                // para que el asesor confirme antes de registrar la venta. Si
+                // el carrito está vacío no hay pedido que confirmar (ej. borrar
+                // una venta ya guardada), así que se manda directo.
+                var btnGuardar = document.getElementById('btn-guardar-venta');
+                var btnConfirmar = document.getElementById('btn-confirmar-venta');
+                var modalEl = document.getElementById('modal-confirmar-venta');
+                var modalItems = document.getElementById('modal-venta-items');
+                var modalTotal = document.getElementById('modal-venta-total');
+
+                function calcularTotal() {{
+                    var total = 0;
+                    var todosNumericos = true;
+                    carrito.forEach(function(item) {{
+                        var n = parseFloat((item.precio || '0').replace(',', '.'));
+                        if (isNaN(n)) {{ todosNumericos = false; return; }}
+                        total += n;
+                    }});
+                    return todosNumericos ? 'S/ ' + total.toFixed(2) : '—';
+                }}
+
+                btnGuardar.addEventListener('click', function() {{
+                    if (!carrito.length) {{ form.requestSubmit ? form.requestSubmit() : form.submit(); return; }}
+                    modalItems.innerHTML = carrito.map(function(item) {{
+                        var etiqueta = (item.marca ? escapar(item.marca) + ' — ' : '') + escapar(item.producto);
+                        var precio = item.precio ? 'S/ ' + escapar(item.precio) : '-';
+                        return '<div class="d-flex justify-content-between align-items-center py-1 gap-2 small">' +
+                            '<span>' + etiqueta + '</span><span class="text-muted flex-shrink-0 ps-2">' + precio + '</span></div>';
+                    }}).join('');
+                    modalTotal.textContent = calcularTotal();
+                    if (window.bootstrap && bootstrap.Modal) {{
+                        bootstrap.Modal.getOrCreateInstance(modalEl).show();
+                    }} else {{
+                        form.requestSubmit ? form.requestSubmit() : form.submit();
+                    }}
+                }});
+
+                btnConfirmar.addEventListener('click', function() {{
+                    if (window.bootstrap && bootstrap.Modal) {{
+                        var instancia = bootstrap.Modal.getInstance(modalEl);
+                        if (instancia) instancia.hide();
+                    }}
+                    form.requestSubmit ? form.requestSubmit() : form.submit();
+                }});
             }})();
             </script>
         </div>
