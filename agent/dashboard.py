@@ -1434,8 +1434,13 @@ async def _bloque_respuesta(telefono: str, lead: dict) -> str:
     ) or '<li><span class="dropdown-item-text text-muted small">Aún no hay catálogos disponibles.</span></li>'
 
     return f"""
-    <form id="form-respuesta" class="d-flex gap-2 align-items-center" method="post" action="/dashboard/lead/{html.escape(telefono)}/responder">
-        <input type="text" name="mensaje" id="input-mensaje" class="form-control" placeholder="Escribe tu respuesta..." required autocomplete="off">
+    <form id="form-respuesta" class="d-flex gap-2 align-items-end" method="post" action="/dashboard/lead/{html.escape(telefono)}/responder">
+        <div class="flex-grow-1">
+            <textarea name="mensaje" id="input-mensaje" class="form-control" placeholder="Escribe tu respuesta..." required rows="1" style="resize:none;overflow-y:auto;max-height:140px;"></textarea>
+            <div class="text-end" style="font-size:.68rem;line-height:1.3">
+                <span id="contador-mensaje" class="text-muted">0/200</span>
+            </div>
+        </div>
         <div class="dropdown">
             <button class="btn btn-outline-secondary flex-shrink-0" type="button" data-bs-toggle="dropdown" aria-expanded="false" title="Enviar catálogo">
                 <i class="bi bi-folder-fill"></i>
@@ -1526,12 +1531,36 @@ def _script_chat_en_vivo(telefono: str, tiene_asesor: bool) -> str:
         {"" if not tiene_asesor else '''
         const form = document.getElementById('form-respuesta');
         const input = document.getElementById('input-mensaje');
+        const contadorMensaje = document.getElementById('contador-mensaje');
+        const LIMITE_MENSAJE_SUGERIDO = 200;
+
+        // El input crece con el texto (en vez de quedar como una sola línea
+        // fija) y el contador avisa en rojo pasado el límite sugerido — no
+        // bloquea el envío, un mensaje más largo puede ser necesario (ej.
+        // explicar financiamiento), solo evita que el asesor no se dé
+        // cuenta de que se está extendiendo.
+        function ajustarInputMensaje() {
+            input.style.height = 'auto';
+            input.style.height = input.scrollHeight + 'px';
+            if (!contadorMensaje) return;
+            const largo = input.value.length;
+            contadorMensaje.textContent = largo + '/' + LIMITE_MENSAJE_SUGERIDO;
+            contadorMensaje.classList.toggle('text-danger', largo > LIMITE_MENSAJE_SUGERIDO);
+            contadorMensaje.classList.toggle('fw-semibold', largo > LIMITE_MENSAJE_SUGERIDO);
+            contadorMensaje.classList.toggle('text-muted', largo <= LIMITE_MENSAJE_SUGERIDO);
+        }
+        if (input) {
+            input.addEventListener('input', ajustarInputMensaje);
+            ajustarInputMensaje();
+        }
+
         if (form) {
             form.addEventListener('submit', function(ev) {
                 ev.preventDefault();
                 const texto = input.value.trim();
                 if (!texto) return;
                 input.value = '';
+                ajustarInputMensaje();
 
                 // Optimista: muestra el mensaje al instante, sin esperar la
                 // ida y vuelta a WhatsApp/la base de datos
@@ -1548,7 +1577,8 @@ def _script_chat_en_vivo(telefono: str, tiene_asesor: bool) -> str:
                     body: 'mensaje=' + encodeURIComponent(texto)
                 }).then(actualizar);
             });
-            // Enter envía el mensaje (input de una sola línea, estilo WhatsApp)
+            // Enter envía el mensaje, Shift+Enter agrega un salto de línea
+            // (el input ahora es multilínea, ya no una sola línea fija)
             input.addEventListener('keydown', function(ev) {
                 if (ev.key === 'Enter' && !ev.shiftKey) {
                     ev.preventDefault();
@@ -1571,6 +1601,7 @@ def _script_chat_en_vivo(telefono: str, tiene_asesor: bool) -> str:
             datos.append('archivo', archivo);
             datos.append('caption', input.value.trim());
             input.value = '';
+            ajustarInputMensaje();
             estadoAdjunto.style.display = 'block';
             estadoAdjunto.textContent = 'Enviando ' + archivo.name + '...';
             fetch('/dashboard/lead/' + encodeURIComponent(telefono) + '/enviar-archivo', {
