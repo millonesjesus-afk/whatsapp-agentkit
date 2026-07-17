@@ -10,7 +10,7 @@ import os
 from datetime import datetime
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
-from sqlalchemy import String, Text, DateTime, select, Integer, Boolean, func, case
+from sqlalchemy import String, Text, DateTime, select, Integer, Boolean, func, case, delete
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -99,9 +99,11 @@ class Lead(Base):
     fecha_agendada: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     # Asesor al que el supervisor asignó este lead (username de Usuario)
     asesor_asignado: Mapped[str | None] = mapped_column(String(50), nullable=True)
-    # Cierre de venta (si resultado == "vendido") — idealmente viene del
-    # catálogo real (por código), pero se puede escribir a mano si el
-    # producto no está cargado ahí todavía.
+    # Cierre de venta (si resultado == "vendido") — SUPERADOS por la tabla
+    # LineaVenta (un lead puede vender varios artefactos o un mix de
+    # artefacto + servicio, no solo uno). Se dejan sin usar en vez de
+    # borrarse para no perder el histórico de ventas cerradas antes de
+    # este cambio; el código nuevo lee/escribe siempre en LineaVenta.
     producto_vendido: Mapped[str | None] = mapped_column(String(300), nullable=True)
     precio_venta: Mapped[str | None] = mapped_column(String(30), nullable=True)
     marca_venta: Mapped[str | None] = mapped_column(String(100), nullable=True)
@@ -123,6 +125,23 @@ class Lead(Base):
     # por campaña en el panel.
     campana_origen: Mapped[str | None] = mapped_column(String(100), nullable=True)
     actualizado: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    creado: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class LineaVenta(Base):
+    """Un producto o servicio dentro del cierre de venta de un lead — un
+    cliente puede comprar un artefacto, varios, un servicio, o un mix de
+    ambos, así que la venta de un lead es una LISTA de líneas en vez de un
+    solo producto. La forma de pago (modalidad_pago/cuotas/medio_pago)
+    sigue siendo una sola para toda la venta y vive en Lead, no acá."""
+    __tablename__ = "lineas_venta"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    telefono: Mapped[str] = mapped_column(String(50), index=True)
+    producto: Mapped[str] = mapped_column(String(300))
+    precio: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    marca: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    proveedor: Mapped[str | None] = mapped_column(String(150), nullable=True)
     creado: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
@@ -376,6 +395,56 @@ async def actualizar_lead(telefono: str, **campos):
         for campo, valor in campos.items():
             setattr(lead, campo, valor)
         lead.actualizado = datetime.utcnow()
+        await session.commit()
+
+
+async def listar_lineas_venta(telefono: str) -> list[dict]:
+    """Líneas de venta de un lead (un artefacto, varios, o un mix con
+    servicio), en el orden en que se agregaron."""
+    async with async_session() as session:
+        query = select(LineaVenta).where(LineaVenta.telefono == telefono).order_by(LineaVenta.id.asc())
+        result = await session.execute(query)
+        return [
+            {"producto": l.producto, "precio": l.precio, "marca": l.marca, "proveedor": l.proveedor}
+            for l in result.scalars().all()
+        ]
+
+
+async def listar_lineas_venta_de_muchos(telefonos: list[str]) -> dict[str, list[dict]]:
+    """Igual que listar_lineas_venta pero para varios leads a la vez en una
+    sola consulta — para pintar la tabla de leads/exportar sin hacer un
+    query por fila (N+1)."""
+    if not telefonos:
+        return {}
+    async with async_session() as session:
+        query = (
+            select(LineaVenta)
+            .where(LineaVenta.telefono.in_(telefonos))
+            .order_by(LineaVenta.id.asc())
+        )
+        result = await session.execute(query)
+        agrupado: dict[str, list[dict]] = {}
+        for l in result.scalars().all():
+            agrupado.setdefault(l.telefono, []).append(
+                {"producto": l.producto, "precio": l.precio, "marca": l.marca, "proveedor": l.proveedor}
+            )
+        return agrupado
+
+
+async def guardar_lineas_venta(telefono: str, lineas: list[dict]):
+    """Reemplaza TODAS las líneas de venta de un lead por la lista dada —
+    el carrito del formulario de Cierre de venta siempre manda el estado
+    completo (lo que quedó tras agregar/quitar productos), no un delta."""
+    async with async_session() as session:
+        await session.execute(delete(LineaVenta).where(LineaVenta.telefono == telefono))
+        for l in lineas:
+            session.add(LineaVenta(
+                telefono=telefono,
+                producto=l["producto"],
+                precio=l.get("precio") or None,
+                marca=l.get("marca") or None,
+                proveedor=l.get("proveedor") or None,
+            ))
         await session.commit()
 
 

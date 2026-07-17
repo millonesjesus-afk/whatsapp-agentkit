@@ -44,6 +44,7 @@ from agent.memory import (
     obtener_configuracion, guardar_configuracion,
     crear_archivo_adjunto, obtener_archivo_adjunto, listar_archivos_reutilizables,
     eliminar_archivo_reutilizable, obtener_telefono_de_archivo,
+    listar_lineas_venta, listar_lineas_venta_de_muchos, guardar_lineas_venta,
 )
 from agent.campanas import resolver_promo, generar_link_whatsapp
 from agent.tools import obtener_producto_por_codigo, buscar_productos
@@ -504,6 +505,54 @@ def _pill_resultado(resultado: str | None) -> str:
     # resultados, que son solo texto.
     icono = '<i class="bi bi-calendar-event me-1"></i>' if resultado == "agendado" else ""
     return f'<span class="badge rounded-pill text-white" style="background-color:{color}">{icono}{html.escape(etiqueta)}</span>'
+
+
+def _resumen_venta(lineas: list[dict]) -> dict:
+    """Convierte la lista de líneas de venta de un lead en los mismos 4
+    campos de texto que antes eran columnas sueltas en Lead
+    (producto_vendido/marca_venta/proveedor_venta/precio_venta) — así la
+    tabla de leads y la exportación (que ya leen esos nombres de campo)
+    siguen funcionando igual sin reescribirse, ahora resumiendo N líneas
+    en un solo texto por columna."""
+    if not lineas:
+        return {"producto_vendido": "", "marca_venta": "", "proveedor_venta": "", "precio_venta": "", "_busqueda_venta": ""}
+    productos = [l["producto"] for l in lineas]
+    marcas = sorted({l["marca"] for l in lineas if l.get("marca")})
+    proveedores = sorted({l["proveedor"] for l in lineas if l.get("proveedor")})
+    texto_producto = productos[0] if len(productos) == 1 else f"{productos[0]} +{len(productos) - 1} más"
+    total = 0.0
+    todos_numericos = True
+    for l in lineas:
+        try:
+            total += float((l.get("precio") or "0").replace(",", ""))
+        except ValueError:
+            todos_numericos = False
+    precio_texto = (
+        f"{total:.0f}" if todos_numericos
+        else " + ".join(l.get("precio") or "0" for l in lineas)
+    )
+    return {
+        "producto_vendido": texto_producto,
+        "marca_venta": ", ".join(marcas),
+        "proveedor_venta": ", ".join(proveedores),
+        "precio_venta": precio_texto,
+        # El texto resumido ("+1 más") no alcanza para buscar por un
+        # producto que no sea el primero — este campo lleva TODOS los
+        # nombres, solo para el buscador de la tabla, no para mostrar.
+        "_busqueda_venta": " ".join(productos + marcas + proveedores),
+    }
+
+
+async def _adjuntar_resumen_ventas(leads: list[dict]) -> list[dict]:
+    """Sobreescribe producto_vendido/marca_venta/proveedor_venta/precio_venta
+    de cada lead con el resumen de sus líneas de venta (una consulta para
+    todos los leads, no una por fila) — para que la tabla/exportación, que
+    ya leen esos 4 campos, muestren el cierre real sin cambiar su código."""
+    telefonos = [l["telefono"] for l in leads]
+    lineas_por_lead = await listar_lineas_venta_de_muchos(telefonos)
+    for lead in leads:
+        lead.update(_resumen_venta(lineas_por_lead.get(lead["telefono"], [])))
+    return leads
 
 
 def _titulo_seccion(icono: str, texto: str) -> str:
@@ -1301,7 +1350,7 @@ async def _contenido_metricas(leads: list[dict]) -> str:
     )
 
     filas = "".join(
-        f"""<tr data-buscar="{html.escape((lead.get('nombre') or '') + ' ' + lead['telefono'] + ' ' + (lead.get('interes') or '') + ' ' + (lead.get('producto_tipo') or '') + ' ' + (lead.get('producto_marca') or '') + ' ' + (lead.get('asesor_asignado') or '') + ' ' + (lead.get('campana_origen') or '') + ' ' + (lead.get('producto_vendido') or '') + ' ' + (lead.get('marca_venta') or '') + ' ' + (lead.get('proveedor_venta') or ''), quote=True).lower()}">
+        f"""<tr data-buscar="{html.escape((lead.get('nombre') or '') + ' ' + lead['telefono'] + ' ' + (lead.get('interes') or '') + ' ' + (lead.get('producto_tipo') or '') + ' ' + (lead.get('producto_marca') or '') + ' ' + (lead.get('asesor_asignado') or '') + ' ' + (lead.get('campana_origen') or '') + ' ' + (lead.get('_busqueda_venta') or ''), quote=True).lower()}">
             <td class="ps-4">
                 <a href="/dashboard/lead/{html.escape(lead['telefono'])}" class="d-flex align-items-center gap-2 text-decoration-none text-dark" data-ajax="1">
                     {_avatar(lead.get('nombre') or lead['telefono'], 26)}
@@ -1387,7 +1436,7 @@ async def metricas(request: Request, usuario: dict = Depends(_usuario_actual)):
     if usuario["rol"] not in ROLES_CON_VISION_TOTAL:
         raise HTTPException(status_code=403, detail="Solo un supervisor puede ver las métricas")
     sidebar = await _renderizar_sidebar(usuario, telefono_activo=None)
-    leads = await listar_leads()
+    leads = await _adjuntar_resumen_ventas(await listar_leads())
     panel = await _contenido_metricas(leads)
     cuerpo = f"""<div class="shell d-flex">{sidebar}<div class="main-pane flex-grow-1 p-4">{panel}</div></div>"""
     return _pagina("Métricas", usuario, cuerpo, request=request)
@@ -1425,7 +1474,7 @@ async def exportar_metricas_csv(usuario: dict = Depends(_usuario_actual)):
     import csv
     import io
 
-    leads = await listar_leads()
+    leads = await _adjuntar_resumen_ventas(await listar_leads())
     buffer = io.StringIO()
     escritor = csv.writer(buffer)
     escritor.writerow(COLUMNAS_EXPORTACION)
@@ -1447,7 +1496,7 @@ async def exportar_metricas_xlsx(usuario: dict = Depends(_usuario_actual)):
     from openpyxl import Workbook
     from openpyxl.styles import Font
 
-    leads = await listar_leads()
+    leads = await _adjuntar_resumen_ventas(await listar_leads())
     filas = _filas_exportacion(leads)
     libro = Workbook()
     hoja = libro.active
@@ -2124,6 +2173,16 @@ async def _bloque_gestion_lead(telefono: str, lead: dict, usuario: dict) -> str:
     fecha_agendada_valor = lead["fecha_agendada"].strftime("%Y-%m-%dT%H:%M") if lead.get("fecha_agendada") else ""
     es_agendado = lead.get("resultado") == "agendado"
 
+    # El cierre de venta admite VARIAS líneas (un cliente puede comprar un
+    # artefacto, varios, un servicio, o un mix) — el carrito arranca
+    # precargado con lo que ya esté guardado, para poder agregar/quitar
+    # productos en cierres que se editan más de una vez.
+    lineas_venta = await listar_lineas_venta(telefono)
+    # Va crudo dentro de un <script>, no como atributo HTML — nada de
+    # html.escape acá (rompería el JSON). Solo hay que evitar que un "</"
+    # dentro de algún texto cierre la etiqueta <script> antes de tiempo.
+    lineas_venta_json = json.dumps(lineas_venta).replace("</", "<\\/")
+
     return f"""
     {bloque_asignacion}
     <div class="card leads-card shadow-sm mb-2">
@@ -2160,32 +2219,30 @@ async def _bloque_gestion_lead(telefono: str, lead: dict, usuario: dict) -> str:
         <div class="card-body p-3">
             <h6 class="text-uppercase text-muted small fw-bold mb-2">Cierre de venta (si corresponde)</h6>
             <form method="post" action="/dashboard/lead/{html.escape(telefono)}/venta" id="form-venta">
-                <div class="mb-2" id="venta-producto-catalogo">
-                    <label class="form-label small text-muted mb-0">Producto vendido (catálogo)</label>
-                    <div class="position-relative">
-                        <input type="text" id="venta-buscar-producto" class="form-control form-control-sm" placeholder="Busca por marca, tipo o modelo..." autocomplete="off">
+                <div class="mb-2">
+                    <label class="form-label small text-muted mb-0">Productos vendidos</label>
+                    <div id="venta-carrito-lista" class="mb-1"></div>
+                    <div class="position-relative" id="venta-producto-catalogo">
+                        <input type="text" id="venta-buscar-producto" class="form-control form-control-sm" placeholder="Busca por marca, tipo o modelo y agrégalo..." autocomplete="off">
                         <div id="venta-resultados-producto" class="list-group position-absolute w-100 shadow-sm" style="z-index:10;display:none;max-height:220px;overflow-y:auto;"></div>
                     </div>
-                    <div id="venta-producto-seleccionado" class="small mt-1" style="display:{'block' if lead.get('producto_vendido') else 'none'}">
-                        <i class="bi bi-check-circle-fill text-success"></i> {html.escape(lead.get('marca_venta') or '')} — {html.escape(lead.get('producto_vendido') or '')} &middot; S/ {html.escape(lead.get('precio_venta') or '')}
-                    </div>
-                    <input type="hidden" name="producto_vendido" id="venta-producto-vendido" value="{html.escape(lead.get('producto_vendido') or '')}">
-                    <input type="hidden" name="precio_venta" id="venta-precio-venta" value="{html.escape(lead.get('precio_venta') or '')}">
-                    <input type="hidden" name="marca_venta" id="venta-marca-venta" value="{html.escape(lead.get('marca_venta') or '')}">
-                    <input type="hidden" name="proveedor_venta" id="venta-proveedor-venta" value="{html.escape(lead.get('proveedor_venta') or '')}">
-                    <button type="button" class="btn btn-link btn-sm p-0 mt-1" id="venta-btn-manual">¿No está en la lista? Escribir manualmente</button>
+                    <button type="button" class="btn btn-link btn-sm p-0 mt-1" id="venta-btn-manual">¿No está en la lista? Agregar manualmente</button>
                 </div>
                 <div class="mb-2" id="venta-producto-manual" style="display:none;">
-                    <label class="form-label small text-muted mb-0">Producto vendido</label>
-                    <input type="text" name="producto_vendido" class="form-control form-control-sm mb-1" placeholder="Ej: Terma Rheem 10L GN + Combo" disabled>
+                    <label class="form-label small text-muted mb-0">Producto</label>
+                    <input type="text" id="venta-manual-producto" class="form-control form-control-sm mb-1" placeholder="Ej: Terma Rheem 10L GN + Combo">
                     <label class="form-label small text-muted mb-0">Precio (S/)</label>
-                    <input type="text" name="precio_venta" class="form-control form-control-sm mb-1" placeholder="Ej: 1549" disabled>
+                    <input type="text" id="venta-manual-precio" class="form-control form-control-sm mb-1" placeholder="Ej: 1549">
                     <label class="form-label small text-muted mb-0">Marca</label>
-                    <input type="text" name="marca_venta" class="form-control form-control-sm mb-1" placeholder="Ej: Rheem" disabled>
+                    <input type="text" id="venta-manual-marca" class="form-control form-control-sm mb-1" placeholder="Ej: Rheem">
                     <label class="form-label small text-muted mb-0">Proveedor</label>
-                    <input type="text" name="proveedor_venta" class="form-control form-control-sm mb-1" placeholder="Ej: Dalka S.A.C" disabled>
-                    <button type="button" class="btn btn-link btn-sm p-0" id="venta-btn-catalogo">Volver a buscar en el catálogo</button>
+                    <input type="text" id="venta-manual-proveedor" class="form-control form-control-sm mb-1" placeholder="Ej: Dalka S.A.C">
+                    <div class="d-flex gap-2">
+                        <button type="button" class="btn btn-sm btn-outline-primary" id="venta-btn-agregar-manual">Agregar al carrito</button>
+                        <button type="button" class="btn btn-link btn-sm p-0" id="venta-btn-catalogo">Volver a buscar en el catálogo</button>
+                    </div>
                 </div>
+                <input type="hidden" name="lineas_venta" id="venta-lineas-json" value="">
                 <div class="mb-2">
                     <label class="form-label small text-muted mb-0">Modalidad de pago</label>
                     <select name="modalidad_pago" id="venta-modalidad" class="form-select form-select-sm">
@@ -2222,32 +2279,71 @@ async def _bloque_gestion_lead(telefono: str, lead: dict, usuario: dict) -> str:
 
                 var buscarInput = document.getElementById('venta-buscar-producto');
                 var resultadosBox = document.getElementById('venta-resultados-producto');
-                var seleccionadoBox = document.getElementById('venta-producto-seleccionado');
-                var hiddenProducto = document.getElementById('venta-producto-vendido');
-                var hiddenPrecio = document.getElementById('venta-precio-venta');
-                var hiddenMarca = document.getElementById('venta-marca-venta');
-                var hiddenProveedor = document.getElementById('venta-proveedor-venta');
-                var bloqueCatalogo = document.getElementById('venta-producto-catalogo');
+                var listaCarrito = document.getElementById('venta-carrito-lista');
+                var hiddenLineas = document.getElementById('venta-lineas-json');
                 var bloqueManual = document.getElementById('venta-producto-manual');
                 var btnManual = document.getElementById('venta-btn-manual');
                 var btnCatalogo = document.getElementById('venta-btn-catalogo');
-                var inputsManual = bloqueManual.querySelectorAll('input');
-                var inputsCatalogo = [hiddenProducto, hiddenPrecio, hiddenMarca, hiddenProveedor];
+                var btnAgregarManual = document.getElementById('venta-btn-agregar-manual');
+                var manualProducto = document.getElementById('venta-manual-producto');
+                var manualPrecio = document.getElementById('venta-manual-precio');
+                var manualMarca = document.getElementById('venta-manual-marca');
+                var manualProveedor = document.getElementById('venta-manual-proveedor');
 
-                function activarModoManual(manual) {{
-                    bloqueCatalogo.style.display = manual ? 'none' : '';
-                    bloqueManual.style.display = manual ? '' : 'none';
-                    inputsCatalogo.forEach(function(i) {{ i.disabled = manual; }});
-                    inputsManual.forEach(function(i) {{ i.disabled = !manual; }});
-                }}
-                btnManual.addEventListener('click', function() {{ activarModoManual(true); }});
-                btnCatalogo.addEventListener('click', function() {{ activarModoManual(false); }});
+                var carrito = {lineas_venta_json};
 
                 function escapar(texto) {{
                     var div = document.createElement('div');
                     div.textContent = texto || '';
                     return div.innerHTML;
                 }}
+
+                function pintarCarrito() {{
+                    if (!carrito.length) {{
+                        listaCarrito.innerHTML = '<p class="text-muted small mb-1">Aún no agregaste ningún producto.</p>';
+                    }} else {{
+                        listaCarrito.innerHTML = carrito.map(function(item, i) {{
+                            var etiqueta = (item.marca ? escapar(item.marca) + ' — ' : '') + escapar(item.producto) +
+                                (item.precio ? ' &middot; S/ ' + escapar(item.precio) : '');
+                            return '<div class="d-flex align-items-center justify-content-between border rounded px-2 py-1 mb-1 small">' +
+                                '<span><i class="bi bi-check-circle-fill text-success"></i> ' + etiqueta + '</span>' +
+                                '<button type="button" class="btn btn-sm btn-link text-danger p-0 btn-quitar-linea" data-i="' + i + '" title="Quitar"><i class="bi bi-x-lg"></i></button>' +
+                                '</div>';
+                        }}).join('');
+                    }}
+                    hiddenLineas.value = JSON.stringify(carrito);
+                }}
+                pintarCarrito();
+
+                listaCarrito.addEventListener('click', function(ev) {{
+                    var btn = ev.target.closest('.btn-quitar-linea');
+                    if (!btn) return;
+                    carrito.splice(parseInt(btn.getAttribute('data-i'), 10), 1);
+                    pintarCarrito();
+                }});
+
+                function activarModoManual(manual) {{
+                    bloqueManual.style.display = manual ? '' : 'none';
+                }}
+                btnManual.addEventListener('click', function() {{ activarModoManual(true); }});
+                btnCatalogo.addEventListener('click', function() {{ activarModoManual(false); }});
+
+                btnAgregarManual.addEventListener('click', function() {{
+                    var producto = manualProducto.value.trim();
+                    if (!producto) {{ manualProducto.focus(); return; }}
+                    carrito.push({{
+                        producto: producto,
+                        precio: manualPrecio.value.trim(),
+                        marca: manualMarca.value.trim(),
+                        proveedor: manualProveedor.value.trim(),
+                    }});
+                    pintarCarrito();
+                    manualProducto.value = '';
+                    manualPrecio.value = '';
+                    manualMarca.value = '';
+                    manualProveedor.value = '';
+                    activarModoManual(false);
+                }});
 
                 var timeoutBusqueda;
                 buscarInput.addEventListener('input', function() {{
@@ -2277,14 +2373,13 @@ async def _bloque_gestion_lead(telefono: str, lead: dict, usuario: dict) -> str:
                 resultadosBox.addEventListener('click', function(ev) {{
                     var btn = ev.target.closest('button[data-descripcion]');
                     if (!btn) return;
-                    hiddenProducto.value = btn.getAttribute('data-descripcion');
-                    hiddenPrecio.value = btn.getAttribute('data-precio');
-                    hiddenMarca.value = btn.getAttribute('data-marca');
-                    hiddenProveedor.value = btn.getAttribute('data-proveedor');
-                    seleccionadoBox.innerHTML = '<i class="bi bi-check-circle-fill text-success"></i> ' +
-                        escapar(btn.getAttribute('data-marca')) + ' — ' + escapar(btn.getAttribute('data-descripcion')) +
-                        ' &middot; S/ ' + escapar(btn.getAttribute('data-precio'));
-                    seleccionadoBox.style.display = 'block';
+                    carrito.push({{
+                        producto: btn.getAttribute('data-descripcion'),
+                        precio: btn.getAttribute('data-precio'),
+                        marca: btn.getAttribute('data-marca'),
+                        proveedor: btn.getAttribute('data-proveedor'),
+                    }});
+                    pintarCarrito();
                     buscarInput.value = '';
                     resultadosBox.style.display = 'none';
                     resultadosBox.innerHTML = '';
@@ -2332,12 +2427,28 @@ async def _bloque_resumen_cliente(telefono: str, lead: dict, usuario: dict) -> s
             ("Resultado", _pill_resultado(lead.get("resultado"))),
             ("Cita agendada", lead["fecha_agendada"].strftime("%d/%m/%Y %H:%M") if lead.get("fecha_agendada") else "-"),
             ("Campaña", html.escape(lead.get("campana_origen") or "-")),
-            ("Producto vendido", html.escape(lead.get("producto_vendido") or "-")),
-            ("Precio de venta", f"S/ {html.escape(lead['precio_venta'])}" if lead.get("precio_venta") else "-"),
             ("Modalidad de pago", html.escape((lead.get("modalidad_pago") or "-").capitalize())),
             ("Última actividad", lead["actualizado"].strftime("%d/%m/%Y %H:%M")),
         ]
     )
+
+    # Un lead puede vender varios artefactos, un servicio, o un mix — se
+    # lista cada línea en vez de un solo campo "Producto vendido".
+    lineas_venta = await listar_lineas_venta(telefono)
+    bloque_lineas_venta = ""
+    if lineas_venta:
+        filas_venta = "".join(
+            f'<div class="d-flex justify-content-between align-items-center py-1 gap-2">'
+            f'<span class="text-truncate" style="font-size:.8rem">'
+            f'{html.escape((l["marca"] + " — " if l.get("marca") else "") + l["producto"])}</span>'
+            f'<span class="fw-semibold text-end flex-shrink-0 ps-2" style="font-size:.8rem">'
+            f'{f"S/ {html.escape(l['precio'])}" if l.get("precio") else "-"}</span></div>'
+            for l in lineas_venta
+        )
+        bloque_lineas_venta = f"""
+        <div class="text-muted" style="font-size:.76rem">Productos vendidos</div>
+        {filas_venta}
+        """
 
     return f"""
     <div class="card leads-card shadow-sm mb-2">
@@ -2353,6 +2464,7 @@ async def _bloque_resumen_cliente(telefono: str, lead: dict, usuario: dict) -> s
             {_badge_estado_suave(lead)}
             <hr class="my-2">
             {filas_info}
+            {bloque_lineas_venta}
         </div>
     </div>
     {await _bloque_gestion_lead(telefono, lead, usuario)}
@@ -2901,10 +3013,7 @@ async def buscar_producto_venta(telefono: str, q: str = "", usuario: dict = Depe
 @router.post("/lead/{telefono}/venta")
 async def registrar_venta(
     telefono: str,
-    producto_vendido: str = Form(""),
-    precio_venta: str = Form(""),
-    marca_venta: str = Form(""),
-    proveedor_venta: str = Form(""),
+    lineas_venta: str = Form("[]"),
     modalidad_pago: str = Form(""),
     cuotas: str = Form(""),
     medio_pago: str = Form(""),
@@ -2927,17 +3036,28 @@ async def registrar_venta(
     elif medio_pago and medio_pago not in MEDIOS_PAGO_CONTADO:
         raise HTTPException(status_code=400, detail="Medio de pago inválido")
 
-    campos = {
-        "producto_vendido": producto_vendido.strip(),
-        "precio_venta": precio_venta.strip(),
-        "marca_venta": marca_venta.strip(),
-        "proveedor_venta": proveedor_venta.strip(),
-        "modalidad_pago": modalidad_pago,
-        "cuotas": cuotas,
-        "medio_pago": medio_pago,
-    }
-    # Si se registra un producto vendido, el resultado pasa a "vendido" automáticamente
-    if campos["producto_vendido"]:
+    try:
+        lineas_crudas = json.loads(lineas_venta)
+    except (json.JSONDecodeError, TypeError):
+        lineas_crudas = []
+    # El carrito del formulario manda el estado completo (lo que quedó tras
+    # agregar/quitar productos) — se valida/recorta acá, nunca se confía en
+    # el JSON que mandó el navegador tal cual.
+    lineas = [
+        {
+            "producto": str(l["producto"]).strip()[:300],
+            "precio": str(l.get("precio") or "").strip()[:30],
+            "marca": str(l.get("marca") or "").strip()[:100],
+            "proveedor": str(l.get("proveedor") or "").strip()[:150],
+        }
+        for l in lineas_crudas
+        if isinstance(l, dict) and str(l.get("producto") or "").strip()
+    ]
+    await guardar_lineas_venta(telefono, lineas)
+
+    campos = {"modalidad_pago": modalidad_pago, "cuotas": cuotas, "medio_pago": medio_pago}
+    # Si se registró al menos un producto, el resultado pasa a "vendido" automáticamente
+    if lineas:
         campos["resultado"] = "vendido"
 
     await actualizar_lead(telefono, **campos)
