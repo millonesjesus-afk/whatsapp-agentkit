@@ -351,6 +351,8 @@ ESTILOS_PROPIOS = """
   .barra-audio-progreso { position: absolute; left: 0; top: 0; height: 100%; width: 0%; background: var(--gaso-azul); border-radius: 999px; }
   .tiempo-audio { font-size: .68rem; color: var(--gaso-azul-osc); flex-shrink: 0; min-width: 30px; text-align: right; }
   #chat .msg .reproductor-audio { background: rgba(255,255,255,.6); }
+  .btn-icono-chat.btn-descartar-audio { background: #fdeaea; color: #b91c1c; }
+  .btn-icono-chat.btn-descartar-audio:hover { background: #fbd5d5; color: #991b1b; }
   .btn-volver-movil { display: none; text-decoration: none; }
   .btn-filtros-movil { display: none; }
   .btn-resumen-movil { display: none; }
@@ -1467,13 +1469,13 @@ async def _bloque_respuesta(telefono: str, lead: dict) -> str:
     return f"""
     <form id="form-respuesta" class="d-flex gap-2 align-items-end" method="post" action="/dashboard/lead/{html.escape(telefono)}/responder">
         <div class="flex-grow-1">
-            <textarea name="mensaje" id="input-mensaje" class="form-control" placeholder="Escribe tu respuesta..." required rows="1" maxlength="200" style="resize:none;overflow-y:auto;max-height:140px;"></textarea>
+            <textarea name="mensaje" id="input-mensaje" class="form-control" placeholder="Escribe tu respuesta..." rows="1" maxlength="200" style="resize:none;overflow-y:auto;max-height:140px;"></textarea>
             <div class="text-end" style="font-size:.68rem;line-height:1.3">
                 <span id="contador-mensaje" class="text-muted">0/200</span>
             </div>
         </div>
         <div class="dropdown">
-            <button class="btn-icono-chat" type="button" data-bs-toggle="dropdown" aria-expanded="false" title="Enviar catálogo">
+            <button class="btn-icono-chat" type="button" id="btn-catalogo-dropdown" data-bs-toggle="dropdown" aria-expanded="false" title="Enviar catálogo">
                 <i class="bi bi-folder-fill"></i>
             </button>
             <ul class="dropdown-menu dropdown-menu-end" id="lista-catalogos" style="max-height:260px;overflow-y:auto;">
@@ -1491,13 +1493,15 @@ async def _bloque_respuesta(telefono: str, lead: dict) -> str:
     </form>
     <div id="estado-adjunto" class="small text-muted mt-1" style="display:none"></div>
     <div id="previsualizacion-audio" class="d-flex align-items-center gap-2 mt-1" style="display:none">
+        <button type="button" class="btn-icono-chat btn-descartar-audio" id="btn-descartar-audio" title="Descartar grabación">
+            <i class="bi bi-trash-fill"></i>
+        </button>
         <div class="reproductor-audio" id="reproductor-preview-audio">
             <button type="button" class="btn-play-audio"><i class="bi bi-play-fill"></i></button>
             <div class="barra-audio-wrap"><div class="barra-audio-progreso"></div></div>
             <span class="tiempo-audio">0:00</span>
         </div>
-        <button type="button" class="btn btn-sm btn-primary" id="btn-enviar-audio">Enviar</button>
-        <button type="button" class="btn btn-sm btn-outline-secondary" id="btn-descartar-audio">Descartar</button>
+        <span class="small text-muted">Toca <i class="bi bi-send-fill"></i> para enviar</span>
     </div>
     """
 
@@ -1658,6 +1662,23 @@ def _script_chat_en_vivo(telefono: str, tiene_asesor: bool) -> str:
         const input = document.getElementById('input-mensaje');
         const contadorMensaje = document.getElementById('contador-mensaje');
         const LIMITE_MENSAJE = 200;
+        const btnAdjuntar = document.getElementById('btn-adjuntar');
+        const inputArchivo = document.getElementById('input-archivo');
+        const estadoAdjunto = document.getElementById('estado-adjunto');
+        const zonaSoltar = document.querySelector('.chat-reply-fijo');
+        const btnAudio = document.getElementById('btn-audio');
+        const previsualizacionAudio = document.getElementById('previsualizacion-audio');
+        const reproductorPreview = document.getElementById('reproductor-preview-audio');
+        const btnDescartarAudio = document.getElementById('btn-descartar-audio');
+        const btnCatalogoDropdown = document.getElementById('btn-catalogo-dropdown');
+        const DURACION_MAXIMA_AUDIO = 60;
+        let mediaRecorder = null;
+        let fragmentosAudio = [];
+        let grabando = false;
+        let segundosGrabados = 0;
+        let intervaloGrabacion = null;
+        let blobPendiente = null;
+        let urlPendiente = null;
 
         // El input crece con el texto (en vez de quedar como una sola línea
         // fija) y el maxlength="200" del textarea impide escribir (o pegar)
@@ -1674,9 +1695,108 @@ def _script_chat_en_vivo(telefono: str, tiene_asesor: bool) -> str:
             ajustarInputMensaje();
         }
 
+        function formatearTiempo(segundos) {
+            const m = Math.floor(segundos / 60);
+            const s = segundos % 60;
+            return m + ':' + (s < 10 ? '0' : '') + s;
+        }
+
+        // Mientras hay una nota de voz previsualizándose, adjuntar archivo y
+        // catálogo quedan deshabilitados (no tiene sentido mezclar un envío
+        // con otro a medio armar) — grabar de nuevo sigue habilitado, sirve
+        // para regrabar (descarta la anterior sola).
+        function habilitarAdjuntosNoAudio(habilitado) {
+            if (btnAdjuntar) btnAdjuntar.disabled = !habilitado;
+            if (btnCatalogoDropdown) btnCatalogoDropdown.disabled = !habilitado;
+        }
+
+        function reiniciarReproductorPreview() {
+            if (reproductorPreview._audioObj) reproductorPreview._audioObj.pause();
+            reproductorPreview._audioObj = null;
+            reproductorPreview.querySelector('.btn-play-audio').innerHTML = '<i class="bi bi-play-fill"></i>';
+            reproductorPreview.querySelector('.barra-audio-progreso').style.width = '0%';
+            reproductorPreview.querySelector('.tiempo-audio').textContent = '0:00';
+        }
+
+        function limpiarPrevisualizacion() {
+            if (urlPendiente) URL.revokeObjectURL(urlPendiente);
+            urlPendiente = null;
+            blobPendiente = null;
+            reiniciarReproductorPreview();
+            previsualizacionAudio.style.display = 'none';
+            habilitarAdjuntosNoAudio(true);
+        }
+
+        function mostrarPrevisualizacion(blob) {
+            blobPendiente = blob;
+            urlPendiente = URL.createObjectURL(blob);
+            reiniciarReproductorPreview();
+            reproductorPreview.setAttribute('data-src', urlPendiente);
+            previsualizacionAudio.style.display = 'flex';
+            habilitarAdjuntosNoAudio(false);
+        }
+
+        function enviarNotaDeVoz(blob) {
+            const datos = new FormData();
+            datos.append('audio', blob, 'nota.webm');
+            estadoAdjunto.style.display = 'block';
+            estadoAdjunto.textContent = 'Procesando y enviando nota de voz...';
+            fetch('/dashboard/lead/' + encodeURIComponent(telefono) + '/enviar-audio', {
+                method: 'POST',
+                body: datos
+            }).then(function(r) {
+                if (!r.ok) throw new Error('fallo el envio');
+                estadoAdjunto.style.display = 'none';
+                actualizar();
+            }).catch(function() {
+                estadoAdjunto.textContent = 'No se pudo enviar la nota de voz.';
+            });
+        }
+
+        function detenerGrabacion() {
+            if (!grabando) return;
+            mediaRecorder.stop();
+            grabando = false;
+            clearInterval(intervaloGrabacion);
+            btnAudio.classList.remove('grabando');
+            btnAudio.title = 'Grabar nota de voz';
+        }
+
+        function subirYEnviarArchivo(archivo) {
+            if (!archivo || !estadoAdjunto) return;
+            const datos = new FormData();
+            datos.append('archivo', archivo);
+            datos.append('caption', input.value.trim());
+            input.value = '';
+            ajustarInputMensaje();
+            estadoAdjunto.style.display = 'block';
+            estadoAdjunto.textContent = 'Enviando ' + archivo.name + '...';
+            fetch('/dashboard/lead/' + encodeURIComponent(telefono) + '/enviar-archivo', {
+                method: 'POST',
+                body: datos
+            }).then(function(r) {
+                if (!r.ok) throw new Error('fallo el envio');
+                estadoAdjunto.style.display = 'none';
+                actualizar();
+            }).catch(function() {
+                estadoAdjunto.textContent = 'No se pudo enviar el archivo — verifica el tamaño/formato e intenta de nuevo.';
+            });
+        }
+
         if (form) {
             form.addEventListener('submit', function(ev) {
                 ev.preventDefault();
+
+                // El mismo botón de enviar (avión de papel) manda la nota de
+                // voz pendiente en vez del texto, si hay una previsualización
+                // activa — igual que hace WhatsApp Web con un solo botón.
+                if (blobPendiente) {
+                    const blob = blobPendiente;
+                    limpiarPrevisualizacion();
+                    enviarNotaDeVoz(blob);
+                    return;
+                }
+
                 const texto = input.value.trim();
                 if (!texto) return;
                 input.value = '';
@@ -1710,32 +1830,6 @@ def _script_chat_en_vivo(telefono: str, tiene_asesor: bool) -> str:
         // Adjuntar archivo: el botón de clip abre el selector nativo, pero
         // subirYEnviarArchivo() es la función real de envío — la reusa tanto
         // el selector como arrastrar-y-soltar sobre la barra de respuesta.
-        const btnAdjuntar = document.getElementById('btn-adjuntar');
-        const inputArchivo = document.getElementById('input-archivo');
-        const estadoAdjunto = document.getElementById('estado-adjunto');
-        const zonaSoltar = document.querySelector('.chat-reply-fijo');
-
-        function subirYEnviarArchivo(archivo) {
-            if (!archivo || !estadoAdjunto) return;
-            const datos = new FormData();
-            datos.append('archivo', archivo);
-            datos.append('caption', input.value.trim());
-            input.value = '';
-            ajustarInputMensaje();
-            estadoAdjunto.style.display = 'block';
-            estadoAdjunto.textContent = 'Enviando ' + archivo.name + '...';
-            fetch('/dashboard/lead/' + encodeURIComponent(telefono) + '/enviar-archivo', {
-                method: 'POST',
-                body: datos
-            }).then(function(r) {
-                if (!r.ok) throw new Error('fallo el envio');
-                estadoAdjunto.style.display = 'none';
-                actualizar();
-            }).catch(function() {
-                estadoAdjunto.textContent = 'No se pudo enviar el archivo — verifica el tamaño/formato e intenta de nuevo.';
-            });
-        }
-
         if (btnAdjuntar && inputArchivo) {
             btnAdjuntar.addEventListener('click', function() { inputArchivo.click(); });
             inputArchivo.addEventListener('change', function() {
@@ -1769,96 +1863,18 @@ def _script_chat_en_vivo(telefono: str, tiene_asesor: bool) -> str:
             });
         }
 
+        if (btnDescartarAudio) {
+            btnDescartarAudio.addEventListener('click', limpiarPrevisualizacion);
+        }
+
         // Grabar nota de voz: primer clic pide permiso del micrófono y
         // empieza a grabar (botón en rojo, pulsando, con cronómetro); segundo
         // clic o llegar a DURACION_MAXIMA_AUDIO corta la grabación — pero no
         // la manda todavía, muestra una previsualización (igual que WhatsApp)
-        // con botones Enviar/Descartar, para que el asesor pueda escucharse
-        // antes de mandarla. El navegador solo sabe grabar en WebM/Opus, el
-        // servidor la convierte a OGG/Opus antes de mandarla a Meta.
-        const btnAudio = document.getElementById('btn-audio');
-        const previsualizacionAudio = document.getElementById('previsualizacion-audio');
-        const reproductorPreview = document.getElementById('reproductor-preview-audio');
-        const btnEnviarAudio = document.getElementById('btn-enviar-audio');
-        const btnDescartarAudio = document.getElementById('btn-descartar-audio');
+        // con reproductor + tacho de descartar, y el envío real pasa por el
+        // mismo botón que manda texto. El navegador solo sabe grabar en
+        // WebM/Opus, el servidor la convierte a OGG/Opus antes de mandarla.
         if (btnAudio && estadoAdjunto && previsualizacionAudio) {
-            const DURACION_MAXIMA_AUDIO = 60;
-            let mediaRecorder = null;
-            let fragmentosAudio = [];
-            let grabando = false;
-            let segundosGrabados = 0;
-            let intervaloGrabacion = null;
-            let blobPendiente = null;
-            let urlPendiente = null;
-
-            function formatearTiempo(segundos) {
-                const m = Math.floor(segundos / 60);
-                const s = segundos % 60;
-                return m + ':' + (s < 10 ? '0' : '') + s;
-            }
-
-            function reiniciarReproductorPreview() {
-                if (reproductorPreview._audioObj) reproductorPreview._audioObj.pause();
-                reproductorPreview._audioObj = null;
-                reproductorPreview.querySelector('.btn-play-audio').innerHTML = '<i class="bi bi-play-fill"></i>';
-                reproductorPreview.querySelector('.barra-audio-progreso').style.width = '0%';
-                reproductorPreview.querySelector('.tiempo-audio').textContent = '0:00';
-            }
-
-            function limpiarPrevisualizacion() {
-                if (urlPendiente) URL.revokeObjectURL(urlPendiente);
-                urlPendiente = null;
-                blobPendiente = null;
-                reiniciarReproductorPreview();
-                previsualizacionAudio.style.display = 'none';
-            }
-
-            function mostrarPrevisualizacion(blob) {
-                blobPendiente = blob;
-                urlPendiente = URL.createObjectURL(blob);
-                reiniciarReproductorPreview();
-                reproductorPreview.setAttribute('data-src', urlPendiente);
-                previsualizacionAudio.style.display = 'flex';
-            }
-
-            function enviarNotaDeVoz(blob) {
-                const datos = new FormData();
-                datos.append('audio', blob, 'nota.webm');
-                estadoAdjunto.style.display = 'block';
-                estadoAdjunto.textContent = 'Procesando y enviando nota de voz...';
-                fetch('/dashboard/lead/' + encodeURIComponent(telefono) + '/enviar-audio', {
-                    method: 'POST',
-                    body: datos
-                }).then(function(r) {
-                    if (!r.ok) throw new Error('fallo el envio');
-                    estadoAdjunto.style.display = 'none';
-                    actualizar();
-                }).catch(function() {
-                    estadoAdjunto.textContent = 'No se pudo enviar la nota de voz.';
-                });
-            }
-
-            function detenerGrabacion() {
-                if (!grabando) return;
-                mediaRecorder.stop();
-                grabando = false;
-                clearInterval(intervaloGrabacion);
-                btnAudio.classList.remove('grabando');
-                btnAudio.title = 'Grabar nota de voz';
-            }
-
-            if (btnEnviarAudio) {
-                btnEnviarAudio.addEventListener('click', function() {
-                    if (!blobPendiente) return;
-                    const blob = blobPendiente;
-                    limpiarPrevisualizacion();
-                    enviarNotaDeVoz(blob);
-                });
-            }
-            if (btnDescartarAudio) {
-                btnDescartarAudio.addEventListener('click', limpiarPrevisualizacion);
-            }
-
             btnAudio.addEventListener('click', function() {
                 if (grabando) {
                     detenerGrabacion();
