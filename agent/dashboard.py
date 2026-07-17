@@ -23,8 +23,11 @@ sin tocar main.py/brain.py.
 """
 
 import html
+import logging
 import os
 import secrets
+import subprocess
+import tempfile
 import uuid
 import bcrypt
 from datetime import datetime
@@ -46,6 +49,8 @@ from agent.tools import obtener_producto_por_codigo, buscar_productos
 from agent.notificaciones import notificar_solicitud_reseteo, notificar_lead_derivado
 from agent.asignacion import asignar_lead_pendiente_a_asesor, UMBRAL_SENIOR_DEFAULT, UMBRAL_INTERMEDIO_DEFAULT
 from agent.providers import obtener_proveedor
+
+logger = logging.getLogger("agentkit")
 
 router = APIRouter(prefix="/dashboard")
 
@@ -313,6 +318,8 @@ ESTILOS_PROPIOS = """
   .chat-mensajes-wrap #chat { height: 100%; overflow-y: auto; }
   .chat-reply-fijo { flex-shrink: 0; padding: .6rem 1.25rem; background: #fff; border-top: 1px solid #e2e8f0; transition: background-color .15s, box-shadow .15s; }
   .chat-reply-fijo.zona-soltar-activa { background: #eaf7fd; box-shadow: inset 0 0 0 2px var(--gaso-azul); }
+  #btn-audio.grabando { background: #ef4444; border-color: #ef4444; color: #fff; animation: pulso-grabando 1.2s ease-in-out infinite; }
+  @keyframes pulso-grabando { 0%, 100% { opacity: 1; } 50% { opacity: .55; } }
   .btn-volver-movil { display: none; text-decoration: none; }
   .btn-filtros-movil { display: none; }
   .btn-resumen-movil { display: none; }
@@ -1441,6 +1448,9 @@ async def _bloque_respuesta(telefono: str, lead: dict) -> str:
             <i class="bi bi-paperclip"></i>
         </button>
         <input type="file" id="input-archivo" accept=".pdf,.jpg,.jpeg,.png" style="display:none">
+        <button type="button" class="btn btn-outline-secondary flex-shrink-0" id="btn-audio" title="Grabar nota de voz">
+            <i class="bi bi-mic-fill"></i>
+        </button>
         <button type="submit" class="btn btn-primary flex-shrink-0"><i class="bi bi-send-fill"></i></button>
     </form>
     <div id="estado-adjunto" class="small text-muted mt-1" style="display:none"></div>
@@ -1469,10 +1479,12 @@ def _script_chat_en_vivo(telefono: str, tiene_asesor: bool) -> str:
                 const rol = etiquetas[m.role] || m.role;
                 const texto = m.content.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
                 const mio = m.role !== 'user' ? ' mio' : '';
-                const cuerpo = m.archivo_id
-                    ? '<a href="/dashboard/archivo/' + m.archivo_id + '" target="_blank" class="text-reset">' +
-                      '<i class="bi bi-file-earmark-arrow-down"></i> ' + texto + '</a>'
-                    : texto;
+                const esAudio = m.archivo_tipo && m.archivo_tipo.indexOf('audio/') === 0;
+                const cuerpo = !m.archivo_id ? texto
+                    : esAudio
+                        ? '<audio controls preload="none" src="/dashboard/archivo/' + m.archivo_id + '" style="max-width:220px;height:32px;vertical-align:middle"></audio>'
+                        : '<a href="/dashboard/archivo/' + m.archivo_id + '" target="_blank" class="text-reset">' +
+                          '<i class="bi bi-file-earmark-arrow-down"></i> ' + texto + '</a>';
                 return '<div class="msg-row' + mio + '">' +
                     '<span class="avatar avatar-sm">' + (inicial[m.role] || '?') + '</span>' +
                     '<div class="msg ' + m.role + '"><strong>' + rol + ':</strong> ' + cuerpo + '</div>' +
@@ -1603,6 +1615,63 @@ def _script_chat_en_vivo(telefono: str, tiene_asesor: bool) -> str:
                 zonaSoltar.classList.remove('zona-soltar-activa');
                 const archivo = ev.dataTransfer.files[0];
                 if (archivo) subirYEnviarArchivo(archivo);
+            });
+        }
+
+        // Grabar nota de voz: primer clic pide permiso del micrófono y
+        // empieza a grabar (botón en rojo, pulsando); segundo clic corta la
+        // grabación y la manda. El navegador solo sabe grabar en WebM/Opus
+        // — el servidor la convierte a OGG/Opus antes de mandarla a Meta.
+        const btnAudio = document.getElementById('btn-audio');
+        if (btnAudio && estadoAdjunto) {
+            let mediaRecorder = null;
+            let fragmentosAudio = [];
+            let grabando = false;
+
+            function enviarNotaDeVoz(blob) {
+                const datos = new FormData();
+                datos.append('audio', blob, 'nota.webm');
+                estadoAdjunto.style.display = 'block';
+                estadoAdjunto.textContent = 'Procesando y enviando nota de voz...';
+                fetch('/dashboard/lead/' + encodeURIComponent(telefono) + '/enviar-audio', {
+                    method: 'POST',
+                    body: datos
+                }).then(function(r) {
+                    if (!r.ok) throw new Error('fallo el envio');
+                    estadoAdjunto.style.display = 'none';
+                    actualizar();
+                }).catch(function() {
+                    estadoAdjunto.textContent = 'No se pudo enviar la nota de voz.';
+                });
+            }
+
+            btnAudio.addEventListener('click', function() {
+                if (grabando) {
+                    mediaRecorder.stop();
+                    grabando = false;
+                    btnAudio.classList.remove('grabando');
+                    btnAudio.title = 'Grabar nota de voz';
+                    return;
+                }
+                navigator.mediaDevices.getUserMedia({audio: true}).then(function(stream) {
+                    fragmentosAudio = [];
+                    mediaRecorder = new MediaRecorder(stream);
+                    mediaRecorder.addEventListener('dataavailable', function(ev) {
+                        if (ev.data.size > 0) fragmentosAudio.push(ev.data);
+                    });
+                    mediaRecorder.addEventListener('stop', function() {
+                        stream.getTracks().forEach(function(t) { t.stop(); });
+                        const blob = new Blob(fragmentosAudio, {type: mediaRecorder.mimeType || 'audio/webm'});
+                        enviarNotaDeVoz(blob);
+                    });
+                    mediaRecorder.start();
+                    grabando = true;
+                    btnAudio.classList.add('grabando');
+                    btnAudio.title = 'Detener y enviar';
+                }).catch(function() {
+                    estadoAdjunto.style.display = 'block';
+                    estadoAdjunto.textContent = 'No se pudo acceder al micrófono — revisa los permisos del navegador.';
+                });
             });
         }
 
@@ -2083,6 +2152,39 @@ async def responder_cliente(
     return JSONResponse({"status": "ok"})
 
 
+def _convertir_a_ogg_opus(contenido_webm: bytes) -> bytes:
+    """Convierte audio WebM/Opus (lo único que MediaRecorder graba de forma
+    confiable en el navegador) a OGG/Opus mono — el único formato de audio
+    que la API de WhatsApp acepta para notas de voz. Usa archivos temporales
+    en vez de pipes: el demuxer de WebM/Matroska necesita poder buscar
+    dentro del archivo, no lee bien un stream continuo. Los descriptores se
+    cierran apenas se crean (en vez de mantenerlos abiertos con un context
+    manager) para que ffmpeg, un proceso aparte, pueda abrir esos mismos
+    archivos sin toparse con el bloqueo exclusivo que impone Windows."""
+    entrada_fd, entrada_ruta = tempfile.mkstemp(suffix=".webm")
+    salida_fd, salida_ruta = tempfile.mkstemp(suffix=".ogg")
+    os.close(entrada_fd)
+    os.close(salida_fd)
+    try:
+        with open(entrada_ruta, "wb") as f:
+            f.write(contenido_webm)
+        resultado = subprocess.run(
+            ["ffmpeg", "-y", "-i", entrada_ruta, "-c:a", "libopus", "-ac", "1", "-b:a", "32k", salida_ruta],
+            capture_output=True, timeout=30,
+        )
+        if resultado.returncode != 0:
+            logger.error(f"Error convirtiendo audio con ffmpeg: {resultado.stderr.decode(errors='replace')}")
+            raise HTTPException(status_code=502, detail="No se pudo procesar el audio")
+        with open(salida_ruta, "rb") as f:
+            return f.read()
+    finally:
+        for ruta in (entrada_ruta, salida_ruta):
+            try:
+                os.remove(ruta)
+            except OSError:
+                pass
+
+
 def _guardar_archivo_en_disco(nombre_original: str, contenido: bytes) -> str:
     """Escribe el archivo en ARCHIVOS_DIR con un nombre único (evita
     colisiones/sobrescrituras) y retorna la ruta en disco resultante."""
@@ -2148,6 +2250,46 @@ async def enviar_archivo_chat(
         tamano_bytes=len(contenido), subido_por=usuario["username"], reutilizable=False,
     )
     await guardar_mensaje(telefono, "asesor", caption.strip() or archivo.filename, archivo_id=archivo_guardado["id"])
+    return JSONResponse({"status": "ok"})
+
+
+@router.post("/lead/{telefono}/enviar-audio")
+async def enviar_audio_chat(
+    telefono: str,
+    audio: UploadFile = File(...),
+    usuario: dict = Depends(_usuario_actual),
+):
+    """El asesor graba una nota de voz en el navegador (WebM/Opus) — se
+    convierte a OGG/Opus (único formato de audio que acepta WhatsApp) antes
+    de subirla y enviarla, y se guarda ya convertida para poder reabrirla."""
+    lead = await obtener_lead(telefono)
+    if lead is None:
+        raise HTTPException(status_code=404, detail="Lead no encontrado")
+    _verificar_acceso_lead(usuario, lead)
+    if not lead.get("asesor_asignado"):
+        raise HTTPException(status_code=400, detail="Este lead aún no está asignado a un asesor")
+
+    contenido_webm = await audio.read()
+    if len(contenido_webm) > TAMANO_MAXIMO_ARCHIVO_MB * 1024 * 1024:
+        raise HTTPException(status_code=400, detail=f"El audio supera los {TAMANO_MAXIMO_ARCHIVO_MB}MB permitidos")
+    if not contenido_webm:
+        raise HTTPException(status_code=400, detail="No se recibió audio")
+
+    contenido_ogg = _convertir_a_ogg_opus(contenido_webm)
+
+    proveedor = obtener_proveedor()
+    media_id = await proveedor.subir_media(contenido_ogg, "nota_de_voz.ogg", "audio/ogg")
+    if not media_id:
+        raise HTTPException(status_code=502, detail="No se pudo subir el audio a WhatsApp")
+    if not await proveedor.enviar_audio(telefono, media_id):
+        raise HTTPException(status_code=502, detail="No se pudo enviar el audio por WhatsApp")
+
+    ruta_disco = _guardar_archivo_en_disco("nota_de_voz.ogg", contenido_ogg)
+    archivo_guardado = await crear_archivo_adjunto(
+        nombre_original="nota_de_voz.ogg", ruta_disco=ruta_disco, content_type="audio/ogg",
+        tamano_bytes=len(contenido_ogg), subido_por=usuario["username"], reutilizable=False,
+    )
+    await guardar_mensaje(telefono, "asesor", "Nota de voz", archivo_id=archivo_guardado["id"])
     return JSONResponse({"status": "ok"})
 
 

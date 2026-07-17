@@ -67,3 +67,8 @@ class ProveedorWhatsApp(ABC):
         """Envía una imagen ya subida con subir_media. No-op por defecto —
         cada proveedor que lo soporte debe sobreescribirlo."""
         return False
+
+    async def enviar_audio(self, telefono: str, media_id: str) -> bool:
+        """Envía una nota de voz ya subida con subir_media. No-op por
+        defecto — cada proveedor que lo soporte debe sobreescribirlo."""
+        return False

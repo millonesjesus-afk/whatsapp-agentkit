@@ -243,8 +243,21 @@ async def obtener_historial(telefono: str, limite: int = 20) -> list[dict]:
         # Invertir para orden cronológico (los más antiguos quedan primero)
         mensajes.reverse()
 
+        # Segunda consulta liviana (no N+1) solo para saber si cada adjunto
+        # es audio (se reproduce inline) o documento/imagen (se descarga) —
+        # el chat en vivo lo necesita para pintar la burbuja correcta.
+        archivo_ids = {m.archivo_id for m in mensajes if m.archivo_id}
+        content_types: dict[int, str] = {}
+        if archivo_ids:
+            query_archivos = select(ArchivoAdjunto.id, ArchivoAdjunto.content_type).where(ArchivoAdjunto.id.in_(archivo_ids))
+            result_archivos = await session.execute(query_archivos)
+            content_types = dict(result_archivos.all())
+
         return [
-            {"role": msg.role, "content": msg.content, "archivo_id": msg.archivo_id}
+            {
+                "role": msg.role, "content": msg.content, "archivo_id": msg.archivo_id,
+                "archivo_tipo": content_types.get(msg.archivo_id),
+            }
             for msg in mensajes
         ]
 

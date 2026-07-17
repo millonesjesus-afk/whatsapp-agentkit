@@ -183,3 +183,26 @@ class ProveedorMeta(ProveedorWhatsApp):
             if r.status_code != 200:
                 logger.error(f"Error Meta API (imagen): {r.status_code} — {r.text}")
             return r.status_code == 200
+
+    async def enviar_audio(self, telefono: str, media_id: str) -> bool:
+        """Envía una nota de voz ya subida con subir_media (debe ser OGG/Opus
+        — el mensaje tipo audio de WhatsApp no admite caption)."""
+        if not self.access_token or not self.phone_number_id:
+            logger.warning("META_ACCESS_TOKEN o META_PHONE_NUMBER_ID no configurados")
+            return False
+        url = f"https://graph.facebook.com/{self.api_version}/{self.phone_number_id}/messages"
+        headers = {
+            "Authorization": f"Bearer {self.access_token}",
+            "Content-Type": "application/json",
+        }
+        payload = {
+            "messaging_product": "whatsapp",
+            "to": telefono,
+            "type": "audio",
+            "audio": {"id": media_id},
+        }
+        async with httpx.AsyncClient() as client:
+            r = await client.post(url, json=payload, headers=headers)
+            if r.status_code != 200:
+                logger.error(f"Error Meta API (audio): {r.status_code} — {r.text}")
+            return r.status_code == 200
