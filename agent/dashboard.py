@@ -320,6 +320,37 @@ ESTILOS_PROPIOS = """
   .chat-reply-fijo.zona-soltar-activa { background: #eaf7fd; box-shadow: inset 0 0 0 2px var(--gaso-azul); }
   #btn-audio.grabando { background: #ef4444; border-color: #ef4444; color: #fff; animation: pulso-grabando 1.2s ease-in-out infinite; }
   @keyframes pulso-grabando { 0%, 100% { opacity: 1; } 50% { opacity: .55; } }
+
+  /* Botones de acción del chat (adjuntar/catálogo/micrófono) — grupo de
+     íconos con fondo suave celeste en vez del outline gris genérico de
+     Bootstrap, consistente con la paleta del resto del panel. */
+  .btn-icono-chat {
+    width: 38px; height: 38px; flex-shrink: 0; padding: 0;
+    display: inline-flex; align-items: center; justify-content: center;
+    border: none; border-radius: 12px; background: #eaf7fd; color: var(--gaso-azul-osc);
+    transition: background-color .15s, color .15s;
+  }
+  .btn-icono-chat:hover { background: #d5eefb; color: var(--gaso-azul); }
+  .btn-icono-chat:disabled { opacity: .5; }
+
+  /* Reproductor de audio propio (notas de voz) — reemplaza el <audio
+     controls> nativo del navegador (look "Windows 95") tanto en las
+     burbujas del chat como en la previsualización antes de enviar. */
+  .reproductor-audio {
+    display: inline-flex; align-items: center; gap: 8px;
+    background: #eaf7fd; border-radius: 999px; padding: 4px 14px 4px 4px;
+    max-width: 220px; min-width: 170px;
+  }
+  .btn-play-audio {
+    width: 28px; height: 28px; flex-shrink: 0; padding: 0; border: none; border-radius: 50%;
+    background: var(--gaso-azul); color: #fff; display: inline-flex; align-items: center; justify-content: center;
+    cursor: pointer; font-size: .8rem; transition: background-color .15s;
+  }
+  .btn-play-audio:hover { background: var(--gaso-azul-osc); }
+  .barra-audio-wrap { flex: 1 1 auto; min-width: 50px; height: 4px; background: #bcdff1; border-radius: 999px; position: relative; cursor: pointer; }
+  .barra-audio-progreso { position: absolute; left: 0; top: 0; height: 100%; width: 0%; background: var(--gaso-azul); border-radius: 999px; }
+  .tiempo-audio { font-size: .68rem; color: var(--gaso-azul-osc); flex-shrink: 0; min-width: 30px; text-align: right; }
+  #chat .msg .reproductor-audio { background: rgba(255,255,255,.6); }
   .btn-volver-movil { display: none; text-decoration: none; }
   .btn-filtros-movil { display: none; }
   .btn-resumen-movil { display: none; }
@@ -1442,25 +1473,29 @@ async def _bloque_respuesta(telefono: str, lead: dict) -> str:
             </div>
         </div>
         <div class="dropdown">
-            <button class="btn btn-outline-secondary flex-shrink-0" type="button" data-bs-toggle="dropdown" aria-expanded="false" title="Enviar catálogo">
+            <button class="btn-icono-chat" type="button" data-bs-toggle="dropdown" aria-expanded="false" title="Enviar catálogo">
                 <i class="bi bi-folder-fill"></i>
             </button>
             <ul class="dropdown-menu dropdown-menu-end" id="lista-catalogos" style="max-height:260px;overflow-y:auto;">
                 {opciones_catalogos}
             </ul>
         </div>
-        <button type="button" class="btn btn-outline-secondary flex-shrink-0" id="btn-adjuntar" title="Adjuntar PDF o imagen">
+        <button type="button" class="btn-icono-chat" id="btn-adjuntar" title="Adjuntar PDF o imagen">
             <i class="bi bi-paperclip"></i>
         </button>
         <input type="file" id="input-archivo" accept=".pdf,.jpg,.jpeg,.png" style="display:none">
-        <button type="button" class="btn btn-outline-secondary flex-shrink-0" id="btn-audio" title="Grabar nota de voz">
+        <button type="button" class="btn-icono-chat" id="btn-audio" title="Grabar nota de voz">
             <i class="bi bi-mic-fill"></i>
         </button>
-        <button type="submit" class="btn btn-primary flex-shrink-0"><i class="bi bi-send-fill"></i></button>
+        <button type="submit" class="btn btn-primary flex-shrink-0" style="width:38px;height:38px;padding:0;border-radius:12px;"><i class="bi bi-send-fill"></i></button>
     </form>
     <div id="estado-adjunto" class="small text-muted mt-1" style="display:none"></div>
     <div id="previsualizacion-audio" class="d-flex align-items-center gap-2 mt-1" style="display:none">
-        <audio id="reproductor-preview-audio" controls preload="none" style="max-width:220px;height:32px"></audio>
+        <div class="reproductor-audio" id="reproductor-preview-audio">
+            <button type="button" class="btn-play-audio"><i class="bi bi-play-fill"></i></button>
+            <div class="barra-audio-wrap"><div class="barra-audio-progreso"></div></div>
+            <span class="tiempo-audio">0:00</span>
+        </div>
         <button type="button" class="btn btn-sm btn-primary" id="btn-enviar-audio">Enviar</button>
         <button type="button" class="btn btn-sm btn-outline-secondary" id="btn-descartar-audio">Descartar</button>
     </div>
@@ -1492,7 +1527,10 @@ def _script_chat_en_vivo(telefono: str, tiene_asesor: bool) -> str:
                 const esAudio = m.archivo_tipo && m.archivo_tipo.indexOf('audio/') === 0;
                 const cuerpo = !m.archivo_id ? texto
                     : esAudio
-                        ? '<audio controls preload="none" src="/dashboard/archivo/' + m.archivo_id + '" style="max-width:220px;height:32px;vertical-align:middle"></audio>'
+                        ? '<div class="reproductor-audio" data-src="/dashboard/archivo/' + m.archivo_id + '">' +
+                          '<button type="button" class="btn-play-audio"><i class="bi bi-play-fill"></i></button>' +
+                          '<div class="barra-audio-wrap"><div class="barra-audio-progreso"></div></div>' +
+                          '<span class="tiempo-audio">0:00</span></div>'
                         : '<a href="/dashboard/archivo/' + m.archivo_id + '" target="_blank" class="text-reset">' +
                           '<i class="bi bi-file-earmark-arrow-down"></i> ' + texto + '</a>';
                 return '<div class="msg-row' + mio + '">' +
@@ -1502,6 +1540,88 @@ def _script_chat_en_vivo(telefono: str, tiene_asesor: bool) -> str:
             }}).join('') || '<p class="text-muted">Sin mensajes.</p>';
             chatDiv.scrollTop = chatDiv.scrollHeight;
         }}
+
+        // Reproductor de audio propio (nota de voz recibida/enviada, y la
+        // previsualización antes de mandar) — reemplaza el <audio controls>
+        // nativo del navegador, que se ve distinto y anticuado según el
+        // sistema operativo. Un objeto Audio() por reproductor, guardado
+        // directo en el elemento del DOM (se recrea solo si ese nodo se
+        // vuelve a pintar); delegado en el documento porque el chat se
+        // reemplaza entero (innerHTML) en cada actualización.
+        function formatearTiempoAudio(segundos) {{
+            segundos = Math.floor(segundos || 0);
+            const m = Math.floor(segundos / 60);
+            const s = segundos % 60;
+            return m + ':' + (s < 10 ? '0' : '') + s;
+        }}
+
+        function obtenerAudioDe(contenedor) {{
+            if (contenedor._audioObj) return contenedor._audioObj;
+            const audio = new Audio(contenedor.getAttribute('data-src'));
+            contenedor._audioObj = audio;
+            const barraProgreso = contenedor.querySelector('.barra-audio-progreso');
+            const tiempoEl = contenedor.querySelector('.tiempo-audio');
+            const btnPlay = contenedor.querySelector('.btn-play-audio');
+            audio.addEventListener('loadedmetadata', function() {{
+                if (isFinite(audio.duration)) tiempoEl.textContent = formatearTiempoAudio(audio.duration);
+            }});
+            audio.addEventListener('timeupdate', function() {{
+                if (audio.duration) barraProgreso.style.width = (audio.currentTime / audio.duration * 100) + '%';
+                tiempoEl.textContent = formatearTiempoAudio(audio.currentTime);
+            }});
+            audio.addEventListener('ended', function() {{
+                btnPlay.innerHTML = '<i class="bi bi-play-fill"></i>';
+                barraProgreso.style.width = '0%';
+                tiempoEl.textContent = isFinite(audio.duration) ? formatearTiempoAudio(audio.duration) : '0:00';
+            }});
+            return audio;
+        }}
+
+        let audioEnReproduccion = null;
+
+        function alternarReproduccionAudio(contenedor) {{
+            const audio = obtenerAudioDe(contenedor);
+            const btnPlay = contenedor.querySelector('.btn-play-audio');
+            if (audio.paused) {{
+                if (audioEnReproduccion && audioEnReproduccion !== audio) {{
+                    audioEnReproduccion.pause();
+                    const otroBtn = document.querySelector('.reproductor-audio .btn-play-audio.reproduciendo');
+                    if (otroBtn) {{
+                        otroBtn.innerHTML = '<i class="bi bi-play-fill"></i>';
+                        otroBtn.classList.remove('reproduciendo');
+                    }}
+                }}
+                audio.play();
+                audioEnReproduccion = audio;
+                btnPlay.innerHTML = '<i class="bi bi-pause-fill"></i>';
+                btnPlay.classList.add('reproduciendo');
+            }} else {{
+                audio.pause();
+                btnPlay.innerHTML = '<i class="bi bi-play-fill"></i>';
+                btnPlay.classList.remove('reproduciendo');
+            }}
+        }}
+
+        function buscarEnAudio(contenedor, clienteX) {{
+            const audio = obtenerAudioDe(contenedor);
+            const barra = contenedor.querySelector('.barra-audio-wrap');
+            const rect = barra.getBoundingClientRect();
+            if (!audio.duration || !rect.width) return;
+            const porcentaje = Math.min(1, Math.max(0, (clienteX - rect.left) / rect.width));
+            audio.currentTime = porcentaje * audio.duration;
+        }}
+
+        document.addEventListener('click', function(ev) {{
+            const btnPlay = ev.target.closest('.btn-play-audio');
+            if (btnPlay) {{
+                alternarReproduccionAudio(btnPlay.closest('.reproductor-audio'));
+                return;
+            }}
+            const barra = ev.target.closest('.barra-audio-wrap');
+            if (barra) {{
+                buscarEnAudio(barra.closest('.reproductor-audio'), ev.clientX);
+            }}
+        }});
 
         function actualizar() {{
             if (document.hidden) return;  // pestaña en segundo plano: no gastar requests
@@ -1677,18 +1797,27 @@ def _script_chat_en_vivo(telefono: str, tiene_asesor: bool) -> str:
                 return m + ':' + (s < 10 ? '0' : '') + s;
             }
 
+            function reiniciarReproductorPreview() {
+                if (reproductorPreview._audioObj) reproductorPreview._audioObj.pause();
+                reproductorPreview._audioObj = null;
+                reproductorPreview.querySelector('.btn-play-audio').innerHTML = '<i class="bi bi-play-fill"></i>';
+                reproductorPreview.querySelector('.barra-audio-progreso').style.width = '0%';
+                reproductorPreview.querySelector('.tiempo-audio').textContent = '0:00';
+            }
+
             function limpiarPrevisualizacion() {
                 if (urlPendiente) URL.revokeObjectURL(urlPendiente);
                 urlPendiente = null;
                 blobPendiente = null;
-                reproductorPreview.removeAttribute('src');
+                reiniciarReproductorPreview();
                 previsualizacionAudio.style.display = 'none';
             }
 
             function mostrarPrevisualizacion(blob) {
                 blobPendiente = blob;
                 urlPendiente = URL.createObjectURL(blob);
-                reproductorPreview.src = urlPendiente;
+                reiniciarReproductorPreview();
+                reproductorPreview.setAttribute('data-src', urlPendiente);
                 previsualizacionAudio.style.display = 'flex';
             }
 
