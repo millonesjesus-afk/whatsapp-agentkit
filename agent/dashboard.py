@@ -353,6 +353,12 @@ ESTILOS_PROPIOS = """
   #chat .msg .reproductor-audio { background: rgba(255,255,255,.6); }
   .btn-icono-chat.btn-descartar-audio { background: #fdeaea; color: #b91c1c; }
   .btn-icono-chat.btn-descartar-audio:hover { background: #fbd5d5; color: #991b1b; }
+
+  /* A propósito NO usa la utilidad .d-flex de Bootstrap: esa clase trae
+     !important, que le gana a un style="display:none" en línea — el JS que
+     muestra/oculta esta barra según haya o no una nota de voz pendiente
+     terminaba sin efecto visual y la barra quedaba SIEMPRE visible. */
+  .previsualizacion-audio-bar { display: flex; }
   .btn-volver-movil { display: none; text-decoration: none; }
   .btn-filtros-movil { display: none; }
   .btn-resumen-movil { display: none; }
@@ -1492,7 +1498,7 @@ async def _bloque_respuesta(telefono: str, lead: dict) -> str:
         <button type="submit" class="btn btn-primary flex-shrink-0" style="width:38px;height:38px;padding:0;border-radius:12px;"><i class="bi bi-send-fill"></i></button>
     </form>
     <div id="estado-adjunto" class="small text-muted mt-1" style="display:none"></div>
-    <div id="previsualizacion-audio" class="d-flex align-items-center gap-2 mt-1" style="display:none">
+    <div id="previsualizacion-audio" class="previsualizacion-audio-bar align-items-center gap-2 mt-1" style="display:none">
         <button type="button" class="btn-icono-chat btn-descartar-audio" id="btn-descartar-audio" title="Descartar grabación">
             <i class="bi bi-trash-fill"></i>
         </button>
