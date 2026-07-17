@@ -2437,14 +2437,16 @@ async def _bloque_resumen_cliente(telefono: str, lead: dict, usuario: dict) -> s
     lineas_venta = await listar_lineas_venta(telefono)
     bloque_lineas_venta = ""
     if lineas_venta:
-        filas_venta = "".join(
-            f'<div class="d-flex justify-content-between align-items-center py-1 gap-2">'
-            f'<span class="text-truncate" style="font-size:.8rem">'
-            f'{html.escape((l["marca"] + " — " if l.get("marca") else "") + l["producto"])}</span>'
-            f'<span class="fw-semibold text-end flex-shrink-0 ps-2" style="font-size:.8rem">'
-            f'{f"S/ {html.escape(l['precio'])}" if l.get("precio") else "-"}</span></div>'
-            for l in lineas_venta
-        )
+        filas_venta_partes = []
+        for l in lineas_venta:
+            etiqueta = html.escape((l["marca"] + " — " if l.get("marca") else "") + l["producto"])
+            precio_texto = f"S/ {html.escape(l['precio'])}" if l.get("precio") else "-"
+            filas_venta_partes.append(
+                '<div class="d-flex justify-content-between align-items-center py-1 gap-2">'
+                f'<span class="text-truncate" style="font-size:.8rem">{etiqueta}</span>'
+                f'<span class="fw-semibold text-end flex-shrink-0 ps-2" style="font-size:.8rem">{precio_texto}</span></div>'
+            )
+        filas_venta = "".join(filas_venta_partes)
         bloque_lineas_venta = f"""
         <div class="text-muted" style="font-size:.76rem">Productos vendidos</div>
         {filas_venta}
