@@ -2145,6 +2145,7 @@ async def _bloque_gestion_lead(telefono: str, lead: dict, usuario: dict) -> str:
         )
         bloque_asignacion = f"""
         <div class="card leads-card shadow-sm mb-2">
+            <div class="barra-acento"></div>
             <div class="card-body p-3">
                 <h6 class="text-uppercase text-muted small fw-bold mb-2">Asignación</h6>
                 <form method="post" action="/dashboard/lead/{html.escape(telefono)}/asignar" class="d-flex gap-2">
@@ -2186,6 +2187,7 @@ async def _bloque_gestion_lead(telefono: str, lead: dict, usuario: dict) -> str:
     return f"""
     {bloque_asignacion}
     <div class="card leads-card shadow-sm mb-2">
+        <div class="barra-acento"></div>
         <div class="card-body p-3">
             <h6 class="text-uppercase text-muted small fw-bold mb-2">Resultado tras derivación a asesor</h6>
             <form method="post" action="/dashboard/lead/{html.escape(telefono)}/resultado" id="form-resultado">
@@ -2216,6 +2218,7 @@ async def _bloque_gestion_lead(telefono: str, lead: dict, usuario: dict) -> str:
         </div>
     </div>
     <div class="card leads-card shadow-sm mb-2">
+        <div class="barra-acento"></div>
         <div class="card-body p-3">
             <h6 class="text-uppercase text-muted small fw-bold mb-2">Cierre de venta (si corresponde)</h6>
             <form method="post" action="/dashboard/lead/{html.escape(telefono)}/venta" id="form-venta">
@@ -2524,7 +2527,7 @@ async def detalle_lead(
         </div>
         <div class="offcanvas offcanvas-end" tabindex="-1" id="offcanvasResumen">
             <div class="offcanvas-header border-bottom">
-                <h5 class="offcanvas-title fw-semibold">Detalles del lead</h5>
+                <h5 class="offcanvas-title fw-semibold"><i class="bi bi-person-vcard" style="color:var(--gaso-azul)"></i> Detalles del lead</h5>
                 <button type="button" class="btn-close" data-bs-dismiss="offcanvas"></button>
             </div>
             <div class="offcanvas-body">
