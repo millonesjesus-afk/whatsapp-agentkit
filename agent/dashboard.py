@@ -1912,6 +1912,20 @@ def _script_chat_en_vivo(telefono: str, tiene_asesor: bool) -> str:
             });
         }
 
+        // Si el navegador restaura esta página desde su caché de
+        // adelante/atrás (bfcache — pasa al usar el botón Atrás/Adelante,
+        // no los links internos), lo hace congelando y descongelando el
+        // JS tal como estaba, sin volver a ejecutar este script. Si en ese
+        // momento había una grabación o previsualización pendiente, queda
+        // "resucitada" en pantalla sin que el asesor haya tocado el
+        // micrófono en la sesión actual — se limpia todo al restaurar.
+        window.addEventListener('pageshow', function(ev) {
+            if (!ev.persisted) return;
+            if (grabando) detenerGrabacion();
+            limpiarPrevisualizacion();
+            if (estadoAdjunto) estadoAdjunto.style.display = 'none';
+        });
+
         // Enviar catálogo: un clic en la lista, sin subir nada de nuevo
         // (ya está guardado del lado del servidor).
         const listaCatalogos = document.getElementById('lista-catalogos');
