@@ -1436,7 +1436,7 @@ async def _bloque_respuesta(telefono: str, lead: dict) -> str:
     return f"""
     <form id="form-respuesta" class="d-flex gap-2 align-items-end" method="post" action="/dashboard/lead/{html.escape(telefono)}/responder">
         <div class="flex-grow-1">
-            <textarea name="mensaje" id="input-mensaje" class="form-control" placeholder="Escribe tu respuesta..." required rows="1" style="resize:none;overflow-y:auto;max-height:140px;"></textarea>
+            <textarea name="mensaje" id="input-mensaje" class="form-control" placeholder="Escribe tu respuesta..." required rows="1" maxlength="200" style="resize:none;overflow-y:auto;max-height:140px;"></textarea>
             <div class="text-end" style="font-size:.68rem;line-height:1.3">
                 <span id="contador-mensaje" class="text-muted">0/200</span>
             </div>
@@ -1532,22 +1532,17 @@ def _script_chat_en_vivo(telefono: str, tiene_asesor: bool) -> str:
         const form = document.getElementById('form-respuesta');
         const input = document.getElementById('input-mensaje');
         const contadorMensaje = document.getElementById('contador-mensaje');
-        const LIMITE_MENSAJE_SUGERIDO = 200;
+        const LIMITE_MENSAJE = 200;
 
         // El input crece con el texto (en vez de quedar como una sola línea
-        // fija) y el contador avisa en rojo pasado el límite sugerido — no
-        // bloquea el envío, un mensaje más largo puede ser necesario (ej.
-        // explicar financiamiento), solo evita que el asesor no se dé
-        // cuenta de que se está extendiendo.
+        // fija) y el maxlength="200" del textarea impide escribir (o pegar)
+        // más allá del límite — el contador solo informa cuánto espacio
+        // queda, ya no hace falta que avise "te pasaste" porque no se puede.
         function ajustarInputMensaje() {
             input.style.height = 'auto';
             input.style.height = input.scrollHeight + 'px';
             if (!contadorMensaje) return;
-            const largo = input.value.length;
-            contadorMensaje.textContent = largo + '/' + LIMITE_MENSAJE_SUGERIDO;
-            contadorMensaje.classList.toggle('text-danger', largo > LIMITE_MENSAJE_SUGERIDO);
-            contadorMensaje.classList.toggle('fw-semibold', largo > LIMITE_MENSAJE_SUGERIDO);
-            contadorMensaje.classList.toggle('text-muted', largo <= LIMITE_MENSAJE_SUGERIDO);
+            contadorMensaje.textContent = input.value.length + '/' + LIMITE_MENSAJE;
         }
         if (input) {
             input.addEventListener('input', ajustarInputMensaje);
@@ -1650,14 +1645,25 @@ def _script_chat_en_vivo(telefono: str, tiene_asesor: bool) -> str:
         }
 
         // Grabar nota de voz: primer clic pide permiso del micrófono y
-        // empieza a grabar (botón en rojo, pulsando); segundo clic corta la
-        // grabación y la manda. El navegador solo sabe grabar en WebM/Opus
-        // — el servidor la convierte a OGG/Opus antes de mandarla a Meta.
+        // empieza a grabar (botón en rojo, pulsando, con cronómetro); segundo
+        // clic o llegar a DURACION_MAXIMA_AUDIO corta la grabación sola y la
+        // manda — evita nota de voz larguísimas y pesadas sin querer. El
+        // navegador solo sabe grabar en WebM/Opus, el servidor la convierte
+        // a OGG/Opus antes de mandarla a Meta.
         const btnAudio = document.getElementById('btn-audio');
         if (btnAudio && estadoAdjunto) {
+            const DURACION_MAXIMA_AUDIO = 60;
             let mediaRecorder = null;
             let fragmentosAudio = [];
             let grabando = false;
+            let segundosGrabados = 0;
+            let intervaloGrabacion = null;
+
+            function formatearTiempo(segundos) {
+                const m = Math.floor(segundos / 60);
+                const s = segundos % 60;
+                return m + ':' + (s < 10 ? '0' : '') + s;
+            }
 
             function enviarNotaDeVoz(blob) {
                 const datos = new FormData();
@@ -1676,16 +1682,23 @@ def _script_chat_en_vivo(telefono: str, tiene_asesor: bool) -> str:
                 });
             }
 
+            function detenerGrabacion() {
+                if (!grabando) return;
+                mediaRecorder.stop();
+                grabando = false;
+                clearInterval(intervaloGrabacion);
+                btnAudio.classList.remove('grabando');
+                btnAudio.title = 'Grabar nota de voz';
+            }
+
             btnAudio.addEventListener('click', function() {
                 if (grabando) {
-                    mediaRecorder.stop();
-                    grabando = false;
-                    btnAudio.classList.remove('grabando');
-                    btnAudio.title = 'Grabar nota de voz';
+                    detenerGrabacion();
                     return;
                 }
                 navigator.mediaDevices.getUserMedia({audio: true}).then(function(stream) {
                     fragmentosAudio = [];
+                    segundosGrabados = 0;
                     mediaRecorder = new MediaRecorder(stream);
                     mediaRecorder.addEventListener('dataavailable', function(ev) {
                         if (ev.data.size > 0) fragmentosAudio.push(ev.data);
@@ -1699,6 +1712,13 @@ def _script_chat_en_vivo(telefono: str, tiene_asesor: bool) -> str:
                     grabando = true;
                     btnAudio.classList.add('grabando');
                     btnAudio.title = 'Detener y enviar';
+                    estadoAdjunto.style.display = 'block';
+                    estadoAdjunto.textContent = 'Grabando... 0:00 / ' + formatearTiempo(DURACION_MAXIMA_AUDIO);
+                    intervaloGrabacion = setInterval(function() {
+                        segundosGrabados++;
+                        estadoAdjunto.textContent = 'Grabando... ' + formatearTiempo(segundosGrabados) + ' / ' + formatearTiempo(DURACION_MAXIMA_AUDIO);
+                        if (segundosGrabados >= DURACION_MAXIMA_AUDIO) detenerGrabacion();
+                    }, 1000);
                 }).catch(function() {
                     estadoAdjunto.style.display = 'block';
                     estadoAdjunto.textContent = 'No se pudo acceder al micrófono — revisa los permisos del navegador.';
