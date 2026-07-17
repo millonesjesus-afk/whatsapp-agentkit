@@ -2268,6 +2268,7 @@ async def _bloque_gestion_lead(telefono: str, lead: dict, usuario: dict) -> str:
                         {opciones_medio_contado}
                     </select>
                 </div>
+                <p class="text-danger small mb-2" id="venta-error" style="display:none"></p>
                 <button type="button" class="btn btn-sm btn-primary" id="btn-guardar-venta">Guardar venta</button>
             </form>
             <div class="modal fade" id="modal-confirmar-venta" tabindex="-1">
@@ -2440,6 +2441,45 @@ async def _bloque_gestion_lead(telefono: str, lead: dict, usuario: dict) -> str:
                 var modalEl = document.getElementById('modal-confirmar-venta');
                 var modalItems = document.getElementById('modal-venta-items');
                 var modalTotal = document.getElementById('modal-venta-total');
+                var ventaError = document.getElementById('venta-error');
+
+                // El modal vive dentro del panel "Detalles del lead" (offcanvas),
+                // que usa transform para su animación — eso rompe cómo Bootstrap
+                // posiciona el modal y su fondo oscuro (queda todo congelado sin
+                // responder). Sacarlo al final de <body> antes de mostrarlo lo
+                // arregla; es el fix estándar de Bootstrap para este caso.
+                if (modalEl.parentElement !== document.body) {{
+                    document.body.appendChild(modalEl);
+                }}
+
+                function validarFormularioVenta() {{
+                    ventaError.style.display = 'none';
+                    selectModalidad.classList.remove('is-invalid');
+                    selectCuotas.classList.remove('is-invalid');
+                    medioContado.classList.remove('is-invalid');
+                    if (!selectModalidad.value) {{
+                        ventaError.textContent = 'Selecciona la modalidad de pago antes de guardar la venta.';
+                        ventaError.style.display = 'block';
+                        selectModalidad.classList.add('is-invalid');
+                        selectModalidad.focus();
+                        return false;
+                    }}
+                    if (selectModalidad.value === 'financiado' && !selectCuotas.value) {{
+                        ventaError.textContent = 'Selecciona las cuotas antes de guardar la venta.';
+                        ventaError.style.display = 'block';
+                        selectCuotas.classList.add('is-invalid');
+                        selectCuotas.focus();
+                        return false;
+                    }}
+                    if (selectModalidad.value === 'contado' && !medioContado.value) {{
+                        ventaError.textContent = 'Selecciona el medio de pago antes de guardar la venta.';
+                        ventaError.style.display = 'block';
+                        medioContado.classList.add('is-invalid');
+                        medioContado.focus();
+                        return false;
+                    }}
+                    return true;
+                }}
 
                 function calcularTotal() {{
                     var total = 0;
@@ -2454,6 +2494,7 @@ async def _bloque_gestion_lead(telefono: str, lead: dict, usuario: dict) -> str:
 
                 btnGuardar.addEventListener('click', function() {{
                     if (!carrito.length) {{ form.requestSubmit ? form.requestSubmit() : form.submit(); return; }}
+                    if (!validarFormularioVenta()) return;
                     modalItems.innerHTML = carrito.map(function(item) {{
                         var etiqueta = (item.marca ? escapar(item.marca) + ' — ' : '') + escapar(item.producto);
                         var precio = item.precio ? 'S/ ' + escapar(item.precio) : '-';
@@ -3127,6 +3168,16 @@ async def registrar_venta(
         for l in lineas_crudas
         if isinstance(l, dict) and str(l.get("producto") or "").strip()
     ]
+    # Si hay productos, la forma de pago es obligatoria (según corresponda) —
+    # ya se valida en el navegador, esto es el respaldo del lado servidor.
+    if lineas:
+        if not modalidad_pago:
+            raise HTTPException(status_code=400, detail="Selecciona la modalidad de pago")
+        if modalidad_pago == "financiado" and not cuotas:
+            raise HTTPException(status_code=400, detail="Selecciona las cuotas")
+        if modalidad_pago == "contado" and not medio_pago:
+            raise HTTPException(status_code=400, detail="Selecciona el medio de pago")
+
     await guardar_lineas_venta(telefono, lineas)
 
     campos = {"modalidad_pago": modalidad_pago, "cuotas": cuotas, "medio_pago": medio_pago}
