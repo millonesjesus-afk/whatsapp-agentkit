@@ -48,6 +48,32 @@ class Mensaje(Base):
     role: Mapped[str] = mapped_column(String(20))  # "user" o "assistant"
     content: Mapped[str] = mapped_column(Text)
     timestamp: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    # Si este mensaje fue un archivo adjunto (proforma o catálogo) enviado por
+    # un asesor, referencia al registro en ArchivoAdjunto — content queda como
+    # el caption/nombre visible igual. Sin ForeignKey estricta, mismo criterio
+    # que asesor_asignado en Lead (String suelto en vez de FK).
+    archivo_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+
+class ArchivoAdjunto(Base):
+    """Archivo subido por un asesor para enviar por WhatsApp — proforma
+    puntual (reutilizable=False, ligada a un solo envío) o catálogo de la
+    librería reutilizable (reutilizable=True, se puede mandar en cualquier
+    conversación sin volver a subirlo). El contenido vive en el volumen
+    persistente de Railway (ver ARCHIVOS_DIR en dashboard.py) — acá solo se
+    guardan los metadatos y la ruta en disco."""
+    __tablename__ = "archivos_adjuntos"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    nombre_original: Mapped[str] = mapped_column(String(255))
+    ruta_disco: Mapped[str] = mapped_column(String(500))
+    content_type: Mapped[str] = mapped_column(String(100))
+    tamano_bytes: Mapped[int] = mapped_column(Integer)
+    reutilizable: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Nombre visible en la librería de catálogos — solo aplica si reutilizable
+    etiqueta: Mapped[str | None] = mapped_column(String(150), nullable=True)
+    subido_por: Mapped[str] = mapped_column(String(50))
+    creado: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
 class Lead(Base):
@@ -178,14 +204,16 @@ async def inicializar_db():
         await conn.run_sync(Base.metadata.create_all)
 
 
-async def guardar_mensaje(telefono: str, role: str, content: str):
-    """Guarda un mensaje en el historial de conversación."""
+async def guardar_mensaje(telefono: str, role: str, content: str, archivo_id: int | None = None):
+    """Guarda un mensaje en el historial de conversación. archivo_id solo se
+    usa cuando el mensaje fue un archivo adjunto enviado por un asesor."""
     async with async_session() as session:
         mensaje = Mensaje(
             telefono=telefono,
             role=role,
             content=content,
-            timestamp=datetime.utcnow()
+            timestamp=datetime.utcnow(),
+            archivo_id=archivo_id,
         )
         session.add(mensaje)
         await session.commit()
@@ -216,7 +244,7 @@ async def obtener_historial(telefono: str, limite: int = 20) -> list[dict]:
         mensajes.reverse()
 
         return [
-            {"role": msg.role, "content": msg.content}
+            {"role": msg.role, "content": msg.content, "archivo_id": msg.archivo_id}
             for msg in mensajes
         ]
 
@@ -604,3 +632,71 @@ async def limpiar_historial(telefono: str):
         for msg in mensajes:
             session.delete(msg)
         await session.commit()
+
+
+def _archivo_a_dict(a: ArchivoAdjunto) -> dict:
+    return {
+        "id": a.id, "nombre_original": a.nombre_original, "ruta_disco": a.ruta_disco,
+        "content_type": a.content_type, "tamano_bytes": a.tamano_bytes,
+        "reutilizable": a.reutilizable, "etiqueta": a.etiqueta,
+        "subido_por": a.subido_por, "creado": a.creado,
+    }
+
+
+async def crear_archivo_adjunto(
+    nombre_original: str, ruta_disco: str, content_type: str, tamano_bytes: int,
+    subido_por: str, reutilizable: bool = False, etiqueta: str | None = None,
+) -> dict:
+    """Registra un archivo ya guardado en disco (proforma puntual o catálogo
+    reutilizable) — ver ARCHIVOS_DIR en dashboard.py para dónde vive el archivo."""
+    async with async_session() as session:
+        archivo = ArchivoAdjunto(
+            nombre_original=nombre_original, ruta_disco=ruta_disco, content_type=content_type,
+            tamano_bytes=tamano_bytes, reutilizable=reutilizable, etiqueta=etiqueta, subido_por=subido_por,
+        )
+        session.add(archivo)
+        await session.commit()
+        await session.refresh(archivo)
+        return _archivo_a_dict(archivo)
+
+
+async def obtener_archivo_adjunto(archivo_id: int) -> dict | None:
+    async with async_session() as session:
+        archivo = await session.get(ArchivoAdjunto, archivo_id)
+        return _archivo_a_dict(archivo) if archivo else None
+
+
+async def listar_archivos_reutilizables() -> list[dict]:
+    """Librería de catálogos ya subidos, listos para enviar en cualquier
+    conversación sin volver a subirlos — más recientes primero."""
+    async with async_session() as session:
+        query = (
+            select(ArchivoAdjunto)
+            .where(ArchivoAdjunto.reutilizable.is_(True))
+            .order_by(ArchivoAdjunto.creado.desc())
+        )
+        result = await session.execute(query)
+        return [_archivo_a_dict(a) for a in result.scalars().all()]
+
+
+async def eliminar_archivo_reutilizable(archivo_id: int):
+    """Quita un catálogo de la librería (no borra el archivo físico del disco,
+    por si algún mensaje viejo todavía lo referencia — solo dejar de ofrecerlo
+    para envíos nuevos)."""
+    async with async_session() as session:
+        archivo = await session.get(ArchivoAdjunto, archivo_id)
+        if archivo is None:
+            return
+        archivo.reutilizable = False
+        await session.commit()
+
+
+async def obtener_telefono_de_archivo(archivo_id: int) -> str | None:
+    """A qué lead se le envió un archivo puntual (proforma) — para poder
+    verificar que quien lo quiere descargar tiene acceso a ese lead. Un
+    catálogo reutilizable puede estar ligado a varios leads, así que esto
+    solo tiene sentido/se usa para archivos no reutilizables."""
+    async with async_session() as session:
+        query = select(Mensaje.telefono).where(Mensaje.archivo_id == archivo_id).limit(1)
+        result = await session.execute(query)
+        return result.scalar_one_or_none()

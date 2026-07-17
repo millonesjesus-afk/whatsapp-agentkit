@@ -6,6 +6,10 @@
 *.sqlite
 *.sqlite3
 
+# Archivos adjuntos subidos por asesores (proformas/catálogos) — en Railway
+# viven en un Volume persistente aparte, no en el repo
+data/archivos/
+
 # Python
 __pycache__/
 *.py[cod]

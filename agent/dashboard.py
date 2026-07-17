@@ -23,11 +23,13 @@ sin tocar main.py/brain.py.
 """
 
 import html
+import os
 import secrets
+import uuid
 import bcrypt
 from datetime import datetime
-from fastapi import APIRouter, Depends, HTTPException, Form, Request
-from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse, Response
+from fastapi import APIRouter, Depends, HTTPException, Form, Request, UploadFile, File
+from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse, Response, FileResponse
 
 from agent.memory import (
     listar_leads, obtener_lead, obtener_historial, actualizar_lead,
@@ -36,6 +38,8 @@ from agent.memory import (
     listar_campanas, crear_campana, actualizar_campana, contar_leads_por_campana,
     cambiar_password, contar_leads_activos, RESULTADOS_CERRADOS, listar_leads_agendados,
     obtener_configuracion, guardar_configuracion,
+    crear_archivo_adjunto, obtener_archivo_adjunto, listar_archivos_reutilizables,
+    eliminar_archivo_reutilizable, obtener_telefono_de_archivo,
 )
 from agent.campanas import resolver_promo, generar_link_whatsapp
 from agent.tools import obtener_producto_por_codigo, buscar_productos
@@ -44,6 +48,14 @@ from agent.asignacion import asignar_lead_pendiente_a_asesor, UMBRAL_SENIOR_DEFA
 from agent.providers import obtener_proveedor
 
 router = APIRouter(prefix="/dashboard")
+
+# Carpeta donde viven los archivos adjuntos (proformas/catálogos) enviados
+# por los asesores. En Railway apunta a un Volume persistente (el disco del
+# contenedor es efímero — se pierde en cada redeploy); en local, una carpeta
+# normal alcanza. Ver ArchivoAdjunto en agent/memory.py para los metadatos.
+ARCHIVOS_DIR = os.getenv("ARCHIVOS_DIR", "data/archivos")
+EXTENSIONES_ARCHIVO_PERMITIDAS = {".pdf", ".jpg", ".jpeg", ".png"}
+TAMANO_MAXIMO_ARCHIVO_MB = 20  # margen conservador bajo los límites de Meta (100MB doc / 5MB imagen)
 
 NIVELES_ASESOR = ["junior", "intermedio", "senior"]
 ETAPAS_FUNNEL = ["explorando", "comparando_producto", "evaluando_financiamiento", "derivado_asesor"]
@@ -484,6 +496,7 @@ def _pagina(
             )
         if usuario["rol"] == "admin":
             gestion_html += '<a href="/dashboard/campanas" data-ajax="1" class="link-light small text-decoration-none"><i class="bi bi-megaphone-fill"></i> Campañas</a>'
+            gestion_html += '<a href="/dashboard/catalogos" data-ajax="1" class="link-light small text-decoration-none"><i class="bi bi-folder-fill"></i> Catálogos</a>'
         topbar = f"""
         <nav class="navbar navbar-gaso navbar-dark px-3 py-2">
             <a class="navbar-brand mb-0 d-flex align-items-center gap-2" href="/dashboard" data-ajax="1">
@@ -1398,18 +1411,38 @@ def _aviso_proximas_citas(agendados: list[dict], vision_total: bool) -> str:
 
 # ── Conversación / detalle de lead ────────────────────────────────────
 
-def _bloque_respuesta(telefono: str, lead: dict) -> str:
+async def _bloque_respuesta(telefono: str, lead: dict) -> str:
     if not lead.get("asesor_asignado"):
         return (
             '<p class="text-muted small mb-0">'
             '<i class="bi bi-info-circle"></i> Asigna este lead a un asesor para poder responder '
             'manualmente (mientras tanto, Gabi sigue atendiendo automáticamente).</p>'
         )
+    catalogos = await listar_archivos_reutilizables()
+    opciones_catalogos = "".join(
+        f'<li><button type="button" class="dropdown-item small catalogo-item" data-archivo-id="{c["id"]}">'
+        f'<i class="bi bi-file-earmark-fill me-1"></i>{html.escape(c["etiqueta"] or c["nombre_original"])}</button></li>'
+        for c in catalogos
+    ) or '<li><span class="dropdown-item-text text-muted small">Aún no hay catálogos disponibles.</span></li>'
+
     return f"""
     <form id="form-respuesta" class="d-flex gap-2 align-items-center" method="post" action="/dashboard/lead/{html.escape(telefono)}/responder">
         <input type="text" name="mensaje" id="input-mensaje" class="form-control" placeholder="Escribe tu respuesta..." required autocomplete="off">
+        <div class="dropdown">
+            <button class="btn btn-outline-secondary flex-shrink-0" type="button" data-bs-toggle="dropdown" aria-expanded="false" title="Enviar catálogo">
+                <i class="bi bi-folder-fill"></i>
+            </button>
+            <ul class="dropdown-menu dropdown-menu-end" id="lista-catalogos" style="max-height:260px;overflow-y:auto;">
+                {opciones_catalogos}
+            </ul>
+        </div>
+        <button type="button" class="btn btn-outline-secondary flex-shrink-0" id="btn-adjuntar" title="Adjuntar PDF o imagen">
+            <i class="bi bi-paperclip"></i>
+        </button>
+        <input type="file" id="input-archivo" accept=".pdf,.jpg,.jpeg,.png" style="display:none">
         <button type="submit" class="btn btn-primary flex-shrink-0"><i class="bi bi-send-fill"></i></button>
     </form>
+    <div id="estado-adjunto" class="small text-muted mt-1" style="display:none"></div>
     """
 
 
@@ -1435,9 +1468,13 @@ def _script_chat_en_vivo(telefono: str, tiene_asesor: bool) -> str:
                 const rol = etiquetas[m.role] || m.role;
                 const texto = m.content.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
                 const mio = m.role !== 'user' ? ' mio' : '';
+                const cuerpo = m.archivo_id
+                    ? '<a href="/dashboard/archivo/' + m.archivo_id + '" target="_blank" class="text-reset">' +
+                      '<i class="bi bi-file-earmark-arrow-down"></i> ' + texto + '</a>'
+                    : texto;
                 return '<div class="msg-row' + mio + '">' +
                     '<span class="avatar avatar-sm">' + (inicial[m.role] || '?') + '</span>' +
-                    '<div class="msg ' + m.role + '"><strong>' + rol + ':</strong> ' + texto + '</div>' +
+                    '<div class="msg ' + m.role + '"><strong>' + rol + ':</strong> ' + cuerpo + '</div>' +
                     '</div>';
             }}).join('') || '<p class="text-muted">Sin mensajes.</p>';
             chatDiv.scrollTop = chatDiv.scrollHeight;
@@ -1504,6 +1541,58 @@ def _script_chat_en_vivo(telefono: str, tiene_asesor: bool) -> str:
                     ev.preventDefault();
                     form.requestSubmit ? form.requestSubmit() : form.dispatchEvent(new Event('submit', {cancelable: true}));
                 }
+            });
+        }
+
+        // Adjuntar archivo: el botón de clip solo abre el selector nativo;
+        // el envío real pasa cuando el usuario ya eligió un archivo.
+        const btnAdjuntar = document.getElementById('btn-adjuntar');
+        const inputArchivo = document.getElementById('input-archivo');
+        const estadoAdjunto = document.getElementById('estado-adjunto');
+        if (btnAdjuntar && inputArchivo) {
+            btnAdjuntar.addEventListener('click', function() { inputArchivo.click(); });
+            inputArchivo.addEventListener('change', function() {
+                const archivo = inputArchivo.files[0];
+                if (!archivo) return;
+                const datos = new FormData();
+                datos.append('archivo', archivo);
+                datos.append('caption', input.value.trim());
+                input.value = '';
+                estadoAdjunto.style.display = 'block';
+                estadoAdjunto.textContent = 'Enviando ' + archivo.name + '...';
+                fetch('/dashboard/lead/' + encodeURIComponent(telefono) + '/enviar-archivo', {
+                    method: 'POST',
+                    body: datos
+                }).then(function(r) {
+                    if (!r.ok) throw new Error('fallo el envio');
+                    estadoAdjunto.style.display = 'none';
+                    inputArchivo.value = '';
+                    actualizar();
+                }).catch(function() {
+                    estadoAdjunto.textContent = 'No se pudo enviar el archivo — verifica el tamaño/formato e intenta de nuevo.';
+                });
+            });
+        }
+
+        // Enviar catálogo: un clic en la lista, sin subir nada de nuevo
+        // (ya está guardado del lado del servidor).
+        const listaCatalogos = document.getElementById('lista-catalogos');
+        if (listaCatalogos && estadoAdjunto) {
+            listaCatalogos.addEventListener('click', function(ev) {
+                const item = ev.target.closest('.catalogo-item');
+                if (!item) return;
+                const archivoId = item.getAttribute('data-archivo-id');
+                estadoAdjunto.style.display = 'block';
+                estadoAdjunto.textContent = 'Enviando catálogo...';
+                fetch('/dashboard/lead/' + encodeURIComponent(telefono) + '/enviar-catalogo/' + archivoId, {
+                    method: 'POST'
+                }).then(function(r) {
+                    if (!r.ok) throw new Error('fallo el envio');
+                    estadoAdjunto.style.display = 'none';
+                    actualizar();
+                }).catch(function() {
+                    estadoAdjunto.textContent = 'No se pudo enviar el catálogo.';
+                });
             });
         }
         '''}
@@ -1824,6 +1913,7 @@ async def detalle_lead(
 
     nombre_mostrado = lead.get("nombre") or "(sin nombre)"
     resumen_cliente_html = await _bloque_resumen_cliente(telefono, lead, usuario)
+    bloque_respuesta_html = await _bloque_respuesta(telefono, lead)
 
     if asesor:
         # Ya se ve la lista de conversaciones del asesor junto al chat — con
@@ -1841,7 +1931,7 @@ async def detalle_lead(
             </div>
         </div>
         <div class="chat-reply-fijo">
-            {_bloque_respuesta(telefono, lead)}
+            {bloque_respuesta_html}
         </div>
         <div class="offcanvas offcanvas-end" tabindex="-1" id="offcanvasResumen">
             <div class="offcanvas-header border-bottom">
@@ -1873,7 +1963,7 @@ async def detalle_lead(
                     </div>
                 </div>
                 <div class="chat-reply-fijo">
-                    {_bloque_respuesta(telefono, lead)}
+                    {bloque_respuesta_html}
                 </div>
             </div>
         </div>
@@ -1959,6 +2049,224 @@ async def responder_cliente(
 
     await guardar_mensaje(telefono, "asesor", mensaje)
     return JSONResponse({"status": "ok"})
+
+
+def _guardar_archivo_en_disco(nombre_original: str, contenido: bytes) -> str:
+    """Escribe el archivo en ARCHIVOS_DIR con un nombre único (evita
+    colisiones/sobrescrituras) y retorna la ruta en disco resultante."""
+    extension = os.path.splitext(nombre_original)[1].lower()
+    nombre_disco = f"{uuid.uuid4().hex}{extension}"
+    os.makedirs(ARCHIVOS_DIR, exist_ok=True)
+    ruta_disco = os.path.join(ARCHIVOS_DIR, nombre_disco)
+    with open(ruta_disco, "wb") as f:
+        f.write(contenido)
+    return ruta_disco
+
+
+async def _subir_y_enviar_media(telefono: str, nombre_archivo: str, content_type: str, contenido: bytes, caption: str) -> bool:
+    """Sube el archivo a WhatsApp y lo envía como imagen o documento según
+    su tipo — común entre el envío de una proforma nueva y el reenvío de un
+    catálogo ya guardado."""
+    proveedor = obtener_proveedor()
+    media_id = await proveedor.subir_media(contenido, nombre_archivo, content_type)
+    if not media_id:
+        raise HTTPException(status_code=502, detail="No se pudo subir el archivo a WhatsApp")
+    es_imagen = content_type.startswith("image/")
+    enviado = (
+        await proveedor.enviar_imagen(telefono, media_id, caption)
+        if es_imagen else
+        await proveedor.enviar_documento(telefono, media_id, nombre_archivo, caption)
+    )
+    if not enviado:
+        raise HTTPException(status_code=502, detail="No se pudo enviar el archivo por WhatsApp")
+    return True
+
+
+@router.post("/lead/{telefono}/enviar-archivo")
+async def enviar_archivo_chat(
+    telefono: str,
+    archivo: UploadFile = File(...),
+    caption: str = Form(""),
+    usuario: dict = Depends(_usuario_actual),
+):
+    """El asesor sube una proforma/imagen puntual y se la manda al cliente
+    de una — se guarda en ARCHIVOS_DIR (persistente) para poder reabrirla
+    después desde el historial del chat."""
+    lead = await obtener_lead(telefono)
+    if lead is None:
+        raise HTTPException(status_code=404, detail="Lead no encontrado")
+    _verificar_acceso_lead(usuario, lead)
+    if not lead.get("asesor_asignado"):
+        raise HTTPException(status_code=400, detail="Este lead aún no está asignado a un asesor")
+
+    extension = os.path.splitext(archivo.filename or "")[1].lower()
+    if extension not in EXTENSIONES_ARCHIVO_PERMITIDAS:
+        raise HTTPException(status_code=400, detail="Solo se aceptan PDF, JPG o PNG")
+
+    contenido = await archivo.read()
+    if len(contenido) > TAMANO_MAXIMO_ARCHIVO_MB * 1024 * 1024:
+        raise HTTPException(status_code=400, detail=f"El archivo supera los {TAMANO_MAXIMO_ARCHIVO_MB}MB permitidos")
+
+    content_type = archivo.content_type or "application/octet-stream"
+    await _subir_y_enviar_media(telefono, archivo.filename, content_type, contenido, caption.strip())
+
+    ruta_disco = _guardar_archivo_en_disco(archivo.filename, contenido)
+    archivo_guardado = await crear_archivo_adjunto(
+        nombre_original=archivo.filename, ruta_disco=ruta_disco, content_type=content_type,
+        tamano_bytes=len(contenido), subido_por=usuario["username"], reutilizable=False,
+    )
+    await guardar_mensaje(telefono, "asesor", caption.strip() or archivo.filename, archivo_id=archivo_guardado["id"])
+    return JSONResponse({"status": "ok"})
+
+
+@router.post("/lead/{telefono}/enviar-catalogo/{archivo_id}")
+async def enviar_catalogo_chat(telefono: str, archivo_id: int, usuario: dict = Depends(_usuario_actual)):
+    """Reenvía un archivo de la librería de catálogos reutilizables — se
+    vuelve a subir a WhatsApp desde nuestra copia en disco (el media_id de
+    Meta es de un solo uso/temporal, no se reutiliza entre conversaciones)."""
+    lead = await obtener_lead(telefono)
+    if lead is None:
+        raise HTTPException(status_code=404, detail="Lead no encontrado")
+    _verificar_acceso_lead(usuario, lead)
+    if not lead.get("asesor_asignado"):
+        raise HTTPException(status_code=400, detail="Este lead aún no está asignado a un asesor")
+
+    archivo = await obtener_archivo_adjunto(archivo_id)
+    if archivo is None or not archivo["reutilizable"]:
+        raise HTTPException(status_code=404, detail="Catálogo no encontrado")
+
+    with open(archivo["ruta_disco"], "rb") as f:
+        contenido = f.read()
+    await _subir_y_enviar_media(telefono, archivo["nombre_original"], archivo["content_type"], contenido, "")
+
+    await guardar_mensaje(telefono, "asesor", archivo["nombre_original"], archivo_id=archivo["id"])
+    return JSONResponse({"status": "ok"})
+
+
+@router.get("/archivo/{archivo_id}")
+async def descargar_archivo(archivo_id: int, usuario: dict = Depends(_usuario_actual)):
+    """Sirve un archivo adjunto ya enviado — si es una proforma puntual (no
+    reutilizable), verifica que el usuario tenga acceso al lead al que se le
+    mandó, igual que para ver la conversación misma."""
+    archivo = await obtener_archivo_adjunto(archivo_id)
+    if archivo is None:
+        raise HTTPException(status_code=404, detail="Archivo no encontrado")
+    if not archivo["reutilizable"]:
+        telefono_lead = await obtener_telefono_de_archivo(archivo_id)
+        if telefono_lead:
+            lead = await obtener_lead(telefono_lead)
+            if lead:
+                _verificar_acceso_lead(usuario, lead)
+    if not os.path.exists(archivo["ruta_disco"]):
+        raise HTTPException(status_code=404, detail="El archivo ya no está disponible")
+    return FileResponse(archivo["ruta_disco"], filename=archivo["nombre_original"], media_type=archivo["content_type"])
+
+
+@router.get("/catalogos", response_class=HTMLResponse)
+async def gestionar_catalogos(request: Request, usuario: dict = Depends(_usuario_actual), subido: str = ""):
+    """Librería de catálogos reutilizables — subir una vez, cualquier asesor
+    los puede mandar en cualquier conversación sin volver a subirlos."""
+    if usuario["rol"] != "admin":
+        raise HTTPException(status_code=403, detail="Solo un administrador puede gestionar catálogos")
+
+    sidebar = await _renderizar_sidebar(usuario, telefono_activo=None)
+    archivos = await listar_archivos_reutilizables()
+
+    mensaje_html = ""
+    if subido:
+        mensaje_html = '<div class="alert alert-success py-2 px-3 mb-3"><i class="bi bi-check-circle-fill"></i> Catálogo subido.</div>'
+
+    filas = "".join(
+        f"""<tr>
+            <td class="ps-3">
+                <div class="fw-semibold">{html.escape(a['etiqueta'] or a['nombre_original'])}</div>
+                <div class="text-muted" style="font-size:.75rem">{html.escape(a['nombre_original'])} &middot; {round(a['tamano_bytes'] / 1024)} KB</div>
+            </td>
+            <td class="text-muted">{html.escape(a['subido_por'])}</td>
+            <td><a href="/dashboard/archivo/{a['id']}" target="_blank" class="btn btn-sm btn-outline-secondary"><i class="bi bi-download"></i> Ver</a></td>
+            <td class="pe-3">
+                <form method="post" action="/dashboard/catalogos/{a['id']}/eliminar" onsubmit="return confirm('¿Quitar este catálogo de la librería? Ya no se podrá elegir para enviar en nuevas conversaciones.')">
+                    <button type="submit" class="btn btn-sm btn-outline-danger"><i class="bi bi-trash"></i></button>
+                </form>
+            </td>
+        </tr>"""
+        for a in archivos
+    )
+
+    panel = f"""
+    {_titulo_seccion('bi-folder-fill', 'Librería de catálogos')}
+    <p class="text-muted small mb-3">
+        Sube catálogos, listas de precios en PDF o imágenes de referencia una sola vez — cualquier
+        asesor los va a poder elegir y enviar desde el chat sin tener que subirlos de nuevo cada vez.
+    </p>
+    {mensaje_html}
+    <div class="card leads-card shadow-sm mb-4">
+        <div class="barra-acento"></div>
+        <div class="table-responsive">
+            <table class="table table-hover align-middle mb-0 tabla-ejecutiva">
+                <thead><tr><th class="ps-3">Catálogo</th><th>Subido por</th><th></th><th class="pe-3"></th></tr></thead>
+                <tbody>{filas or '<tr><td colspan="4" class="text-center text-muted py-4">Aún no hay catálogos.</td></tr>'}</tbody>
+            </table>
+        </div>
+    </div>
+
+    {_titulo_seccion('bi-plus-circle-fill', 'Subir catálogo nuevo')}
+    <div class="card leads-card shadow-sm">
+        <div class="barra-acento"></div>
+        <div class="card-body">
+            <form method="post" action="/dashboard/catalogos/nuevo" enctype="multipart/form-data" class="row g-2">
+                <div class="col-md-4">
+                    <label class="form-label small text-muted mb-0">Nombre para identificarlo</label>
+                    <input type="text" name="etiqueta" class="form-control form-control-sm" required placeholder="Ej: Catálogo general 2026">
+                </div>
+                <div class="col-md-6">
+                    <label class="form-label small text-muted mb-0">Archivo (PDF, JPG o PNG, máx. {TAMANO_MAXIMO_ARCHIVO_MB}MB)</label>
+                    <input type="file" name="archivo" class="form-control form-control-sm" accept=".pdf,.jpg,.jpeg,.png" required>
+                </div>
+                <div class="col-md-2 d-flex align-items-end">
+                    <button type="submit" class="btn btn-sm btn-primary w-100">Subir</button>
+                </div>
+            </form>
+        </div>
+    </div>
+    """
+    cuerpo = f"""<div class="shell d-flex">{sidebar}<div class="main-pane flex-grow-1 p-4">{panel}</div></div>"""
+    return _pagina("Librería de catálogos", usuario, cuerpo, request=request)
+
+
+@router.post("/catalogos/nuevo")
+async def subir_catalogo(
+    etiqueta: str = Form(...),
+    archivo: UploadFile = File(...),
+    usuario: dict = Depends(_usuario_actual),
+):
+    if usuario["rol"] != "admin":
+        raise HTTPException(status_code=403, detail="Solo un administrador puede gestionar catálogos")
+
+    extension = os.path.splitext(archivo.filename or "")[1].lower()
+    if extension not in EXTENSIONES_ARCHIVO_PERMITIDAS:
+        raise HTTPException(status_code=400, detail="Solo se aceptan PDF, JPG o PNG")
+
+    contenido = await archivo.read()
+    if len(contenido) > TAMANO_MAXIMO_ARCHIVO_MB * 1024 * 1024:
+        raise HTTPException(status_code=400, detail=f"El archivo supera los {TAMANO_MAXIMO_ARCHIVO_MB}MB permitidos")
+
+    ruta_disco = _guardar_archivo_en_disco(archivo.filename, contenido)
+    await crear_archivo_adjunto(
+        nombre_original=archivo.filename, ruta_disco=ruta_disco,
+        content_type=archivo.content_type or "application/octet-stream",
+        tamano_bytes=len(contenido), subido_por=usuario["username"],
+        reutilizable=True, etiqueta=etiqueta.strip(),
+    )
+    return RedirectResponse(url="/dashboard/catalogos?subido=1", status_code=303)
+
+
+@router.post("/catalogos/{archivo_id}/eliminar")
+async def quitar_catalogo(archivo_id: int, usuario: dict = Depends(_usuario_actual)):
+    if usuario["rol"] != "admin":
+        raise HTTPException(status_code=403, detail="Solo un administrador puede gestionar catálogos")
+    await eliminar_archivo_reutilizable(archivo_id)
+    return RedirectResponse(url="/dashboard/catalogos", status_code=303)
 
 
 @router.post("/lead/{telefono}/resultado")

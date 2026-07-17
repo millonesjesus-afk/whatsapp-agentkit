@@ -50,3 +50,20 @@ class ProveedorWhatsApp(ABC):
         tardar unos segundos por la llamada al modelo). No-op por defecto —
         cada proveedor que lo soporte debe sobreescribirlo."""
         return False
+
+    async def subir_media(self, contenido: bytes, nombre_archivo: str, content_type: str) -> str | None:
+        """Sube un archivo a los servidores del proveedor y retorna su id de
+        media, para poder enviarlo después con enviar_documento/enviar_imagen
+        sin necesitar alojarlo nosotros mismos. None por defecto — cada
+        proveedor que lo soporte debe sobreescribirlo."""
+        return None
+
+    async def enviar_documento(self, telefono: str, media_id: str, nombre_archivo: str, caption: str = "") -> bool:
+        """Envía un documento (PDF, etc.) ya subido con subir_media. No-op
+        por defecto — cada proveedor que lo soporte debe sobreescribirlo."""
+        return False
+
+    async def enviar_imagen(self, telefono: str, media_id: str, caption: str = "") -> bool:
+        """Envía una imagen ya subida con subir_media. No-op por defecto —
+        cada proveedor que lo soporte debe sobreescribirlo."""
+        return False
