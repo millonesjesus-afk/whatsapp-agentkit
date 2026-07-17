@@ -1459,6 +1459,11 @@ async def _bloque_respuesta(telefono: str, lead: dict) -> str:
         <button type="submit" class="btn btn-primary flex-shrink-0"><i class="bi bi-send-fill"></i></button>
     </form>
     <div id="estado-adjunto" class="small text-muted mt-1" style="display:none"></div>
+    <div id="previsualizacion-audio" class="d-flex align-items-center gap-2 mt-1" style="display:none">
+        <audio id="reproductor-preview-audio" controls preload="none" style="max-width:220px;height:32px"></audio>
+        <button type="button" class="btn btn-sm btn-primary" id="btn-enviar-audio">Enviar</button>
+        <button type="button" class="btn btn-sm btn-outline-secondary" id="btn-descartar-audio">Descartar</button>
+    </div>
     """
 
 
@@ -1646,23 +1651,45 @@ def _script_chat_en_vivo(telefono: str, tiene_asesor: bool) -> str:
 
         // Grabar nota de voz: primer clic pide permiso del micrófono y
         // empieza a grabar (botón en rojo, pulsando, con cronómetro); segundo
-        // clic o llegar a DURACION_MAXIMA_AUDIO corta la grabación sola y la
-        // manda — evita nota de voz larguísimas y pesadas sin querer. El
-        // navegador solo sabe grabar en WebM/Opus, el servidor la convierte
-        // a OGG/Opus antes de mandarla a Meta.
+        // clic o llegar a DURACION_MAXIMA_AUDIO corta la grabación — pero no
+        // la manda todavía, muestra una previsualización (igual que WhatsApp)
+        // con botones Enviar/Descartar, para que el asesor pueda escucharse
+        // antes de mandarla. El navegador solo sabe grabar en WebM/Opus, el
+        // servidor la convierte a OGG/Opus antes de mandarla a Meta.
         const btnAudio = document.getElementById('btn-audio');
-        if (btnAudio && estadoAdjunto) {
+        const previsualizacionAudio = document.getElementById('previsualizacion-audio');
+        const reproductorPreview = document.getElementById('reproductor-preview-audio');
+        const btnEnviarAudio = document.getElementById('btn-enviar-audio');
+        const btnDescartarAudio = document.getElementById('btn-descartar-audio');
+        if (btnAudio && estadoAdjunto && previsualizacionAudio) {
             const DURACION_MAXIMA_AUDIO = 60;
             let mediaRecorder = null;
             let fragmentosAudio = [];
             let grabando = false;
             let segundosGrabados = 0;
             let intervaloGrabacion = null;
+            let blobPendiente = null;
+            let urlPendiente = null;
 
             function formatearTiempo(segundos) {
                 const m = Math.floor(segundos / 60);
                 const s = segundos % 60;
                 return m + ':' + (s < 10 ? '0' : '') + s;
+            }
+
+            function limpiarPrevisualizacion() {
+                if (urlPendiente) URL.revokeObjectURL(urlPendiente);
+                urlPendiente = null;
+                blobPendiente = null;
+                reproductorPreview.removeAttribute('src');
+                previsualizacionAudio.style.display = 'none';
+            }
+
+            function mostrarPrevisualizacion(blob) {
+                blobPendiente = blob;
+                urlPendiente = URL.createObjectURL(blob);
+                reproductorPreview.src = urlPendiente;
+                previsualizacionAudio.style.display = 'flex';
             }
 
             function enviarNotaDeVoz(blob) {
@@ -1691,11 +1718,24 @@ def _script_chat_en_vivo(telefono: str, tiene_asesor: bool) -> str:
                 btnAudio.title = 'Grabar nota de voz';
             }
 
+            if (btnEnviarAudio) {
+                btnEnviarAudio.addEventListener('click', function() {
+                    if (!blobPendiente) return;
+                    const blob = blobPendiente;
+                    limpiarPrevisualizacion();
+                    enviarNotaDeVoz(blob);
+                });
+            }
+            if (btnDescartarAudio) {
+                btnDescartarAudio.addEventListener('click', limpiarPrevisualizacion);
+            }
+
             btnAudio.addEventListener('click', function() {
                 if (grabando) {
                     detenerGrabacion();
                     return;
                 }
+                limpiarPrevisualizacion();
                 navigator.mediaDevices.getUserMedia({audio: true}).then(function(stream) {
                     fragmentosAudio = [];
                     segundosGrabados = 0;
@@ -1706,12 +1746,13 @@ def _script_chat_en_vivo(telefono: str, tiene_asesor: bool) -> str:
                     mediaRecorder.addEventListener('stop', function() {
                         stream.getTracks().forEach(function(t) { t.stop(); });
                         const blob = new Blob(fragmentosAudio, {type: mediaRecorder.mimeType || 'audio/webm'});
-                        enviarNotaDeVoz(blob);
+                        estadoAdjunto.style.display = 'none';
+                        mostrarPrevisualizacion(blob);
                     });
                     mediaRecorder.start();
                     grabando = true;
                     btnAudio.classList.add('grabando');
-                    btnAudio.title = 'Detener y enviar';
+                    btnAudio.title = 'Detener grabación';
                     estadoAdjunto.style.display = 'block';
                     estadoAdjunto.textContent = 'Grabando... 0:00 / ' + formatearTiempo(DURACION_MAXIMA_AUDIO);
                     intervaloGrabacion = setInterval(function() {
