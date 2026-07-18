@@ -3533,7 +3533,7 @@ async def gestionar_campanas(request: Request, usuario: dict = Depends(_usuario_
                 </div>
                 <div class="col-md-3">
                     <label class="form-label small text-muted mb-0">Cómo se detecta</label>
-                    <select name="tipo_deteccion" class="form-select form-select-sm">{opciones_tipo}</select>
+                    <select name="tipo_deteccion" id="input-tipo-deteccion" class="form-select form-select-sm">{opciones_tipo}</select>
                 </div>
                 <div class="col-md-6">
                     <label class="form-label small text-muted mb-0">Mensaje de saludo completo (wa.link/SMS) — opcional para anuncios de Meta</label>
@@ -3542,6 +3542,9 @@ async def gestionar_campanas(request: Request, usuario: dict = Depends(_usuario_
                 <div class="col-md-6">
                     <label class="form-label small text-muted mb-0">Patrón de detección (fragmento distintivo del saludo, o dato del anuncio de Meta)</label>
                     <input type="text" name="patron" id="input-patron" class="form-control form-control-sm" required placeholder="Se autocompleta con el saludo si lo dejas vacío">
+                    <div id="patron-advertencia" class="text-danger small mt-1" style="display:none">
+                        <i class="bi bi-exclamation-triangle-fill"></i> Este patrón no aparece en el mensaje de saludo — la campaña nunca se detectaría.
+                    </div>
                 </div>
                 <div class="col-md-6">
                     <label class="form-label small text-muted mb-0">Producto de la promoción (catálogo)</label>
@@ -3570,8 +3573,34 @@ async def gestionar_campanas(request: Request, usuario: dict = Depends(_usuario_
     (function() {{
         var saludo = document.getElementById('input-texto-saludo');
         var patron = document.getElementById('input-patron');
+        var tipoDeteccion = document.getElementById('input-tipo-deteccion');
+        var advertencia = document.getElementById('patron-advertencia');
+        var formNueva = saludo.closest('form');
+
         saludo.addEventListener('input', function() {{
             if (!patron.value.trim()) {{ patron.value = saludo.value.trim().toLowerCase(); }}
+            validarPatron();
+        }});
+
+        // Avisa ANTES de guardar si el patrón no aparece en el saludo — la
+        // campaña quedaría creada pero nunca se detectaría (el bug real que
+        // pasó con 4 campañas cargadas a mano). El servidor también lo
+        // valida, esto es para que el admin lo note al toque, sin tener que
+        // enviar el formulario para enterarse.
+        function validarPatron() {{
+            var esTextoSaludo = tipoDeteccion.value === 'texto_saludo';
+            var hayMismatch = esTextoSaludo && saludo.value.trim() && patron.value.trim() &&
+                saludo.value.toLowerCase().indexOf(patron.value.trim().toLowerCase()) === -1;
+            advertencia.style.display = hayMismatch ? 'block' : 'none';
+            return !hayMismatch;
+        }}
+        patron.addEventListener('input', validarPatron);
+        tipoDeteccion.addEventListener('change', validarPatron);
+        formNueva.addEventListener('submit', function(ev) {{
+            if (!validarPatron()) {{
+                ev.preventDefault();
+                patron.focus();
+            }}
         }});
 
         function escapar(texto) {{
@@ -3695,6 +3724,16 @@ async def crear_campana_nueva(
     codigo_material = codigo_material.strip()
     if codigo_material and obtener_producto_por_codigo(codigo_material) is None:
         raise HTTPException(status_code=400, detail=f"El código de material '{codigo_material}' no existe en la lista de precios vigente")
+    # El patrón se compara contra el mensaje real que manda el cliente (que
+    # es texto_saludo, tal cual) — si no aparece ahí, la campaña nunca se va
+    # a detectar (bug real que pasó con 4 campañas sembradas a mano, donde
+    # patrón y saludo se escribieron por separado y quedaron desalineados).
+    if tipo_deteccion == "texto_saludo" and texto_saludo.strip():
+        if patron.strip().lower() not in texto_saludo.strip().lower():
+            raise HTTPException(
+                status_code=400,
+                detail="El patrón no aparece dentro del mensaje de saludo — así nunca se detectaría esta campaña. Usa un fragmento que sí esté en el saludo.",
+            )
     campana_creada = await crear_campana(
         nombre=nombre.strip(), tipo_deteccion=tipo_deteccion, patron=patron.strip().lower(),
         texto_saludo=texto_saludo.strip(), codigo_material=codigo_material,
