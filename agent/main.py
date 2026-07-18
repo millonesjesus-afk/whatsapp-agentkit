@@ -26,7 +26,10 @@ from agent.providers import obtener_proveedor
 from agent.dashboard import router as dashboard_router, NoAutenticado
 from agent.notificaciones import notificar_lead_derivado
 from agent.asignacion import elegir_asesor_automatico
-from agent.campanas import detectar_y_asignar_campana, sembrar_campanas_iniciales, corregir_patrones_desalineados
+from agent.campanas import (
+    detectar_y_asignar_campana, sembrar_campanas_iniciales, corregir_patrones_desalineados,
+    procesar_leads_formulario,
+)
 
 load_dotenv()
 
@@ -112,6 +115,15 @@ async def webhook_handler(request: Request):
         if not await proveedor.verificar_firma(request, cuerpo_crudo):
             logger.warning("Firma de webhook inválida — solicitud rechazada")
             raise HTTPException(status_code=403, detail="Firma inválida")
+
+        # Los leads de formulario (Meta Lead Ads/Instant Forms) llegan por un
+        # webhook de PÁGINA distinto al de WhatsApp — objeto "page" en vez de
+        # "whatsapp_business_account". El cliente nunca escribió primero, así
+        # que este camino no toca nada del flujo normal de mensajes de abajo.
+        body = await request.json()
+        if body.get("object") == "page":
+            await procesar_leads_formulario(body, proveedor)
+            return {"status": "ok"}
 
         # Parsear webhook — el proveedor normaliza el formato
         mensajes = await proveedor.parsear_webhook(request)

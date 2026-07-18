@@ -25,7 +25,10 @@ import os
 import logging
 import urllib.parse
 
-from agent.memory import listar_campanas, asignar_campana_origen, obtener_campana_por_nombre
+from agent.memory import (
+    listar_campanas, asignar_campana_origen, obtener_campana_por_nombre,
+    obtener_lead, actualizar_lead,
+)
 from agent.tools import obtener_producto_por_codigo, obtener_familia_producto, formatear_producto
 
 logger = logging.getLogger("agentkit")
@@ -151,6 +154,88 @@ async def detectar_y_asignar_campana(telefono: str, texto_mensaje: str, referral
                 return campana
 
     return None
+
+
+def _normalizar_telefono(telefono: str) -> str:
+    """Meta manda el teléfono del formulario con un '+' adelante (ej.
+    '+51987654321') — el resto del sistema guarda el teléfono sin él (igual
+    que llega el campo 'from' de un mensaje de WhatsApp), así que hay que
+    homologarlo para que sea el MISMO lead si el cliente también escribe."""
+    return (telefono or "").strip().lstrip("+").replace(" ", "").replace("-", "")
+
+
+async def detectar_campana_por_formulario(form_id: str, ad_id: str) -> dict | None:
+    """Busca una campaña de tipo 'leadgen_meta' cuyo patrón coincida con el
+    formulario o el anuncio de origen de un lead de Meta Lead Ads."""
+    campanas = await listar_campanas(solo_activas=True)
+    form_norm = _normalizar(form_id)
+    ad_norm = _normalizar(ad_id)
+    for campana in campanas:
+        if campana["tipo_deteccion"] != "leadgen_meta":
+            continue
+        patron = _normalizar(campana["patron"])
+        if patron and (patron == form_norm or patron == ad_norm):
+            return campana
+    return None
+
+
+async def procesar_leads_formulario(body: dict, proveedor) -> None:
+    """Procesa el webhook de 'leadgen' de una Página de Meta (Lead Ads/
+    Instant Forms) — a diferencia de un mensaje de WhatsApp, acá el cliente
+    NUNCA escribió primero: solo llenó un formulario en Facebook/Instagram.
+    Trae sus datos reales, crea el lead, y le manda la primera plantilla
+    aprobada para poder iniciar la conversación (WhatsApp no deja mandar
+    texto libre a alguien que nunca escribió)."""
+    nombre_plantilla = os.getenv("META_LEADGEN_TEMPLATE_NAME")
+    idioma_plantilla = os.getenv("META_LEADGEN_TEMPLATE_LANG", "es")
+
+    for entry in body.get("entry", []):
+        for change in entry.get("changes", []):
+            if change.get("field") != "leadgen":
+                continue
+            leadgen_id = change.get("value", {}).get("leadgen_id")
+            if not leadgen_id:
+                continue
+
+            datos = await proveedor.obtener_datos_leadgen(leadgen_id)
+            if not datos or not datos.get("telefono"):
+                logger.warning(f"No se pudieron traer datos del lead de formulario {leadgen_id}")
+                continue
+
+            telefono = _normalizar_telefono(datos["telefono"])
+            if not telefono:
+                logger.warning(f"Lead de formulario {leadgen_id} sin teléfono válido")
+                continue
+
+            # Ya es un lead conocido (llegó antes por WhatsApp u otro
+            # formulario) — no se le manda otra plantilla de "primer
+            # contacto", solo se completa el dato si faltaba.
+            if await obtener_lead(telefono):
+                logger.info(f"Lead de formulario {leadgen_id} ya existía como {telefono} — no se reenvía la plantilla")
+                continue
+
+            campana = await detectar_campana_por_formulario(datos.get("form_id", ""), datos.get("ad_id", ""))
+            await actualizar_lead(
+                telefono,
+                nombre=datos.get("nombre") or "",
+                origen_contacto="formulario_meta",
+                campana_origen=campana["nombre"] if campana else "",
+            )
+            logger.info(f"Lead de formulario creado: {telefono} (leadgen_id {leadgen_id})")
+
+            if not nombre_plantilla:
+                logger.warning(
+                    f"META_LEADGEN_TEMPLATE_NAME no configurado — el lead {telefono} quedó "
+                    f"creado pero todavía nadie le escribió"
+                )
+                continue
+
+            primer_nombre = (datos.get("nombre") or "").strip().split(" ")[0] or "🙂"
+            enviado = await proveedor.enviar_plantilla(telefono, nombre_plantilla, [primer_nombre], idioma_plantilla)
+            if enviado:
+                logger.info(f"Plantilla '{nombre_plantilla}' enviada a {telefono} (lead de formulario)")
+            else:
+                logger.error(f"No se pudo enviar la plantilla a {telefono} (lead de formulario)")
 
 
 # Campañas activas según el correo de Jesús Millones del 15/05/2026

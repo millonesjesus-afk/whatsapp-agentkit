@@ -125,6 +125,12 @@ class Lead(Base):
     # primer contacto, y nunca se sobreescribe. Sirve para medir conversión
     # por campaña en el panel.
     campana_origen: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    # Cómo llegó este lead: None/"" = escribió por WhatsApp orgánicamente
+    # (el caso de siempre). "formulario_meta" = llenó un Lead Ad/Instant
+    # Form de Meta y nunca escribió — Gaso+ tuvo que iniciar la conversación
+    # con una plantilla aprobada. Sirve para reportar y para no reenviar esa
+    # plantilla si el mismo teléfono ya es un lead conocido.
+    origen_contacto: Mapped[str | None] = mapped_column(String(30), nullable=True)
     actualizado: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     creado: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
@@ -320,6 +326,7 @@ def _lead_a_dict(lead: Lead) -> dict:
         "visto_asesor": lead.visto_asesor,
         "fallos_tecnicos": lead.fallos_tecnicos,
         "campana_origen": lead.campana_origen,
+        "origen_contacto": lead.origen_contacto,
         "actualizado": lead.actualizado,
         "creado": lead.creado,
     }

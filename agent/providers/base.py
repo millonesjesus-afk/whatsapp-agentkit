@@ -72,3 +72,20 @@ class ProveedorWhatsApp(ABC):
         """Envía una nota de voz ya subida con subir_media. No-op por
         defecto — cada proveedor que lo soporte debe sobreescribirlo."""
         return False
+
+    async def obtener_datos_leadgen(self, leadgen_id: str) -> dict | None:
+        """Trae los datos completos (nombre, teléfono, formulario/anuncio de
+        origen) de un lead que llegó por un formulario de Meta Ads (Lead
+        Ads/Instant Forms) — el webhook solo avisa el ID, hay que pedir el
+        detalle aparte. None por defecto — cada proveedor que lo soporte
+        debe sobreescribirlo."""
+        return None
+
+    async def enviar_plantilla(
+        self, telefono: str, nombre_plantilla: str, parametros: list[str], idioma: str = "es"
+    ) -> bool:
+        """Envía una plantilla de mensaje aprobada — la única forma de que
+        el negocio inicie una conversación con alguien que nunca escribió
+        primero (ej. un lead de formulario). No-op por defecto — cada
+        proveedor que lo soporte debe sobreescribirlo."""
+        return False

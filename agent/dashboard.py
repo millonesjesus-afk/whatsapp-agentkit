@@ -3380,6 +3380,7 @@ async def actualizar_umbrales_asignacion(
 TIPOS_DETECCION = {
     "texto_saludo": "Texto del saludo (wa.link)",
     "referral_meta": "Anuncio de Meta (referral)",
+    "leadgen_meta": "Formulario de Meta (Lead Ads)",
 }
 
 

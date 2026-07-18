@@ -20,6 +20,10 @@ class ProveedorMeta(ProveedorWhatsApp):
         self.phone_number_id = os.getenv("META_PHONE_NUMBER_ID")
         self.verify_token = os.getenv("META_VERIFY_TOKEN", "agentkit-verify")
         self.app_secret = os.getenv("META_APP_SECRET")
+        # Token de la Página (permiso leads_retrieval) — distinto del token
+        # de WhatsApp de arriba, solo hace falta si se usan leads de
+        # formulario (Meta Lead Ads/Instant Forms).
+        self.page_access_token = os.getenv("META_PAGE_ACCESS_TOKEN")
         self.api_version = "v21.0"
 
     async def verificar_firma(self, request: Request, body: bytes) -> bool:
@@ -205,4 +209,68 @@ class ProveedorMeta(ProveedorWhatsApp):
             r = await client.post(url, json=payload, headers=headers)
             if r.status_code != 200:
                 logger.error(f"Error Meta API (audio): {r.status_code} — {r.text}")
+            return r.status_code == 200
+
+    async def obtener_datos_leadgen(self, leadgen_id: str) -> dict | None:
+        """Trae nombre/teléfono/formulario de origen de un lead de Meta Lead
+        Ads — el webhook de leadgen solo manda el ID, no los datos."""
+        if not self.page_access_token:
+            logger.warning("META_PAGE_ACCESS_TOKEN no configurado — no se pueden traer datos de leads de formulario")
+            return None
+        url = f"https://graph.facebook.com/{self.api_version}/{leadgen_id}"
+        params = {"access_token": self.page_access_token}
+        async with httpx.AsyncClient() as client:
+            r = await client.get(url, params=params)
+            if r.status_code != 200:
+                logger.error(f"Error trayendo datos de leadgen {leadgen_id}: {r.status_code} — {r.text}")
+                return None
+            datos = r.json()
+            # field_data trae los campos del formulario como una lista de
+            # {name, values} — los nombres estándar son full_name/phone_number,
+            # pero puede haber preguntas personalizadas con otros nombres.
+            campos = {
+                f.get("name", ""): (f.get("values") or [""])[0]
+                for f in datos.get("field_data", [])
+            }
+            return {
+                "leadgen_id": leadgen_id,
+                "nombre": campos.get("full_name") or campos.get("nombre") or "",
+                "telefono": campos.get("phone_number") or campos.get("telefono") or "",
+                "ad_id": datos.get("ad_id", ""),
+                "form_id": datos.get("form_id", ""),
+            }
+
+    async def enviar_plantilla(
+        self, telefono: str, nombre_plantilla: str, parametros: list[str], idioma: str = "es"
+    ) -> bool:
+        """Envía una plantilla de mensaje aprobada por Meta — necesaria para
+        iniciar una conversación con alguien que nunca escribió primero."""
+        if not self.access_token or not self.phone_number_id:
+            logger.warning("META_ACCESS_TOKEN o META_PHONE_NUMBER_ID no configurados")
+            return False
+        url = f"https://graph.facebook.com/{self.api_version}/{self.phone_number_id}/messages"
+        headers = {
+            "Authorization": f"Bearer {self.access_token}",
+            "Content-Type": "application/json",
+        }
+        componentes = []
+        if parametros:
+            componentes.append({
+                "type": "body",
+                "parameters": [{"type": "text", "text": p} for p in parametros],
+            })
+        payload = {
+            "messaging_product": "whatsapp",
+            "to": telefono,
+            "type": "template",
+            "template": {
+                "name": nombre_plantilla,
+                "language": {"code": idioma},
+                "components": componentes,
+            },
+        }
+        async with httpx.AsyncClient() as client:
+            r = await client.post(url, json=payload, headers=headers)
+            if r.status_code != 200:
+                logger.error(f"Error Meta API (plantilla): {r.status_code} — {r.text}")
             return r.status_code == 200
