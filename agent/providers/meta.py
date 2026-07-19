@@ -62,9 +62,21 @@ class ProveedorMeta(ProveedorWhatsApp):
                 value = change.get("value", {})
                 for msg in value.get("messages", []):
                     tipo = msg.get("type", "unknown")
+                    if tipo == "text":
+                        texto = msg.get("text", {}).get("body", "")
+                    elif tipo == "button":
+                        # Clic en un botón de respuesta rápida de una
+                        # plantilla (ej. "Sí, cuéntame más" / "No, gracias")
+                        # — se trata igual que si el cliente hubiera escrito
+                        # ese texto a mano, así Gabi lo procesa normal en
+                        # vez de recibir un mensaje vacío o "no soportado".
+                        texto = msg.get("button", {}).get("text", "")
+                        tipo = "text"
+                    else:
+                        texto = ""
                     mensajes.append(MensajeEntrante(
                         telefono=msg.get("from", ""),
-                        texto=msg.get("text", {}).get("body", "") if tipo == "text" else "",
+                        texto=texto,
                         mensaje_id=msg.get("id", ""),
                         es_propio=False,  # Meta solo envía mensajes entrantes
                         tipo=tipo,
