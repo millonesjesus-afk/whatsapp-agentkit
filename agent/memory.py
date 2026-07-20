@@ -7,13 +7,49 @@ por número de teléfono usando SQLite (local) o PostgreSQL (producción).
 """
 
 import os
+import logging
 from datetime import datetime
+from cryptography.fernet import Fernet
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from sqlalchemy import String, Text, DateTime, select, Integer, Boolean, func, case, delete
 from dotenv import load_dotenv
 
 load_dotenv()
+logger = logging.getLogger("agentkit")
+
+_fernet: Fernet | None = None
+
+
+def _obtener_fernet() -> Fernet:
+    """Carga (una sola vez) la clave de cifrado usada para access_token/app_secret
+    de los canales de WhatsApp guardados en la base de datos — a diferencia del
+    resto de credenciales del proyecto (que viven solo en variables de entorno
+    de Railway), estos tokens SÍ quedan persistidos en la BD para que se
+    administren desde el panel, así que se cifran en reposo por si alguien
+    llegara a tener acceso a la base sin tener también esta clave."""
+    global _fernet
+    if _fernet is None:
+        clave = os.getenv("CANAL_ENCRYPTION_KEY")
+        if not clave:
+            raise RuntimeError(
+                "CANAL_ENCRYPTION_KEY no está configurado — es obligatorio para "
+                "guardar/leer canales de WhatsApp desde el panel."
+            )
+        _fernet = Fernet(clave.encode())
+    return _fernet
+
+
+def _cifrar(texto: str | None) -> str | None:
+    if not texto:
+        return None
+    return _obtener_fernet().encrypt(texto.encode()).decode()
+
+
+def _descifrar(texto_cifrado: str | None) -> str | None:
+    if not texto_cifrado:
+        return None
+    return _obtener_fernet().decrypt(texto_cifrado.encode()).decode()
 
 # Configuración de base de datos
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite+aiosqlite:///./agentkit.db")
@@ -131,6 +167,12 @@ class Lead(Base):
     # con una plantilla aprobada. Sirve para reportar y para no reenviar esa
     # plantilla si el mismo teléfono ya es un lead conocido.
     origen_contacto: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    # phone_number_id (de Meta) del número de WhatsApp del NEGOCIO por el que
+    # entró/se atiende esta conversación — permite tener varios números
+    # activos a la vez (ej. pruebas y producción) y responder siempre por el
+    # mismo canal. Se actualiza con cada mensaje entrante (ver main.py), no
+    # solo la primera vez, por si el cliente llegara a escribir a otro número.
+    numero_whatsapp_id: Mapped[str | None] = mapped_column(String(50), nullable=True)
     actualizado: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     creado: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
@@ -183,6 +225,26 @@ class Campana(Base):
     creado: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
+class CanalWhatsApp(Base):
+    """Un número de WhatsApp (Meta Cloud API) que Gabi puede usar para recibir
+    y responder mensajes. Permite tener varios números activos a la vez (ej.
+    pruebas y producción) administrables desde el panel, en vez de fijos en
+    variables de entorno. access_token/app_secret/page_access_token se
+    guardan CIFRADOS (ver _cifrar/_descifrar) — a diferencia de las demás
+    credenciales del proyecto, estas sí viven en la base de datos."""
+    __tablename__ = "canales_whatsapp"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    nombre: Mapped[str] = mapped_column(String(100))
+    phone_number_id: Mapped[str] = mapped_column(String(50), unique=True, index=True)
+    access_token_cifrado: Mapped[str | None] = mapped_column(Text, nullable=True)
+    app_secret_cifrado: Mapped[str | None] = mapped_column(Text, nullable=True)
+    page_access_token_cifrado: Mapped[str | None] = mapped_column(Text, nullable=True)
+    activo: Mapped[bool] = mapped_column(Boolean, default=True)
+    creado: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    actualizado: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
 class Usuario(Base):
     """Cuenta de acceso al panel interno (/dashboard). Roles: admin, supervisor, asesor."""
     __tablename__ = "usuarios"
@@ -222,6 +284,123 @@ async def guardar_configuracion(clave: str, valor: str):
             session.add(config)
         config.valor = valor
         await session.commit()
+
+
+def _canal_a_dict(c: CanalWhatsApp) -> dict:
+    """Retorna el canal con sus credenciales YA DESCIFRADAS — para uso interno
+    (ProveedorMeta necesita el valor real para llamar a la API de Meta). El
+    llamador (ej. la pantalla del panel) es responsable de no mostrar estos
+    valores completos en la UI."""
+    return {
+        "id": c.id,
+        "nombre": c.nombre,
+        "phone_number_id": c.phone_number_id,
+        "access_token": _descifrar(c.access_token_cifrado),
+        "app_secret": _descifrar(c.app_secret_cifrado),
+        "page_access_token": _descifrar(c.page_access_token_cifrado),
+        "activo": c.activo,
+        "creado": c.creado,
+        "actualizado": c.actualizado,
+    }
+
+
+async def crear_canal_whatsapp(
+    nombre: str, phone_number_id: str, access_token: str = "",
+    app_secret: str = "", page_access_token: str = "",
+) -> dict:
+    """Agrega un número de WhatsApp nuevo administrable desde el panel."""
+    async with async_session() as session:
+        canal = CanalWhatsApp(
+            nombre=nombre,
+            phone_number_id=phone_number_id,
+            access_token_cifrado=_cifrar(access_token),
+            app_secret_cifrado=_cifrar(app_secret),
+            page_access_token_cifrado=_cifrar(page_access_token),
+        )
+        session.add(canal)
+        await session.commit()
+        await session.refresh(canal)
+        return _canal_a_dict(canal)
+
+
+async def listar_canales_whatsapp(solo_activos: bool = False) -> list[dict]:
+    """Recupera los canales de WhatsApp configurados, con sus credenciales
+    descifradas — usado tanto por ProveedorMeta (para enviar/verificar) como
+    por la pantalla de administración del panel."""
+    async with async_session() as session:
+        query = select(CanalWhatsApp).order_by(CanalWhatsApp.creado.asc())
+        if solo_activos:
+            query = query.where(CanalWhatsApp.activo.is_(True))
+        result = await session.execute(query)
+        return [_canal_a_dict(c) for c in result.scalars().all()]
+
+
+async def actualizar_canal_whatsapp(canal_id: int, **campos):
+    """Actualiza los datos de un canal (nombre, tokens, activo/inactivo).
+    Los campos de credenciales, si vienen presentes, se cifran antes de
+    guardarse; si vienen vacíos/None no se tocan (para no borrar un token ya
+    guardado solo porque el formulario de edición no lo volvió a mandar)."""
+    async with async_session() as session:
+        canal = await session.get(CanalWhatsApp, canal_id)
+        if canal is None:
+            return
+        if "nombre" in campos and campos["nombre"]:
+            canal.nombre = campos["nombre"]
+        if "phone_number_id" in campos and campos["phone_number_id"]:
+            canal.phone_number_id = campos["phone_number_id"]
+        if campos.get("access_token"):
+            canal.access_token_cifrado = _cifrar(campos["access_token"])
+        if campos.get("app_secret"):
+            canal.app_secret_cifrado = _cifrar(campos["app_secret"])
+        if campos.get("page_access_token"):
+            canal.page_access_token_cifrado = _cifrar(campos["page_access_token"])
+        if "activo" in campos:
+            canal.activo = campos["activo"]
+        canal.actualizado = datetime.utcnow()
+        await session.commit()
+
+
+async def sembrar_canales_desde_env():
+    """Si la tabla de canales está vacía, la siembra a partir de las
+    variables de entorno META_CANAL_N_* (o las sueltas META_ACCESS_TOKEN/
+    META_PHONE_NUMBER_ID/META_APP_SECRET como canal único) — así una
+    instalación que ya venía configurada por variable de entorno sigue
+    funcionando igual tras este cambio, sin perder su configuración ni
+    necesitar que alguien la vuelva a escribir a mano en el panel."""
+    existentes = await listar_canales_whatsapp()
+    if existentes:
+        return
+
+    canales_env = []
+    i = 1
+    while True:
+        phone_number_id = os.getenv(f"META_CANAL_{i}_PHONE_NUMBER_ID")
+        if not phone_number_id:
+            break
+        canales_env.append({
+            "nombre": os.getenv(f"META_CANAL_{i}_NOMBRE", f"Canal {i}"),
+            "phone_number_id": phone_number_id,
+            "access_token": os.getenv(f"META_CANAL_{i}_ACCESS_TOKEN", ""),
+            "app_secret": os.getenv(f"META_CANAL_{i}_APP_SECRET", ""),
+            "page_access_token": os.getenv(f"META_CANAL_{i}_PAGE_ACCESS_TOKEN", ""),
+        })
+        i += 1
+
+    if not canales_env:
+        phone_number_id = os.getenv("META_PHONE_NUMBER_ID")
+        if phone_number_id:
+            canales_env.append({
+                "nombre": "Principal",
+                "phone_number_id": phone_number_id,
+                "access_token": os.getenv("META_ACCESS_TOKEN", ""),
+                "app_secret": os.getenv("META_APP_SECRET", ""),
+                "page_access_token": os.getenv("META_PAGE_ACCESS_TOKEN", ""),
+            })
+
+    for datos in canales_env:
+        await crear_canal_whatsapp(**datos)
+    if canales_env:
+        logger.info(f"Sembrados {len(canales_env)} canal(es) de WhatsApp desde variables de entorno")
 
 
 async def inicializar_db():
@@ -327,6 +506,7 @@ def _lead_a_dict(lead: Lead) -> dict:
         "fallos_tecnicos": lead.fallos_tecnicos,
         "campana_origen": lead.campana_origen,
         "origen_contacto": lead.origen_contacto,
+        "numero_whatsapp_id": lead.numero_whatsapp_id,
         "actualizado": lead.actualizado,
         "creado": lead.creado,
     }

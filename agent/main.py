@@ -21,6 +21,7 @@ from agent.memory import (
     inicializar_db, guardar_mensaje, obtener_historial, obtener_lead, actualizar_lead,
     asignar_asesor_a_lead, marcar_lead_no_visto, liberar_asignacion,
     registrar_fallo_tecnico, resetear_fallos_tecnicos, RESULTADOS_CERRADOS,
+    sembrar_canales_desde_env,
 )
 from agent.providers import obtener_proveedor
 from agent.dashboard import router as dashboard_router, NoAutenticado
@@ -60,6 +61,7 @@ PORT = int(os.getenv("PORT", 8000))
 async def lifespan(app: FastAPI):
     """Inicializa la base de datos al arrancar el servidor."""
     await inicializar_db()
+    await sembrar_canales_desde_env()
     await sembrar_campanas_iniciales()
     await corregir_patrones_desalineados()
     logger.info("Base de datos inicializada")
@@ -133,6 +135,15 @@ async def webhook_handler(request: Request):
             if msg.es_propio:
                 continue
 
+            # Número de WhatsApp del NEGOCIO por el que entró este mensaje —
+            # permite tener varios números activos a la vez (ej. pruebas y
+            # producción); se responde siempre por el mismo canal, y se deja
+            # guardado en el lead para que respuestas posteriores (asesor
+            # desde el panel) también sepan por cuál número contestar.
+            canal = await proveedor.resolver_canal(msg.numero_whatsapp_id)
+            if msg.numero_whatsapp_id:
+                await actualizar_lead(msg.telefono, numero_whatsapp_id=msg.numero_whatsapp_id)
+
             # Tipos que aún no procesamos (audio, imagen, documento, etc.):
             # avisamos al cliente en vez de dejarlo sin respuesta
             if msg.tipo != "text":
@@ -140,7 +151,7 @@ async def webhook_handler(request: Request):
                 respuesta = obtener_mensaje_no_soportado()
                 await guardar_mensaje(msg.telefono, "user", f"[{msg.tipo}]")
                 await guardar_mensaje(msg.telefono, "assistant", respuesta)
-                await proveedor.enviar_mensaje(msg.telefono, respuesta)
+                await proveedor.enviar_mensaje(msg.telefono, respuesta, canal=canal)
                 continue
 
             if not msg.texto:
@@ -191,7 +202,7 @@ async def webhook_handler(request: Request):
             # Le muestra "escribiendo..." en WhatsApp mientras Claude genera
             # la respuesta (puede tardar unos segundos) — así el cliente sabe
             # que su mensaje sí se está procesando, no que quedó en el aire.
-            await proveedor.marcar_leido_y_escribiendo(msg.mensaje_id)
+            await proveedor.marcar_leido_y_escribiendo(msg.mensaje_id, canal=canal)
 
             # Generar respuesta con Claude
             respuesta, hubo_error = await generar_respuesta(msg.texto, historial, lead)
@@ -211,7 +222,7 @@ async def webhook_handler(request: Request):
 
             await guardar_mensaje(msg.telefono, "user", msg.texto)
             await guardar_mensaje(msg.telefono, "assistant", respuesta)
-            await proveedor.enviar_mensaje(msg.telefono, respuesta)
+            await proveedor.enviar_mensaje(msg.telefono, respuesta, canal=canal)
             logger.info(f"Respuesta a {msg.telefono}: {respuesta}")
 
             if escalado_por_falla:

@@ -188,6 +188,11 @@ async def procesar_leads_formulario(body: dict, proveedor) -> None:
     texto libre a alguien que nunca escribió)."""
     nombre_plantilla = os.getenv("META_LEADGEN_TEMPLATE_NAME")
     idioma_plantilla = os.getenv("META_LEADGEN_TEMPLATE_LANG", "es")
+    # El webhook de leadgen (Página) no indica por cuál número de WhatsApp
+    # contactar al cliente — a diferencia de un mensaje, no hay un
+    # phone_number_id de destino. Mientras solo haya un caso de uso real
+    # (Cálidda), se usa el canal por defecto (el primero configurado).
+    canal = await proveedor.resolver_canal(None)
 
     for entry in body.get("entry", []):
         for change in entry.get("changes", []):
@@ -197,7 +202,7 @@ async def procesar_leads_formulario(body: dict, proveedor) -> None:
             if not leadgen_id:
                 continue
 
-            datos = await proveedor.obtener_datos_leadgen(leadgen_id)
+            datos = await proveedor.obtener_datos_leadgen(leadgen_id, canal=canal)
             if not datos or not datos.get("telefono"):
                 logger.warning(f"No se pudieron traer datos del lead de formulario {leadgen_id}")
                 continue
@@ -220,6 +225,7 @@ async def procesar_leads_formulario(body: dict, proveedor) -> None:
                 nombre=datos.get("nombre") or "",
                 origen_contacto="formulario_meta",
                 campana_origen=campana["nombre"] if campana else "",
+                numero_whatsapp_id=(canal or {}).get("phone_number_id") or "",
             )
             logger.info(f"Lead de formulario creado: {telefono} (leadgen_id {leadgen_id})")
 
@@ -231,7 +237,7 @@ async def procesar_leads_formulario(body: dict, proveedor) -> None:
                 continue
 
             primer_nombre = (datos.get("nombre") or "").strip().split(" ")[0] or "🙂"
-            enviado = await proveedor.enviar_plantilla(telefono, nombre_plantilla, [primer_nombre], idioma_plantilla)
+            enviado = await proveedor.enviar_plantilla(telefono, nombre_plantilla, [primer_nombre], idioma_plantilla, canal=canal)
             if enviado:
                 logger.info(f"Plantilla '{nombre_plantilla}' enviada a {telefono} (lead de formulario)")
             else:

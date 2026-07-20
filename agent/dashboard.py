@@ -45,6 +45,7 @@ from agent.memory import (
     crear_archivo_adjunto, obtener_archivo_adjunto, listar_archivos_reutilizables,
     eliminar_archivo_reutilizable, obtener_telefono_de_archivo,
     listar_lineas_venta, listar_lineas_venta_de_muchos, guardar_lineas_venta,
+    listar_canales_whatsapp, crear_canal_whatsapp, actualizar_canal_whatsapp,
 )
 from agent.campanas import resolver_promo, generar_link_whatsapp
 from agent.tools import obtener_producto_por_codigo, buscar_productos
@@ -702,6 +703,7 @@ def _pagina(
         if usuario["rol"] == "admin":
             gestion_html += '<a href="/dashboard/campanas" data-ajax="1" class="link-light small text-decoration-none"><i class="bi bi-megaphone-fill"></i> Campañas</a>'
             gestion_html += '<a href="/dashboard/catalogos" data-ajax="1" class="link-light small text-decoration-none"><i class="bi bi-folder-fill"></i> Catálogos</a>'
+            gestion_html += '<a href="/dashboard/canales-whatsapp" data-ajax="1" class="link-light small text-decoration-none"><i class="bi bi-whatsapp"></i> Canales de WhatsApp</a>'
         topbar = f"""
         <nav class="navbar navbar-gaso navbar-dark px-3 py-2">
             <a class="navbar-brand mb-0 d-flex align-items-center gap-2" href="/dashboard" data-ajax="1">
@@ -2785,7 +2787,8 @@ async def responder_cliente(
         raise HTTPException(status_code=400, detail="El mensaje no puede estar vacío")
 
     proveedor = obtener_proveedor()
-    enviado = await proveedor.enviar_mensaje(telefono, mensaje)
+    canal = await proveedor.resolver_canal(lead.get("numero_whatsapp_id"))
+    enviado = await proveedor.enviar_mensaje(telefono, mensaje, canal=canal)
     if not enviado:
         raise HTTPException(status_code=502, detail="No se pudo enviar el mensaje por WhatsApp")
 
@@ -2838,19 +2841,19 @@ def _guardar_archivo_en_disco(nombre_original: str, contenido: bytes) -> str:
     return ruta_disco
 
 
-async def _subir_y_enviar_media(telefono: str, nombre_archivo: str, content_type: str, contenido: bytes, caption: str) -> bool:
+async def _subir_y_enviar_media(telefono: str, nombre_archivo: str, content_type: str, contenido: bytes, caption: str, canal: dict | None = None) -> bool:
     """Sube el archivo a WhatsApp y lo envía como imagen o documento según
     su tipo — común entre el envío de una proforma nueva y el reenvío de un
     catálogo ya guardado."""
     proveedor = obtener_proveedor()
-    media_id = await proveedor.subir_media(contenido, nombre_archivo, content_type)
+    media_id = await proveedor.subir_media(contenido, nombre_archivo, content_type, canal=canal)
     if not media_id:
         raise HTTPException(status_code=502, detail="No se pudo subir el archivo a WhatsApp")
     es_imagen = content_type.startswith("image/")
     enviado = (
-        await proveedor.enviar_imagen(telefono, media_id, caption)
+        await proveedor.enviar_imagen(telefono, media_id, caption, canal=canal)
         if es_imagen else
-        await proveedor.enviar_documento(telefono, media_id, nombre_archivo, caption)
+        await proveedor.enviar_documento(telefono, media_id, nombre_archivo, caption, canal=canal)
     )
     if not enviado:
         raise HTTPException(status_code=502, detail="No se pudo enviar el archivo por WhatsApp")
@@ -2883,7 +2886,8 @@ async def enviar_archivo_chat(
         raise HTTPException(status_code=400, detail=f"El archivo supera los {TAMANO_MAXIMO_ARCHIVO_MB}MB permitidos")
 
     content_type = archivo.content_type or "application/octet-stream"
-    await _subir_y_enviar_media(telefono, archivo.filename, content_type, contenido, caption.strip())
+    canal = await obtener_proveedor().resolver_canal(lead.get("numero_whatsapp_id"))
+    await _subir_y_enviar_media(telefono, archivo.filename, content_type, contenido, caption.strip(), canal=canal)
 
     ruta_disco = _guardar_archivo_en_disco(archivo.filename, contenido)
     archivo_guardado = await crear_archivo_adjunto(
@@ -2919,10 +2923,11 @@ async def enviar_audio_chat(
     contenido_ogg = _convertir_a_ogg_opus(contenido_webm)
 
     proveedor = obtener_proveedor()
-    media_id = await proveedor.subir_media(contenido_ogg, "nota_de_voz.ogg", "audio/ogg")
+    canal = await proveedor.resolver_canal(lead.get("numero_whatsapp_id"))
+    media_id = await proveedor.subir_media(contenido_ogg, "nota_de_voz.ogg", "audio/ogg", canal=canal)
     if not media_id:
         raise HTTPException(status_code=502, detail="No se pudo subir el audio a WhatsApp")
-    if not await proveedor.enviar_audio(telefono, media_id):
+    if not await proveedor.enviar_audio(telefono, media_id, canal=canal):
         raise HTTPException(status_code=502, detail="No se pudo enviar el audio por WhatsApp")
 
     ruta_disco = _guardar_archivo_en_disco("nota_de_voz.ogg", contenido_ogg)
@@ -2952,7 +2957,8 @@ async def enviar_catalogo_chat(telefono: str, archivo_id: int, usuario: dict = D
 
     with open(archivo["ruta_disco"], "rb") as f:
         contenido = f.read()
-    await _subir_y_enviar_media(telefono, archivo["nombre_original"], archivo["content_type"], contenido, "")
+    canal = await obtener_proveedor().resolver_canal(lead.get("numero_whatsapp_id"))
+    await _subir_y_enviar_media(telefono, archivo["nombre_original"], archivo["content_type"], contenido, "", canal=canal)
 
     await guardar_mensaje(telefono, "asesor", archivo["nombre_original"], archivo_id=archivo["id"])
     return JSONResponse({"status": "ok"})
@@ -3775,6 +3781,137 @@ async def toggle_campana(campana_id: int, usuario: dict = Depends(_usuario_actua
         raise HTTPException(status_code=404, detail="Campaña no encontrada")
     await actualizar_campana(campana_id, activa=not actual["activa"])
     return RedirectResponse(url="/dashboard/campanas", status_code=303)
+
+
+# ── Canales de WhatsApp (admin) ─────────────────────────────────────
+
+def _enmascarar_token(token: str | None) -> str:
+    """Nunca se muestra un token completo en la pantalla — solo alcanza para
+    reconocer cuál es cuál (ej. al confirmar que se pegó el correcto)."""
+    if not token:
+        return "—"
+    if len(token) <= 8:
+        return "••••" + token[-2:]
+    return "••••" + token[-6:]
+
+
+@router.get("/canales-whatsapp", response_class=HTMLResponse)
+async def gestionar_canales_whatsapp(request: Request, usuario: dict = Depends(_usuario_actual)):
+    if usuario["rol"] != "admin":
+        raise HTTPException(status_code=403, detail="Solo un administrador puede gestionar los canales de WhatsApp")
+
+    sidebar = await _renderizar_sidebar(usuario, telefono_activo=None)
+    canales = await listar_canales_whatsapp()
+
+    filas = []
+    for c in canales:
+        filas.append(f"""<tr>
+            <td class="ps-3">
+                <div class="fw-semibold">{html.escape(c['nombre'])}</div>
+                <div class="text-muted" style="font-size:.75rem">Phone Number ID: {html.escape(c['phone_number_id'])}</div>
+            </td>
+            <td class="text-muted small">
+                Token: {html.escape(_enmascarar_token(c.get('access_token')))}<br>
+                App Secret: {html.escape(_enmascarar_token(c.get('app_secret')))}
+            </td>
+            <td class="pe-3">
+                <form method="post" action="/dashboard/canales-whatsapp/{c['id']}/toggle">
+                    <button type="submit" class="btn btn-sm {'btn-success' if c['activo'] else 'btn-outline-secondary'}">
+                        {'Activo' if c['activo'] else 'Inactivo'}
+                    </button>
+                </form>
+            </td>
+        </tr>""")
+
+    panel = f"""
+    {_titulo_seccion('bi-whatsapp', 'Canales de WhatsApp')}
+    <p class="text-muted small mb-3">
+        Cada canal es un número de WhatsApp que Gabi puede usar para recibir y responder mensajes.
+        Se puede tener más de uno activo a la vez (ej. un número de pruebas y el de producción) —
+        cada mensaje se identifica y se responde siempre por el mismo número por el que entró.
+        Los tokens se guardan cifrados en la base de datos.
+    </p>
+
+    <div class="card leads-card shadow-sm mb-4">
+        <div class="barra-acento"></div>
+        <div class="table-responsive">
+            <table class="table table-hover align-middle mb-0 tabla-ejecutiva">
+                <thead>
+                    <tr><th class="ps-3">Canal</th><th>Credenciales</th><th class="pe-3">Estado</th></tr>
+                </thead>
+                <tbody>{''.join(filas) or '<tr><td colspan="3" class="text-center text-muted py-4">Aún no hay canales configurados.</td></tr>'}</tbody>
+            </table>
+        </div>
+    </div>
+
+    {_titulo_seccion('bi-plus-circle-fill', 'Nuevo canal')}
+    <p class="text-muted small mb-2">
+        Estos datos se obtienen desde Meta for Developers → tu app → WhatsApp → Configuración de la API.
+    </p>
+    <div class="card leads-card shadow-sm">
+        <div class="barra-acento"></div>
+        <div class="card-body">
+            <form method="post" action="/dashboard/canales-whatsapp/nuevo" class="row g-2">
+                <div class="col-md-4">
+                    <label class="form-label small text-muted mb-0">Nombre (para identificarlo en el panel)</label>
+                    <input type="text" name="nombre" class="form-control form-control-sm" required placeholder="Ej: Cálidda - Producción">
+                </div>
+                <div class="col-md-4">
+                    <label class="form-label small text-muted mb-0">Phone Number ID</label>
+                    <input type="text" name="phone_number_id" class="form-control form-control-sm" required placeholder="Ej: 418282818043771">
+                </div>
+                <div class="col-md-4">
+                    <label class="form-label small text-muted mb-0">Access Token</label>
+                    <input type="text" name="access_token" class="form-control form-control-sm" required placeholder="Token permanente del número">
+                </div>
+                <div class="col-md-4">
+                    <label class="form-label small text-muted mb-0">App Secret</label>
+                    <input type="text" name="app_secret" class="form-control form-control-sm" placeholder="Para verificar la firma del webhook">
+                </div>
+                <div class="col-md-4">
+                    <label class="form-label small text-muted mb-0">Page Access Token <span class="text-muted">(opcional, solo Lead Ads)</span></label>
+                    <input type="text" name="page_access_token" class="form-control form-control-sm" placeholder="Solo si usas leads de formulario de Meta">
+                </div>
+                <div class="col-12">
+                    <button type="submit" class="btn btn-sm btn-primary">Agregar canal</button>
+                </div>
+            </form>
+        </div>
+    </div>
+    """
+    cuerpo = f"""<div class="shell d-flex">{sidebar}<div class="main-pane flex-grow-1 p-4">{panel}</div></div>"""
+    return _pagina("Canales de WhatsApp", usuario, cuerpo, request=request)
+
+
+@router.post("/canales-whatsapp/nuevo")
+async def crear_canal_whatsapp_nuevo(
+    nombre: str = Form(...),
+    phone_number_id: str = Form(...),
+    access_token: str = Form(...),
+    app_secret: str = Form(""),
+    page_access_token: str = Form(""),
+    usuario: dict = Depends(_usuario_actual),
+):
+    if usuario["rol"] != "admin":
+        raise HTTPException(status_code=403, detail="Solo un administrador puede gestionar los canales de WhatsApp")
+    await crear_canal_whatsapp(
+        nombre=nombre.strip(), phone_number_id=phone_number_id.strip(),
+        access_token=access_token.strip(), app_secret=app_secret.strip(),
+        page_access_token=page_access_token.strip(),
+    )
+    return RedirectResponse(url="/dashboard/canales-whatsapp", status_code=303)
+
+
+@router.post("/canales-whatsapp/{canal_id}/toggle")
+async def toggle_canal_whatsapp(canal_id: int, usuario: dict = Depends(_usuario_actual)):
+    if usuario["rol"] != "admin":
+        raise HTTPException(status_code=403, detail="Solo un administrador puede gestionar los canales de WhatsApp")
+    canales = await listar_canales_whatsapp()
+    actual = next((c for c in canales if c["id"] == canal_id), None)
+    if actual is None:
+        raise HTTPException(status_code=404, detail="Canal no encontrado")
+    await actualizar_canal_whatsapp(canal_id, activo=not actual["activo"])
+    return RedirectResponse(url="/dashboard/canales-whatsapp", status_code=303)
 
 
 # ── Mi perfil / cambio de contraseña (self-service, cualquier rol) ────
