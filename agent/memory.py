@@ -888,6 +888,25 @@ async def actualizar_campana(campana_id: int, **campos):
         await session.commit()
 
 
+async def eliminar_campana(campana_id: int) -> bool:
+    """Borra una campaña por completo — SOLO si nunca tuvo ningún lead
+    atribuido (así no se pierde historial de conversión real). Si ya tiene
+    al menos un lead, no la borra y retorna False; el camino normal para una
+    campaña con leads es desactivarla (ver actualizar_campana activa=False),
+    no borrarla."""
+    async with async_session() as session:
+        campana = await session.get(Campana, campana_id)
+        if campana is None:
+            return False
+        query_conteo = select(func.count()).select_from(Lead).where(Lead.campana_origen == campana.nombre)
+        total_leads = (await session.execute(query_conteo)).scalar_one()
+        if total_leads > 0:
+            return False
+        await session.delete(campana)
+        await session.commit()
+        return True
+
+
 async def contar_leads_por_campana() -> list[dict]:
     """Cuenta leads y ventas por campaña de origen — para medir conversión por campaña."""
     async with async_session() as session:

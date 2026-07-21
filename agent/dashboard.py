@@ -39,7 +39,7 @@ from agent.memory import (
     listar_leads, obtener_lead, obtener_historial, actualizar_lead,
     obtener_usuario, listar_asesores, guardar_mensaje, obtener_ultimo_mensaje,
     asignar_asesor_a_lead, marcar_lead_visto, actualizar_disponibilidad, actualizar_nivel_asesor,
-    listar_campanas, crear_campana, actualizar_campana, contar_leads_por_campana,
+    listar_campanas, crear_campana, actualizar_campana, contar_leads_por_campana, eliminar_campana,
     cambiar_password, contar_leads_activos, RESULTADOS_CERRADOS, listar_leads_agendados,
     obtener_configuracion, guardar_configuracion,
     crear_archivo_adjunto, obtener_archivo_adjunto, listar_archivos_reutilizables,
@@ -3562,6 +3562,21 @@ async def gestionar_campanas(request: Request, usuario: dict = Depends(_usuario_
                 f'</div>'
             )
 
+        # Eliminar de verdad (no solo desactivar) solo se permite si la
+        # campaña nunca tuvo ningún lead atribuido — si no, se pierde
+        # historial de conversión real. El botón ni siquiera se muestra en
+        # el otro caso (ver memory.py:eliminar_campana, que igual lo valida
+        # de nuevo del lado del servidor).
+        boton_eliminar_campana = ""
+        if conteos.get(c["nombre"], {}).get("total", 0) == 0:
+            nombre_js = html.escape(c["nombre"]).replace("'", "\\'")
+            boton_eliminar_campana = (
+                f'<form method="post" action="/dashboard/campanas/{c["id"]}/eliminar" '
+                f"onsubmit=\"return confirm('¿Eliminar la campaña {nombre_js}? Esta acción no se puede deshacer.');\">"
+                f'<button type="submit" class="btn btn-sm btn-outline-danger" title="Eliminar (sin leads asociados)">'
+                f'<i class="bi bi-trash"></i></button></form>'
+            )
+
         # Modo manual arranca activo solo si ya tiene promo manual guardada y
         # ningún código de catálogo — igual que en Cierre de venta, los dos
         # bloques son mutuamente excluyentes (inputs disabled en el que no
@@ -3597,11 +3612,14 @@ async def gestionar_campanas(request: Request, usuario: dict = Depends(_usuario_
                 </form>
             </td>
             <td class="pe-3">
-                <form method="post" action="/dashboard/campanas/{c['id']}/toggle">
-                    <button type="submit" class="btn btn-sm {'btn-success' if c['activa'] else 'btn-outline-secondary'}">
-                        {'Activa' if c['activa'] else 'Inactiva'}
-                    </button>
-                </form>
+                <div class="d-flex gap-1">
+                    <form method="post" action="/dashboard/campanas/{c['id']}/toggle">
+                        <button type="submit" class="btn btn-sm {'btn-success' if c['activa'] else 'btn-outline-secondary'}">
+                            {'Activa' if c['activa'] else 'Inactiva'}
+                        </button>
+                    </form>
+                    {boton_eliminar_campana}
+                </div>
             </td>
         </tr>""")
 
@@ -3889,6 +3907,19 @@ async def toggle_campana(campana_id: int, usuario: dict = Depends(_usuario_actua
     if actual is None:
         raise HTTPException(status_code=404, detail="Campaña no encontrada")
     await actualizar_campana(campana_id, activa=not actual["activa"])
+    return RedirectResponse(url="/dashboard/campanas", status_code=303)
+
+
+@router.post("/campanas/{campana_id}/eliminar")
+async def eliminar_campana_ruta(campana_id: int, usuario: dict = Depends(_usuario_actual)):
+    if usuario["rol"] != "admin":
+        raise HTTPException(status_code=403, detail="Solo un administrador puede eliminar campañas")
+    borrada = await eliminar_campana(campana_id)
+    if not borrada:
+        raise HTTPException(
+            status_code=400,
+            detail="Esta campaña ya tiene leads asociados — no se puede eliminar, desactívala en su lugar.",
+        )
     return RedirectResponse(url="/dashboard/campanas", status_code=303)
 
 
