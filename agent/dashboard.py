@@ -47,6 +47,43 @@ from agent.memory import (
     listar_lineas_venta, listar_lineas_venta_de_muchos, guardar_lineas_venta,
     listar_canales_whatsapp, crear_canal_whatsapp, actualizar_canal_whatsapp,
 )
+
+# Paleta de colores para distinguir canales de WhatsApp en el panel — se
+# asigna por posición (orden de creación), no por nombre, así que un canal
+# siempre se ve del mismo color mientras no se agreguen/quiten otros antes
+# que él en la lista.
+_PALETA_CANAL = [
+    ("#e0f2fe", "#0369a1"),  # celeste
+    ("#ede9fe", "#6d28d9"),  # morado
+    ("#dcfce7", "#15803d"),  # verde
+    ("#fef3c7", "#b45309"),  # ámbar
+    ("#fce7f3", "#be185d"),  # rosa
+]
+
+
+async def _mapa_canales() -> dict:
+    """Nombre + color de cada canal de WhatsApp, indexado por phone_number_id
+    — para pintar el badge de canal en leads/conversaciones sin repetir la
+    consulta en cada fila."""
+    canales = await listar_canales_whatsapp()
+    return {
+        c["phone_number_id"]: {"nombre": c["nombre"], "color": _PALETA_CANAL[i % len(_PALETA_CANAL)]}
+        for i, c in enumerate(canales)
+    }
+
+
+def _badge_canal(numero_whatsapp_id: str | None, mapa_canales: dict, compacto: bool = False) -> str:
+    """Badge con el nombre del canal (número de WhatsApp) por el que entró
+    la conversación — vacío si el lead es de antes de esta función o si solo
+    hay un canal configurado (no aporta nada distinguirlo en ese caso)."""
+    if not numero_whatsapp_id or len(mapa_canales) <= 1:
+        return ""
+    extra = "font-size:.62rem;padding:.1rem .4rem;" if compacto else ""
+    canal = mapa_canales.get(numero_whatsapp_id)
+    if not canal:
+        return f'<span class="badge-suave" style="{extra}background-color:#f1f5f9;color:#64748b">Canal desconocido</span>'
+    bg, texto = canal["color"]
+    return f'<span class="badge-suave" style="{extra}background-color:{bg};color:{texto}">{html.escape(canal["nombre"])}</span>'
 from agent.campanas import resolver_promo, generar_link_whatsapp
 from agent.tools import obtener_producto_por_codigo, buscar_productos
 from agent.notificaciones import notificar_solicitud_reseteo, notificar_lead_derivado
@@ -860,11 +897,28 @@ def _item_equipo(nombre: str, username: str, cantidad: int, activo: bool) -> str
     )
 
 
-async def _datos_bandeja(usuario: dict, estado_filtro: str, asesor_filtro: str) -> dict:
+def _item_canal(nombre: str, phone_number_id: str, color: tuple, activo: bool) -> str:
+    clase = " activo" if activo else ""
+    _, texto = color
+    href = "/dashboard" if activo else f"/dashboard?canal={html.escape(phone_number_id)}"
+    icono_quitar = '<i class="bi bi-x-circle"></i>' if activo else ""
+    return (
+        f'<a href="{href}" data-ajax="1" class="equipo-item{clase}" title="{html.escape(nombre)}">'
+        f'<span class="d-flex align-items-center gap-2">'
+        f'<span style="width:10px;height:10px;border-radius:50%;background-color:{texto};display:inline-block;flex-shrink:0"></span>'
+        f'<span class="rail-label">{html.escape(nombre)}</span></span>'
+        f'{icono_quitar}</a>'
+    )
+
+
+async def _datos_bandeja(usuario: dict, estado_filtro: str, asesor_filtro: str, canal_filtro: str = "") -> dict:
     """Consulta y filtra los leads una sola vez, para que el rail de estados
     y la lista de conversaciones (columnas separadas) no dupliquen queries."""
     vision_total = usuario["rol"] in ROLES_CON_VISION_TOTAL
     leads_todos = await listar_leads(asesor_asignado=None if vision_total else usuario["username"])
+    mapa_canales = await _mapa_canales()
+    if canal_filtro:
+        leads_todos = [l for l in leads_todos if l.get("numero_whatsapp_id") == canal_filtro]
 
     # La bandeja de conversaciones es para lo que un humano necesita mirar:
     # solo leads que ya se derivaron a un asesor (con sus 4 sub-estados). Lo
@@ -887,10 +941,12 @@ async def _datos_bandeja(usuario: dict, estado_filtro: str, asesor_filtro: str) 
         "leads_derivados": leads_derivados,
         "leads_filtrados": leads_filtrados,
         "conteos": conteos,
+        "mapa_canales": mapa_canales,
+        "canal_filtro": canal_filtro,
     }
 
 
-async def _renderizar_rail_estados(usuario: dict, datos: dict, estado_filtro: str, asesor_filtro: str) -> str:
+async def _renderizar_rail_estados(usuario: dict, datos: dict, estado_filtro: str, asesor_filtro: str, canal_filtro: str = "") -> str:
     vision_total = datos["vision_total"]
     conteos = datos["conteos"]
 
@@ -928,6 +984,20 @@ async def _renderizar_rail_estados(usuario: dict, datos: dict, estado_filtro: st
         {''.join(filas_equipo) or '<p class="px-3 text-muted small">Ningún asesor tiene leads en este estado.</p>'}
         """
 
+    # Solo se muestra si hay más de un canal configurado — con uno solo, un
+    # filtro por canal no distingue nada y solo agregaría ruido visual.
+    mapa_canales = datos.get("mapa_canales") or {}
+    canales_html = ""
+    if len(mapa_canales) > 1:
+        filas_canal = [
+            _item_canal(info["nombre"], numero, info["color"], canal_filtro == numero)
+            for numero, info in mapa_canales.items()
+        ]
+        canales_html = f"""
+        <div class="sidebar-subtitulo">CANALES</div>
+        {''.join(filas_canal)}
+        """
+
     return f"""
     <div class="rail-estados border-end d-flex flex-column" id="rail-estados">
         <div class="sidebar-subtitulo d-flex justify-content-between align-items-center pe-2">
@@ -939,6 +1009,7 @@ async def _renderizar_rail_estados(usuario: dict, datos: dict, estado_filtro: st
             {nav_estados}
         </div>
         {equipo_html}
+        {canales_html}
     </div>
     """
 
@@ -953,6 +1024,7 @@ async def _renderizar_lista_conversaciones(
     # el link de cada conversación — así, al abrir un lead, la vista sabe que
     # viene de esa lista y la mantiene visible junto al resumen y el chat.
     query = f"?asesor={html.escape(asesor_filtro)}" if asesor_filtro else ""
+    mapa_canales = datos.get("mapa_canales") or {}
 
     items = []
     for lead in leads_filtrados:
@@ -962,6 +1034,7 @@ async def _renderizar_lista_conversaciones(
         activo = " activo" if lead["telefono"] == telefono_activo else ""
         es_nuevo = (not vision_total) and not lead.get("visto_asesor", True)
         badge_nuevo = ' <span class="badge text-bg-warning">Nuevo</span>' if es_nuevo else ""
+        badge_canal = _badge_canal(lead.get("numero_whatsapp_id"), mapa_canales, compacto=True)
         nombre_lead = lead.get("nombre") or lead["telefono"]
         items.append(f"""
         <a class="list-group-item list-group-item-action convo-item d-flex gap-2 py-1{activo}" href="/dashboard/lead/{html.escape(lead['telefono'])}{query}" data-ajax="1">
@@ -972,6 +1045,7 @@ async def _renderizar_lista_conversaciones(
                     <small class="text-muted" style="font-size:10.5px">{hora}</small>
                 </div>
                 <div class="convo-preview text-muted">{html.escape(preview)}</div>
+                {badge_canal}
             </div>
         </a>
         """)
@@ -1033,11 +1107,13 @@ def _tiempo_relativo(momento: datetime) -> str:
     return momento.strftime("%d/%m/%y")
 
 
-def _tabla_todos_los_leads(leads: list[dict]) -> str:
+def _tabla_todos_los_leads(leads: list[dict], mapa_canales: dict | None = None) -> str:
     """Tabla resumen de todos los leads con su estado, con búsqueda, orden
     por columna y paginación (todo client-side con JS liviano, sin
     framework) — se muestra en el panel de chat cuando aún no se seleccionó
     ninguna conversación, en vez de dejar ese espacio vacío."""
+    mapa_canales = mapa_canales or {}
+    mostrar_canal = len(mapa_canales) > 1
     filas = "".join(
         f"""<tr data-buscar="{html.escape((lead.get('nombre') or '') + ' ' + lead['telefono'] + ' ' + (lead.get('interes') or '') + ' ' + (lead.get('asesor_asignado') or '') + ' ' + (lead.get('campana_origen') or ''), quote=True).lower()}">
             <td class="ps-4">
@@ -1053,12 +1129,15 @@ def _tabla_todos_los_leads(leads: list[dict]) -> str:
             <td class="text-muted">{html.escape(lead.get('campana_origen') or '-')}</td>
             <td class="text-muted" data-ts="{lead['creado'].isoformat()}" title="{lead['creado'].strftime('%d/%m/%Y %H:%M')}">{lead['creado'].strftime('%d/%m/%Y')}</td>
             <td class="text-muted text-end pe-4" data-ts="{lead['actualizado'].isoformat()}" title="{lead['actualizado'].strftime('%d/%m/%Y %H:%M')}">{_tiempo_relativo(lead['actualizado'])}</td>
+            {f'<td>{_badge_canal(lead.get("numero_whatsapp_id"), mapa_canales)}</td>' if mostrar_canal else ''}
         </tr>"""
         for lead in leads
     )
     columnas = ["Cliente", "Interés", "Estado", "Asesor", "Campaña", "Creado el", "Actividad"]
+    if mostrar_canal:
+        columnas.append("Canal")
     encabezados = "".join(
-        f'<th class="{"ps-4" if i == 0 else ("text-end pe-4" if i == len(columnas) - 1 else "")}" '
+        f'<th class="{"ps-4" if i == 0 else ("text-end pe-4" if col == "Actividad" and not mostrar_canal else "")}" '
         f'style="cursor:pointer;user-select:none" data-col="{i}">{html.escape(col)} <i class="bi bi-arrow-down-up" style="font-size:.7em"></i></th>'
         for i, col in enumerate(columnas)
     )
@@ -1078,7 +1157,7 @@ def _tabla_todos_los_leads(leads: list[dict]) -> str:
                 <thead>
                     <tr>{encabezados}</tr>
                 </thead>
-                <tbody>{filas or '<tr><td colspan="7" class="text-center text-muted py-5">Aún no hay leads.</td></tr>'}</tbody>
+                <tbody>{filas or f'<tr><td colspan="{len(columnas)}" class="text-center text-muted py-5">Aún no hay leads.</td></tr>'}</tbody>
             </table>
         </div>
         <div class="d-flex justify-content-between align-items-center p-3 border-top small" id="leads-paginacion" style="display:none !important">
@@ -1538,9 +1617,11 @@ async def exportar_metricas_xlsx(usuario: dict = Depends(_usuario_actual)):
 
 
 @router.get("", response_class=HTMLResponse)
-async def panel_principal(request: Request, usuario: dict = Depends(_usuario_actual), estado: str = "todos", asesor: str = ""):
-    datos = await _datos_bandeja(usuario, estado, asesor)
-    rail = await _renderizar_rail_estados(usuario, datos, estado, asesor)
+async def panel_principal(
+    request: Request, usuario: dict = Depends(_usuario_actual), estado: str = "todos", asesor: str = "", canal: str = "",
+):
+    datos = await _datos_bandeja(usuario, estado, asesor, canal)
+    rail = await _renderizar_rail_estados(usuario, datos, estado, asesor, canal)
 
     asesores = await listar_asesores() if datos["vision_total"] else []
     resumen = _barra_resumen(datos, asesores) if datos["vision_total"] else ""
@@ -1563,7 +1644,7 @@ async def panel_principal(request: Request, usuario: dict = Depends(_usuario_act
         leads_tabla = datos["leads_todos"]
         if estado != "todos":
             leads_tabla = [l for l in leads_tabla if _estado_conversacion(l) == estado]
-        panel = _tabla_todos_los_leads(leads_tabla)
+        panel = _tabla_todos_los_leads(leads_tabla, datos["mapa_canales"])
         columnas = rail
 
     # Aviso de "Próximas citas" en la vista principal — sin correo/dominio
@@ -2536,6 +2617,7 @@ async def _bloque_resumen_cliente(telefono: str, lead: dict, usuario: dict) -> s
     compacta) — seguido de los formularios de gestión, todo en una sola
     columna que se muestra siempre junto al chat."""
     nombre_mostrado = lead.get("nombre") or "(sin nombre)"
+    badge_canal = _badge_canal(lead.get("numero_whatsapp_id"), await _mapa_canales())
 
     filas_info = "".join(
         f'<div class="d-flex justify-content-between align-items-center py-1 gap-2">'
@@ -2583,7 +2665,7 @@ async def _bloque_resumen_cliente(telefono: str, lead: dict, usuario: dict) -> s
                     <div class="text-muted text-truncate" style="font-size:.8rem">{html.escape(telefono)}</div>
                 </div>
             </div>
-            {_badge_estado_suave(lead)}
+            {_badge_estado_suave(lead)} {badge_canal}
             <hr class="my-2">
             {filas_info}
             {bloque_lineas_venta}
