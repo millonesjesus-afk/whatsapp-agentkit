@@ -241,6 +241,12 @@ class CanalWhatsApp(Base):
     app_secret_cifrado: Mapped[str | None] = mapped_column(Text, nullable=True)
     page_access_token_cifrado: Mapped[str | None] = mapped_column(Text, nullable=True)
     activo: Mapped[bool] = mapped_column(Boolean, default=True)
+    # "produccion" (usa el prompt promovido, guardado en Configuracion — no
+    # cambia solo con un deploy) o "pruebas" (usa siempre config/prompts.yaml
+    # tal cual está desplegado) — permite probar cambios de Gabi en un canal
+    # antes de que lleguen al de producción. Default "produccion" para que un
+    # canal ya existente (de antes de este campo) no cambie de comportamiento.
+    modo: Mapped[str] = mapped_column(String(20), default="produccion")
     creado: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     actualizado: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -299,6 +305,7 @@ def _canal_a_dict(c: CanalWhatsApp) -> dict:
         "app_secret": _descifrar(c.app_secret_cifrado),
         "page_access_token": _descifrar(c.page_access_token_cifrado),
         "activo": c.activo,
+        "modo": c.modo,
         "creado": c.creado,
         "actualizado": c.actualizado,
     }
@@ -306,7 +313,7 @@ def _canal_a_dict(c: CanalWhatsApp) -> dict:
 
 async def crear_canal_whatsapp(
     nombre: str, phone_number_id: str, access_token: str = "",
-    app_secret: str = "", page_access_token: str = "",
+    app_secret: str = "", page_access_token: str = "", modo: str = "produccion",
 ) -> dict:
     """Agrega un número de WhatsApp nuevo administrable desde el panel."""
     async with async_session() as session:
@@ -316,6 +323,7 @@ async def crear_canal_whatsapp(
             access_token_cifrado=_cifrar(access_token),
             app_secret_cifrado=_cifrar(app_secret),
             page_access_token_cifrado=_cifrar(page_access_token),
+            modo=modo if modo in ("produccion", "pruebas") else "produccion",
         )
         session.add(canal)
         await session.commit()
@@ -356,6 +364,8 @@ async def actualizar_canal_whatsapp(canal_id: int, **campos):
             canal.page_access_token_cifrado = _cifrar(campos["page_access_token"])
         if "activo" in campos:
             canal.activo = campos["activo"]
+        if campos.get("modo") in ("produccion", "pruebas"):
+            canal.modo = campos["modo"]
         canal.actualizado = datetime.utcnow()
         await session.commit()
 

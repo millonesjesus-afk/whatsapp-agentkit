@@ -15,7 +15,7 @@ from anthropic import AsyncAnthropic
 from dotenv import load_dotenv
 
 from agent.tools import obtener_contexto_relevante, obtener_estado_horario_atencion, formatear_producto
-from agent.memory import obtener_campana_por_nombre
+from agent.memory import obtener_campana_por_nombre, obtener_configuracion
 from agent.campanas import resolver_promo, resolver_familia_promo, obtener_codigos_promocionales_activos
 
 load_dotenv()
@@ -48,11 +48,29 @@ def cargar_config_prompts() -> dict:
 
 
 def cargar_system_prompt() -> str:
-    """Lee el system prompt desde config/prompts.yaml. Se mantiene 100%
-    estático entre llamadas (sin datos dinámicos del turno) para poder
-    aprovechar prompt caching más adelante si el volumen lo justifica."""
+    """Lee el system prompt desde config/prompts.yaml — la versión "de
+    pruebas": es la que corre apenas se despliega un cambio, sin pasar por
+    ninguna aprobación. Se mantiene 100% estático entre llamadas (sin datos
+    dinámicos del turno) para poder aprovechar prompt caching más adelante
+    si el volumen lo justifica."""
     config = cargar_config_prompts()
     return config.get("system_prompt", "Eres un asistente útil. Responde en español.")
+
+
+async def obtener_system_prompt(modo: str) -> str:
+    """Resuelve qué system prompt usar según el modo del canal:
+    - "pruebas": siempre el de config/prompts.yaml, tal cual está desplegado
+      — así se puede probar un cambio de Gabi en el número de pruebas apenas
+      se hace un deploy, sin esperar nada más.
+    - "produccion": el prompt PROMOVIDO manualmente desde el panel (guardado
+      en la tabla Configuracion, clave "system_prompt_produccion") — no
+      cambia solo con un deploy. Si todavía no se promovió nada (instalación
+      nueva, o nadie usó el botón de promover aún), cae de vuelta al del
+      archivo, para que producción nunca quede con un prompt vacío."""
+    prompt_archivo = cargar_system_prompt()
+    if modo == "pruebas":
+        return prompt_archivo
+    return await obtener_configuracion("system_prompt_produccion", prompt_archivo)
 
 
 def obtener_mensaje_error() -> str:
@@ -160,7 +178,7 @@ async def _armar_bloques_contexto(mensaje: str, historial: list[dict], lead: dic
     return bloques
 
 
-async def generar_respuesta(mensaje: str, historial: list[dict], lead: dict | None = None) -> tuple[str, bool]:
+async def generar_respuesta(mensaje: str, historial: list[dict], lead: dict | None = None, modo: str = "produccion") -> tuple[str, bool]:
     """
     Genera una respuesta usando Claude API.
 
@@ -168,6 +186,9 @@ async def generar_respuesta(mensaje: str, historial: list[dict], lead: dict | No
         mensaje: El mensaje nuevo del usuario
         historial: Lista de mensajes anteriores [{"role": "user/assistant", "content": "..."}]
         lead: Datos estructurados ya conocidos del cliente (nombre, interes, paso_flujo)
+        modo: "produccion" o "pruebas" — el modo del canal por el que llegó
+            este mensaje, para saber qué versión del system prompt usar (ver
+            obtener_system_prompt).
 
     Returns:
         Tupla (texto_respuesta, hubo_error). hubo_error=True solo cuando la
@@ -178,7 +199,7 @@ async def generar_respuesta(mensaje: str, historial: list[dict], lead: dict | No
     if not mensaje or not mensaje.strip():
         return obtener_mensaje_fallback(), False
 
-    system_prompt = cargar_system_prompt()
+    system_prompt = await obtener_system_prompt(modo)
 
     bloques_contexto = await _armar_bloques_contexto(mensaje, historial, lead)
     mensaje_para_claude = mensaje

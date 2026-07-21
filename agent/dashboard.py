@@ -85,6 +85,7 @@ def _badge_canal(numero_whatsapp_id: str | None, mapa_canales: dict, compacto: b
     bg, texto = canal["color"]
     return f'<span class="badge-suave" style="{extra}background-color:{bg};color:{texto}">{html.escape(canal["nombre"])}</span>'
 from agent.campanas import resolver_promo, generar_link_whatsapp
+from agent.brain import cargar_system_prompt
 from agent.tools import obtener_producto_por_codigo, buscar_productos
 from agent.notificaciones import notificar_solicitud_reseteo, notificar_lead_derivado
 from agent.asignacion import asignar_lead_pendiente_a_asesor, UMBRAL_SENIOR_DEFAULT, UMBRAL_INTERMEDIO_DEFAULT
@@ -985,7 +986,9 @@ async def _renderizar_rail_estados(usuario: dict, datos: dict, estado_filtro: st
         """
 
     # Solo se muestra si hay más de un canal configurado — con uno solo, un
-    # filtro por canal no distingue nada y solo agregaría ruido visual.
+    # filtro por canal no distingue nada y solo agregaría ruido visual. Va
+    # primero en el rail (antes de "Conversaciones") porque es el filtro más
+    # amplio — qué número — antes de refinar por estado o asesor.
     mapa_canales = datos.get("mapa_canales") or {}
     canales_html = ""
     if len(mapa_canales) > 1:
@@ -994,22 +997,46 @@ async def _renderizar_rail_estados(usuario: dict, datos: dict, estado_filtro: st
             for numero, info in mapa_canales.items()
         ]
         canales_html = f"""
-        <div class="sidebar-subtitulo">CANALES</div>
-        {''.join(filas_canal)}
+        {_subtitulo_contraible("CANALES", "canales-contenido")}
+        <div id="canales-contenido">
+            {''.join(filas_canal)}
+        </div>
         """
 
     return f"""
     <div class="rail-estados border-end d-flex flex-column" id="rail-estados">
-        <div class="sidebar-subtitulo d-flex justify-content-between align-items-center pe-2">
-            CONVERSACIONES
-            <button type="button" class="btn-close d-md-none" style="font-size:.65rem" onclick="document.getElementById('rail-estados').classList.remove('abierto')"></button>
+        <div class="sidebar-subtitulo d-flex justify-content-between align-items-center pe-2 d-md-none">
+            <span>&nbsp;</span>
+            <button type="button" class="btn-close" style="font-size:.65rem" onclick="document.getElementById('rail-estados').classList.remove('abierto')"></button>
         </div>
-        <div class="estado-nav pb-2">
-            {item_todos}
-            {nav_estados}
-        </div>
-        {equipo_html}
         {canales_html}
+        {_subtitulo_contraible("CONVERSACIONES", "conversaciones-contenido")}
+        <div id="conversaciones-contenido">
+            <div class="estado-nav pb-2">
+                {item_todos}
+                {nav_estados}
+            </div>
+            {equipo_html}
+        </div>
+    </div>
+    """
+
+
+def _subtitulo_contraible(etiqueta: str, id_contenido: str) -> str:
+    """Título de sección del rail lateral que se puede contraer/expandir con
+    un clic — el contenido (id_contenido) alterna entre visible y oculto por
+    estilo inline en JS (no una clase de Bootstrap, para no repetir el bug
+    de d-flex + !important peleando con display:none de nuevo)."""
+    return f"""
+    <div class="sidebar-subtitulo d-flex justify-content-between align-items-center pe-2" style="cursor:pointer"
+        onclick="var el = document.getElementById('{id_contenido}');
+                 var colapsando = el.style.display !== 'none';
+                 el.style.display = colapsando ? 'none' : '';
+                 var ic = this.querySelector('.chevron-contraible');
+                 ic.classList.toggle('bi-chevron-down', !colapsando);
+                 ic.classList.toggle('bi-chevron-right', colapsando);">
+        <span>{etiqueta}</span>
+        <i class="bi bi-chevron-down chevron-contraible" style="font-size:.65rem"></i>
     </div>
     """
 
@@ -3877,6 +3904,55 @@ def _enmascarar_token(token: str | None) -> str:
     return "••••" + token[-6:]
 
 
+async def _bloque_promover_prompt() -> str:
+    """Compara el prompt del archivo (config/prompts.yaml, lo que ya corre en
+    los canales de prueba) contra el promovido a producción, y ofrece el
+    botón para igualarlos — así no hace falta un deploy para que producción
+    reciba un cambio ya probado."""
+    prompt_archivo = cargar_system_prompt()
+    prompt_produccion = await obtener_configuracion("system_prompt_produccion", prompt_archivo)
+    sincronizados = prompt_archivo == prompt_produccion
+
+    def _vista_previa(texto: str) -> str:
+        recorte = texto.strip()[:280]
+        return html.escape(recorte + ("…" if len(texto.strip()) > 280 else ""))
+
+    if sincronizados:
+        return """
+        <div class="alert alert-success py-2 px-3 small mb-0">
+            <i class="bi bi-check-circle-fill"></i> El prompt de producción ya está al día con el
+            recién desplegado — no hay nada pendiente de promover.
+        </div>
+        """
+
+    return f"""
+    <div class="card leads-card shadow-sm">
+        <div class="barra-acento"></div>
+        <div class="card-body">
+            <div class="alert alert-warning py-2 px-3 small">
+                <i class="bi bi-exclamation-triangle-fill"></i> El prompt recién desplegado es distinto
+                al que está corriendo en producción — revísalo antes de promoverlo.
+            </div>
+            <div class="row g-3">
+                <div class="col-md-6">
+                    <div class="text-muted small mb-1">Recién desplegado (canales de prueba)</div>
+                    <div class="border rounded p-2 small text-muted" style="max-height:160px;overflow-y:auto;white-space:pre-wrap">{_vista_previa(prompt_archivo)}</div>
+                </div>
+                <div class="col-md-6">
+                    <div class="text-muted small mb-1">Actualmente en producción</div>
+                    <div class="border rounded p-2 small text-muted" style="max-height:160px;overflow-y:auto;white-space:pre-wrap">{_vista_previa(prompt_produccion)}</div>
+                </div>
+            </div>
+            <form method="post" action="/dashboard/canales-whatsapp/promover-prompt" class="mt-3">
+                <button type="submit" class="btn btn-sm btn-warning">
+                    <i class="bi bi-rocket-takeoff-fill"></i> Promover a producción
+                </button>
+            </form>
+        </div>
+    </div>
+    """
+
+
 @router.get("/canales-whatsapp", response_class=HTMLResponse)
 async def gestionar_canales_whatsapp(request: Request, usuario: dict = Depends(_usuario_actual)):
     if usuario["rol"] != "admin":
@@ -3887,6 +3963,7 @@ async def gestionar_canales_whatsapp(request: Request, usuario: dict = Depends(_
 
     filas = []
     for c in canales:
+        es_produccion = c.get("modo", "produccion") == "produccion"
         filas.append(f"""<tr>
             <td class="ps-3">
                 <div class="fw-semibold">{html.escape(c['nombre'])}</div>
@@ -3895,6 +3972,14 @@ async def gestionar_canales_whatsapp(request: Request, usuario: dict = Depends(_
             <td class="text-muted small">
                 Token: {html.escape(_enmascarar_token(c.get('access_token')))}<br>
                 App Secret: {html.escape(_enmascarar_token(c.get('app_secret')))}
+            </td>
+            <td>
+                <form method="post" action="/dashboard/canales-whatsapp/{c['id']}/modo">
+                    <button type="submit" class="btn btn-sm {'btn-outline-primary' if es_produccion else 'btn-outline-warning'}"
+                        title="Click para cambiar a {'pruebas' if es_produccion else 'producción'}">
+                        {'🟢 Producción' if es_produccion else '🧪 Pruebas'}
+                    </button>
+                </form>
             </td>
             <td class="pe-3">
                 <form method="post" action="/dashboard/canales-whatsapp/{c['id']}/toggle">
@@ -3919,9 +4004,9 @@ async def gestionar_canales_whatsapp(request: Request, usuario: dict = Depends(_
         <div class="table-responsive">
             <table class="table table-hover align-middle mb-0 tabla-ejecutiva">
                 <thead>
-                    <tr><th class="ps-3">Canal</th><th>Credenciales</th><th class="pe-3">Estado</th></tr>
+                    <tr><th class="ps-3">Canal</th><th>Credenciales</th><th>Modo</th><th class="pe-3">Estado</th></tr>
                 </thead>
-                <tbody>{''.join(filas) or '<tr><td colspan="3" class="text-center text-muted py-4">Aún no hay canales configurados.</td></tr>'}</tbody>
+                <tbody>{''.join(filas) or '<tr><td colspan="4" class="text-center text-muted py-4">Aún no hay canales configurados.</td></tr>'}</tbody>
             </table>
         </div>
     </div>
@@ -3954,12 +4039,26 @@ async def gestionar_canales_whatsapp(request: Request, usuario: dict = Depends(_
                     <label class="form-label small text-muted mb-0">Page Access Token <span class="text-muted">(opcional, solo Lead Ads)</span></label>
                     <input type="text" name="page_access_token" class="form-control form-control-sm" placeholder="Solo si usas leads de formulario de Meta">
                 </div>
+                <div class="col-md-4">
+                    <label class="form-label small text-muted mb-0">Modo</label>
+                    <select name="modo" class="form-select form-select-sm">
+                        <option value="produccion">🟢 Producción (usa el prompt promovido)</option>
+                        <option value="pruebas">🧪 Pruebas (usa siempre el prompt recién desplegado)</option>
+                    </select>
+                </div>
                 <div class="col-12">
                     <button type="submit" class="btn btn-sm btn-primary">Agregar canal</button>
                 </div>
             </form>
         </div>
     </div>
+
+    {_titulo_seccion('bi-chat-square-text-fill', 'Prompt de Gabi')}
+    <p class="text-muted small mb-2">
+        El prompt recién desplegado corre de inmediato en los canales marcados "Pruebas". Los
+        canales en "Producción" usan la última versión promovida acá — no cambia sola con un deploy.
+    </p>
+    {await _bloque_promover_prompt()}
     """
     cuerpo = f"""<div class="shell d-flex">{sidebar}<div class="main-pane flex-grow-1 p-4">{panel}</div></div>"""
     return _pagina("Canales de WhatsApp", usuario, cuerpo, request=request)
@@ -3972,6 +4071,7 @@ async def crear_canal_whatsapp_nuevo(
     access_token: str = Form(...),
     app_secret: str = Form(""),
     page_access_token: str = Form(""),
+    modo: str = Form("produccion"),
     usuario: dict = Depends(_usuario_actual),
 ):
     if usuario["rol"] != "admin":
@@ -3979,7 +4079,7 @@ async def crear_canal_whatsapp_nuevo(
     await crear_canal_whatsapp(
         nombre=nombre.strip(), phone_number_id=phone_number_id.strip(),
         access_token=access_token.strip(), app_secret=app_secret.strip(),
-        page_access_token=page_access_token.strip(),
+        page_access_token=page_access_token.strip(), modo=modo,
     )
     return RedirectResponse(url="/dashboard/canales-whatsapp", status_code=303)
 
@@ -3993,6 +4093,30 @@ async def toggle_canal_whatsapp(canal_id: int, usuario: dict = Depends(_usuario_
     if actual is None:
         raise HTTPException(status_code=404, detail="Canal no encontrado")
     await actualizar_canal_whatsapp(canal_id, activo=not actual["activo"])
+    return RedirectResponse(url="/dashboard/canales-whatsapp", status_code=303)
+
+
+@router.post("/canales-whatsapp/{canal_id}/modo")
+async def toggle_modo_canal_whatsapp(canal_id: int, usuario: dict = Depends(_usuario_actual)):
+    if usuario["rol"] != "admin":
+        raise HTTPException(status_code=403, detail="Solo un administrador puede gestionar los canales de WhatsApp")
+    canales = await listar_canales_whatsapp()
+    actual = next((c for c in canales if c["id"] == canal_id), None)
+    if actual is None:
+        raise HTTPException(status_code=404, detail="Canal no encontrado")
+    nuevo_modo = "pruebas" if actual.get("modo", "produccion") == "produccion" else "produccion"
+    await actualizar_canal_whatsapp(canal_id, modo=nuevo_modo)
+    return RedirectResponse(url="/dashboard/canales-whatsapp", status_code=303)
+
+
+@router.post("/canales-whatsapp/promover-prompt")
+async def promover_prompt_produccion_route(usuario: dict = Depends(_usuario_actual)):
+    """Copia el prompt recién desplegado (config/prompts.yaml) hacia la
+    versión que usan los canales de producción — sin necesitar un deploy
+    para que el cambio ya probado en el número de pruebas llegue allá."""
+    if usuario["rol"] != "admin":
+        raise HTTPException(status_code=403, detail="Solo un administrador puede promover el prompt de Gabi")
+    await guardar_configuracion("system_prompt_produccion", cargar_system_prompt())
     return RedirectResponse(url="/dashboard/canales-whatsapp", status_code=303)
 
 

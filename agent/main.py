@@ -204,8 +204,11 @@ async def webhook_handler(request: Request):
             # que su mensaje sí se está procesando, no que quedó en el aire.
             await proveedor.marcar_leido_y_escribiendo(msg.mensaje_id, canal=canal)
 
-            # Generar respuesta con Claude
-            respuesta, hubo_error = await generar_respuesta(msg.texto, historial, lead)
+            # Generar respuesta con Claude — el modo del canal decide si usa
+            # el prompt "de pruebas" (config/prompts.yaml tal cual) o el
+            # promovido a producción desde el panel.
+            modo_canal = (canal or {}).get("modo", "produccion")
+            respuesta, hubo_error = await generar_respuesta(msg.texto, historial, lead, modo=modo_canal)
 
             # Si Claude falla, se pide reintentar la primera vez. Si vuelve a
             # fallar (2 veces seguidas), se escala a un asesor en vez de
