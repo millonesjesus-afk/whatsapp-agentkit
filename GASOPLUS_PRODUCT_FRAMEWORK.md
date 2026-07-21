@@ -1,22 +1,22 @@
 # Gaso+ — Product Framework
 ## Commercial Operating System
 
-> Depende de [`CONVERTIA_FRAMEWORK.md`](CONVERTIA_FRAMEWORK.md),
-> [`CONVERTIA_PLATFORM_ARCHITECTURE.md`](CONVERTIA_PLATFORM_ARCHITECTURE.md) y
-> [`CONVERTIA_DESIGN_SYSTEM.md`](CONVERTIA_DESIGN_SYSTEM.md).
+> Depende de [`MACLLEC_AI_FRAMEWORK.md`](MACLLEC_AI_FRAMEWORK.md),
+> [`MACLLEC_AI_PLATFORM_ARCHITECTURE.md`](MACLLEC_AI_PLATFORM_ARCHITECTURE.md) y
+> [`MACLLEC_AI_DESIGN_SYSTEM.md`](MACLLEC_AI_DESIGN_SYSTEM.md).
 > Versión condensada del original — mismos principios, sin el formato de una idea por línea.
 
 ## Propósito
 
-Gaso+ es el primer producto de ConvertIA: no un CRM simple, sino el aspirante a **Sistema Operativo Comercial** del negocio de gasodomésticos — centraliza venta, seguimiento, automatización y analítica en una sola plataforma. Debe evolucionar continuamente sin perder simplicidad.
+Gaso+ es el primer producto de Maçllec AI: no un CRM simple, sino el aspirante a **Sistema Operativo Comercial** del negocio de gasodomésticos — centraliza venta, seguimiento, automatización y analítica en una sola plataforma. Debe evolucionar continuamente sin perder simplicidad.
 
 ## Posicionamiento
 
-`Gaso+` — Commercial Operating System — Powered by ConvertIA. Debe percibirse como una plataforma tecnológica moderna especializada en operaciones comerciales, nunca como un CRM genérico.
+`Gaso+` — Commercial Operating System — Powered by Maçllec AI. Debe percibirse como una plataforma tecnológica moderna especializada en operaciones comerciales, nunca como un CRM genérico.
 
 ## Propósito del producto y visión
 
-Centralizar toda la gestión comercial en una plataforma inteligente; reducir tiempos operativos; automatizar tareas repetitivas; incrementar productividad; facilitar decisiones; integrar IA en todos los procesos; eliminar herramientas dispersas. Visión: ser la plataforma comercial más completa del sector energético, y luego adaptarse a otras industrias como productos derivados sobre ConvertIA Platform.
+Centralizar toda la gestión comercial en una plataforma inteligente; reducir tiempos operativos; automatizar tareas repetitivas; incrementar productividad; facilitar decisiones; integrar IA en todos los procesos; eliminar herramientas dispersas. Visión: ser la plataforma comercial más completa del sector energético, y luego adaptarse a otras industrias como productos derivados sobre Maçllec AI Platform.
 
 ## Las 7 capacidades de Gaso+
 
@@ -58,7 +58,7 @@ Centro de toda la operación — toda interacción comercial debe quedar registr
 
 La IA debe estar integrada en todo el producto, nunca como módulo aislado: redacción de mensajes, análisis de conversaciones, resúmenes, predicción de ventas, priorización de leads, recomendaciones comerciales, análisis documental, asistente comercial, automatizaciones inteligentes.
 
-**Importante — no confundir con Gabi:** esta "IA Comercial" es un copiloto para el **equipo interno** (asesores/supervisores). Gabi, la IA que ya existe hoy, es 100% cara al cliente por WhatsApp — son capacidades distintas, aunque puedan compartir el mismo motor (ConvertIA Intelligence) a futuro.
+**Importante — no confundir con Gabi:** esta "IA Comercial" es un copiloto para el **equipo interno** (asesores/supervisores). Gabi, la IA que ya existe hoy, es 100% cara al cliente por WhatsApp — son capacidades distintas, aunque puedan compartir el mismo motor (Maçllec AI Intelligence) a futuro.
 
 ## Dashboard
 
@@ -82,11 +82,11 @@ Cada funcionalidad debe responder "¿cómo reduce trabajo al usuario?" — si no
 
 ## Branding
 
-Siempre: `Gaso+ — Commercial Operating System — Powered by ConvertIA`. ConvertIA nunca es protagonista — el protagonista siempre es el producto.
+Siempre: `Gaso+ — Commercial Operating System — Powered by Maçllec AI`. Maçllec AI nunca es protagonista — el protagonista siempre es el producto.
 
 ## Clasificación de funcionalidad nueva
 
-Antes de implementar algo, responder: ¿pertenece al CRM? ¿al producto (Gaso+)? ¿a ConvertIA Platform? ¿únicamente al cliente? (ver Nivel 1/2/3 en `CONVERTIA_PLATFORM_ARCHITECTURE.md`).
+Antes de implementar algo, responder: ¿pertenece al CRM? ¿al producto (Gaso+)? ¿a Maçllec AI Platform? ¿únicamente al cliente? (ver Nivel 1/2/3 en `MACLLEC_AI_PLATFORM_ARCHITECTURE.md`).
 
 ## Rol de Claude en Gaso+
 

@@ -1,8 +1,8 @@
 # Cliente: Cálidda — Client Framework
 
-> Depende de [`CONVERTIA_FRAMEWORK.md`](CONVERTIA_FRAMEWORK.md),
-> [`CONVERTIA_PLATFORM_ARCHITECTURE.md`](CONVERTIA_PLATFORM_ARCHITECTURE.md),
-> [`CONVERTIA_DESIGN_SYSTEM.md`](CONVERTIA_DESIGN_SYSTEM.md) y
+> Depende de [`MACLLEC_AI_FRAMEWORK.md`](MACLLEC_AI_FRAMEWORK.md),
+> [`MACLLEC_AI_PLATFORM_ARCHITECTURE.md`](MACLLEC_AI_PLATFORM_ARCHITECTURE.md),
+> [`MACLLEC_AI_DESIGN_SYSTEM.md`](MACLLEC_AI_DESIGN_SYSTEM.md) y
 > [`GASOPLUS_PRODUCT_FRAMEWORK.md`](GASOPLUS_PRODUCT_FRAMEWORK.md).
 > Versión condensada del original — mismos principios, sin el formato de una idea por línea.
 >
@@ -12,7 +12,7 @@
 
 ## Propósito
 
-Define el conocimiento específico del negocio de Cálidda necesario para configurar Gaso+ — nunca modifica el producto, solo lo adapta. Ante conflicto con los Frameworks superiores de ConvertIA, estos prevalecen siempre. Las reglas específicas de Cálidda nunca deben incorporarse directamente al producto ni a ConvertIA Platform — quedan documentadas solo aquí.
+Define el conocimiento específico del negocio de Cálidda necesario para configurar Gaso+ — nunca modifica el producto, solo lo adapta. Ante conflicto con los Frameworks superiores de Maçllec AI, estos prevalecen siempre. Las reglas específicas de Cálidda nunca deben incorporarse directamente al producto ni a Maçllec AI Platform — quedan documentadas solo aquí.
 
 ## Cliente
 
@@ -94,8 +94,8 @@ El conocimiento acumulado del proyecto sirve para entender el contexto comercial
 
 ## Rol de Claude en esta implementación
 
-Consultor Funcional, Business Analyst, Arquitecto de Soluciones, Product Manager, UX Lead, Especialista Comercial — la responsabilidad es adaptar Gaso+ al negocio de Cálidda respetando siempre la arquitectura de ConvertIA.
+Consultor Funcional, Business Analyst, Arquitecto de Soluciones, Product Manager, UX Lead, Especialista Comercial — la responsabilidad es adaptar Gaso+ al negocio de Cálidda respetando siempre la arquitectura de Maçllec AI.
 
 ## Regla principal
 
-Nunca modificar el producto para resolver una necesidad exclusiva de Cálidda sin antes evaluar si esa capacidad puede incorporarse al núcleo de Gaso+ o a ConvertIA Platform — el objetivo es implementar un producto, no desarrollar software exclusivo para un solo cliente.
+Nunca modificar el producto para resolver una necesidad exclusiva de Cálidda sin antes evaluar si esa capacidad puede incorporarse al núcleo de Gaso+ o a Maçllec AI Platform — el objetivo es implementar un producto, no desarrollar software exclusivo para un solo cliente.

@@ -437,7 +437,7 @@ ESTILOS_PROPIOS = """
     .sidebar { width: 100%; min-width: 0; }
     .main-pane { padding: 1rem !important; }
     /* La bajada de marca ("Commercial Operating System · Powered by
-       ConvertIA") no entra en el navbar angosto de mobile sin romper el
+       Maçllec AI") no entra en el navbar angosto de mobile sin romper el
        alto fijo de 58px que asume .rail-estados más abajo — se oculta y
        queda solo "Gaso+", igual que antes del rebrand. */
     .brand-subtitulo { display: none; }
@@ -748,7 +748,7 @@ def _pagina(
                 <i class="bi bi-droplet-fill" style="color:var(--gaso-secundario)"></i>
                 <span class="d-flex flex-column lh-1">
                     <span>Gaso<span class="plus">+</span></span>
-                    <span class="fw-normal opacity-75 brand-subtitulo" style="font-size:.62rem;letter-spacing:.02em">Commercial Operating System <span class="opacity-50">&middot; Powered by ConvertIA</span></span>
+                    <span class="fw-normal opacity-75 brand-subtitulo" style="font-size:.62rem;letter-spacing:.02em">Commercial Operating System <span class="opacity-50">&middot; Powered by Maçllec <span style="font-weight:300">AI</span></span></span>
                 </span>
             </a>
             <div class="d-flex align-items-center gap-3 text-white-50 small">
@@ -1323,7 +1323,7 @@ async def login_form(error: str = ""):
                 <div class="avatar mx-auto mb-2" style="width:56px;height:56px;font-size:24px"><i class="bi bi-droplet-fill"></i></div>
                 <h4 class="mb-0">Gaso<span style="color:var(--gaso-secundario)">+</span></h4>
                 <div class="text-muted small">Commercial Operating System</div>
-                <div class="text-muted" style="font-size:.68rem;opacity:.7">Powered by ConvertIA</div>
+                <div class="text-muted" style="font-size:.68rem;opacity:.7">Powered by Maçllec <span style="font-weight:300">AI</span></div>
             </div>
             {mensaje_error}
             <form method="post" action="/dashboard/login">

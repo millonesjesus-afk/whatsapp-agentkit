@@ -1,11 +1,11 @@
-# ConvertIA — Framework Maestro
+# Maçllec AI — Framework Maestro
 
-> Documento fundacional de ConvertIA: identidad, filosofía, principios y visión de la empresa.
-> No pertenece a un cliente ni a un producto específico — es el ADN permanente de ConvertIA.
+> Documento fundacional de Maçllec AI: identidad, filosofía, principios y visión de la empresa.
+> No pertenece a un cliente ni a un producto específico — es el ADN permanente de Maçllec AI.
 > Ante un conflicto con cualquier otro documento del proyecto, este prevalece.
 > Versión condensada del original — mismos principios, sin el formato de una idea por línea.
 
-## Qué es ConvertIA
+## Qué es Maçllec AI
 
 Empresa de tecnología especializada en plataformas inteligentes para la transformación comercial y digital mediante IA. El objetivo no es desarrollar software a medida, sino construir **productos tecnológicos escalables**, adaptables a distintas industrias mediante módulos reutilizables. Cada implementación para un cliente debe fortalecer el producto y la plataforma — nunca crear soluciones aisladas.
 
@@ -17,11 +17,11 @@ Empresa de tecnología especializada en plataformas inteligentes para la transfo
 
 ## Filosofía
 
-ConvertIA no desarrolla software, construye productos. Cada línea de código debe aportar valor al producto; cada funcionalidad nueva debe fortalecer la plataforma; cada implementación debe convertirse en conocimiento reutilizable. No se desarrollan proyectos aislados — se construye tecnología.
+Maçllec AI no desarrolla software, construye productos. Cada línea de código debe aportar valor al producto; cada funcionalidad nueva debe fortalecer la plataforma; cada implementación debe convertirse en conocimiento reutilizable. No se desarrollan proyectos aislados — se construye tecnología.
 
 ## Evolución continua
 
-ConvertIA no busca el producto perfecto desde el día uno, sino productos que evolucionen continuamente — toda funcionalidad, interfaz o proceso puede mejorarse. Las decisiones favorecen la iteración continua sobre la perfección inicial: se construye para aprender, medir, mejorar y volver a evolucionar.
+Maçllec AI no busca el producto perfecto desde el día uno, sino productos que evolucionen continuamente — toda funcionalidad, interfaz o proceso puede mejorarse. Las decisiones favorecen la iteración continua sobre la perfección inicial: se construye para aprender, medir, mejorar y volver a evolucionar.
 
 ## Antes de desarrollar algo, preguntar siempre
 
@@ -40,11 +40,11 @@ ConvertIA no busca el producto perfecto desde el día uno, sino productos que ev
 ## Modelo de producto
 
 ```
-ConvertIA → ConvertIA Platform → ConvertIA Intelligence → Productos → Clientes
+Maçllec AI → Maçllec AI Platform → Maçllec AI Intelligence → Productos → Clientes
 ```
 
-- **ConvertIA Platform**: núcleo tecnológico común (autenticación, usuarios, permisos, dashboard, reportes, notificaciones, automatizaciones, integraciones, analytics, seguridad, APIs, componentes UI, base de datos).
-- **ConvertIA Intelligence**: motor de IA común (agentes, asistentes, predicciones, clasificación automática, análisis de conversaciones, recomendaciones, generación de contenido, análisis documental, búsquedas inteligentes).
+- **Maçllec AI Platform**: núcleo tecnológico común (autenticación, usuarios, permisos, dashboard, reportes, notificaciones, automatizaciones, integraciones, analytics, seguridad, APIs, componentes UI, base de datos).
+- **Maçllec AI Intelligence**: motor de IA común (agentes, asistentes, predicciones, clasificación automática, análisis de conversaciones, recomendaciones, generación de contenido, análisis documental, búsquedas inteligentes).
 - **Productos**: cada uno resuelve un problema específico de una industria (ej. Gaso+, y potencialmente Retail+, Health+, Construction+, Energy+, Logistics+, Service+), reutilizando los componentes comunes de la Platform.
 - **Clientes**: usan productos, nunca desarrollos aislados. Nunca modifican el núcleo del producto — cada cliente tiene su propio Framework (procesos, reglas, branding, catálogo, usuarios, integraciones, configuración).
 
@@ -52,9 +52,9 @@ ConvertIA → ConvertIA Platform → ConvertIA Intelligence → Productos → Cl
 
 ## Rol de Claude en este proyecto
 
-Actuar como CTO, Product Manager, Software Architect, UX Lead, UI Designer, Business Analyst, AI Architect y Technical Writer — priorizando siempre la visión de ConvertIA por encima de resolver únicamente la tarea puntual.
+Actuar como CTO, Product Manager, Software Architect, UX Lead, UI Designer, Business Analyst, AI Architect y Technical Writer — priorizando siempre la visión de Maçllec AI por encima de resolver únicamente la tarea puntual.
 
-Antes de proponer una solución, preguntarse: ¿es escalable? ¿es reutilizable? ¿podría servir para otro producto? ¿podría convertirse en un módulo de ConvertIA Platform? ¿es consistente con la arquitectura y el design system? ¿respeta la experiencia de usuario? Si hay una alternativa mejor, proponerla.
+Antes de proponer una solución, preguntarse: ¿es escalable? ¿es reutilizable? ¿podría servir para otro producto? ¿podría convertirse en un módulo de Maçllec AI Platform? ¿es consistente con la arquitectura y el design system? ¿respeta la experiencia de usuario? Si hay una alternativa mejor, proponerla.
 
 ## Comunicación
 
@@ -62,4 +62,4 @@ Respuestas profesionales, claras, estructuradas, ejecutivas, sin redundancias, o
 
 ## Regla final
 
-No desarrollar solo para el presente — diseñar pensando en el producto que ConvertIA será dentro de cinco años. Cada decisión debe acercar la plataforma a esa visión.
+No desarrollar solo para el presente — diseñar pensando en el producto que Maçllec AI será dentro de cinco años. Cada decisión debe acercar la plataforma a esa visión.

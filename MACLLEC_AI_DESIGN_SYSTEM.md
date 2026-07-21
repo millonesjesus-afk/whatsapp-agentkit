@@ -1,7 +1,7 @@
-# ConvertIA — Design System
+# Maçllec AI — Design System
 
-> Depende de [`CONVERTIA_FRAMEWORK.md`](CONVERTIA_FRAMEWORK.md) y
-> [`CONVERTIA_PLATFORM_ARCHITECTURE.md`](CONVERTIA_PLATFORM_ARCHITECTURE.md).
+> Depende de [`MACLLEC_AI_FRAMEWORK.md`](MACLLEC_AI_FRAMEWORK.md) y
+> [`MACLLEC_AI_PLATFORM_ARCHITECTURE.md`](MACLLEC_AI_PLATFORM_ARCHITECTURE.md).
 > Versión condensada del original — mismos principios y valores exactos, sin el formato de una idea por línea.
 >
 > **Estado: guardado solo como referencia.** Todavía NO está aplicado al panel de Gaso+ — el
@@ -10,7 +10,7 @@
 
 ## Propósito y filosofía
 
-Define identidad visual, UX y principios de diseño/interacción de todos los productos ConvertIA — prevalece sobre cualquier diseño puntual que lo contradiga. ConvertIA hace software empresarial que nunca debe sentirse como un ERP antiguo: cada pantalla debe transmitir tecnología, innovación, inteligencia, rapidez, claridad, elegancia, confianza, productividad, automatización y simplicidad. Ligero, natural, moderno.
+Define identidad visual, UX y principios de diseño/interacción de todos los productos Maçllec AI — prevalece sobre cualquier diseño puntual que lo contradiga. Maçllec AI hace software empresarial que nunca debe sentirse como un ERP antiguo: cada pantalla debe transmitir tecnología, innovación, inteligencia, rapidez, claridad, elegancia, confianza, productividad, automatización y simplicidad. Ligero, natural, moderno.
 
 **Referencias de inspiración** (nunca copiar, solo inspirarse — construir identidad propia): Microsoft/Azure Portal, HubSpot, Salesforce, Linear, Notion, ClickUp, Stripe Dashboard, Supabase, Vercel, Figma.
 
@@ -25,12 +25,12 @@ Toda pantalla debe cumplir:
 6. Toda interacción da una respuesta inmediata.
 7. La plataforma debe sentirse más rápida de lo que realmente es.
 8. La IA complementa el trabajo del usuario, nunca lo interrumpe.
-9. Todo componente debe poder reutilizarse en cualquier producto de ConvertIA.
+9. Todo componente debe poder reutilizarse en cualquier producto de Maçllec AI.
 10. Si un diseño no mejora la productividad del usuario, se replantea.
 
 ## Identidad visual
 
-ConvertIA es la empresa; cada producto tiene identidad propia bajo el paraguas de la marca: `ConvertIA → Gaso+ → "Powered by ConvertIA"`. El usuario siempre debe poder reconocer que usa una plataforma de ConvertIA. ConvertIA nunca compite visualmente con el producto — es un sello de calidad, no un logo protagonista.
+Maçllec AI es la empresa; cada producto tiene identidad propia bajo el paraguas de la marca: `Maçllec AI → Gaso+ → "Powered by Maçllec AI"`. El usuario siempre debe poder reconocer que usa una plataforma de Maçllec AI. Maçllec AI nunca compite visualmente con el producto — es un sello de calidad, no un logo protagonista.
 
 ## Paleta de colores
 
@@ -84,7 +84,7 @@ Desktop primero, tablet optimizado, mobile funcional — nunca sacrificar produc
 
 ## Branding por producto
 
-Cada producto tiene su propia identidad (ej. "Gaso+ — Commercial Operating System — Powered by ConvertIA").
+Cada producto tiene su propia identidad (ej. "Gaso+ — Commercial Operating System — Powered by Maçllec AI").
 
 ## Microcopy
 
