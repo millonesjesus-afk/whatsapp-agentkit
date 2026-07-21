@@ -869,11 +869,15 @@ async def listar_campanas(solo_activas: bool = False) -> list[dict]:
 
 async def obtener_campana_por_nombre(nombre: str) -> dict | None:
     """Recupera una campaña por su nombre exacto (ej. para saber qué promo
-    ofrecer según la campana_origen guardada en el lead)."""
+    ofrecer según la campana_origen guardada en el lead). Usa .first() con
+    límite en vez de esperar una fila única: el nombre no tiene una
+    restricción UNIQUE a nivel de base de datos, así que si llegara a haber
+    más de una campaña con el mismo nombre, esto no debe tumbar el arranque
+    del servidor — se toma la primera."""
     async with async_session() as session:
-        query = select(Campana).where(Campana.nombre == nombre)
+        query = select(Campana).where(Campana.nombre == nombre).limit(1)
         result = await session.execute(query)
-        campana = result.scalar_one_or_none()
+        campana = result.scalars().first()
         return _campana_a_dict(campana) if campana else None
 
 
