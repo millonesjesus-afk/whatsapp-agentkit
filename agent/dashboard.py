@@ -922,24 +922,34 @@ async def _datos_bandeja(usuario: dict, estado_filtro: str, asesor_filtro: str, 
         leads_todos = [l for l in leads_todos if l.get("numero_whatsapp_id") == canal_filtro]
 
     # La bandeja de conversaciones es para lo que un humano necesita mirar:
-    # solo leads que ya se derivaron a un asesor (con sus 4 sub-estados). Lo
-    # que Gabi todavía atiende sola (explorando/comparando/evaluando) no
-    # entra acá — eso se ve en el embudo, en la página de Métricas.
+    # solo leads que ya se derivaron a un asesor (con sus 4 sub-estados) por
+    # defecto. Lo que Gabi todavía atiende sola (explorando/comparando/
+    # evaluando) queda en un filtro aparte, "con_gabi" — admin/supervisor
+    # pueden entrar ahí a mirar cualquier conversación en vivo aunque nadie
+    # la haya derivado todavía (antes solo se veía el conteo, sin poder
+    # abrir ninguna). Un asesor normal nunca ve nada acá de todos modos,
+    # porque listar_leads ya solo le trae SUS leads asignados (línea de
+    # arriba), y un lead que Gabi sigue atendiendo sola no tiene asesor.
     leads_derivados = [l for l in leads_todos if _estado_conversacion(l) in ESTADOS_DERIVADO]
+    leads_con_gabi = [l for l in leads_todos if _estado_conversacion(l) in ESTADOS_GABI]
 
     conteos = {estado: 0 for estado in ESTADOS_DERIVADO}
     for lead in leads_derivados:
         conteos[_estado_conversacion(lead)] += 1
 
-    leads = leads_derivados
-    if vision_total and asesor_filtro:
-        leads = [l for l in leads if l.get("asesor_asignado") == asesor_filtro]
-    leads_filtrados = leads if estado_filtro == "todos" else [l for l in leads if _estado_conversacion(l) == estado_filtro]
+    if estado_filtro == "con_gabi":
+        leads_filtrados = leads_con_gabi
+    else:
+        leads = leads_derivados
+        if vision_total and asesor_filtro:
+            leads = [l for l in leads if l.get("asesor_asignado") == asesor_filtro]
+        leads_filtrados = leads if estado_filtro == "todos" else [l for l in leads if _estado_conversacion(l) == estado_filtro]
 
     return {
         "vision_total": vision_total,
         "leads_todos": leads_todos,
         "leads_derivados": leads_derivados,
+        "leads_con_gabi": leads_con_gabi,
         "leads_filtrados": leads_filtrados,
         "conteos": conteos,
         "mapa_canales": mapa_canales,
@@ -958,6 +968,15 @@ async def _renderizar_rail_estados(usuario: dict, datos: dict, estado_filtro: st
     item_todos = _item_nav_estado(
         "Todos", "bi-collection-fill", len(datos["leads_derivados"]), "todos", estado_filtro == "todos" and not asesor_filtro
     )
+    # Solo admin/supervisor lo ven — para un asesor normal esto siempre daría
+    # 0 (listar_leads ya solo le trae SUS leads asignados, y un lead que
+    # Gabi todavía atiende sola no tiene asesor asignado), así que mostrarlo
+    # solo agregaría ruido sin ningún caso real detrás.
+    item_con_gabi = ""
+    if vision_total:
+        item_con_gabi = _item_nav_estado(
+            "Con Gabi", "bi-robot", len(datos["leads_con_gabi"]), "con_gabi", estado_filtro == "con_gabi" and not asesor_filtro
+        )
 
     equipo_html = ""
     if vision_total:
@@ -1015,6 +1034,7 @@ async def _renderizar_rail_estados(usuario: dict, datos: dict, estado_filtro: st
             <div class="estado-nav pb-2">
                 {item_todos}
                 {nav_estados}
+                {item_con_gabi}
             </div>
             {equipo_html}
         </div>
@@ -1669,7 +1689,13 @@ async def panel_principal(
         # ese estado si corresponde, para que el supervisor pueda revisar y
         # reasignar directamente desde ahí.
         leads_tabla = datos["leads_todos"]
-        if estado != "todos":
+        if estado == "con_gabi":
+            # "con_gabi" es un balde sintético (explorando/comparando/
+            # evaluando juntos) — ningún lead tiene ese valor exacto en
+            # _estado_conversacion, así que no puede filtrarse con == estado
+            # como los demás.
+            leads_tabla = datos["leads_con_gabi"]
+        elif estado != "todos":
             leads_tabla = [l for l in leads_tabla if _estado_conversacion(l) == estado]
         panel = _tabla_todos_los_leads(leads_tabla, datos["mapa_canales"])
         columnas = rail
