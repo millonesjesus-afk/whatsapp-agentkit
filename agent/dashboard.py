@@ -815,7 +815,16 @@ def _script_tiempo_real(usuario: dict | None) -> str:
         let temporizadorLista = null;
         window.__gasoWS.on(function(evento) {
             if (evento.tipo !== 'mensaje_nuevo') return;
-            if (evento.telefono === telefonoActivo) return;  // eso ya lo maneja el chat abierto
+            // Si hay un chat abierto (telefonoActivo != null), NO refrescar
+            // la página aunque el mensaje sea de otro lead — la URL actual
+            // ES ese chat, así que un refresco "silencioso" terminaría
+            // re-renderizando el chat abierto entero (vuelve a ejecutar su
+            // script vía ejecutarScripts) cada vez que CUALQUIER otro lead
+            // recibe un mensaje. Eso acumula listeners/intervalos viejos que
+            // tardan hasta 20s en limpiarse solos y hacía que el panel se
+            // sintiera cada vez más lento. Solo tiene sentido refrescar la
+            // lista sola cuando se está mirando la tabla/lista, no un chat.
+            if (telefonoActivo !== null) return;
             if (typeof window.__navegarAjax !== 'function') return;
             clearTimeout(temporizadorLista);
             temporizadorLista = setTimeout(function() {
@@ -915,6 +924,7 @@ def _pagina(
 <style>{ESTILOS_PROPIOS}</style>
 </head>
 <body class="{'pagina-chat' if es_chat else ''}">
+{_script_tiempo_real(usuario)}
 <div id="barra-carga"></div>
 {topbar}
 {boton_filtros_movil}
@@ -963,6 +973,12 @@ def _pagina(
                 return r.text().then(function(html) {{ return {{ html: html, titulo: titulo, esChat: esChat }}; }});
             }})
             .then(function(datos) {{
+                // Si el contenido que se va a reemplazar tenía un chat con
+                // su propia conexión WS activa, límpialo YA (deja de
+                // escuchar eventos, avisa al servidor que ya no lo mira) —
+                // si no, el listener queda vivo hasta que su propio
+                // intervalo de respaldo lo note (hasta 20s después).
+                if (window.__gasoChatLimpiar) window.__gasoChatLimpiar();
                 contenedor.innerHTML = datos.html;
                 ejecutarScripts(contenedor);
                 if (datos.titulo) document.title = datos.titulo + ' — Gaso+ Panel';
@@ -1010,7 +1026,6 @@ def _pagina(
 }})();
 </script>
 {_script_notificaciones(usuario)}
-{_script_tiempo_real(usuario)}
 </body>
 </html>"""
 
@@ -2148,7 +2163,15 @@ def _script_chat_en_vivo(telefono: str, tiene_asesor: bool) -> str:
                 window.__gasoWS.off(alEventoWS);
                 window.__gasoWS.verLead(null);
             }}
+            if (window.__gasoChatLimpiar === limpiarWS) window.__gasoChatLimpiar = null;
         }}
+        // Referencia global para que la navegación AJAX (ver navegarAjax en
+        // _pagina) pueda limpiar ESTE chat de inmediato apenas se navega a
+        // otro lado, en vez de esperar hasta 20s a que el intervalo de
+        // respaldo note que el chatDiv ya no está — así no quedan listeners
+        // viejos acumulados escuchando eventos de chats que ya se dejaron
+        // de ver.
+        window.__gasoChatLimpiar = limpiarWS;
         if (window.__gasoWS) {{
             window.__gasoWS.on(alEventoWS);
             window.__gasoWS.verLead(telefono);
