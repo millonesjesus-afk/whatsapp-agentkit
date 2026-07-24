@@ -368,6 +368,12 @@ ESTILOS_PROPIOS = """
   #barra-carga.activa { opacity: 1; }
   .navbar-gaso .navbar-brand { color: white !important; font-weight: 800; letter-spacing: -0.02em; font-size: 1.15rem; }
   .navbar-gaso .navbar-brand .plus { color: var(--gaso-secundario); }
+  /* Sección activa en la barra superior (Métricas/Campañas/etc.) — se
+     asigna por JS (ver actualizarNavActiva en _pagina), no por Python, porque
+     la barra es parte del shell fijo de la página y no se vuelve a renderizar
+     en cada navegación AJAX interna. */
+  .nav-superior-link { padding: 4px 8px; border-radius: 6px; border-bottom: 2px solid transparent; transition: background-color .15s ease, border-color .15s ease; }
+  .nav-superior-link.activo { background: rgba(255,255,255,.16); border-bottom-color: var(--gaso-secundario); color: #fff !important; }
 
   .avatar {
     display: inline-flex; align-items: center; justify-content: center;
@@ -873,13 +879,13 @@ def _pagina(
         gestion_html = ""
         if usuario["rol"] in ROLES_CON_VISION_TOTAL:
             gestion_html = (
-                '<a href="/dashboard/metricas" data-ajax="1" class="link-light small text-decoration-none"><i class="bi bi-graph-up-arrow"></i> Métricas</a>'
-                '<a href="/dashboard/asesores" data-ajax="1" class="link-light small text-decoration-none"><i class="bi bi-people-fill"></i> Gestionar asesores</a>'
+                '<a href="/dashboard/metricas" data-ajax="1" data-ruta="/dashboard/metricas" class="link-light small text-decoration-none nav-superior-link"><i class="bi bi-graph-up-arrow"></i> Métricas</a>'
+                '<a href="/dashboard/asesores" data-ajax="1" data-ruta="/dashboard/asesores" class="link-light small text-decoration-none nav-superior-link"><i class="bi bi-people-fill"></i> Gestionar asesores</a>'
             )
         if usuario["rol"] == "admin":
-            gestion_html += '<a href="/dashboard/campanas" data-ajax="1" class="link-light small text-decoration-none"><i class="bi bi-megaphone-fill"></i> Campañas</a>'
-            gestion_html += '<a href="/dashboard/catalogos" data-ajax="1" class="link-light small text-decoration-none"><i class="bi bi-folder-fill"></i> Catálogos</a>'
-            gestion_html += '<a href="/dashboard/canales-whatsapp" data-ajax="1" class="link-light small text-decoration-none"><i class="bi bi-whatsapp"></i> Canales de WhatsApp</a>'
+            gestion_html += '<a href="/dashboard/campanas" data-ajax="1" data-ruta="/dashboard/campanas" class="link-light small text-decoration-none nav-superior-link"><i class="bi bi-megaphone-fill"></i> Campañas</a>'
+            gestion_html += '<a href="/dashboard/catalogos" data-ajax="1" data-ruta="/dashboard/catalogos" class="link-light small text-decoration-none nav-superior-link"><i class="bi bi-folder-fill"></i> Catálogos</a>'
+            gestion_html += '<a href="/dashboard/canales-whatsapp" data-ajax="1" data-ruta="/dashboard/canales-whatsapp" class="link-light small text-decoration-none nav-superior-link"><i class="bi bi-whatsapp"></i> Canales de WhatsApp</a>'
         topbar = f"""
         <nav class="navbar navbar-gaso navbar-dark px-3 py-2">
             <a class="navbar-brand mb-0 d-flex align-items-center gap-2" href="/dashboard" data-ajax="1">
@@ -963,6 +969,19 @@ def _pagina(
         }});
     }}
 
+    // Marca cuál link de la barra superior corresponde a la pantalla actual
+    // — la barra es parte del shell fijo (no se vuelve a renderizar en cada
+    // navegación AJAX interna), así que el estado "activo" se calcula acá en
+    // vez de en el servidor. Se llama al cargar la página y después de cada
+    // navegación (normal o silenciosa).
+    function actualizarNavActiva() {{
+        var ruta = window.location.pathname;
+        document.querySelectorAll('.nav-superior-link').forEach(function(link) {{
+            link.classList.toggle('activo', link.getAttribute('data-ruta') === ruta);
+        }});
+    }}
+    actualizarNavActiva();
+
     function navegarAjax(url, agregarHistorial, silencioso) {{
         if (!silencioso) iniciar();
         fetch(url, {{ headers: {{ 'X-Panel-Fragment': '1' }} }})
@@ -984,6 +1003,7 @@ def _pagina(
                 if (datos.titulo) document.title = datos.titulo + ' — Gaso+ Panel';
                 document.body.classList.toggle('pagina-chat', datos.esChat);
                 if (agregarHistorial) history.pushState({{ ajax: true }}, '', url);
+                actualizarNavActiva();
                 if (!silencioso) {{ window.scrollTo(0, 0); terminar(); }}
             }})
             .catch(function() {{
