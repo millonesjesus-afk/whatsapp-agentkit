@@ -25,6 +25,11 @@ class MensajeEntrante:
     # (ej. pruebas y producción) y responder siempre por el mismo número por
     # el que entró la conversación. Vacío si el proveedor no distingue canales.
     numero_whatsapp_id: str = ""
+    # "mensaje" (el cliente escribió) o "echo" (coexistencia: un asesor le
+    # respondió al cliente directo desde la app de WhatsApp Business en el
+    # celular, no desde el panel). En "echo", telefono es el número del
+    # CLIENTE (destinatario del mensaje), no del negocio.
+    tipo_evento: str = "mensaje"
 
 
 class ProveedorWhatsApp(ABC):

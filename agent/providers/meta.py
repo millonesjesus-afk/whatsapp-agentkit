@@ -104,6 +104,23 @@ class ProveedorMeta(ProveedorWhatsApp):
                         referral=msg.get("referral"),
                         numero_whatsapp_id=numero_whatsapp_id,
                     ))
+                # Coexistencia: un asesor respondió al cliente directo desde
+                # la app de WhatsApp Business en el celular (no desde Gabi ni
+                # el panel). Meta lo manda en un campo aparte, "message_echoes"
+                # — "to" es el cliente (el negocio es "from" acá, al revés
+                # que en un mensaje entrante normal).
+                for echo in value.get("message_echoes", []):
+                    tipo_echo = echo.get("type", "unknown")
+                    texto_echo = echo.get("text", {}).get("body", "") if tipo_echo == "text" else ""
+                    mensajes.append(MensajeEntrante(
+                        telefono=echo.get("to", ""),
+                        texto=texto_echo,
+                        mensaje_id=echo.get("id", ""),
+                        es_propio=False,
+                        tipo=tipo_echo,
+                        numero_whatsapp_id=numero_whatsapp_id,
+                        tipo_evento="echo",
+                    ))
         return mensajes
 
     async def marcar_leido_y_escribiendo(self, mensaje_id: str, canal: dict | None = None) -> bool:

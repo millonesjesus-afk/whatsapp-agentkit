@@ -1800,7 +1800,12 @@ def _script_chat_en_vivo(telefono: str, tiene_asesor: bool) -> str:
             if (firma === ultimaFirma) return;
             ultimaFirma = firma;
             chatDiv.innerHTML = mensajes.map(function(m) {{
-                const rol = etiquetas[m.role] || m.role;
+                // Un mensaje via_app lo mandó un asesor directo desde la app
+                // de WhatsApp Business en el celular (coexistencia), no Gabi
+                // ni el panel — Meta no dice qué asesor fue, así que se
+                // marca genérico en vez de atribuirlo a "Gabi" (su role
+                // guardado sigue siendo "assistant" para el historial).
+                const rol = m.via_app ? 'Asesor (desde app)' : (etiquetas[m.role] || m.role);
                 const texto = m.content.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
                 const mio = m.role !== 'user' ? ' mio' : '';
                 const esAudio = m.archivo_tipo && m.archivo_tipo.indexOf('audio/') === 0;
@@ -1813,7 +1818,7 @@ def _script_chat_en_vivo(telefono: str, tiene_asesor: bool) -> str:
                         : '<a href="/dashboard/archivo/' + m.archivo_id + '" target="_blank" class="text-reset">' +
                           '<i class="bi bi-file-earmark-arrow-down"></i> ' + texto + '</a>';
                 return '<div class="msg-row' + mio + '">' +
-                    '<span class="avatar avatar-sm">' + (inicial[m.role] || '?') + '</span>' +
+                    '<span class="avatar avatar-sm">' + (m.via_app ? 'A' : (inicial[m.role] || '?')) + '</span>' +
                     '<div class="msg ' + m.role + '"><strong>' + rol + ':</strong> ' + cuerpo + '</div>' +
                     '</div>';
             }}).join('') || '<p class="text-muted">Sin mensajes.</p>';

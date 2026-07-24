@@ -90,6 +90,12 @@ class Mensaje(Base):
     # el caption/nombre visible igual. Sin ForeignKey estricta, mismo criterio
     # que asesor_asignado en Lead (String suelto en vez de FK).
     archivo_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # True si este mensaje llegó por el webhook smb_message_echoes de
+    # coexistencia (un asesor lo mandó directo desde la app de WhatsApp
+    # Business en el celular, no desde Gabi ni desde el panel). Meta no
+    # informa QUÉ asesor lo escribió — solo que salió de la app — así que no
+    # se puede atribuir a una persona específica, solo marcar el origen.
+    via_app: Mapped[bool] = mapped_column(Boolean, default=False)
 
 
 class ArchivoAdjunto(Base):
@@ -173,6 +179,15 @@ class Lead(Base):
     # mismo canal. Se actualiza con cada mensaje entrante (ver main.py), no
     # solo la primera vez, por si el cliente llegara a escribir a otro número.
     numero_whatsapp_id: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    # True si un asesor le respondió a este lead directo desde la app de
+    # WhatsApp Business en el celular (coexistencia), SIN pasar por una
+    # asignación formal en el panel — pausa a Gabi igual que asesor_asignado,
+    # para que no choquen respuestas, aunque no sepamos qué asesor fue. Se
+    # limpia junto con asesor_asignado al liberar la asignación (ver
+    # liberar_asignacion). paso_flujo también se marca "derivado_asesor" al
+    # activarse, así el caso aparece en listar_leads_esperando_asesor() para
+    # que un supervisor lo reclame y lo asigne a una persona real.
+    pausado_manual: Mapped[bool] = mapped_column(Boolean, default=False)
     actualizado: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     creado: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
@@ -419,9 +434,11 @@ async def inicializar_db():
         await conn.run_sync(Base.metadata.create_all)
 
 
-async def guardar_mensaje(telefono: str, role: str, content: str, archivo_id: int | None = None):
+async def guardar_mensaje(telefono: str, role: str, content: str, archivo_id: int | None = None, via_app: bool = False):
     """Guarda un mensaje en el historial de conversación. archivo_id solo se
-    usa cuando el mensaje fue un archivo adjunto enviado por un asesor."""
+    usa cuando el mensaje fue un archivo adjunto enviado por un asesor.
+    via_app=True cuando llegó por el echo de coexistencia (asesor respondió
+    desde la app de WhatsApp Business en el celular, no desde el panel)."""
     async with async_session() as session:
         mensaje = Mensaje(
             telefono=telefono,
@@ -429,6 +446,7 @@ async def guardar_mensaje(telefono: str, role: str, content: str, archivo_id: in
             content=content,
             timestamp=datetime.utcnow(),
             archivo_id=archivo_id,
+            via_app=via_app,
         )
         session.add(mensaje)
         await session.commit()
@@ -471,7 +489,7 @@ async def obtener_historial(telefono: str, limite: int = 20) -> list[dict]:
         return [
             {
                 "role": msg.role, "content": msg.content, "archivo_id": msg.archivo_id,
-                "archivo_tipo": content_types.get(msg.archivo_id),
+                "archivo_tipo": content_types.get(msg.archivo_id), "via_app": msg.via_app,
             }
             for msg in mensajes
         ]
@@ -505,6 +523,7 @@ def _lead_a_dict(lead: Lead) -> dict:
         "resultado": lead.resultado,
         "fecha_agendada": lead.fecha_agendada,
         "asesor_asignado": lead.asesor_asignado,
+        "pausado_manual": lead.pausado_manual,
         "producto_vendido": lead.producto_vendido,
         "precio_venta": lead.precio_venta,
         "marca_venta": lead.marca_venta,
@@ -676,14 +695,37 @@ async def marcar_lead_no_visto(telefono: str):
 async def liberar_asignacion(telefono: str):
     """Quita la asignación de un lead — se usa cuando el caso anterior ya
     quedó cerrado (vendido / no interesado) y el cliente vuelve a escribir,
-    probablemente por una necesidad nueva. Gabi retoma la atención."""
+    probablemente por una necesidad nueva. Gabi retoma la atención. También
+    limpia pausado_manual, para que un caso viejo respondido desde la app no
+    deje a Gabi pausada para siempre en un lead que ya se cerró."""
     async with async_session() as session:
         lead = await session.get(Lead, telefono)
         if lead is not None:
             lead.asesor_asignado = None
+            lead.pausado_manual = False
             lead.visto_asesor = True
             lead.actualizado = datetime.utcnow()
             await session.commit()
+
+
+async def pausar_gabi_manual(telefono: str):
+    """Pausa a Gabi para este lead porque un asesor le respondió directo
+    desde la app de WhatsApp Business en el celular (coexistencia) — sin
+    pasar por una asignación formal en el panel. No sabemos qué asesor fue
+    (Meta no lo informa), así que no se llena asesor_asignado; en cambio se
+    marca paso_flujo='derivado_asesor' (si no lo estaba ya) para que el caso
+    aparezca en listar_leads_esperando_asesor() y un supervisor lo reclame y
+    lo asigne a una persona real cuando pueda."""
+    async with async_session() as session:
+        lead = await session.get(Lead, telefono)
+        if lead is None:
+            lead = Lead(telefono=telefono)
+            session.add(lead)
+        lead.pausado_manual = True
+        if not lead.paso_flujo:
+            lead.paso_flujo = "derivado_asesor"
+        lead.actualizado = datetime.utcnow()
+        await session.commit()
 
 
 async def registrar_fallo_tecnico(telefono: str) -> int:

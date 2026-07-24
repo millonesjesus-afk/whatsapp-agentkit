@@ -21,7 +21,7 @@ from agent.memory import (
     inicializar_db, guardar_mensaje, obtener_historial, obtener_lead, actualizar_lead,
     asignar_asesor_a_lead, marcar_lead_no_visto, liberar_asignacion,
     registrar_fallo_tecnico, resetear_fallos_tecnicos, RESULTADOS_CERRADOS,
-    sembrar_canales_desde_env,
+    sembrar_canales_desde_env, pausar_gabi_manual,
 )
 from agent.providers import obtener_proveedor
 from agent.dashboard import router as dashboard_router, NoAutenticado
@@ -144,6 +144,21 @@ async def webhook_handler(request: Request):
             if msg.numero_whatsapp_id:
                 await actualizar_lead(msg.telefono, numero_whatsapp_id=msg.numero_whatsapp_id)
 
+            # Coexistencia: un asesor le respondió al cliente directo desde
+            # la app de WhatsApp Business en el celular, no desde Gabi ni el
+            # panel. Solo se registra en el historial (para que el panel
+            # quede completo) y se pausa a Gabi si nadie más estaba
+            # atendiendo — no pasa por detección de campaña ni genera
+            # respuesta, porque no es un mensaje nuevo del cliente.
+            if msg.tipo_evento == "echo":
+                contenido = msg.texto if msg.texto else f"[{msg.tipo}]"
+                await guardar_mensaje(msg.telefono, "assistant", contenido, via_app=True)
+                lead_actual = await obtener_lead(msg.telefono)
+                if not (lead_actual and lead_actual.get("asesor_asignado")):
+                    await pausar_gabi_manual(msg.telefono)
+                logger.info(f"Echo de app registrado para {msg.telefono}: {contenido}")
+                continue
+
             # Tipos que aún no procesamos (audio, imagen, documento, etc.):
             # avisamos al cliente en vez de dejarlo sin respuesta
             if msg.tipo != "text":
@@ -171,10 +186,11 @@ async def webhook_handler(request: Request):
                 if campana:
                     lead = await obtener_lead(msg.telefono)
 
-            # Si ya hay un asesor humano asignado, Gabi se pausa: solo se
-            # guarda el mensaje para que el asesor lo vea y responda desde
-            # el panel — así no chocan las respuestas del bot y el humano.
-            if lead and lead.get("asesor_asignado"):
+            # Si ya hay un asesor humano asignado (o alguien le respondió
+            # directo desde la app en coexistencia, sin asignación formal),
+            # Gabi se pausa: solo se guarda el mensaje para que un humano lo
+            # vea y responda — así no chocan las respuestas del bot y el humano.
+            if lead and (lead.get("asesor_asignado") or lead.get("pausado_manual")):
                 if lead.get("resultado") in RESULTADOS_CERRADOS:
                     # El caso anterior ya se cerró — si el cliente vuelve a
                     # escribir, probablemente sea por algo nuevo. Se libera
