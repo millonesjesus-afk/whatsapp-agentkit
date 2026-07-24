@@ -937,8 +937,17 @@ async def _datos_bandeja(usuario: dict, estado_filtro: str, asesor_filtro: str, 
     for lead in leads_derivados:
         conteos[_estado_conversacion(lead)] += 1
 
+    # Mismo patrón que conteos, pero para los 3 sub-estados de "Con Gabi"
+    # (Explorando/Comparando producto/Evaluando financiamiento) — permite un
+    # drill-down igual de granular al que ya existe para Conversaciones.
+    conteos_gabi = {estado: 0 for estado in ESTADOS_GABI}
+    for lead in leads_con_gabi:
+        conteos_gabi[_estado_conversacion(lead)] += 1
+
     if estado_filtro == "con_gabi":
         leads_filtrados = leads_con_gabi
+    elif estado_filtro in ESTADOS_GABI:
+        leads_filtrados = [l for l in leads_con_gabi if _estado_conversacion(l) == estado_filtro]
     else:
         leads = leads_derivados
         if vision_total and asesor_filtro:
@@ -952,6 +961,7 @@ async def _datos_bandeja(usuario: dict, estado_filtro: str, asesor_filtro: str, 
         "leads_con_gabi": leads_con_gabi,
         "leads_filtrados": leads_filtrados,
         "conteos": conteos,
+        "conteos_gabi": conteos_gabi,
         "mapa_canales": mapa_canales,
         "canal_filtro": canal_filtro,
     }
@@ -968,15 +978,35 @@ async def _renderizar_rail_estados(usuario: dict, datos: dict, estado_filtro: st
     item_todos = _item_nav_estado(
         "Todos", "bi-collection-fill", len(datos["leads_derivados"]), "todos", estado_filtro == "todos" and not asesor_filtro
     )
-    # Solo admin/supervisor lo ven — para un asesor normal esto siempre daría
-    # 0 (listar_leads ya solo le trae SUS leads asignados, y un lead que
-    # Gabi todavía atiende sola no tiene asesor asignado), así que mostrarlo
-    # solo agregaría ruido sin ningún caso real detrás.
-    item_con_gabi = ""
+
+    # Sección aparte, propia sección desplegable — separa visualmente lo que
+    # atiende la IA sola de lo que ya pasó a manos humanas (capa Automate vs.
+    # capa Collaborate/CRM del framework de producto). Mismo drill-down que
+    # ya existe para Conversaciones: un "Todos" agregado + los 3 sub-estados
+    # individuales, cada uno clicable. Solo admin/supervisor lo ven — para un
+    # asesor normal esto siempre daría 0 (listar_leads ya solo le trae SUS
+    # leads asignados, y un lead que Gabi todavía atiende sola no tiene
+    # asesor asignado), así que mostrarlo solo agregaría ruido sin ningún
+    # caso real detrás.
+    gabi_html = ""
     if vision_total:
-        item_con_gabi = _item_nav_estado(
-            "Con Gabi", "bi-robot", len(datos["leads_con_gabi"]), "con_gabi", estado_filtro == "con_gabi" and not asesor_filtro
+        conteos_gabi = datos["conteos_gabi"]
+        nav_gabi = "".join(
+            _item_nav_estado(ETIQUETAS_ESTADO[e], ICONO_ESTADO[e][0], conteos_gabi[e], e, estado_filtro == e and not asesor_filtro)
+            for e in ESTADOS_GABI
         )
+        item_todos_gabi = _item_nav_estado(
+            "Todos (con Gabi)", "bi-robot", len(datos["leads_con_gabi"]), "con_gabi", estado_filtro == "con_gabi" and not asesor_filtro
+        )
+        gabi_html = f"""
+        {_subtitulo_contraible("CON GABI", "gabi-contenido")}
+        <div id="gabi-contenido">
+            <div class="estado-nav pb-2">
+                {item_todos_gabi}
+                {nav_gabi}
+            </div>
+        </div>
+        """
 
     equipo_html = ""
     if vision_total:
@@ -1029,12 +1059,12 @@ async def _renderizar_rail_estados(usuario: dict, datos: dict, estado_filtro: st
             <button type="button" class="btn-close" style="font-size:.65rem" onclick="document.getElementById('rail-estados').classList.remove('abierto')"></button>
         </div>
         {canales_html}
+        {gabi_html}
         {_subtitulo_contraible("CONVERSACIONES", "conversaciones-contenido")}
         <div id="conversaciones-contenido">
             <div class="estado-nav pb-2">
                 {item_todos}
                 {nav_estados}
-                {item_con_gabi}
             </div>
             {equipo_html}
         </div>
