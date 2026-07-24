@@ -25,6 +25,7 @@ from agent.memory import (
 )
 from agent.providers import obtener_proveedor
 from agent.dashboard import router as dashboard_router, NoAutenticado
+from agent.tiempo_real import gestor_conexiones
 from agent.notificaciones import notificar_lead_derivado
 from agent.asignacion import elegir_asesor_automatico
 from agent.campanas import (
@@ -157,6 +158,7 @@ async def webhook_handler(request: Request):
                 if not (lead_actual and lead_actual.get("asesor_asignado")):
                     await pausar_gabi_manual(msg.telefono)
                 logger.info(f"Echo de app registrado para {msg.telefono}: {contenido}")
+                await gestor_conexiones.emitir_mensaje_nuevo(msg.telefono)
                 continue
 
             # Tipos que aún no procesamos (audio, imagen, documento, etc.):
@@ -167,6 +169,7 @@ async def webhook_handler(request: Request):
                 await guardar_mensaje(msg.telefono, "user", f"[{msg.tipo}]")
                 await guardar_mensaje(msg.telefono, "assistant", respuesta)
                 await proveedor.enviar_mensaje(msg.telefono, respuesta, canal=canal)
+                await gestor_conexiones.emitir_mensaje_nuevo(msg.telefono)
                 continue
 
             if not msg.texto:
@@ -209,6 +212,7 @@ async def webhook_handler(request: Request):
                         f"Mensaje de {msg.telefono} guardado sin respuesta automática "
                         f"(asignado a {lead['asesor_asignado']})"
                     )
+                    await gestor_conexiones.emitir_mensaje_nuevo(msg.telefono)
                     continue
 
             # Obtener historial ANTES de guardar el mensaje actual
@@ -242,6 +246,7 @@ async def webhook_handler(request: Request):
             await guardar_mensaje(msg.telefono, "user", msg.texto)
             await guardar_mensaje(msg.telefono, "assistant", respuesta)
             await proveedor.enviar_mensaje(msg.telefono, respuesta, canal=canal)
+            await gestor_conexiones.emitir_mensaje_nuevo(msg.telefono)
             logger.info(f"Respuesta a {msg.telefono}: {respuesta}")
 
             if escalado_por_falla:

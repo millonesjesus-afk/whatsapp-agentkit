@@ -32,9 +32,10 @@ import tempfile
 import uuid
 import bcrypt
 from datetime import datetime, timedelta
-from fastapi import APIRouter, Depends, HTTPException, Form, Request, UploadFile, File
+from fastapi import APIRouter, Depends, HTTPException, Form, Request, UploadFile, File, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse, Response, FileResponse
 
+from agent.tiempo_real import gestor_conexiones
 from agent.memory import (
     listar_leads, obtener_lead, obtener_historial, actualizar_lead,
     obtener_usuario, listar_asesores, guardar_mensaje, obtener_ultimo_mensaje,
@@ -262,6 +263,44 @@ def _verificar_acceso_lead(usuario: dict, lead: dict):
         return
     if lead.get("asesor_asignado") != usuario["username"]:
         raise HTTPException(status_code=403, detail="No tienes acceso a este lead")
+
+
+# ── WebSocket del panel (chat en vivo, lista en vivo, "escribiendo...") ─
+#
+# Una sola conexión persistente por sesión de navegador — se abre una vez al
+# cargar la página (ver _script_tiempo_real) y sobrevive a la navegación
+# AJAX interna (no se re-crea en cada clic), así que no hay que reconectar
+# cada vez que se abre un chat distinto. El cliente avisa qué lead tiene
+# activo con el mensaje "ver_lead"; el servidor usa eso para saber a quién
+# mandarle el "escribiendo..." de otro miembro del equipo.
+@router.websocket("/ws")
+async def websocket_panel(websocket: WebSocket):
+    username = websocket.session.get("username")
+    if not username:
+        await websocket.close(code=4401)
+        return
+    usuario = await obtener_usuario(username)
+    if usuario is None:
+        await websocket.close(code=4401)
+        return
+
+    await gestor_conexiones.conectar(websocket, username)
+    try:
+        while True:
+            datos = await websocket.receive_json()
+            tipo = datos.get("tipo")
+            if tipo == "ver_lead":
+                gestor_conexiones.set_telefono_activo(websocket, datos.get("telefono") or None)
+            elif tipo == "escribiendo":
+                telefono = datos.get("telefono")
+                if telefono:
+                    await gestor_conexiones.emitir_escribiendo(telefono, usuario["nombre"], excluir=websocket)
+    except WebSocketDisconnect:
+        pass
+    except Exception as e:
+        logger.warning(f"Error en WebSocket del panel ({username}): {e}")
+    finally:
+        gestor_conexiones.desconectar(websocket)
 
 
 # ── Estilos y layout (Bootstrap 5 vía CDN + ajustes propios) ──────────
@@ -700,6 +739,96 @@ def _script_notificaciones(usuario: dict | None) -> str:
     """
 
 
+def _script_tiempo_real(usuario: dict | None) -> str:
+    """Conexión WebSocket única y persistente para toda la sesión del panel
+    — vive en el shell base (fuera de #contenido-app, igual que el script de
+    navegación AJAX y _script_notificaciones), así que NO se recrea en cada
+    navegación interna: se abre una vez al cargar la página y se reconecta
+    sola (con backoff) si se corta.
+
+    Expone window.__gasoWS = {{on, off, verLead, escribiendo}} para que
+    scripts de una pantalla puntual (ej. _script_chat_en_vivo, que sí se
+    re-ejecuta en cada navegación AJAX) puedan suscribirse a eventos sin
+    manejar su propia conexión."""
+    if not usuario:
+        return ""
+    return """
+    <script>
+    (function() {
+        if (!window.WebSocket) return;  // navegador muy viejo: sin tiempo real, el panel sigue funcionando igual
+
+        const listeners = [];
+        let socket = null;
+        let intentos = 0;
+        let telefonoActivo = null;
+        let colaEnviar = [];
+
+        function enviar(msg) {
+            if (socket && socket.readyState === WebSocket.OPEN) {
+                socket.send(JSON.stringify(msg));
+            } else {
+                colaEnviar.push(msg);
+            }
+        }
+
+        function conectar() {
+            const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+            socket = new WebSocket(proto + '//' + location.host + '/dashboard/ws');
+            socket.addEventListener('open', function() {
+                intentos = 0;
+                if (telefonoActivo !== null) enviar({tipo: 'ver_lead', telefono: telefonoActivo});
+                const pendientes = colaEnviar;
+                colaEnviar = [];
+                pendientes.forEach(enviar);
+            });
+            socket.addEventListener('message', function(ev) {
+                let evento;
+                try { evento = JSON.parse(ev.data); } catch (e) { return; }
+                listeners.forEach(function(fn) {
+                    try { fn(evento); } catch (e) {}
+                });
+            });
+            socket.addEventListener('close', function() {
+                intentos++;
+                const espera = Math.min(1000 * Math.pow(1.5, intentos), 15000);
+                setTimeout(conectar, espera);
+            });
+            socket.addEventListener('error', function() { socket.close(); });
+        }
+
+        window.__gasoWS = {
+            on: function(fn) { listeners.push(fn); },
+            off: function(fn) {
+                const i = listeners.indexOf(fn);
+                if (i >= 0) listeners.splice(i, 1);
+            },
+            verLead: function(telefono) { telefonoActivo = telefono; enviar({tipo: 'ver_lead', telefono: telefono}); },
+            escribiendo: function(telefono) { enviar({tipo: 'escribiendo', telefono: telefono}); },
+        };
+
+        // Un mensaje nuevo en un lead que NO es el que está abierto ahora
+        // mismo: refresca la lista/tabla (contadores, vista previa) en vez
+        // de dejarla desactualizada hasta el próximo clic. Reusa la
+        // navegación AJAX que ya existe (misma URL) — con un pequeño
+        // debounce para no repintar de más si llegan varios mensajes
+        // seguidos de golpe.
+        let temporizadorLista = null;
+        window.__gasoWS.on(function(evento) {
+            if (evento.tipo !== 'mensaje_nuevo') return;
+            if (evento.telefono === telefonoActivo) return;  // eso ya lo maneja el chat abierto
+            if (typeof window.__navegarAjax !== 'function') return;
+            clearTimeout(temporizadorLista);
+            temporizadorLista = setTimeout(function() {
+                window.__navegarAjax(window.location.href, false, true);
+            }, 1200);
+        });
+
+        conectar();
+    })();
+    </script>
+    """
+
+
 def _pagina(
     titulo: str,
     usuario: dict | None,
@@ -824,8 +953,8 @@ def _pagina(
         }});
     }}
 
-    function navegarAjax(url, agregarHistorial) {{
-        iniciar();
+    function navegarAjax(url, agregarHistorial, silencioso) {{
+        if (!silencioso) iniciar();
         fetch(url, {{ headers: {{ 'X-Panel-Fragment': '1' }} }})
             .then(function(r) {{
                 if (!r.ok) throw new Error('HTTP ' + r.status);
@@ -839,15 +968,20 @@ def _pagina(
                 if (datos.titulo) document.title = datos.titulo + ' — Gaso+ Panel';
                 document.body.classList.toggle('pagina-chat', datos.esChat);
                 if (agregarHistorial) history.pushState({{ ajax: true }}, '', url);
-                window.scrollTo(0, 0);
-                terminar();
+                if (!silencioso) {{ window.scrollTo(0, 0); terminar(); }}
             }})
             .catch(function() {{
-                // Si algo falla (red, error del servidor), no te deja colgado:
-                // navega normal como si nunca hubiera intentado ir por AJAX.
-                window.location.href = url;
+                // Si algo falla (red, error del servidor): en un refresco
+                // silencioso simplemente no pasa nada (se reintenta con el
+                // próximo evento); en una navegación normal, no deja
+                // colgado — navega normal como si nunca hubiera intentado ir por AJAX.
+                if (!silencioso) window.location.href = url;
             }});
     }}
+    // Expuesto para que _script_tiempo_real (fuera de esta IIFE) pueda
+    // disparar un refresco silencioso de la lista/tabla cuando llega un
+    // mensaje de un lead que no es el que está abierto ahora mismo.
+    window.__navegarAjax = navegarAjax;
 
     document.addEventListener('click', function(ev) {{
         var link = ev.target.closest('a[href]');
@@ -876,6 +1010,7 @@ def _pagina(
 }})();
 </script>
 {_script_notificaciones(usuario)}
+{_script_tiempo_real(usuario)}
 </body>
 </html>"""
 
@@ -1974,18 +2109,63 @@ def _script_chat_en_vivo(telefono: str, tiene_asesor: bool) -> str:
         actualizar();
         chatDiv.scrollTop = chatDiv.scrollHeight;
 
-        // Este chat puede quedar reemplazado por una navegación AJAX (tabla
-        // -> detalle -> chat) sin que la página se recargue — el intervalo y
-        // el listener se auto-desactivan apenas su chatDiv ya no está en el
-        // documento, para no seguir pidiendo mensajes de un chat que ya no
-        // se ve (y no acumular listeners cada vez que se vuelve a entrar).
-        const intervalo = setInterval(function() {{
-            if (!document.body.contains(chatDiv)) {{ clearInterval(intervalo); return; }}
+        // Indicador de "X está escribiendo..." (otro miembro del equipo
+        // mirando el mismo lead) — se crea al vuelo, no depende de HTML del
+        // servidor. Se auto-oculta si no llega otro aviso en 3s.
+        let elEscribiendo = null;
+        let temporizadorEscribiendo = null;
+        function mostrarEscribiendo(nombre) {{
+            if (!elEscribiendo) {{
+                elEscribiendo = document.createElement('div');
+                elEscribiendo.className = 'text-muted small px-2 py-1 fst-italic';
+                chatDiv.parentElement.appendChild(elEscribiendo);
+            }}
+            elEscribiendo.textContent = nombre + ' está escribiendo...';
+            elEscribiendo.style.display = '';
+            clearTimeout(temporizadorEscribiendo);
+            temporizadorEscribiendo = setTimeout(function() {{
+                if (elEscribiendo) elEscribiendo.style.display = 'none';
+            }}, 3000);
+        }}
+
+        // Chat en vivo por WebSocket (ver _script_tiempo_real, conexión
+        // persistente para toda la sesión) — con sondeo lento de respaldo
+        // por si la conexión se cae y no logra reconectar. Este chat puede
+        // quedar reemplazado por una navegación AJAX (tabla -> detalle ->
+        // chat) sin recargar la página, así que el listener/intervalo se
+        // auto-desactivan apenas su chatDiv ya no está en el documento —
+        // para no seguir escuchando/pidiendo mensajes de un chat que ya no
+        // se ve, ni acumular listeners cada vez que se vuelve a entrar.
+        function alEventoWS(evento) {{
+            if (evento.tipo === 'mensaje_nuevo' && evento.telefono === telefono) {{
+                actualizar();
+            }} else if (evento.tipo === 'asesor_escribiendo' && evento.telefono === telefono) {{
+                mostrarEscribiendo(evento.username);
+            }}
+        }}
+        function limpiarWS() {{
+            if (window.__gasoWS) {{
+                window.__gasoWS.off(alEventoWS);
+                window.__gasoWS.verLead(null);
+            }}
+        }}
+        if (window.__gasoWS) {{
+            window.__gasoWS.on(alEventoWS);
+            window.__gasoWS.verLead(telefono);
+        }}
+
+        // Dos chances de limpiar (lo que pase primero): el intervalo de
+        // respaldo (máx. 20s de retraso) o el cambio de visibilidad de la
+        // pestaña — así no queda un listener fantasma escuchando eventos de
+        // un chat que ya no está en pantalla por mucho tiempo.
+        const intervaloRespaldo = setInterval(function() {{
+            if (!document.body.contains(chatDiv)) {{ clearInterval(intervaloRespaldo); limpiarWS(); return; }}
             actualizar();
-        }}, 1500);
+        }}, 20000);
         function alCambiarVisibilidad() {{
             if (!document.body.contains(chatDiv)) {{
                 document.removeEventListener('visibilitychange', alCambiarVisibilidad);
+                limpiarWS();
                 return;
             }}
             if (!document.hidden) actualizar();
@@ -2027,8 +2207,21 @@ def _script_chat_en_vivo(telefono: str, tiene_asesor: bool) -> str:
             if (!contadorMensaje) return;
             contadorMensaje.textContent = input.value.length + '/' + LIMITE_MENSAJE;
         }
+        // Avisa "escribiendo..." a otros miembros del equipo que tengan este
+        // mismo lead abierto (ej. supervisor mirando en paralelo) — máximo
+        // un aviso cada 2.5s mientras el asesor sigue tipeando, para no
+        // saturar el WebSocket con un mensaje por tecla.
+        let ultimoAvisoEscribiendo = 0;
+        function avisarEscribiendo() {
+            if (!window.__gasoWS) return;
+            const ahora = Date.now();
+            if (ahora - ultimoAvisoEscribiendo < 2500) return;
+            ultimoAvisoEscribiendo = ahora;
+            window.__gasoWS.escribiendo(telefono);
+        }
         if (input) {
             input.addEventListener('input', ajustarInputMensaje);
+            input.addEventListener('input', avisarEscribiendo);
             ajustarInputMensaje();
         }
 
@@ -2963,6 +3156,7 @@ async def responder_cliente(
         raise HTTPException(status_code=502, detail="No se pudo enviar el mensaje por WhatsApp")
 
     await guardar_mensaje(telefono, "asesor", mensaje)
+    await gestor_conexiones.emitir_mensaje_nuevo(telefono)
     return JSONResponse({"status": "ok"})
 
 
@@ -3065,6 +3259,7 @@ async def enviar_archivo_chat(
         tamano_bytes=len(contenido), subido_por=usuario["username"], reutilizable=False,
     )
     await guardar_mensaje(telefono, "asesor", caption.strip() or archivo.filename, archivo_id=archivo_guardado["id"])
+    await gestor_conexiones.emitir_mensaje_nuevo(telefono)
     return JSONResponse({"status": "ok"})
 
 
@@ -3106,6 +3301,7 @@ async def enviar_audio_chat(
         tamano_bytes=len(contenido_ogg), subido_por=usuario["username"], reutilizable=False,
     )
     await guardar_mensaje(telefono, "asesor", "Nota de voz", archivo_id=archivo_guardado["id"])
+    await gestor_conexiones.emitir_mensaje_nuevo(telefono)
     return JSONResponse({"status": "ok"})
 
 
@@ -3131,6 +3327,7 @@ async def enviar_catalogo_chat(telefono: str, archivo_id: int, usuario: dict = D
     await _subir_y_enviar_media(telefono, archivo["nombre_original"], archivo["content_type"], contenido, "", canal=canal)
 
     await guardar_mensaje(telefono, "asesor", archivo["nombre_original"], archivo_id=archivo["id"])
+    await gestor_conexiones.emitir_mensaje_nuevo(telefono)
     return JSONResponse({"status": "ok"})
 
 
