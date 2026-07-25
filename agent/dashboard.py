@@ -464,6 +464,7 @@ ESTILOS_PROPIOS = """
   .btn-volver-movil { display: none; text-decoration: none; }
   .btn-filtros-movil { display: none; }
   .btn-resumen-movil { display: none; }
+  .btn-menu-movil { display: none; }
 
   /* Vista de un lead: resumen del cliente + chat, lado a lado, ambos visibles
      a la vez (en vez de saltar entre dos páginas distintas). */
@@ -486,6 +487,18 @@ ESTILOS_PROPIOS = """
        alto fijo de 58px que asume .rail-estados más abajo — se oculta y
        queda solo "Gaso+", igual que antes del rebrand. */
     .brand-subtitulo { display: none; }
+
+    /* Links de gestión (Métricas, Catálogos, Campañas...) no entran en el
+       ancho del navbar en mobile — se ocultan detrás de un botón ☰ y se
+       despliegan como panel, mismo patrón que .rail-estados.abierto. */
+    #menu-gestion-movil { display: none !important; }
+    #menu-gestion-movil.abierto {
+      display: flex !important; flex-direction: column; align-items: stretch !important;
+      position: fixed; top: 58px; left: 0; right: 0; z-index: 1600;
+      background: var(--gaso-azul-osc); padding: 10px 12px; gap: 2px !important;
+      box-shadow: 0 4px 12px rgba(0,0,0,.25);
+    }
+    .btn-menu-movil { display: inline-flex !important; }
 
     /* Con un chat abierto: solo el chat se ve, a pantalla completa */
     body.pagina-chat .rail-estados,
@@ -520,6 +533,15 @@ ESTILOS_PROPIOS = """
   .estado-nav a.activo, .equipo-item.activo { background: var(--gaso-azul); color: #fff; font-weight: 600; }
   .estado-nav a.activo .badge-count, .equipo-item.activo .badge-count { background: rgba(255,255,255,.25); color: #fff; }
   .badge-count { background: #e2e8f0; color: #475569; border-radius: 999px; padding: 2px 9px; font-size: .72rem; font-weight: 600; flex-shrink: 0; }
+  .mini-embudo { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; padding: 2px 14px 10px; }
+  .chip-embudo {
+    display: inline-flex; align-items: center; gap: 4px;
+    padding: 3px 7px; border-radius: 999px; font-size: .72rem; font-weight: 700;
+    text-decoration: none; border: 1.5px solid transparent; line-height: 1;
+  }
+  .chip-embudo:hover { filter: brightness(.95); }
+  .chip-embudo.activo { border-color: currentColor; }
+  .separador-embudo { color: #cbd5e1; font-size: .7rem; margin: 0 1px; }
   .sidebar-subtitulo { font-size: .68rem; letter-spacing: .05em; color: #94a3b8; padding: 10px 16px 4px; }
 
   .card { border: none; border-radius: 16px !important; }
@@ -901,7 +923,10 @@ def _pagina(
                     {html.escape(usuario['nombre'])} &middot; {html.escape(usuario['rol'])}
                 </a>
                 {disp_html}
-                {gestion_html}
+                <div id="menu-gestion-movil" class="d-flex align-items-center gap-3">
+                    {gestion_html}
+                </div>
+                {'<button type="button" class="btn btn-sm btn-outline-light rounded-circle btn-menu-movil" onclick="var m=document.getElementById(&#39;menu-gestion-movil&#39;); if (m) m.classList.toggle(&#39;abierto&#39;)" aria-label="Menú de gestión"><i class="bi bi-list"></i></button>' if gestion_html else ''}
                 <form method="post" action="/dashboard/logout" class="d-inline m-0">
                     <button type="submit" class="btn btn-sm btn-outline-light rounded-pill"><i class="bi bi-box-arrow-right"></i> Salir</button>
                 </form>
@@ -1137,6 +1162,42 @@ async def _datos_bandeja(usuario: dict, estado_filtro: str, asesor_filtro: str, 
     }
 
 
+def _mini_embudo_unificado(datos: dict, estado_filtro: str) -> str:
+    """Franja compacta con las 7 etapas del embudo completo (3 "con Gabi" +
+    4 de "conversaciones") en una sola fila ordenada — el hallazgo de la
+    auditoría de UX fue que admin/supervisor tienen que aprenderse DOS
+    vocabularios de estado separados (uno para lo que atiende Gabi sola,
+    otro para lo que ya pasó a un asesor); esta franja los muestra como un
+    solo flujo continuo, con el mismo lenguaje visual (icono + color) que ya
+    usa cada estado en el resto del panel, sin quitar las dos secciones de
+    abajo (siguen siendo la forma de navegar/filtrar en detalle).
+
+    Solo para vision_total: para un asesor normal los 3 estados "con Gabi"
+    siempre dan 0 (listar_leads ya le trae solo SUS leads asignados, y un
+    lead que Gabi todavía atiende sola no tiene asesor), así que no hay dos
+    vocabularios que unificar — mostrarlo solo agregaría ruido."""
+    conteos_gabi = datos["conteos_gabi"]
+    conteos = datos["conteos"]
+    chips = []
+    for estado in ESTADOS_GABI + ESTADOS_DERIVADO:
+        cantidad = conteos_gabi[estado] if estado in conteos_gabi else conteos[estado]
+        icono, _ = ICONO_ESTADO[estado]
+        bg, texto = COLOR_ESTADO_SUAVE[estado]
+        activo = " activo" if estado_filtro == estado else ""
+        etiqueta = ETIQUETAS_ESTADO[estado]
+        chips.append(
+            f'<a href="/dashboard?estado={estado}" data-ajax="1" class="chip-embudo{activo}" '
+            f'style="background-color:{bg};color:{texto}" title="{html.escape(etiqueta)}: {cantidad}">'
+            f'<i class="bi {icono}"></i><span>{cantidad}</span></a>'
+        )
+        if estado == ESTADOS_GABI[-1]:
+            chips.append('<span class="separador-embudo">&rarr;</span>')
+    return f"""
+    <div class="sidebar-subtitulo">EMBUDO COMPLETO</div>
+    <div class="mini-embudo">{''.join(chips)}</div>
+    """
+
+
 async def _renderizar_rail_estados(usuario: dict, datos: dict, estado_filtro: str, asesor_filtro: str, canal_filtro: str = "") -> str:
     vision_total = datos["vision_total"]
     conteos = datos["conteos"]
@@ -1225,12 +1286,20 @@ async def _renderizar_rail_estados(usuario: dict, datos: dict, estado_filtro: st
         </div>
         """
 
+    # Franja compacta con las 7 etapas del embudo completo en una sola fila
+    # arriba de todo — conecta visualmente "Con Gabi" y "Conversaciones"
+    # como UN flujo, aunque las dos secciones de abajo se mantengan
+    # separadas (siguen siendo útiles para navegar/filtrar). Ver
+    # _mini_embudo_unificado para el detalle de por qué solo vision_total.
+    embudo_html = _mini_embudo_unificado(datos, estado_filtro) if vision_total else ""
+
     return f"""
     <div class="rail-estados border-end d-flex flex-column" id="rail-estados">
         <div class="sidebar-subtitulo d-flex justify-content-between align-items-center pe-2 d-md-none">
             <span>&nbsp;</span>
             <button type="button" class="btn-close" style="font-size:.65rem" onclick="document.getElementById('rail-estados').classList.remove('abierto')"></button>
         </div>
+        {embudo_html}
         {canales_html}
         {gabi_html}
         {_subtitulo_contraible("CONVERSACIONES", "conversaciones-contenido")}
@@ -1905,7 +1974,13 @@ async def panel_principal(
             leads_tabla = datos["leads_con_gabi"]
         elif estado != "todos":
             leads_tabla = [l for l in leads_tabla if _estado_conversacion(l) == estado]
-        panel = _tabla_todos_los_leads(leads_tabla, datos["mapa_canales"])
+        if not datos["vision_total"] and estado == "todos" and not leads_tabla:
+            # Un asesor sin NINGÚN lead asignado (no un filtro sin resultados)
+            # no sabe si eso es normal o un error — la asignación es automática
+            # y silenciosa, así que explicamos de dónde le van a llegar.
+            panel = _estado_vacio_asesor_sin_leads(usuario)
+        else:
+            panel = _tabla_todos_los_leads(leads_tabla, datos["mapa_canales"])
         columnas = rail
 
     # Aviso de "Próximas citas" en la vista principal — sin correo/dominio
@@ -1926,6 +2001,32 @@ async def panel_principal(
     </div>
     """
     return _pagina("Bandeja", usuario, cuerpo, request=request)
+
+
+def _estado_vacio_asesor_sin_leads(usuario: dict) -> str:
+    """Vacío explicativo para un asesor sin ningún lead asignado todavía.
+    Distinto de "sin resultados para este filtro": alguien nuevo no sabe que
+    la asignación es automática y silenciosa (nadie le "entrega" nada a
+    mano), así que sin contexto esta pantalla en blanco parece un error."""
+    en_linea = usuario.get("disponible", True)
+    aviso_disponibilidad = (
+        '<p class="text-muted small mb-0">Estás <strong>🟢 Disponible</strong> — en cuanto Gabi derive '
+        'una conversación a un asesor, te puede tocar a ti.</p>'
+        if en_linea else
+        '<p class="text-muted small mb-0">Estás marcado como <strong>⚪ No disponible</strong> arriba, así '
+        'que por ahora no te están llegando leads nuevos. Cambia tu estado cuando quieras volver a recibir.</p>'
+    )
+    return f"""
+    <div class="text-center mt-5 pt-4">
+        <div class="mb-3" style="font-size:2.5rem">🗂️</div>
+        <h5>Todavía no tienes leads asignados</h5>
+        <p class="text-muted mb-2" style="max-width:420px;margin-inline:auto">
+            Los leads se asignan automáticamente a un asesor disponible cuando Gabi
+            deriva una conversación desde WhatsApp — no hace falta buscarlos ni pedirlos.
+        </p>
+        {aviso_disponibilidad}
+    </div>
+    """
 
 
 def _aviso_proximas_citas(agendados: list[dict], vision_total: bool) -> str:
