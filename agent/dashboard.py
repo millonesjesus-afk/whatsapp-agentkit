@@ -392,8 +392,6 @@ ESTILOS_PROPIOS = """
     font-size: .78rem; color: #475569; flex-shrink: 0;
   }
   .barra-resumen strong { color: var(--gaso-azul-osc); font-size: .95rem; }
-  .badge-agendados { display: inline-flex; align-items: center; gap: 5px; background: #e6f1fb; color: #0c447c; padding: 3px 10px; border-radius: 999px; font-size: .76rem; }
-  .badge-agendados strong { color: #0c447c; font-size: .78rem; }
   .convo-item { border: none !important; border-bottom: 1px solid #eef1f5 !important; border-radius: 0 !important; }
   .convo-item.activo { background-color: #e0f7fa; box-shadow: inset 3px 0 0 var(--gaso-azul); }
   .convo-item:hover { background-color: #f8fafc; }
@@ -533,7 +531,7 @@ ESTILOS_PROPIOS = """
   .estado-nav a.activo, .equipo-item.activo { background: var(--gaso-azul); color: #fff; font-weight: 600; }
   .estado-nav a.activo .badge-count, .equipo-item.activo .badge-count { background: rgba(255,255,255,.25); color: #fff; }
   .badge-count { background: #e2e8f0; color: #475569; border-radius: 999px; padding: 2px 9px; font-size: .72rem; font-weight: 600; flex-shrink: 0; }
-  .mini-embudo { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; padding: 2px 14px 10px; }
+  .mini-embudo { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; }
   .chip-embudo {
     display: inline-flex; align-items: center; gap: 4px;
     padding: 3px 7px; border-radius: 999px; font-size: .72rem; font-weight: 700;
@@ -1163,19 +1161,11 @@ async def _datos_bandeja(usuario: dict, estado_filtro: str, asesor_filtro: str, 
 
 
 def _mini_embudo_unificado(datos: dict, estado_filtro: str) -> str:
-    """Franja compacta con las 7 etapas del embudo completo (3 "con Gabi" +
-    4 de "conversaciones") en una sola fila ordenada — el hallazgo de la
-    auditoría de UX fue que admin/supervisor tienen que aprenderse DOS
-    vocabularios de estado separados (uno para lo que atiende Gabi sola,
-    otro para lo que ya pasó a un asesor); esta franja los muestra como un
-    solo flujo continuo, con el mismo lenguaje visual (icono + color) que ya
-    usa cada estado en el resto del panel, sin quitar las dos secciones de
-    abajo (siguen siendo la forma de navegar/filtrar en detalle).
-
-    Solo para vision_total: para un asesor normal los 3 estados "con Gabi"
-    siempre dan 0 (listar_leads ya le trae solo SUS leads asignados, y un
-    lead que Gabi todavía atiende sola no tiene asesor), así que no hay dos
-    vocabularios que unificar — mostrarlo solo agregaría ruido."""
+    """Embudo completo (7 etapas, "con Gabi" + "conversaciones") como fila
+    de chips clicables — vive en la barra superior (_barra_resumen), no en
+    el rail: mostrarlo en los dos lados a la vez era el mismo dato con el
+    mismo link tres veces en una sola pantalla (los chips + las dos
+    secciones separadas del rail), justo lo que esto buscaba resolver."""
     conteos_gabi = datos["conteos_gabi"]
     conteos = datos["conteos"]
     chips = []
@@ -1192,52 +1182,52 @@ def _mini_embudo_unificado(datos: dict, estado_filtro: str) -> str:
         )
         if estado == ESTADOS_GABI[-1]:
             chips.append('<span class="separador-embudo">&rarr;</span>')
-    return f"""
-    <div class="sidebar-subtitulo">EMBUDO COMPLETO</div>
-    <div class="mini-embudo">{''.join(chips)}</div>
-    """
+    return f'<div class="mini-embudo">{"".join(chips)}</div>'
+
+
+def _item_agendados(cantidad: int) -> str:
+    """Atajo fijo arriba del rail hacia las próximas citas — no es un
+    filtro de estado más (paso_flujo puede ser cualquiera; "agendado" es
+    un cruce ortogonal vía resultado), así que no encaja en la lista de 7
+    estados de abajo. Enlaza a /dashboard, donde ya vive la tarjeta
+    "Próximas citas" (_aviso_proximas_citas), en vez de duplicar esa
+    lógica de filtrado en el rail."""
+    return (
+        '<div class="estado-nav pt-2 pb-1">'
+        '<a href="/dashboard" data-ajax="1" title="Próximas citas agendadas">'
+        '<span class="rail-label"><i class="bi bi-calendar-event me-2"></i>Agendados</span>'
+        f'<span class="badge-count">{cantidad}</span></a>'
+        '</div>'
+    )
 
 
 async def _renderizar_rail_estados(usuario: dict, datos: dict, estado_filtro: str, asesor_filtro: str, canal_filtro: str = "") -> str:
     vision_total = datos["vision_total"]
     conteos = datos["conteos"]
+    conteos_gabi = datos["conteos_gabi"]
 
+    # Una sola lista con las 7 etapas en orden de embudo (antes: dos
+    # secciones separadas, "CON GABI" y "CONVERSACIONES", con vocabularios
+    # sin conexión visual entre sí — el mismo lead avanzando por un único
+    # proceso se leía como dos procesos distintos). Para un asesor normal
+    # los 3 estados "con Gabi" siempre dan 0 (listar_leads ya le trae solo
+    # SUS leads asignados, y un lead que Gabi todavía atiende sola no tiene
+    # asesor), así que solo ve los 4 derivados — mismo resultado que antes.
+    estados_a_mostrar = (ESTADOS_GABI + ESTADOS_DERIVADO) if vision_total else ESTADOS_DERIVADO
     nav_estados = "".join(
-        _item_nav_estado(ETIQUETAS_ESTADO[e], ICONO_ESTADO[e][0], conteos[e], e, estado_filtro == e and not asesor_filtro)
-        for e in ESTADOS_DERIVADO
+        _item_nav_estado(
+            ETIQUETAS_ESTADO[e], ICONO_ESTADO[e][0],
+            conteos_gabi[e] if e in conteos_gabi else conteos[e],
+            e, estado_filtro == e and not asesor_filtro,
+        )
+        for e in estados_a_mostrar
     )
+    # Todo lead cae en exactamente uno de los 7 estados (ver
+    # _estado_conversacion), así que leads_todos ya es el total combinado —
+    # no hace falta sumar leads_derivados + leads_con_gabi a mano.
     item_todos = _item_nav_estado(
-        "Todos", "bi-collection-fill", len(datos["leads_derivados"]), "todos", estado_filtro == "todos" and not asesor_filtro
+        "Todos", "bi-collection-fill", len(datos["leads_todos"]), "todos", estado_filtro == "todos" and not asesor_filtro
     )
-
-    # Sección aparte, propia sección desplegable — separa visualmente lo que
-    # atiende la IA sola de lo que ya pasó a manos humanas (capa Automate vs.
-    # capa Collaborate/CRM del framework de producto). Mismo drill-down que
-    # ya existe para Conversaciones: un "Todos" agregado + los 3 sub-estados
-    # individuales, cada uno clicable. Solo admin/supervisor lo ven — para un
-    # asesor normal esto siempre daría 0 (listar_leads ya solo le trae SUS
-    # leads asignados, y un lead que Gabi todavía atiende sola no tiene
-    # asesor asignado), así que mostrarlo solo agregaría ruido sin ningún
-    # caso real detrás.
-    gabi_html = ""
-    if vision_total:
-        conteos_gabi = datos["conteos_gabi"]
-        nav_gabi = "".join(
-            _item_nav_estado(ETIQUETAS_ESTADO[e], ICONO_ESTADO[e][0], conteos_gabi[e], e, estado_filtro == e and not asesor_filtro)
-            for e in ESTADOS_GABI
-        )
-        item_todos_gabi = _item_nav_estado(
-            "Todos (con Gabi)", "bi-robot", len(datos["leads_con_gabi"]), "con_gabi", estado_filtro == "con_gabi" and not asesor_filtro
-        )
-        gabi_html = f"""
-        {_subtitulo_contraible("CON GABI", "gabi-contenido")}
-        <div id="gabi-contenido">
-            <div class="estado-nav pb-2">
-                {item_todos_gabi}
-                {nav_gabi}
-            </div>
-        </div>
-        """
 
     equipo_html = ""
     if vision_total:
@@ -1286,12 +1276,11 @@ async def _renderizar_rail_estados(usuario: dict, datos: dict, estado_filtro: st
         </div>
         """
 
-    # Franja compacta con las 7 etapas del embudo completo en una sola fila
-    # arriba de todo — conecta visualmente "Con Gabi" y "Conversaciones"
-    # como UN flujo, aunque las dos secciones de abajo se mantengan
-    # separadas (siguen siendo útiles para navegar/filtrar). Ver
-    # _mini_embudo_unificado para el detalle de por qué solo vision_total.
-    embudo_html = _mini_embudo_unificado(datos, estado_filtro) if vision_total else ""
+    # Atajo a "Próximas citas" arriba de todo lo demás en el rail — es lo
+    # más sensible al tiempo (hay una cita con el cliente), así que va antes
+    # que cualquier filtro de estado o canal.
+    agendados_cantidad = sum(1 for l in datos["leads_todos"] if l.get("resultado") == "agendado")
+    agendados_html = _item_agendados(agendados_cantidad)
 
     return f"""
     <div class="rail-estados border-end d-flex flex-column" id="rail-estados">
@@ -1299,9 +1288,8 @@ async def _renderizar_rail_estados(usuario: dict, datos: dict, estado_filtro: st
             <span>&nbsp;</span>
             <button type="button" class="btn-close" style="font-size:.65rem" onclick="document.getElementById('rail-estados').classList.remove('abierto')"></button>
         </div>
-        {embudo_html}
+        {agendados_html}
         {canales_html}
-        {gabi_html}
         {_subtitulo_contraible("CONVERSACIONES", "conversaciones-contenido")}
         <div id="conversaciones-contenido">
             <div class="estado-nav pb-2">
@@ -1578,34 +1566,18 @@ def _script_tabla_dinamica(prefijo: str) -> str:
     """
 
 
-def _barra_resumen(datos: dict, asesores: list[dict]) -> str:
-    """Franja fija y delgada debajo del navbar con el avance de Gabi y del
-    equipo humano de un vistazo — visible siempre, sin ocupar espacio de
-    las columnas de la bandeja."""
-    leads_todos = datos["leads_todos"]
-    con_gabi = sum(1 for l in leads_todos if _estado_conversacion(l) in ESTADOS_GABI)
-    conteos = datos["conteos"]
+def _barra_resumen(datos: dict, asesores: list[dict], estado_filtro: str) -> str:
+    """Franja fija y delgada debajo del navbar — el embudo completo (7
+    chips clicables, ver _mini_embudo_unificado) más la disponibilidad del
+    equipo. Antes tenía los mismos 5 conteos como texto plano, que además
+    se repetían tal cual en el rail izquierdo (ver auditoría UX: el mismo
+    dato con el mismo link, tres veces en una sola pantalla) — "Agendados"
+    se movió al rail (_item_agendados, arriba de todo) porque es un atajo
+    de navegación, no un KPI de resumen."""
     disponibles = sum(1 for a in asesores if a.get("disponible"))
-    # Los "agendados" son casos sensibles al tiempo (hay una cita con el
-    # cliente) — se resaltan con su propio contador en vez de mezclarse
-    # dentro de "En atención", para que un supervisor los vea de un vistazo.
-    agendados = sum(1 for l in leads_todos if l.get("resultado") == "agendado")
-
-    pares = [
-        ("Con Gabi", con_gabi),
-        ("Pendiente asignar", conteos.get("pendiente_asignar", 0)),
-        ("Asignados", conteos.get("asignado", 0)),
-        ("En atención", conteos.get("en_atencion", 0)),
-        ("Resueltos", conteos.get("resuelto", 0)),
-        ("Asesores disponibles", f"{disponibles}/{len(asesores)}"),
-    ]
-    items = "".join(f'<span>{html.escape(etq)}: <strong>{val}</strong></span>' for etq, val in pares)
-    agendados_html = (
-        '<span class="badge-agendados">'
-        '<i class="bi bi-calendar-event"></i> Agendados: '
-        f'<strong>{agendados}</strong></span>'
-    )
-    return f'<div class="barra-resumen">{items}{agendados_html}</div>'
+    embudo = _mini_embudo_unificado(datos, estado_filtro)
+    disponibilidad = f'<span>Asesores disponibles: <strong>{disponibles}/{len(asesores)}</strong></span>'
+    return f'<div class="barra-resumen">{embudo}{disponibilidad}</div>'
 
 
 # ── Login / Logout ────────────────────────────────────────────────────
@@ -1948,7 +1920,7 @@ async def panel_principal(
     rail = await _renderizar_rail_estados(usuario, datos, estado, asesor, canal)
 
     asesores = await listar_asesores() if datos["vision_total"] else []
-    resumen = _barra_resumen(datos, asesores) if datos["vision_total"] else ""
+    resumen = _barra_resumen(datos, asesores, estado) if datos["vision_total"] else ""
 
     if asesor:
         # Clic en un asesor del equipo: se navega su bandeja de conversaciones
@@ -3127,7 +3099,7 @@ async def detalle_lead(
     datos = await _datos_bandeja(usuario, estado, asesor)
     rail = await _renderizar_rail_estados(usuario, datos, estado, asesor)
     asesores_equipo = await listar_asesores() if datos["vision_total"] else []
-    resumen_barra = _barra_resumen(datos, asesores_equipo) if datos["vision_total"] else ""
+    resumen_barra = _barra_resumen(datos, asesores_equipo, estado) if datos["vision_total"] else ""
 
     # La lista de conversaciones solo se muestra si se llegó filtrando por un
     # asesor del equipo (se abrió desde su bandeja de chats) — así se puede
