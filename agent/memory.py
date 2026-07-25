@@ -495,20 +495,26 @@ async def obtener_historial(telefono: str, limite: int = 20) -> list[dict]:
         ]
 
 
-async def obtener_ultimo_mensaje(telefono: str) -> dict | None:
-    """Recupera el último mensaje de una conversación (para la vista previa en la bandeja)."""
+async def obtener_ultimos_mensajes(telefonos: list[str]) -> dict[str, dict]:
+    """Último mensaje de cada teléfono (para la vista previa en la bandeja),
+    en una sola consulta para toda la lista visible — no una por lead en un
+    loop (mismo problema de N consultas que contar_leads_activos_por_asesor)."""
+    if not telefonos:
+        return {}
     async with async_session() as session:
         query = (
             select(Mensaje)
-            .where(Mensaje.telefono == telefono)
-            .order_by(Mensaje.timestamp.desc())
-            .limit(1)
+            .where(Mensaje.telefono.in_(telefonos))
+            .order_by(Mensaje.telefono, Mensaje.timestamp.desc())
         )
         result = await session.execute(query)
-        msg = result.scalars().first()
-        if msg is None:
-            return None
-        return {"role": msg.role, "content": msg.content, "timestamp": msg.timestamp}
+        ultimos: dict[str, dict] = {}
+        for msg in result.scalars().all():
+            # Ordenado por timestamp desc dentro de cada teléfono — la
+            # primera fila que se ve de cada uno ya es la más reciente.
+            if msg.telefono not in ultimos:
+                ultimos[msg.telefono] = {"role": msg.role, "content": msg.content, "timestamp": msg.timestamp}
+        return ultimos
 
 
 def _lead_a_dict(lead: Lead) -> dict:
@@ -771,6 +777,26 @@ async def contar_leads_activos(asesor: str) -> int:
         result = await session.execute(query)
         resultados = result.scalars().all()
         return sum(1 for r in resultados if r not in RESULTADOS_CERRADOS)
+
+
+async def contar_leads_activos_por_asesor(usernames: list[str]) -> dict[str, int]:
+    """Igual que contar_leads_activos, pero para todo el equipo en una sola
+    consulta — el sidebar (rail EQUIPO) antes llamaba a contar_leads_activos
+    una vez POR asesor en un loop, o sea un viaje de ida y vuelta a la base
+    de datos por cada uno; con Postgres en producción (a diferencia de
+    SQLite local, que es casi instantáneo) esa latencia por consulta se
+    siente en cada carga completa de página. Acá se trae todo de una vez y
+    se cuenta en Python."""
+    if not usernames:
+        return {}
+    async with async_session() as session:
+        query = select(Lead.asesor_asignado, Lead.resultado).where(Lead.asesor_asignado.in_(usernames))
+        result = await session.execute(query)
+        conteos = {u: 0 for u in usernames}
+        for asesor, resultado in result.all():
+            if resultado not in RESULTADOS_CERRADOS:
+                conteos[asesor] += 1
+        return conteos
 
 
 async def crear_usuario(username: str, password: str, nombre: str, rol: str, nivel: str | None = None):

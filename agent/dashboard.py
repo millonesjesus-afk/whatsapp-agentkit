@@ -38,10 +38,10 @@ from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse, Resp
 from agent.tiempo_real import gestor_conexiones
 from agent.memory import (
     listar_leads, obtener_lead, obtener_historial, actualizar_lead,
-    obtener_usuario, listar_asesores, guardar_mensaje, obtener_ultimo_mensaje,
+    obtener_usuario, listar_asesores, guardar_mensaje, obtener_ultimos_mensajes,
     asignar_asesor_a_lead, marcar_lead_visto, actualizar_disponibilidad, actualizar_nivel_asesor,
     listar_campanas, crear_campana, actualizar_campana, contar_leads_por_campana, eliminar_campana,
-    cambiar_password, contar_leads_activos, RESULTADOS_CERRADOS, listar_leads_agendados,
+    cambiar_password, contar_leads_activos_por_asesor, RESULTADOS_CERRADOS, listar_leads_agendados,
     obtener_configuracion, guardar_configuracion,
     crear_archivo_adjunto, obtener_archivo_adjunto, listar_archivos_reutilizables,
     eliminar_archivo_reutilizable, obtener_telefono_de_archivo,
@@ -1183,9 +1183,12 @@ async def _renderizar_rail_estados(usuario: dict, datos: dict, estado_filtro: st
         asesores = await listar_asesores()
         filas_equipo = []
         if estado_filtro == "todos":
-            # Sin filtro de estado: se muestra la carga activa total de cada asesor.
+            # Sin filtro de estado: se muestra la carga activa total de cada
+            # asesor — una sola consulta para todo el equipo, no una por
+            # asesor (ver contar_leads_activos_por_asesor).
+            conteos_carga = await contar_leads_activos_por_asesor([a["username"] for a in asesores])
             for a in asesores:
-                carga = await contar_leads_activos(a["username"])
+                carga = conteos_carga.get(a["username"], 0)
                 filas_equipo.append(_item_equipo(a["nombre"], a["username"], carga, asesor_filtro == a["username"]))
         else:
             # Con un estado filtrado (ej. "En atención"): solo se listan los
@@ -1273,9 +1276,14 @@ async def _renderizar_lista_conversaciones(
     query = f"?asesor={html.escape(asesor_filtro)}" if asesor_filtro else ""
     mapa_canales = datos.get("mapa_canales") or {}
 
+    # Una sola consulta para el último mensaje de TODOS los leads visibles,
+    # no una por lead (ver obtener_ultimos_mensajes) — con Postgres en
+    # producción, N consultas secuenciales se sienten en cada carga de página.
+    ultimos_mensajes = await obtener_ultimos_mensajes([l["telefono"] for l in leads_filtrados])
+
     items = []
     for lead in leads_filtrados:
-        ultimo = await obtener_ultimo_mensaje(lead["telefono"])
+        ultimo = ultimos_mensajes.get(lead["telefono"])
         preview = (ultimo["content"][:60] + "…") if ultimo and len(ultimo["content"]) > 60 else (ultimo["content"] if ultimo else "")
         hora = lead["actualizado"].strftime("%d/%m %H:%M")
         activo = " activo" if lead["telefono"] == telefono_activo else ""
