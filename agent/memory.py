@@ -140,8 +140,12 @@ class Lead(Base):
     resultado: Mapped[str | None] = mapped_column(String(50), nullable=True)
     # Solo aplica si resultado == "agendado" — fecha/hora de la cita con el cliente
     fecha_agendada: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
-    # Asesor al que el supervisor asignó este lead (username de Usuario)
-    asesor_asignado: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    # Asesor al que el supervisor asignó este lead (username de Usuario) —
+    # indexado: listar_leads, contar_leads_activos_por_asesor y
+    # listar_leads_agendados filtran por esta columna en cada carga de
+    # página, y sin índice eso se vuelve una revisión completa de la tabla
+    # a medida que se acumulan leads reales.
+    asesor_asignado: Mapped[str | None] = mapped_column(String(50), nullable=True, index=True)
     # Cierre de venta (si resultado == "vendido") — SUPERADOS por la tabla
     # LineaVenta (un lead puede vender varios artefactos o un mix de
     # artefacto + servicio, no solo uno). Se dejan sin usar en vez de
@@ -188,7 +192,10 @@ class Lead(Base):
     # activarse, así el caso aparece en listar_leads_esperando_asesor() para
     # que un supervisor lo reclame y lo asigne a una persona real.
     pausado_manual: Mapped[bool] = mapped_column(Boolean, default=False)
-    actualizado: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    # Indexado: listar_leads ordena por esta columna en CADA carga del
+    # dashboard (la vista más visitada del panel) — sin índice, ordenar se
+    # vuelve más lento a medida que se acumulan leads reales.
+    actualizado: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, index=True)
     creado: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
