@@ -11,7 +11,7 @@ import logging
 from datetime import datetime
 from cryptography.fernet import Fernet
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, aliased
 from sqlalchemy import String, Text, DateTime, select, Integer, Boolean, func, case, delete
 from dotenv import load_dotenv
 
@@ -498,23 +498,31 @@ async def obtener_historial(telefono: str, limite: int = 20) -> list[dict]:
 async def obtener_ultimos_mensajes(telefonos: list[str]) -> dict[str, dict]:
     """Último mensaje de cada teléfono (para la vista previa en la bandeja),
     en una sola consulta para toda la lista visible — no una por lead en un
-    loop (mismo problema de N consultas que contar_leads_activos_por_asesor)."""
+    loop (mismo problema de N consultas que contar_leads_activos_por_asesor).
+
+    Usa row_number() por teléfono en vez de traer todos los mensajes y
+    quedarse con el primero en Python — un lead con una conversación larga
+    (cientos de mensajes) habría traído toda esa historia solo para
+    descartarla, lo cual es justo el mismo tipo de desperdicio que se
+    intentaba evitar. row_number() funciona igual en SQLite y Postgres."""
     if not telefonos:
         return {}
     async with async_session() as session:
-        query = (
-            select(Mensaje)
-            .where(Mensaje.telefono.in_(telefonos))
-            .order_by(Mensaje.telefono, Mensaje.timestamp.desc())
+        fila = (
+            func.row_number()
+            .over(partition_by=Mensaje.telefono, order_by=Mensaje.timestamp.desc())
+            .label("fila")
         )
+        subconsulta = (
+            select(Mensaje).where(Mensaje.telefono.in_(telefonos)).add_columns(fila).subquery()
+        )
+        ultimo_por_telefono = aliased(Mensaje, subconsulta)
+        query = select(ultimo_por_telefono).where(subconsulta.c.fila == 1)
         result = await session.execute(query)
-        ultimos: dict[str, dict] = {}
-        for msg in result.scalars().all():
-            # Ordenado por timestamp desc dentro de cada teléfono — la
-            # primera fila que se ve de cada uno ya es la más reciente.
-            if msg.telefono not in ultimos:
-                ultimos[msg.telefono] = {"role": msg.role, "content": msg.content, "timestamp": msg.timestamp}
-        return ultimos
+        return {
+            msg.telefono: {"role": msg.role, "content": msg.content, "timestamp": msg.timestamp}
+            for msg in result.scalars().all()
+        }
 
 
 def _lead_a_dict(lead: Lead) -> dict:
