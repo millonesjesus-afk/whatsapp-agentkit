@@ -18,19 +18,23 @@
 > portada, control de versiones, objetivo, alcance, glosario y Capítulos 0-7: filosofía,
 > personalidad de marca, foundations, color system con dark mode, tipografía (revisada
 > técnicamente: Inter para producto, Poppins reservado a marca), iconografía y motion; sin
-> componentes todavía) y
+> componentes todavía),
 > [`MAIEK_AI_COMPONENT_SYSTEM.md`](MAIEK_AI_COMPONENT_SYSTEM.md) (Component Design System v1.0,
 > Approved — catálogo de ~48 componentes construidos sobre los tokens del Design Language: objetivo,
 > uso, variantes, estados, accesibilidad, responsive, buenas prácticas y relaciones entre
-> componentes, más el orden recomendado para implementarlos — **ambos guardados solo como
+> componentes, más el orden recomendado para implementarlos — **los tres guardados solo como
 > referencia, todavía NO aplicados al panel de Gaso+**, que sigue usando su paleta y componentes
 > actuales hasta que se confirme el cambio) y
+> [`MAIEK_AI_PRODUCT_EXPERIENCE.md`](MAIEK_AI_PRODUCT_EXPERIENCE.md) (MPX v1.0 — cómo debe
+> sentirse, comportarse e interactuar Maiek AI con sus usuarios: Interaction Model, protocolo de
+> interacción con IA, Decision Experience. Se construye y aprueba **por partes** — **Parte I
+> (Capítulos 0-3): Approved**; Partes II y III todavía no iniciadas) y
 > [`GASOPLUS_PRODUCT_FRAMEWORK.md`](GASOPLUS_PRODUCT_FRAMEWORK.md) (visión de producto de Gaso+
 > específicamente: módulos, roadmap, y qué de eso ya existe en el código vs. qué es visión a
 > futuro) y [`CALIDDA_CLIENT_FRAMEWORK.md`](CALIDDA_CLIENT_FRAMEWORK.md) (conocimiento del negocio
 > de Cálidda para configurar Gaso+ — **guardado solo como referencia, nada de ahí se agrega a
 > Gabi/`/knowledge`/`prompts.yaml`**, es config del panel/CRM interno, no contenido para
-> conversaciones de WhatsApp). Los siete deben guiar las decisiones de arquitectura y diseño en
+> conversaciones de WhatsApp). Los ocho deben guiar las decisiones de arquitectura y diseño en
 > este repo.
 
 ---
@@ -1366,3 +1370,17 @@ ENVIRONMENT=development  # development | production
 DATABASE_URL=sqlite+aiosqlite:///./agentkit.db  # local
 # DATABASE_URL=postgresql+asyncpg://...          # producción Railway
 ```
+
+## Regla Graphify (lectura obligatoria antes de buscar)
+
+Antes de hacer Glob, Grep o Read sobre múltiples archivos, primero:
+
+1. Verifica que `graphify-out/GRAPH_REPORT.md` exista. Si no, sugiéreme correr `/graphify .` y espera mi confirmación.
+2. Si existe, léelo primero. Identifica si la respuesta a mi pregunta ya está ahí (god nodes, comunidades, suggested questions).
+3. Si la pregunta es sobre relaciones entre módulos, usa `/graphify query "..."` antes de abrir archivos.
+4. Si es sobre cómo se conectan dos cosas, usa `/graphify path "NodeA" "NodeB"`.
+5. Solo después, si el grafo no responde, abre archivos.
+
+Esta regla aplica salvo que yo te diga explícitamente "ignora el grafo" o "abre directo el archivo X".
+
+Notas adicionales: `graphify explain "<concepto>"` da una explicación enfocada de un nodo puntual (más chico que abrir GRAPH_REPORT.md completo); si existe `graphify-out/wiki/index.md`, sirve para navegación amplia en vez de recorrer el código a mano; después de modificar código, correr `graphify update .` mantiene el grafo al día (solo AST, sin costo de API).
