@@ -13,15 +13,19 @@
 > portada, control de versiones, objetivo, alcance, glosario y Capítulos 0-7: filosofía,
 > personalidad de marca, foundations, color system con dark mode, tipografía (revisada
 > técnicamente: Inter para producto, Poppins reservado a marca), iconografía y motion; sin
-> componentes todavía, eso es la Fase 2 descrita como "Próximo Entregable" — **guardado solo
-> como referencia, todavía NO aplicado al panel de Gaso+**, que sigue usando su paleta actual
-> hasta que se confirme el cambio) y
+> componentes todavía) y
+> [`MAIEK_AI_COMPONENT_SYSTEM.md`](MAIEK_AI_COMPONENT_SYSTEM.md) (Component Design System v1.0,
+> Approved — catálogo de ~48 componentes construidos sobre los tokens del Design Language: objetivo,
+> uso, variantes, estados, accesibilidad, responsive, buenas prácticas y relaciones entre
+> componentes, más el orden recomendado para implementarlos — **ambos guardados solo como
+> referencia, todavía NO aplicados al panel de Gaso+**, que sigue usando su paleta y componentes
+> actuales hasta que se confirme el cambio) y
 > [`GASOPLUS_PRODUCT_FRAMEWORK.md`](GASOPLUS_PRODUCT_FRAMEWORK.md) (visión de producto de Gaso+
 > específicamente: módulos, roadmap, y qué de eso ya existe en el código vs. qué es visión a
 > futuro) y [`CALIDDA_CLIENT_FRAMEWORK.md`](CALIDDA_CLIENT_FRAMEWORK.md) (conocimiento del negocio
 > de Cálidda para configurar Gaso+ — **guardado solo como referencia, nada de ahí se agrega a
 > Gabi/`/knowledge`/`prompts.yaml`**, es config del panel/CRM interno, no contenido para
-> conversaciones de WhatsApp). Los cinco deben guiar las decisiones de arquitectura y diseño en
+> conversaciones de WhatsApp). Los seis deben guiar las decisiones de arquitectura y diseño en
 > este repo.
 
 ---
