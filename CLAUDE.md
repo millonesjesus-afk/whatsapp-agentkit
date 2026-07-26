@@ -9,10 +9,13 @@
 > (identidad, principios y forma de razonar de Maiek AI),
 > [`MAIEK_AI_PLATFORM_ARCHITECTURE.md`](MAIEK_AI_PLATFORM_ARCHITECTURE.md) (arquitectura técnica
 > de la plataforma: capas, qué va en Platform vs. Producto vs. Cliente, multi-tenant, API first) y
-> [`MAIEK_AI_DESIGN_SYSTEM.md`](MAIEK_AI_DESIGN_SYSTEM.md) (Design Language v1.0 — Fase 1
-> Foundations: filosofía, grid, espaciado, elevación, motion, paleta y tipografía; sin
-> componentes todavía, eso es Fase 2 — **guardado solo como referencia, todavía NO aplicado al
-> panel de Gaso+**, que sigue usando su paleta actual hasta que se confirme el cambio) y
+> [`MAIEK_AI_DESIGN_SYSTEM.md`](MAIEK_AI_DESIGN_SYSTEM.md) (Design Language v1.1, Approved —
+> portada, control de versiones, objetivo, alcance, glosario y Capítulos 0-7: filosofía,
+> personalidad de marca, foundations, color system con dark mode, tipografía (revisada
+> técnicamente: Inter para producto, Poppins reservado a marca), iconografía y motion; sin
+> componentes todavía, eso es la Fase 2 descrita como "Próximo Entregable" — **guardado solo
+> como referencia, todavía NO aplicado al panel de Gaso+**, que sigue usando su paleta actual
+> hasta que se confirme el cambio) y
 > [`GASOPLUS_PRODUCT_FRAMEWORK.md`](GASOPLUS_PRODUCT_FRAMEWORK.md) (visión de producto de Gaso+
 > específicamente: módulos, roadmap, y qué de eso ya existe en el código vs. qué es visión a
 > futuro) y [`CALIDDA_CLIENT_FRAMEWORK.md`](CALIDDA_CLIENT_FRAMEWORK.md) (conocimiento del negocio
