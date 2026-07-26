@@ -40,3 +40,7 @@ Thumbs.db
 
 # Node (si se usa para Claude Code)
 node_modules/
+
+# Graphify — artefacto generado (grafo, reporte, cache), se reconstruye
+# automáticamente vía hooks (post-commit / post-checkout), nunca a mano
+graphify-out/

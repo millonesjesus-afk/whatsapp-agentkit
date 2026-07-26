@@ -1,0 +1,38 @@
+# Salida propia de graphify — nunca indexar su propio output
+graphify-out/
+
+# Control de versiones
+.git/
+
+# Node (previsto por si se agrega tooling JS más adelante)
+node_modules/
+.next/
+dist/
+build/
+vendor/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+env/
+*.egg-info/
+
+# Base de datos local (mismo criterio que .gitignore — pueden tener datos reales de clientes)
+*.db
+*.sqlite
+*.sqlite3
+
+# Archivos adjuntos subidos por asesores (proformas/catálogos) — no son parte del código/docs
+data/archivos/
+
+# Secretos
+.env
+
+# OS / IDE
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
