@@ -1254,8 +1254,10 @@ async def _renderizar_rail_estados(usuario: dict, datos: dict, estado_filtro: st
                 if cantidad > 0:
                     filas_equipo.append(_item_equipo(a["nombre"], a["username"], cantidad, asesor_filtro == a["username"]))
         equipo_html = f"""
-        <div class="sidebar-subtitulo">EQUIPO</div>
-        {''.join(filas_equipo) or '<p class="px-3 text-muted small">Ningún asesor tiene leads en este estado.</p>'}
+        {_subtitulo_contraible("EQUIPO", "equipo-contenido")}
+        <div id="equipo-contenido">
+            {''.join(filas_equipo) or '<p class="px-3 text-muted small">Ningún asesor tiene leads en este estado.</p>'}
+        </div>
         """
 
     # Solo se muestra si hay más de un canal configurado — con uno solo, un
@@ -1296,8 +1298,8 @@ async def _renderizar_rail_estados(usuario: dict, datos: dict, estado_filtro: st
                 {item_todos}
                 {nav_estados}
             </div>
-            {equipo_html}
         </div>
+        {equipo_html}
     </div>
     """
 
