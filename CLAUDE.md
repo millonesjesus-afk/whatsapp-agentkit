@@ -7,8 +7,13 @@
 > Este proyecto (Gaso+) ya pasó la fase de onboarding y está en desarrollo activo del panel
 > interno — para el trabajo en curso, leer también [`MAIEK_AI_FRAMEWORK.md`](MAIEK_AI_FRAMEWORK.md)
 > (identidad, principios y forma de razonar de Maiek AI),
-> [`MAIEK_AI_PLATFORM_ARCHITECTURE.md`](MAIEK_AI_PLATFORM_ARCHITECTURE.md) (arquitectura técnica
-> de la plataforma: capas, qué va en Platform vs. Producto vs. Cliente, multi-tenant, API first) y
+> [`MAIEK_AI_PLATFORM_ARCHITECTURE.md`](MAIEK_AI_PLATFORM_ARCHITECTURE.md) (arquitectura
+> **técnica** de la plataforma: capas, qué va en Platform vs. Producto vs. Cliente, multi-tenant,
+> API first),
+> [`MAIEK_AI_PRODUCT_ARCHITECTURE.md`](MAIEK_AI_PRODUCT_ARCHITECTURE.md) (MPA v1.0, Approved —
+> arquitectura **funcional**: no confundir con el documento anterior, que es técnico; este define
+> los 9 módulos de producto de Maiek AI, responsabilidades, relaciones, flujo de información,
+> capacidades de IA exclusivas, roles/permisos de alto nivel y navegación principal) y
 > [`MAIEK_AI_DESIGN_SYSTEM.md`](MAIEK_AI_DESIGN_SYSTEM.md) (Design Language v1.1, Approved —
 > portada, control de versiones, objetivo, alcance, glosario y Capítulos 0-7: filosofía,
 > personalidad de marca, foundations, color system con dark mode, tipografía (revisada
@@ -25,7 +30,7 @@
 > futuro) y [`CALIDDA_CLIENT_FRAMEWORK.md`](CALIDDA_CLIENT_FRAMEWORK.md) (conocimiento del negocio
 > de Cálidda para configurar Gaso+ — **guardado solo como referencia, nada de ahí se agrega a
 > Gabi/`/knowledge`/`prompts.yaml`**, es config del panel/CRM interno, no contenido para
-> conversaciones de WhatsApp). Los seis deben guiar las decisiones de arquitectura y diseño en
+> conversaciones de WhatsApp). Los siete deben guiar las decisiones de arquitectura y diseño en
 > este repo.
 
 ---
