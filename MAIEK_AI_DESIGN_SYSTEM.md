@@ -1,7 +1,7 @@
-# Maçllec AI — Design System
+# Maiek AI — Design System
 
-> Depende de [`MACLLEC_AI_FRAMEWORK.md`](MACLLEC_AI_FRAMEWORK.md) y
-> [`MACLLEC_AI_PLATFORM_ARCHITECTURE.md`](MACLLEC_AI_PLATFORM_ARCHITECTURE.md).
+> Depende de [`MAIEK_AI_FRAMEWORK.md`](MAIEK_AI_FRAMEWORK.md) y
+> [`MAIEK_AI_PLATFORM_ARCHITECTURE.md`](MAIEK_AI_PLATFORM_ARCHITECTURE.md).
 > Versión condensada del original — mismos principios y valores exactos, sin el formato de una idea por línea.
 >
 > **Estado: guardado solo como referencia.** Todavía NO está aplicado al panel de Gaso+ — el
@@ -10,7 +10,7 @@
 
 ## Propósito y filosofía
 
-Define identidad visual, UX y principios de diseño/interacción de todos los productos Maçllec AI — prevalece sobre cualquier diseño puntual que lo contradiga. Maçllec AI hace software empresarial que nunca debe sentirse como un ERP antiguo: cada pantalla debe transmitir tecnología, innovación, inteligencia, rapidez, claridad, elegancia, confianza, productividad, automatización y simplicidad. Ligero, natural, moderno.
+Define identidad visual, UX y principios de diseño/interacción de todos los productos Maiek AI — prevalece sobre cualquier diseño puntual que lo contradiga. Maiek AI hace software empresarial que nunca debe sentirse como un ERP antiguo: cada pantalla debe transmitir tecnología, innovación, inteligencia, rapidez, claridad, elegancia, confianza, productividad, automatización y simplicidad. Ligero, natural, moderno.
 
 **Referencias de inspiración** (nunca copiar, solo inspirarse — construir identidad propia): Microsoft/Azure Portal, HubSpot, Salesforce, Linear, Notion, ClickUp, Stripe Dashboard, Supabase, Vercel, Figma.
 
@@ -25,25 +25,34 @@ Toda pantalla debe cumplir:
 6. Toda interacción da una respuesta inmediata.
 7. La plataforma debe sentirse más rápida de lo que realmente es.
 8. La IA complementa el trabajo del usuario, nunca lo interrumpe.
-9. Todo componente debe poder reutilizarse en cualquier producto de Maçllec AI.
+9. Todo componente debe poder reutilizarse en cualquier producto de Maiek AI.
 10. Si un diseño no mejora la productividad del usuario, se replantea.
 
 ## Identidad visual
 
-Maçllec AI es la empresa; cada producto tiene identidad propia bajo el paraguas de la marca: `Maçllec AI → Gaso+ → "Powered by Maçllec AI"`. El usuario siempre debe poder reconocer que usa una plataforma de Maçllec AI. Maçllec AI nunca compite visualmente con el producto — es un sello de calidad, no un logo protagonista.
+Maiek AI es la empresa; cada producto tiene identidad propia bajo el paraguas de la marca: `Maiek AI → Gaso+ → "Powered by Maiek AI"`. El usuario siempre debe poder reconocer que usa una plataforma de Maiek AI. Maiek AI nunca compite visualmente con el producto — es un sello de calidad, no un logo protagonista.
 
 ## Paleta de colores
 
+### Identidad de marca (Maiek AI)
+
 | Uso | Hex | Nombre |
 |---|---|---|
-| Primario | `#00A1DE` | Celeste institucional |
-| Secundario | `#3CCBDA` | Aquamarina |
+| Primario | `#1677FF` | Azul tecnológico |
+| Secundario | `#38BDF8` | Celeste |
+| Texto de marca | `#0B1D3A` | Azul navy |
+| Acento / isotipo | `#C6A66B` | Dorado |
+| Fondo | `#F2F4F7` | Gris claro |
+
+### Estados funcionales (sin cambios respecto a la paleta anterior)
+
+| Uso | Hex | Nombre |
+|---|---|---|
 | Éxito | `#00A34B` | Verde |
 | Advertencia | `#FAB200` | Amarillo |
 | Error | `#EF4444` | Rojo |
 | Texto principal | `#1F2937` | — |
 | Texto secundario | `#6B7280` | — |
-| Fondo | `#F8FAFC` | — |
 | Cards | `#FFFFFF` | — |
 | Bordes | `#E5E7EB` | — |
 
@@ -84,7 +93,7 @@ Desktop primero, tablet optimizado, mobile funcional — nunca sacrificar produc
 
 ## Branding por producto
 
-Cada producto tiene su propia identidad (ej. "Gaso+ — Commercial Operating System — Powered by Maçllec AI").
+Cada producto tiene su propia identidad (ej. "Gaso+ — Commercial Operating System — Powered by Maiek AI").
 
 ## Microcopy
 

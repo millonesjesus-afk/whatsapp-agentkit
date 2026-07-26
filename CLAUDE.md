@@ -5,11 +5,11 @@
 > NO modificar manualmente a menos que sepas lo que haces.
 >
 > Este proyecto (Gaso+) ya pasó la fase de onboarding y está en desarrollo activo del panel
-> interno — para el trabajo en curso, leer también [`MACLLEC_AI_FRAMEWORK.md`](MACLLEC_AI_FRAMEWORK.md)
-> (identidad, principios y forma de razonar de Maçllec AI),
-> [`MACLLEC_AI_PLATFORM_ARCHITECTURE.md`](MACLLEC_AI_PLATFORM_ARCHITECTURE.md) (arquitectura técnica
+> interno — para el trabajo en curso, leer también [`MAIEK_AI_FRAMEWORK.md`](MAIEK_AI_FRAMEWORK.md)
+> (identidad, principios y forma de razonar de Maiek AI),
+> [`MAIEK_AI_PLATFORM_ARCHITECTURE.md`](MAIEK_AI_PLATFORM_ARCHITECTURE.md) (arquitectura técnica
 > de la plataforma: capas, qué va en Platform vs. Producto vs. Cliente, multi-tenant, API first) y
-> [`MACLLEC_AI_DESIGN_SYSTEM.md`](MACLLEC_AI_DESIGN_SYSTEM.md) (paleta de colores, tipografía y specs
+> [`MAIEK_AI_DESIGN_SYSTEM.md`](MAIEK_AI_DESIGN_SYSTEM.md) (paleta de colores, tipografía y specs
 > de componentes — **guardado solo como referencia, todavía NO aplicado al panel de Gaso+**, que
 > sigue usando su paleta actual hasta que se confirme el cambio) y
 > [`GASOPLUS_PRODUCT_FRAMEWORK.md`](GASOPLUS_PRODUCT_FRAMEWORK.md) (visión de producto de Gaso+

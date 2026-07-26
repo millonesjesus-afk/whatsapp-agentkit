@@ -1,11 +1,11 @@
-# Maçllec AI Platform — Arquitectura Oficial
+# Maiek AI Platform — Arquitectura Oficial
 
-> Depende de [`MACLLEC_AI_FRAMEWORK.md`](MACLLEC_AI_FRAMEWORK.md) (Master Framework).
+> Depende de [`MAIEK_AI_FRAMEWORK.md`](MAIEK_AI_FRAMEWORK.md) (Master Framework).
 > Versión condensada del original — mismos principios, sin el formato de una idea por línea.
 
 ## Propósito
 
-Maçllec AI Platform es la base tecnológica sobre la que se construyen todos los productos de Maçllec AI. Ningún producto se desarrolla desde cero — todos reutilizan los servicios, componentes y módulos definidos por la Platform. La plataforma es el núcleo tecnológico de la empresa; los productos solo agregan conocimiento específico del negocio.
+Maiek AI Platform es la base tecnológica sobre la que se construyen todos los productos de Maiek AI. Ningún producto se desarrolla desde cero — todos reutilizan los servicios, componentes y módulos definidos por la Platform. La plataforma es el núcleo tecnológico de la empresa; los productos solo agregan conocimiento específico del negocio.
 
 ## Visión
 
@@ -15,14 +15,14 @@ Evolucionar hasta ser un **Enterprise Operating Platform** capaz de soportar mú
 
 - **Modular** — cada funcionalidad existe como módulo independiente, activable/desactivable sin afectar el resto del sistema.
 - **Escalable** — soporta el crecimiento de usuarios, empresas y productos; nunca se diseña pensando solo en el cliente actual.
-- **Reutilizable** — todo componente debe poder usarse en varios productos; si sirve para más de uno, va dentro de Maçllec AI Platform.
+- **Reutilizable** — todo componente debe poder usarse en varios productos; si sirve para más de uno, va dentro de Maiek AI Platform.
 - **Desacoplada** — los productos nunca dependen directamente entre sí, todos consumen los servicios comunes de la plataforma.
 - **Extensible** — permite agregar módulos nuevos sin modificar la arquitectura existente.
 
 ## Arquitectura general
 
 ```
-Maçllec AI → Maçllec AI Platform → Servicios Compartidos → Productos → Clientes
+Maiek AI → Maiek AI Platform → Servicios Compartidos → Productos → Clientes
 ```
 
 La plataforma es el corazón, los productos son implementaciones, los clientes son configuraciones.
@@ -31,13 +31,13 @@ La plataforma es el corazón, los productos son implementaciones, los clientes s
 
 1. **Core Platform** — autenticación, usuarios, roles, permisos, empresas, configuraciones, sesiones, seguridad, auditoría, logs.
 2. **Business Services** — CRM, clientes, leads, ventas, pedidos, cotizaciones, catálogo, inventario, financiamiento, reportes, campañas, automatizaciones, agenda, documentos.
-3. **AI Services** (Maçllec AI Intelligence) — agentes IA (Claude, GPT), predicciones, recomendaciones, copilot, respuestas automáticas, clasificación, análisis, resúmenes, generación de contenido, análisis documental, búsquedas inteligentes.
+3. **AI Services** (Maiek AI Intelligence) — agentes IA (Claude, GPT), predicciones, recomendaciones, copilot, respuestas automáticas, clasificación, análisis, resúmenes, generación de contenido, análisis documental, búsquedas inteligentes.
 4. **Communication Services** — WhatsApp, correo, SMS, llamadas, notificaciones, push, chat, Meta, integraciones, webhooks.
 5. **Analytics** — dashboard, KPIs, Power BI, indicadores, embudos, conversiones, forecast, análisis comercial, machine learning.
 
 ## Productos y clientes
 
-Los productos nunca desarrollan funcionalidades comunes, solo agregan conocimiento específico. Ejemplo: Gaso+ utiliza CRM, Dashboard, IA, Usuarios, Catálogo, Permisos, Notificaciones y Reportes — todo proveniente de Maçllec AI Platform.
+Los productos nunca desarrollan funcionalidades comunes, solo agregan conocimiento específico. Ejemplo: Gaso+ utiliza CRM, Dashboard, IA, Usuarios, Catálogo, Permisos, Notificaciones y Reportes — todo proveniente de Maiek AI Platform.
 
 Cada cliente solo personaliza branding, catálogo, procesos, usuarios, permisos, integraciones, reglas y campañas — nunca modifica el núcleo.
 
@@ -76,7 +76,7 @@ La IA nunca es un módulo aislado, es una capacidad transversal de toda la plata
 
 ## Experiencia de usuario
 
-Consistente entre todos los productos — alguien que ya conoce Gaso+ debe sentirse cómodo usando cualquier otro producto de Maçllec AI.
+Consistente entre todos los productos — alguien que ya conoce Gaso+ debe sentirse cómodo usando cualquier otro producto de Maiek AI.
 
 ## Roadmap por fases
 
@@ -90,4 +90,4 @@ Consistente entre todos los productos — alguien que ya conoce Gaso+ debe senti
 
 ## Regla principal
 
-Nunca desarrollar pensando únicamente en el presente — toda decisión técnica debe fortalecer Maçllec AI Platform y facilitar la creación de futuros productos y clientes. Cada línea de código debe incrementar el valor de la plataforma.
+Nunca desarrollar pensando únicamente en el presente — toda decisión técnica debe fortalecer Maiek AI Platform y facilitar la creación de futuros productos y clientes. Cada línea de código debe incrementar el valor de la plataforma.
