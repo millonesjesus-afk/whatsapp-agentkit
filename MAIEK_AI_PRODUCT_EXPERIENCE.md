@@ -1,15 +1,16 @@
 # Maiek AI — Product Experience (MPX)
 
-**Versión 1.0 · Estado: Parte I Approved · Parte II Approved (Parte III pendiente)**
+**Versión 1.0 · Estado: Approved — completo (Partes I, II y III)**
 
 | | |
 |---|---|
 | Documento | Maiek Product Experience (MPX) |
 | Proyecto | Maiek AI |
-| Versión | 1.0 (en construcción por partes) |
-| Estado | **Parte I: Approved** · **Parte II: Approved** · Parte III: no iniciada |
+| Versión | 1.0 |
+| Estado | **Approved** — Parte I, Parte II y Parte III completas |
 | Fecha de creación | 2026-07-26 |
 | Autor | Claude, a pedido de Jesús Millones |
+| Fecha de aprobación (v1.0 completo) | 2026-07-28 |
 | Última actualización | 2026-07-28 |
 
 ## Dependencias
@@ -37,6 +38,8 @@
 | 1.0 (Parte I, Approved) | 2026-07-26 | Claude | Revisión de arquitectura de contenido de la Parte I: se agregan 3 principios nuevos (Explainability First, Memory Experience, Progressive Intelligence) declarados en el Capítulo 0 y operados en los Capítulos 2-3; "Confianza media" renombrada a "Requiere validación" (Capítulo 2); se retira el valor fijo de 400ms del Capítulo 1, reemplazado por referencia al umbral del Design System. Parte I congelada como **Approved**. |
 | 1.0 (Parte II, borrador) | 2026-07-28 | Claude | Parte II — Experiencia del Usuario: Capítulos 4 (Voz y contenido), 5 (Feedback y estados del sistema), 6 (Onboarding y primeras impresiones) y 7 (Notificaciones e interrupciones). Estructura revisada y aprobada por partes antes de redactar el contenido (índice, luego 6 principios adicionales integrados: Emotional Feedback, Empty State Intelligence, Building Trust, Delight, Cross-channel Experience, Every Screen Teaches). Regla editorial nueva aplicada en toda la Parte: todo principio importante incluye ejemplo concreto y, cuando aporta valor, contraejemplo de qué no hacer. Pendiente de revisión y aprobación. |
 | 1.0 (Parte II, Approved) | 2026-07-28 | Claude | Revisión final de la Parte II: se agrega un séptimo principio adicional, **Predictable Interaction** (la interacción debe ser anticipable; la sorpresa positiva pertenece al valor entregado, nunca al comportamiento de la interfaz), operado en el límite de Delight (Capítulo 5) y en "Consistencia antes que variedad" de Building Trust (Capítulo 6); se agrega en el Capítulo 6 la definición explícita "el onboarding termina cuando el usuario alcanza autonomía, no cuando termina el tutorial". Parte II congelada como **Approved**. |
+| 1.0 (Parte III, borrador) | 2026-07-28 | Claude | Parte III — Calidad y Evolución: Capítulos 8 (Personalización y continuidad), 9 (Manejo de errores y casos límite), 10 (Medición de experiencia) y 11 (Product Experience Governance). Arquitectura revisada y aprobada por partes antes de redactar contenido (índice detallado por 7 dimensiones, luego 3 ajustes incorporados: principio **Evidence over Opinion** complementario a Stable by Default; **Experience Review Checklist** operativo en el Capítulo 11; distinción explícita de tres tipos de memoria — persistente, conversacional, contexto temporal — en el Capítulo 8). QA arquitectónico aplicado: sin contradicciones ni duplicación de reglas de Parte I/II detectadas. Pendiente de revisión y aprobación final del usuario. |
+| 1.0 (completo, Approved) | 2026-07-28 | Claude | Cierre del MPX v1.0: se agregan las secciones finales **Jerarquía documental** (orden de precedencia Framework → MPA → MDL → CDS → MPX → especificaciones derivadas, con regla de resolución de conflictos) y **Estado del documento** (Approved, versión 1.0, congelado, regla de próxima revisión atada exclusivamente al proceso de los Capítulos 10-11). Con esto, las Partes I, II y III quedan Approved — el MPX v1.0 se congela como documento completo. |
 
 Este documento se construye y aprueba **por partes**, a pedido explícito del usuario — cada
 parte se revisa antes de continuar con la siguiente. La tabla de arriba se actualiza al cerrar
@@ -46,7 +49,7 @@ cada parte, no solo al final del documento completo.
 
 # Índice del documento completo
 
-*(referencia — la Parte I y la Parte II están desarrolladas en este archivo; ver estructura aprobada)*
+*(referencia — las tres Partes están desarrolladas en este archivo; ver estructura aprobada)*
 
 **Parte I — Fundamentos de la Experiencia** · "¿Cómo piensa y toma decisiones Maiek AI?"
 - Capítulo 0 — Marco de experiencia
@@ -60,7 +63,7 @@ cada parte, no solo al final del documento completo.
 - Capítulo 6 — Onboarding y primeras impresiones
 - Capítulo 7 — Notificaciones e interrupciones
 
-**Parte III — Calidad y Evolución** *(pendiente)* · "¿Cómo garantizamos que la experiencia se mantenga consistente y evolucione con el tiempo?"
+**Parte III — Calidad y Evolución** *(Approved)* · "¿Cómo garantizamos que la experiencia se mantenga consistente y evolucione con el tiempo?"
 - Capítulo 8 — Personalización y continuidad
 - Capítulo 9 — Manejo de errores y casos límite
 - Capítulo 10 — Medición de experiencia
@@ -737,3 +740,388 @@ es únicamente el formato de entrega, nunca el criterio de cuándo y cuánto not
 
 *Fin de la Parte II — Approved. Parte III (Calidad y Evolución) pendiente de desarrollo,
 siguiendo el mismo proceso: construir, revisar, aprobar por partes.*
+
+---
+
+# PARTE III — Calidad y Evolución
+
+*Esta parte responde una sola pregunta: ¿cómo garantizamos que la experiencia de Maiek AI siga
+siendo consistente, medible y evolucione correctamente con el tiempo? Ningún capítulo de esta
+Parte define una regla nueva de interacción, protocolo de IA, feedback, onboarding o
+notificación — todas esas ya están cerradas en las Partes I y II. Esta Parte mide, gobierna y
+preserva lo ya definido, y define el proceso por el cual eso puede cambiar sin dejar de ser
+Maiek AI.*
+
+*Regla editorial heredada de la Parte II: todo principio o regla importante incluye un ejemplo
+concreto de aplicación y, cuando aporta valor, un contraejemplo de qué no hacer.*
+
+## Principios adicionales de esta Parte
+
+Dos principios nuevos, ambos de gobernanza — se declaran una vez acá y se operan
+fundamentalmente en los Capítulos 10 y 11. Son complementarios, no redundantes: uno protege, el
+otro justifica.
+
+- **Stable by Default.** Las reglas del MPX cambian por evidencia y revisión de gobernanza —
+  nunca por preferencia individual, presión de una sola persona o urgencia de una funcionalidad
+  puntual. Protege la estabilidad del sistema completo frente al cambio casual.
+  **Ejemplo:** una funcionalidad que necesita romper la regla de reversibilidad (Capítulo 1)
+  para un caso de negocio específico no cambia la regla — se registra como Experience Debt
+  (Capítulo 11) hasta que exista evidencia suficiente para evaluar un cambio real.
+  **Qué no hacer:** cambiar el umbral de confianza del protocolo de incertidumbre (Capítulo 2)
+  porque un asesor senior lo pidió en una reunión — sin datos de Medición de experiencia
+  (Capítulo 10) que respalden que el umbral actual está mal calibrado, ese cambio no tiene base.
+- **Evidence over Opinion.** Toda modificación relevante del MPX se sustenta en evidencia
+  objetiva — principalmente las métricas del Capítulo 10 — nunca únicamente en opiniones,
+  preferencias individuales o jerarquía dentro del equipo. Responde *qué cuenta como
+  justificación válida* para una evolución; Stable by Default responde *qué tan fácil debe ser
+  cambiar algo* (difícil, por diseño). Uno protege, el otro define cómo se gana el derecho a
+  cambiar.
+  **Ejemplo:** una propuesta de cambiar el modelo de respuesta optimista (Capítulo 1) a
+  confirmada en un flujo específico se acompaña de la tasa de deshacer real de ese flujo
+  (Capítulo 10) como evidencia — no solo de la percepción de que "se siente arriesgado".
+  **Qué no hacer:** aprobar un cambio de regla de experiencia porque lo pide la persona con más
+  antigüedad o mayor cargo, sin que exista evidencia del Capítulo 10 detrás — Evidence over
+  Opinion existe exactamente para prevenir ese patrón, sin importar quién lo proponga.
+
+---
+
+# Capítulo 8 — Personalización y continuidad
+
+## Qué gobierna este capítulo y qué no
+
+Este capítulo opera el mecanismo completo de **Memory Experience**, principio declarado en el
+Capítulo 0 (Parte I) y explícitamente diferido hasta acá. No redefine Progressive Intelligence
+(Capítulo 2) — ese capítulo ya cubre qué se revela **dentro** de una interacción según el
+contexto inmediato; este cubre la continuidad **a través del tiempo**: entre sesiones, entre
+días, entre canales.
+
+## Tres tipos de memoria, límites explícitos
+
+Antes de cualquier regla de personalización, es necesario distinguir tres conceptos que suelen
+confundirse porque los tres "recuerdan algo" — pero cada uno tiene un alcance, una duración y un
+propósito distintos:
+
+1. **Memoria persistente del usuario** — información que sobrevive entre sesiones, días y
+   canales: preferencias ya expresadas, decisiones tomadas, hechos ya contados por el usuario.
+   Es la que opera Memory Experience en su forma más literal ("un usuario que ya contó algo no
+   debería tener que repetirlo"). Vive fuera de una conversación específica — un asesor que
+   configuró su horario de atención una vez no debería tener que repetirlo en cada sesión nueva.
+   **Ejemplo:** un cliente que ya indicó que prefiere ser contactado por la tarde — esa
+   preferencia se aplica en la próxima campaña, semanas después, sin que nadie se lo repita a
+   Gabi.
+2. **Memoria conversacional** — el historial de una conversación específica en curso (el mismo
+   historial que ya usa el sistema para dar contexto a Gabi dentro de un hilo con un número de
+   teléfono). Vive mientras la conversación sigue activa o reciente; no es necesariamente
+   persistente a largo plazo salvo que algo de ahí se promueva explícitamente a memoria
+   persistente.
+   **Ejemplo:** un cliente que dijo "quiero 3 balones de gas" hace dos mensajes — Gabi no le
+   pregunta de nuevo la cantidad en el mismo hilo. Si la conversación se cierra y el cliente
+   vuelve en un mes con un pedido distinto, ese detalle puntual no persiste necesariamente (a
+   menos que sea información de perfil, no de un pedido puntual).
+3. **Contexto temporal de una interacción** — información relevante solo para la acción
+   inmediata en curso, que se descarta al terminar: qué campo tiene foco, qué filtro está activo
+   en una tabla, qué paso de un formulario multi-paso se está completando. Nunca se persiste ni
+   se recuerda entre sesiones — no es memoria en el sentido de Memory Experience, es estado de
+   interacción momentáneo ya cubierto por el Modelo de respuesta (Capítulo 1).
+
+**Regla de límite:** algo solo se promueve de contexto temporal a memoria conversacional, y de
+memoria conversacional a memoria persistente, cuando tiene valor fuera del momento en que
+ocurrió — nunca por defecto. Guardar todo "por si acaso" viola tanto Predictable Interaction
+como la relación de confianza con el dato del usuario.
+
+**Qué no hacer:** tratar un filtro de tabla que el usuario activó una vez como si fuera una
+preferencia persistente y reaplicarlo automáticamente en su próxima visita sin que lo haya
+pedido — confunde contexto temporal con memoria persistente y produce un comportamiento que el
+usuario no puede anticipar (rompe Predictable Interaction).
+
+## Vigencia y decaimiento de la memoria persistente
+
+No toda memoria persistente vive para siempre de la misma forma — se distinguen dos categorías
+según su naturaleza:
+
+- **Memoria estructural** — datos de perfil y configuración explícitos (horario, preferencias
+  declaradas, datos de contacto) — permanece vigente hasta que el usuario la cambie
+  explícitamente, sin fecha de expiración.
+- **Memoria inferida** — patrones que el sistema dedujo del comportamiento (ej. "este cliente
+  suele comprar los viernes") — tiene una vigencia limitada y se revalida contra comportamiento
+  reciente; un patrón que dejó de repetirse deja de usarse como base de sugerencias, sin que
+  nadie tenga que borrarlo manualmente.
+
+**Ejemplo:** una preferencia de horario de contacto declarada explícitamente por el cliente se
+mantiene indefinidamente; un patrón inferido de "compra los viernes" que no se repitió en las
+últimas semanas deja de influir en las sugerencias de Gabi, sin necesidad de intervención
+humana.
+**Qué no hacer:** tratar un patrón inferido con la misma permanencia que un dato declarado
+explícitamente — un comportamiento que cambió (el cliente ahora compra los martes) seguiría
+generando sugerencias basadas en un patrón obsoleto, contradiciendo la confianza que Building
+Trust (Capítulo 6) busca sostener.
+
+## Continuidad entre canales
+
+Cross-channel Experience (preámbulo Parte II) aplicado a memoria: la memoria persistente de un
+usuario no está atada a un canal — si un cliente escribió por WhatsApp y luego un asesor lo
+contacta por Email, la información ya conocida no se vuelve a pedir solo porque cambió el canal.
+
+**Ejemplo:** un cliente que ya indicó su dirección de entrega por WhatsApp no tiene que
+repetirla si el flujo continúa por otro canal.
+**Qué no hacer:** que cada canal mantenga su propia memoria aislada del mismo usuario — obliga
+al cliente a "reintroducirse" cada vez que cambia de canal, lo opuesto exacto de Memory
+Experience.
+
+## Límite entre personalizar y volverse impredecible
+
+La personalización cambia *qué* se sugiere o se prioriza (contenido) — nunca *cómo* se comporta
+un control o una pantalla (estructura), que es terreno de Predictable Interaction (preámbulo
+Parte II).
+
+**Ejemplo:** para un cliente frecuente, Gabi prioriza mostrar primero los productos que suele
+pedir — pero el flujo de pedido, los botones y la estructura de la conversación son idénticos a
+los de un cliente nuevo.
+**Qué no hacer:** cambiar la disposición o el comportamiento de la interfaz según el perfil del
+usuario (ej. ocultar pasos del flujo para "usuarios expertos" de forma automática sin que lo
+pidan) — eso no es personalización de contenido, es una ruptura de Predictable Interaction que
+hace que dos usuarios no puedan ayudarse mutuamente porque ven productos distintos del sistema.
+
+---
+
+# Capítulo 9 — Manejo de errores y casos límite
+
+## Qué gobierna este capítulo y qué no
+
+El Capítulo 5 (Parte II) ya definió cómo se ve y se redacta un error puntual — este capítulo
+define algo distinto: el árbol de decisión de cuándo se activa cada nivel de degradación, y qué
+ocurre en los casos que ningún flujo normal cubre: fallas en cascada, IA no disponible, timeouts
+prolongados, datos en conflicto.
+
+## Jerarquía de degradación
+
+Toda falla del sistema se resuelve en uno de tres niveles, evaluados en este orden:
+
+1. **Reintento silencioso** — para fallas transitorias de baja severidad (ej. una llamada de red
+   que falla una vez); el sistema reintenta automáticamente sin involucrar al usuario, respetando
+   el umbral de Loading ya definido (Capítulo 1) antes de escalar al siguiente nivel.
+2. **Degradación visible con alternativa** — cuando el reintento silencioso no resuelve la
+   falla, el sistema comunica el error (Capítulo 5) y ofrece una alternativa funcional, aunque
+   sea limitada (ej. IA no disponible → el asesor puede seguir escribiendo manualmente, sin
+   sugerencias).
+3. **Bloqueo explícito** — reservado exclusivamente para los casos donde continuar sin resolver
+   la falla arriesgaría datos o dinero de un cliente real (ej. no se puede confirmar si un pago
+   se procesó) — nunca se usa por comodidad de implementación.
+
+**Ejemplo:** si el servicio de IA no responde, el Copiloto se oculta y el asesor sigue operando
+manualmente con toda la funcionalidad no asistida disponible — nivel 2, nunca nivel 3, porque
+el negocio puede seguir operando sin la IA.
+**Qué no hacer:** bloquear toda la pantalla con un modal de error cada vez que la IA tarda en
+responder — convierte una falla de un componente opcional (Capítulo 2: la IA nunca es la única
+vía para completar una acción) en un bloqueo total, violando esa regla ya establecida en la
+Parte I.
+
+## Cuándo el protocolo de IA no puede seguirse
+
+El Capítulo 2 (Parte I) ya define el protocolo de entrega a un humano para cuando la IA llega al
+límite de su conocimiento — este capítulo extiende el mismo patrón al caso en que la IA no está
+disponible en absoluto (no es que no sepa, es que no responde): el sistema degrada al mismo
+patrón de "ruta manual equivalente disponible" (Capítulo 3, Intervención humana) ya declarado,
+sin inventar un comportamiento nuevo.
+
+## Ediciones concurrentes y datos en conflicto
+
+Cuando dos personas modifican el mismo registro casi al mismo tiempo, la resolución sigue el
+mismo criterio de Reversibilidad (Capítulo 1): se prioriza la versión más reciente, se notifica
+a quien perdió su cambio, y se ofrece deshacer o reaplicar — nunca una fusión automática
+silenciosa de ambos cambios, que rompería Predictable Interaction al producir un resultado que
+ninguna de las dos personas escribió.
+
+**Ejemplo:** dos asesores editan el mismo lead — el segundo en guardar ve "Este lead fue
+actualizado por [nombre] mientras editabas. Tu cambio no se guardó — revisar y reintentar" en
+vez de que su cambio se pierda en silencio.
+**Qué no hacer:** que el sistema combine automáticamente ambos cambios sin decírselo a nadie —
+ni predecible ni seguro, y contradice directamente el modelo de deshacer (Capítulo 1), que exige
+que toda pérdida de un cambio del usuario sea visible y accionable.
+
+## Timeouts más allá del umbral esperado
+
+Cuando una espera supera el umbral de Loading (Capítulo 1) y el reintento silencioso (arriba)
+también falla, la interfaz deja de mostrar un estado de "cargando" indefinido y pasa a un estado
+de error explícito con acción — nunca una rueda de carga girando sin límite de tiempo, que viola
+Emotional Feedback (Capítulo 5): una espera sin fin no sostiene tranquilidad, sostiene ansiedad
+creciente.
+
+---
+
+# Capítulo 10 — Medición de experiencia
+
+## Qué gobierna este capítulo y qué no
+
+Este capítulo no define comportamiento — verifica si los 20 principios de las Partes I y II se
+sostienen en el producto real. Cada métrica existe porque verifica un principio específico, no
+como indicador genérico de producto.
+
+## Tabla de métricas núcleo
+
+| Métrica | Principio que verifica | Qué significa un valor fuera de rango |
+|---|---|---|
+| Tiempo hasta autonomía | "El onboarding termina cuando el usuario alcanza autonomía" (Capítulo 6) | El onboarding declarado completo no lo está realmente — señal de revisar el flujo, no de bajar el estándar de "autonomía" |
+| Tiempo hasta primer valor | Building Trust (Capítulo 6) | La primera sugerencia verificable tarda demasiado en llegar — la confianza inicial no se está construyendo a tiempo |
+| Tasa de aceptación de sugerencias | Protocolo de incertidumbre + Explainability First (Capítulos 2-3) | Aceptación baja en "alta confianza" sugiere umbrales mal calibrados; aceptación alta en "requiere validación" sugiere que la etiqueta ya no comunica la incertidumbre real |
+| Tasa de deshacer | Reversibilidad, modelo de respuesta optimista (Capítulo 1) | Tasa alta en una acción marcada optimista es evidencia de que esa clasificación de reversibilidad fue un error de diseño |
+| Frecuencia de degradación a manual | Manejo de errores (Capítulo 9) | Frecuencia alta indica que la IA no está disponible con la confiabilidad que el protocolo asume |
+| Tasa de notificaciones ignoradas por tipo | Degradación por fatiga (Capítulo 7) | Tasa alta y sostenida en un tipo específico es evidencia de que ese tipo de notificación no aporta valor real, más allá de lo que la degradación automática ya corrige |
+
+**Ejemplo:** si la tasa de deshacer de "enviar mensaje" (clasificada como optimista) se mantiene
+consistentemente alta, esa métrica es la evidencia que Evidence over Opinion exige antes de
+considerar reclasificar esa acción como confirmada — no una opinión de que "se siente
+arriesgado".
+**Qué no hacer:** medir una métrica de vanidad no atada a ningún principio (ej. "tiempo total en
+la app") como si fuera evidencia de salud de experiencia — si no verifica un principio
+específico del MPX, no pertenece a este capítulo, aunque sea un dato interesante para otro
+propósito de negocio.
+
+## Regla de uso: evidencia, no gatillo automático
+
+Ninguna métrica de esta tabla dispara un cambio de regla por sí sola — alimenta al Capítulo 11
+como evidencia (Evidence over Opinion) para una revisión de gobernanza, nunca actúa de forma
+automática. Esto es lo que sostiene Stable by Default: un valor fuera de rango es una señal de
+revisar, no una orden de cambiar.
+
+---
+
+# Capítulo 11 — Product Experience Governance
+
+## Qué gobierna este capítulo y qué no
+
+Este capítulo no define ninguna regla de experiencia — define el proceso por el cual las reglas
+ya existentes se verifican en funcionalidad nueva, se excepcionan con trazabilidad cuando hace
+falta, y eventualmente cambian con evidencia. Gobierna los 11 capítulos anteriores del MPX.
+
+## Experience Review Checklist
+
+Checklist breve, aplicado antes de aprobar cualquier funcionalidad nueva — convierte el MPX en
+una herramienta operativa de revisión, no solo en documentación de referencia. Cada pregunta se
+responde Sí/No; cualquier "No" sin una Experience Debt registrada (abajo) bloquea la aprobación:
+
+1. **¿La forma de respuesta es una de las tres definidas y está clasificada de reversibilidad
+   correctamente?** (Capítulo 1)
+2. **¿Ninguna capacidad de IA interrumpe sin poder ignorarse?** (Capítulo 2)
+3. **¿Toda recomendación de IA responde por qué / por qué ahora / por qué yo?** (Capítulo 3)
+4. **¿El texto de interfaz usa el registro correcto y el vocabulario canónico existente?**
+   (Capítulo 4)
+5. **¿Cada estado (cargando/vacío/error/éxito) tiene su emoción objetivo sostenida, y ningún
+   estado vacío se limita a comunicar ausencia?** (Capítulo 5)
+6. **¿La primera experiencia construye confianza con resultados verificables, no promesas?**
+   (Capítulo 6)
+7. **¿Las notificaciones usan el canal correcto según urgencia real y se degradan por fatiga?**
+   (Capítulo 7)
+8. **¿Lo que se recuerda respeta los tres límites de memoria y no se persiste "por si acaso"?**
+   (Capítulo 8)
+9. **¿Existe una ruta de degradación definida si algo falla, sin bloquear el flujo completo por
+   defecto?** (Capítulo 9)
+10. **¿La funcionalidad es igual de predecible y consistente en todos los canales donde va a
+    vivir?** (Cross-channel Experience, Predictable Interaction)
+
+**Ejemplo:** una funcionalidad nueva de "recordatorios automáticos" pasa el checklist: usa Toast
+con deshacer (reversible, ítem 1), no interrumpe el flujo activo (ítem 2), y se degrada a
+recordatorio manual si el servicio de programación falla (ítem 9).
+**Qué no hacer:** aprobar una funcionalidad que falla dos ítems del checklist "porque el plazo
+de entrega es esta semana" sin registrar Experience Debt — es exactamente el patrón que Stable
+by Default existe para prevenir; el plazo no es evidencia.
+
+## Experience Debt
+
+Cuando una funcionalidad necesita apartarse del MPX por una razón de negocio real, esa
+desviación se registra — nunca se shippea en silencio. Un registro de Experience Debt contiene,
+como mínimo:
+
+- **Qué principio o regla se viola** — referencia directa al capítulo/sección del MPX.
+- **Por qué** — la razón de negocio concreta, no una preferencia.
+- **Alcance** — qué funcionalidad exacta, no "todo el módulo".
+- **Temporal o permanente** — si es temporal, fecha de revisión obligatoria; si se propone
+  permanente, pasa a evaluarse como una propuesta de cambio real del MPX (ver Evolución
+  controlada, abajo), no queda como deuda indefinida.
+
+**Ejemplo:** una integración con un proveedor externo de pagos que solo permite confirmación
+diferida (rompe el modelo de respuesta optimista, Capítulo 1) se registra como Experience Debt
+temporal, con revisión programada para cuando el proveedor ofrezca confirmación inmediata.
+**Qué no hacer:** una Experience Debt sin fecha de revisión ni alcance definido ("vamos a romper
+la regla de reversibilidad en Pagos por ahora") — eso no es una excepción gobernada, es la regla
+rompiéndose sin que nadie lo audite después.
+
+## Evolución controlada del MPX
+
+Este documento se versiona igual que cualquier documento oficial de Maiek AI
+(`DOCUMENTATION_INDEX.md`, sección 8, gobierna el proceso general de todo documento — este
+apartado no lo repite, define la instancia específica para cambios de contenido de experiencia).
+Un cambio de regla de experiencia sigue esta secuencia, nunca una edición directa sobre una
+Parte ya Approved:
+
+1. Evidencia del Capítulo 10 (o una Experience Debt recurrente que revela un patrón, no un caso
+   aislado) — Evidence over Opinion.
+2. Propuesta de cambio explícita, con qué principio o regla exacta cambia y por qué.
+3. Revisión de gobernanza — nunca aprobado por una sola persona sin registro.
+4. Nueva entrada en Control de versiones del MPX, nunca edición silenciosa de una Parte Approved.
+
+**Qué no hacer:** que un ajuste de experiencia se implemente directo en código sin pasar por
+esta secuencia, dejando el MPX desactualizado respecto al comportamiento real del producto — el
+documento deja de ser confiable como referencia en el momento en que el producto real se aparta
+de él sin que el documento lo sepa.
+
+---
+
+*Fin de la Parte III — Approved. Con esto, el MAIEK PRODUCT EXPERIENCE (MPX) v1.0 queda completo
+y congelado — Partes I, II y III, sus 22 principios (13 + 7 + 2) y sus 12 capítulos (0 a 11).*
+
+### Nota de QA arquitectónico (autorevisión antes de tu revisión)
+
+Verificación de que ningún capítulo de la Parte III reintrodujo una regla ya definida en Parte
+I/II:
+
+- Capítulo 8 no redefine Progressive Intelligence (Capítulo 2) — solo lo distingue y opera la
+  dimensión temporal que ese capítulo dejó fuera a propósito.
+- Capítulo 9 no redefine el vocabulario visual de error (Capítulo 5) — opera únicamente el árbol
+  de decisión de cuándo se activa cada nivel.
+- Capítulo 10 no define comportamiento — cada fila de la tabla de métricas apunta a un principio
+  ya existente, ninguna introduce una regla nueva.
+- Capítulo 11 no redefine ninguna regla de experiencia — el Experience Review Checklist es una
+  síntesis operativa de reglas ya existentes, citadas por capítulo, no una reformulación.
+- Ninguna referencia cruzada a `DOCUMENTATION_INDEX.md` duplica sus reglas de gobernanza
+  documental general — el Capítulo 11 declara explícitamente que es una instancia específica de
+  ese marco para cambios de contenido de experiencia, no un proceso paralelo.
+
+No se detectaron contradicciones con las Partes I o II, ni con MDL, CDS o MPA.
+
+---
+
+## Jerarquía documental
+
+Orden de precedencia entre los documentos que fundamentan el MPX y las especificaciones que él
+mismo fundamenta — relevante quien decide cuál documento prevalece ante un conflicto aparente:
+
+1. **Framework** — identidad, principios y forma de razonar de Maiek AI. Autoridad máxima; ningún
+   documento posterior puede contradecirlo.
+2. **MPA** (Product Architecture) — qué existe en el producto y cómo se organiza funcionalmente.
+3. **MDL** (Design Language) — cómo se ve y qué principios visuales/de marca rigen.
+4. **CDS** (Component Design System) — de qué piezas concretas dispone el sistema, construido
+   sobre los tokens y principios del MDL.
+5. **MPX** (este documento) — cómo se comporta y se siente el producto, construido sobre los
+   cuatro anteriores; ninguna regla del MPX puede contradecir al Framework, al MPA, al MDL o al
+   CDS.
+6. **Especificaciones derivadas** (futuras: Frontend Architecture, Backend Architecture, patrones
+   de producto específicos) — construidas sobre los cinco documentos anteriores, incluido el MPX.
+
+**Regla de conflicto:** ante una contradicción aparente entre dos documentos, prevalece el de
+mayor jerarquía (más cercano al Framework) — el de menor jerarquía se corrige, nunca al revés,
+salvo que el cambio siga el proceso de Evolución controlada ya definido (Capítulo 11) y quede
+reflejado en el Control de versiones del documento correspondiente. Una especificación derivada
+futura que contradiga una regla ya Approved del MPX se ajusta a la especificación, no al MPX.
+
+---
+
+## Estado del documento
+
+| | |
+|---|---|
+| Estado | **Approved** |
+| Versión | 1.0 |
+| Congelado | Sí — Partes I, II y III completas y Approved |
+| Última revisión arquitectónica | 2026-07-28 (QA arquitectónico de la Parte III, sin contradicciones detectadas con Parte I/II, MDL, CDS o MPA) |
+| Regla de próxima revisión | Únicamente mediante el proceso ya definido en los Capítulos 10 (Medición de experiencia) y 11 (Product Experience Governance) — evidencia primero (Evidence over Opinion), revisión de gobernanza, nueva entrada en Control de versiones. Nunca edición directa sobre una Parte ya Approved. |

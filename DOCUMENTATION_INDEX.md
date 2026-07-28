@@ -11,7 +11,7 @@
 | Fecha de creación | 2026-07-26 |
 | Autor | Claude, a pedido de Jesús Millones |
 | Fecha de aprobación | 2026-07-28 |
-| Última actualización | 2026-07-28 (sección 7: MPX Parte II pasa a Approved) |
+| Última actualización | 2026-07-28 (sección 4, 6 y 7: MPX v1.0 completo — Partes I, II y III Approved) |
 
 ## Dependencias
 
@@ -94,8 +94,9 @@ se apoya en el anterior, nunca al revés:
    funcionales) — no confundir con el anterior, ver la nota ya documentada en el propio MPA.
 4. **MDL** (Design Language) — cómo se ve y se siente visualmente.
 5. **CDS** (Component Design System) — de qué piezas visuales concretas dispone el sistema.
-6. **MPX** (Product Experience), Parte I — cómo se comporta: interacción, protocolo de IA,
-   toma de decisiones.
+6. **MPX** (Product Experience) — cómo se comporta y se vive el producto: interacción, protocolo
+   de IA, decisión, voz, feedback, onboarding, notificaciones, y cómo se mide y gobierna esa
+   experiencia con el tiempo.
 7. **Gaso+ Product Framework** — la primera implementación real de todo lo anterior.
 8. **Cálidda Client Framework** — el conocimiento de negocio del primer cliente, la capa más
    específica y menos reutilizable de todas.
@@ -135,7 +136,7 @@ flowchart TB
     MPA["MPA<br/>(arquitectura funcional)"]
     MDL["MDL<br/>(lenguaje visual)"]
     CDS["CDS<br/>(componentes)"]
-    MPX["MPX — Parte I<br/>(comportamiento / IA / decisión)"]
+    MPX["MPX<br/>(comportamiento, experiencia, gobernanza)"]
     GPF["Gaso+ Product Framework<br/>(primer producto)"]
     CCF["Cálidda Client Framework<br/>(primer cliente)"]
 
@@ -168,7 +169,7 @@ ciclos — cada flecha va de lo más fundacional hacia lo más específico, nunc
 | `MAIEK_AI_PRODUCT_ARCHITECTURE.md` | MPA | Product | Product | Managed | 1.0 | **Approved** | Jesús Millones | 2026-07-26 | — | Framework, Platform Architecture | MPX, Gaso+ PF, *Frontend/Backend Architecture (futuro)* |
 | `MAIEK_AI_DESIGN_SYSTEM.md` | MDL | Design | UX | Managed | 1.1 | **Approved** | Jesús Millones | 2026-07-26 | — | Framework, Platform Architecture | CDS, MPX, Gaso+ PF, Cálidda CF |
 | `MAIEK_AI_COMPONENT_SYSTEM.md` | CDS | Design | UX | Managed | 1.0 | **Approved** | Jesús Millones | 2026-07-26 | — | MDL | MPX, *Frontend Architecture (futuro)* |
-| `MAIEK_AI_PRODUCT_EXPERIENCE.md` | MPX | Product | UX | Managed | 1.0 (Partes I-II) | **Parte I: Approved** · **Parte II: Approved** · Parte III: no iniciada | Jesús Millones | 2026-07-28 (Parte II) | — | Framework, MDL, CDS, MPA | *Patrones de producto, Frontend/Backend Architecture (futuros)* |
+| `MAIEK_AI_PRODUCT_EXPERIENCE.md` | MPX | Product | UX | Managed | 1.0 (completo) | **Approved** — Partes I, II y III | Jesús Millones | 2026-07-28 | — | Framework, MDL, CDS, MPA | *Patrones de producto, Frontend/Backend Architecture (futuros)* |
 | `GASOPLUS_PRODUCT_FRAMEWORK.md` | Gaso+ Product Framework | Business | Product | Legacy | — | **Approved** | Jesús Millones | N/A (Legacy) | 2026-07-26 | Framework, Platform Architecture, MDL | Cálidda CF |
 | `CALIDDA_CLIENT_FRAMEWORK.md` | Cálidda Client Framework | Business | Business | Legacy | — | **Approved** | Jesús Millones | N/A (Legacy) | 2026-07-26 | Framework, Platform Architecture, MDL, Gaso+ PF | Ninguno (hoja del árbol documental) |
 
