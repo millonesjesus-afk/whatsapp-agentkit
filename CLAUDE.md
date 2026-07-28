@@ -7,9 +7,17 @@
 > Este proyecto (Gaso+) ya pasó la fase de onboarding y está en desarrollo activo del panel
 > interno — para el trabajo en curso, leer también [`MAIEK_AI_FRAMEWORK.md`](MAIEK_AI_FRAMEWORK.md)
 > (identidad, principios y forma de razonar de Maiek AI),
-> [`MAIEK_AI_PLATFORM_ARCHITECTURE.md`](MAIEK_AI_PLATFORM_ARCHITECTURE.md) (arquitectura
-> **técnica** de la plataforma: capas, qué va en Platform vs. Producto vs. Cliente, multi-tenant,
-> API first),
+> [`MAIEK_AI_PLATFORM_ARCHITECTURE.md`](MAIEK_AI_PLATFORM_ARCHITECTURE.md) (**Superseded** desde
+> el 2026-07-28 — se conserva solo por trazabilidad histórica; la arquitectura técnica de la
+> plataforma vive ahora en `MAIEK_AI_SYSTEM_ARCHITECTURE.md`, abajo),
+> [`MAIEK_AI_SYSTEM_ARCHITECTURE.md`](MAIEK_AI_SYSTEM_ARCHITECTURE.md) (MSA v1.0, Approved —
+> documento **padre** de toda la arquitectura técnica de la plataforma: propósito, principios
+> arquitectónicos, capas, componentes, Platform Engines, arquitectura de IA y de datos de alto
+> nivel, integraciones, Runtime Architecture (recorrido completo de una solicitud), Architectural
+> Constraints, Architectural Decisions (API First, Event-Driven, Configuration over Code,
+> Multi-Tenant por fila, Feature Flags), seguridad, despliegue, observabilidad y escalabilidad —
+> del que heredarán Frontend/Backend/AI/Data/API/Security/DevOps/Operations Architecture,
+> ninguno construido todavía),
 > [`MAIEK_AI_PRODUCT_ARCHITECTURE.md`](MAIEK_AI_PRODUCT_ARCHITECTURE.md) (MPA v1.0, Approved —
 > arquitectura **funcional**: no confundir con el documento anterior, que es técnico; este define
 > los 9 módulos de producto de Maiek AI, responsabilidades, relaciones, flujo de información,
@@ -36,8 +44,8 @@
 > futuro) y [`CALIDDA_CLIENT_FRAMEWORK.md`](CALIDDA_CLIENT_FRAMEWORK.md) (conocimiento del negocio
 > de Cálidda para configurar Gaso+ — **guardado solo como referencia, nada de ahí se agrega a
 > Gabi/`/knowledge`/`prompts.yaml`**, es config del panel/CRM interno, no contenido para
-> conversaciones de WhatsApp). Los ocho deben guiar las decisiones de arquitectura y diseño en
-> este repo.
+> conversaciones de WhatsApp). Los nueve deben guiar las decisiones de arquitectura y diseño en
+> este repo (Platform Architecture, Superseded, se mantiene solo por trazabilidad histórica).
 
 ---
 

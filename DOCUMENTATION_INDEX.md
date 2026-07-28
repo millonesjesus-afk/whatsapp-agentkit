@@ -11,7 +11,7 @@
 | Fecha de creación | 2026-07-26 |
 | Autor | Claude, a pedido de Jesús Millones |
 | Fecha de aprobación | 2026-07-28 |
-| Última actualización | 2026-07-28 (sección 4, 6 y 7: MPX v1.0 completo — Partes I, II y III Approved) |
+| Última actualización | 2026-07-28 (secciones 4-7 y 9: alta de MSA v1.0, `MAIEK_AI_PLATFORM_ARCHITECTURE.md` pasa a Superseded) |
 
 ## Dependencias
 
@@ -89,14 +89,17 @@ Para alguien nuevo en el proyecto, este es el orden que menos fricción genera �
 se apoya en el anterior, nunca al revés:
 
 1. **Framework** — identidad, filosofía y principios. El ADN del que todo lo demás se deriva.
-2. **Platform Architecture** — cómo está construida la plataforma por dentro (capas técnicas).
-3. **MPA** (Product Architecture) — cómo está organizado el producto por fuera (módulos
-   funcionales) — no confundir con el anterior, ver la nota ya documentada en el propio MPA.
-4. **MDL** (Design Language) — cómo se ve y se siente visualmente.
-5. **CDS** (Component Design System) — de qué piezas visuales concretas dispone el sistema.
-6. **MPX** (Product Experience) — cómo se comporta y se vive el producto: interacción, protocolo
+2. **MPA** (Product Architecture) — cómo está organizado el producto por fuera (módulos
+   funcionales) — no confundir con MSA (abajo), que es la arquitectura técnica.
+3. **MDL** (Design Language) — cómo se ve y se siente visualmente.
+4. **CDS** (Component Design System) — de qué piezas visuales concretas dispone el sistema.
+5. **MPX** (Product Experience) — cómo se comporta y se vive el producto: interacción, protocolo
    de IA, decisión, voz, feedback, onboarding, notificaciones, y cómo se mide y gobierna esa
    experiencia con el tiempo.
+6. **MSA** (System Architecture) — cómo está construida la plataforma técnicamente para soportar
+   todo lo anterior: capas, componentes, Platform Engines, IA, datos, integraciones, seguridad,
+   despliegue — documento padre de toda arquitectura técnica derivada. Reemplaza a la antigua
+   Platform Architecture (hoy Superseded, ver sección 7).
 7. **Gaso+ Product Framework** — la primera implementación real de todo lo anterior.
 8. **Cálidda Client Framework** — el conocimiento de negocio del primer cliente, la capa más
    específica y menos reutilizable de todas.
@@ -110,7 +113,7 @@ qué orden conviene leerlo:
 - Framework
 
 **Engineering** — arquitectura técnica de la plataforma.
-- Platform Architecture
+- MSA (System Architecture) — Platform Architecture queda Superseded, ver sección 7.
 
 **Product** — cómo está organizado y cómo se comporta el producto.
 - MPA (Product Architecture)
@@ -132,30 +135,35 @@ señal de que debería dividirse, no de que el dominio sea flexible.
 ```mermaid
 flowchart TB
     FW["Framework<br/>(identidad y principios)"]
-    PA["Platform Architecture<br/>(técnica)"]
     MPA["MPA<br/>(arquitectura funcional)"]
     MDL["MDL<br/>(lenguaje visual)"]
     CDS["CDS<br/>(componentes)"]
     MPX["MPX<br/>(comportamiento, experiencia, gobernanza)"]
+    MSA["MSA<br/>(arquitectura técnica de plataforma)"]
     GPF["Gaso+ Product Framework<br/>(primer producto)"]
     CCF["Cálidda Client Framework<br/>(primer cliente)"]
 
-    FW --> PA
     FW --> MPA
     FW --> MDL
     FW --> MPX
-    PA --> MPA
-    PA --> MDL
-    PA --> GPF
-    PA --> CCF
+    FW --> MSA
     MPA --> MPX
+    MPA --> MSA
     MDL --> CDS
     MDL --> MPX
+    MDL --> MSA
     MDL --> GPF
     MDL --> CCF
     CDS --> MPX
+    CDS --> MSA
+    MPX --> MSA
+    MSA --> GPF
+    MSA --> CCF
     GPF --> CCF
 ```
+
+*(`MAIEK_AI_PLATFORM_ARCHITECTURE.md` queda fuera de este mapa activo — Superseded por MSA, ver
+sección 7 para su registro histórico.)*
 
 Línea sólida = "depende de" (flecha apunta del documento base hacia el que lo consume). Sin
 ciclos — cada flecha va de lo más fundacional hacia lo más específico, nunca al revés.
@@ -165,11 +173,12 @@ ciclos — cada flecha va de lo más fundacional hacia lo más específico, nunc
 | Nombre | Código | Dominio | Owner | Origen | Versión | Estado | Responsable | Fecha aprobación | Reconocido por gobernanza | Dependencias | Consumido por |
 |---|---|---|---|---|---|---|---|---|---|---|---|
 | `MAIEK_AI_FRAMEWORK.md` | Framework | Foundation | Business | Legacy | — | **Approved** | Jesús Millones | N/A (Legacy) | 2026-07-26 | Ninguna | Todos los demás |
-| `MAIEK_AI_PLATFORM_ARCHITECTURE.md` | Platform Architecture | Engineering | Engineering | Legacy | — | **Approved** | Jesús Millones | N/A (Legacy) | 2026-07-26 | Framework | MPA, MDL, Gaso+ PF, Cálidda CF |
-| `MAIEK_AI_PRODUCT_ARCHITECTURE.md` | MPA | Product | Product | Managed | 1.0 | **Approved** | Jesús Millones | 2026-07-26 | — | Framework, Platform Architecture | MPX, Gaso+ PF, *Frontend/Backend Architecture (futuro)* |
-| `MAIEK_AI_DESIGN_SYSTEM.md` | MDL | Design | UX | Managed | 1.1 | **Approved** | Jesús Millones | 2026-07-26 | — | Framework, Platform Architecture | CDS, MPX, Gaso+ PF, Cálidda CF |
-| `MAIEK_AI_COMPONENT_SYSTEM.md` | CDS | Design | UX | Managed | 1.0 | **Approved** | Jesús Millones | 2026-07-26 | — | MDL | MPX, *Frontend Architecture (futuro)* |
-| `MAIEK_AI_PRODUCT_EXPERIENCE.md` | MPX | Product | UX | Managed | 1.0 (completo) | **Approved** — Partes I, II y III | Jesús Millones | 2026-07-28 | — | Framework, MDL, CDS, MPA | *Patrones de producto, Frontend/Backend Architecture (futuros)* |
+| `MAIEK_AI_PLATFORM_ARCHITECTURE.md` | Platform Architecture | Engineering | Engineering | Legacy | — | **Superseded** (por MSA, 2026-07-28) | Jesús Millones | N/A (Legacy) | 2026-07-26 | Framework | Ninguno — reemplazado por MSA |
+| `MAIEK_AI_SYSTEM_ARCHITECTURE.md` | MSA | Engineering | Engineering | Managed | 1.0 | **Approved** | Jesús Millones | 2026-07-28 | — | Framework, MPA, MDL, CDS, MPX, Platform Architecture (Superseded) | Frontend/Backend/AI/Data/API/Security/DevOps/Operations Architecture (futuros), QA Strategy (futuro) |
+| `MAIEK_AI_PRODUCT_ARCHITECTURE.md` | MPA | Product | Product | Managed | 1.0 | **Approved** | Jesús Millones | 2026-07-26 | — | Framework, Platform Architecture | MPX, Gaso+ PF, MSA, *Frontend/Backend Architecture (futuro)* |
+| `MAIEK_AI_DESIGN_SYSTEM.md` | MDL | Design | UX | Managed | 1.1 | **Approved** | Jesús Millones | 2026-07-26 | — | Framework, Platform Architecture | CDS, MPX, MSA, Gaso+ PF, Cálidda CF |
+| `MAIEK_AI_COMPONENT_SYSTEM.md` | CDS | Design | UX | Managed | 1.0 | **Approved** | Jesús Millones | 2026-07-26 | — | MDL | MPX, MSA, *Frontend Architecture (futuro)* |
+| `MAIEK_AI_PRODUCT_EXPERIENCE.md` | MPX | Product | UX | Managed | 1.0 (completo) | **Approved** — Partes I, II y III | Jesús Millones | 2026-07-28 | — | Framework, MDL, CDS, MPA | MSA, *Patrones de producto, Frontend/Backend Architecture (futuros)* |
 | `GASOPLUS_PRODUCT_FRAMEWORK.md` | Gaso+ Product Framework | Business | Product | Legacy | — | **Approved** | Jesús Millones | N/A (Legacy) | 2026-07-26 | Framework, Platform Architecture, MDL | Cálidda CF |
 | `CALIDDA_CLIENT_FRAMEWORK.md` | Cálidda Client Framework | Business | Business | Legacy | — | **Approved** | Jesús Millones | N/A (Legacy) | 2026-07-26 | Framework, Platform Architecture, MDL, Gaso+ PF | Ninguno (hoja del árbol documental) |
 
@@ -197,27 +206,41 @@ Reglas mínimas, aplicables a cualquier documento oficial nuevo o existente de M
 Documentos previstos, **no desarrollados todavía** — solo registrados como próximos pasos
 posibles del sistema documental:
 
+Los primeros 8 ítems son los documentos derivados formalmente anticipados en `MAIEK_AI_SYSTEM_ARCHITECTURE.md` (MSA) Capítulo 17 — cada uno hereda de capítulos específicos del MSA, no se desarrolla desde cero:
+
 - **Frontend Architecture** — cómo se implementan MDL/CDS/MPX en código real (frameworks,
-  estructura de carpetas, estado, tokens como variables).
+  estructura de carpetas, estado, tokens como variables). Hereda de MSA Cap. 4-5.
 - **Backend Architecture** — cómo se implementa MPA en código real (servicios, capas, contratos
-  entre módulos).
-- **API Architecture** — contratos de API entre módulos y con integraciones externas.
+  entre módulos). Hereda de MSA Cap. 4-6, 10.
+- **AI Architecture** — arquitectura técnica de los agentes de IA (Gabi, Copiloto) — distinto
+  del MPX, que define comportamiento, no implementación. Hereda de MSA Cap. 6-7, 10.
+- **Data Architecture** — modelo de datos multi-tenant, ya anticipado como visión en MSA. Hereda
+  de MSA Cap. 8, 12.
+- **API Architecture** — contratos de API entre módulos y con integraciones externas
+  (Meta/WhatsApp, Anthropic, futuras: ERP, SAP, Power BI) — absorbe el alcance antes previsto
+  para un "Integration Architecture" separado (decisión tomada en MSA Cap. 9/17). Hereda de MSA
+  Cap. 9, 12.
 - **Security Architecture** — modelo de amenazas, manejo de credenciales, auditoría, cifrado
   (ya hay decisiones reales tomadas en el código — ej. Fernet para canales WhatsApp — que este
-  documento formalizaría).
-- **Deployment Architecture** — infraestructura de despliegue (hoy vive informalmente repartida
-  entre este chat y la configuración de Railway).
-- **Data Architecture** — modelo de datos multi-tenant, ya anticipado como visión en Platform
-  Architecture pero sin documento propio.
-- **AI Architecture** — arquitectura técnica de los agentes de IA (Gabi, Copiloto) — distinto
-  del MPX, que define comportamiento, no implementación.
-- **Integration Architecture** — Meta/WhatsApp, Anthropic, y futuras integraciones (ERP, SAP,
-  Power BI, ya mencionadas como visión en Cálidda Client Framework).
-- **QA Strategy** — enfoque de calidad y pruebas del proyecto.
+  documento formalizaría). Hereda de MSA Cap. 11, 13.
+- **DevOps Architecture** (antes "Deployment Architecture") — infraestructura de despliegue (hoy
+  vive informalmente repartida entre este chat y la configuración de Railway). Hereda de MSA
+  Cap. 14-15.
+- **Operations Architecture** (nuevo, anticipado en MSA Cap. 17) — arquitectura de cómo se opera
+  la plataforma en producción — distinto del Operations Runbook (abajo), que es procedimental,
+  no arquitectónico. Hereda de MSA Cap. 15-16.
+
+El resto sigue en el roadmap general, sin depender directamente del MSA salvo donde se indica:
+
+- **QA Strategy** — enfoque de calidad y pruebas del proyecto — hereda directamente de MSA Cap.
+  10 (Runtime Architecture): cada paso del flujo de una solicitud es un punto de prueba de
+  extremo a extremo.
 - **Testing Strategy** — estrategia concreta de testing (unitario, integración, end-to-end).
-- **Operations Runbook** — procedimientos operativos (incidentes, rollback, monitoreo).
-- **ADR Index** — registro de Architecture Decision Records — decisiones técnicas puntuales con
-  su razón, separadas de los documentos de arquitectura general.
+- **Operations Runbook** — procedimientos operativos (incidentes, rollback, monitoreo) — hijo de
+  Operations Architecture (arriba), más operativo que arquitectónico.
+- **ADR Index** — registro de Architecture Decision Records — decisiones técnicas puntuales
+  futuras, con su razón, distinto de las decisiones fundacionales ya fijadas en MSA Cap. 12
+  (Architectural Decisions), que no crece con cada decisión menor.
 - **CHANGELOG** — historial de cambios de producto de cara afuera, distinto del control de
   versiones interno de cada documento. Una vez exista, la regla 6 de gobernanza (sección 8)
   empieza a aplicar en la práctica.
