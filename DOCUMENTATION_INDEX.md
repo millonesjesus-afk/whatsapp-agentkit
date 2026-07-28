@@ -11,7 +11,7 @@
 | Fecha de creación | 2026-07-26 |
 | Autor | Claude, a pedido de Jesús Millones |
 | Fecha de aprobación | 2026-07-28 |
-| Última actualización | 2026-07-28 (secciones 4-7 y 9: alta de MSA v1.0, `MAIEK_AI_PLATFORM_ARCHITECTURE.md` pasa a Superseded) |
+| Última actualización | 2026-07-28 (secciones 4-7 y 9: alta de `MAIEK_AI_ARCHITECTURE_BASELINE_V1.md` como Baseline oficial, MSA v1.0, `MAIEK_AI_PLATFORM_ARCHITECTURE.md` pasa a Superseded) |
 
 ## Dependencias
 
@@ -22,6 +22,14 @@ documentos de contenido, solo los cataloga.
 
 Cualquier persona nueva en el proyecto (humana o agente de IA) debería empezar acá antes de
 abrir cualquier otro documento oficial.
+
+## Baseline oficial del proyecto
+
+`MAIEK_AI_ARCHITECTURE_BASELINE_V1.md` — Approved 2026-07-28 — certifica que el corpus completo
+(Framework, MPA, MDL, CDS, MPX, MSA, este índice) es consistente y está **Ready for Technical
+Expansion**, con riesgos y vacíos formalmente aceptados y con dueño futuro asignado. Marca el
+cierre oficial de la fase de definición de Maiek AI y el inicio de la fase de construcción
+técnica (Data → Backend → AI → API → Frontend → Security → DevOps → Operations Architecture).
 
 ---
 
@@ -103,6 +111,8 @@ se apoya en el anterior, nunca al revés:
 7. **Gaso+ Product Framework** — la primera implementación real de todo lo anterior.
 8. **Cálidda Client Framework** — el conocimiento de negocio del primer cliente, la capa más
    específica y menos reutilizable de todas.
+9. **MAB** (Architecture Baseline v1) — certifica que los 8 anteriores son consistentes y da luz
+   verde a construir las arquitecturas técnicas derivadas. Se lee al final, como cierre.
 
 ## 5. Agrupación por dominios
 
@@ -111,6 +121,7 @@ qué orden conviene leerlo:
 
 **Foundation** — identidad y principios de los que todo se deriva.
 - Framework
+- MAB (Architecture Baseline v1) — hito de gobernanza, no de contenido: certifica el resto.
 
 **Engineering** — arquitectura técnica de la plataforma.
 - MSA (System Architecture) — Platform Architecture queda Superseded, ver sección 7.
@@ -142,6 +153,7 @@ flowchart TB
     MSA["MSA<br/>(arquitectura técnica de plataforma)"]
     GPF["Gaso+ Product Framework<br/>(primer producto)"]
     CCF["Cálidda Client Framework<br/>(primer cliente)"]
+    MAB["MAB<br/>(Baseline — certifica el corpus)"]
 
     FW --> MPA
     FW --> MDL
@@ -154,6 +166,12 @@ flowchart TB
     MDL --> MSA
     MDL --> GPF
     MDL --> CCF
+    FW --> MAB
+    MPA --> MAB
+    MDL --> MAB
+    CDS --> MAB
+    MPX --> MAB
+    MSA --> MAB
     CDS --> MPX
     CDS --> MSA
     MPX --> MSA
@@ -181,6 +199,7 @@ ciclos — cada flecha va de lo más fundacional hacia lo más específico, nunc
 | `MAIEK_AI_PRODUCT_EXPERIENCE.md` | MPX | Product | UX | Managed | 1.0 (completo) | **Approved** — Partes I, II y III | Jesús Millones | 2026-07-28 | — | Framework, MDL, CDS, MPA | MSA, *Patrones de producto, Frontend/Backend Architecture (futuros)* |
 | `GASOPLUS_PRODUCT_FRAMEWORK.md` | Gaso+ Product Framework | Business | Product | Legacy | — | **Approved** | Jesús Millones | N/A (Legacy) | 2026-07-26 | Framework, Platform Architecture, MDL | Cálidda CF |
 | `CALIDDA_CLIENT_FRAMEWORK.md` | Cálidda Client Framework | Business | Business | Legacy | — | **Approved** | Jesús Millones | N/A (Legacy) | 2026-07-26 | Framework, Platform Architecture, MDL, Gaso+ PF | Ninguno (hoja del árbol documental) |
+| `MAIEK_AI_ARCHITECTURE_BASELINE_V1.md` | MAB | Foundation | Business | Managed | 1.0 | **Approved** | Jesús Millones | 2026-07-28 | — | Framework, MPA, MDL, CDS, MPX, MSA, DOCUMENTATION_INDEX | 8 arquitecturas técnicas derivadas (futuras), QA/Testing Strategy (futuros) |
 
 ## 8. Reglas de Gobernanza Documental
 
