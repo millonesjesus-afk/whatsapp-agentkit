@@ -1,12 +1,12 @@
 # Maiek AI — Architecture Document Standard (ADS)
 
-**Versión 1.1 · Estado: Approved**
+**Versión 1.2 · Estado: Approved**
 
 | | |
 |---|---|
 | Documento | Maiek Architecture Document Standard (ADS) |
 | Proyecto | Maiek AI |
-| Versión | 1.1 |
+| Versión | 1.2 |
 | Estado | **Approved** |
 | Fecha de creación | 2026-07-28 |
 | Autor | Claude, a pedido de Jesús Millones |
@@ -28,9 +28,9 @@ Data, Backend, AI, API, Frontend, Security, DevOps y Operations Architecture —
 | Versión | Fecha | Autor | Descripción |
 |---|---|---|---|
 | 1.0 (borrador) | 2026-07-28 | Claude | Primera versión — plantilla oficial para los 8 documentos técnicos derivados del MSA, extraída de los patrones ya validados en MSA y en el resto del corpus. |
-| 1.0 (Approved) | 2026-07-28 | Claude | "Plantilla obligatoria" → "estándar de referencia" con desviaciones justificadas; ciclo Draft → Architecture Review → Approved → Frozen (sección 12); novena pregunta de QA. Documento congelado como Approved. |
-| 1.1 (Approved) | 2026-07-28 | Claude | Se agrega la **Regla de herencia arquitectónica** (sección 7) tras la aprobación de Data Architecture: toda decisión de un documento superior es un contrato — un derivado solo puede implementarla, especializarla, o declarar una incompatibilidad justificada; cualquier cambio de fondo requiere reabrir el documento propietario, nunca modificarse implícitamente desde un derivado. |
 | 1.0 (Approved) | 2026-07-28 | Claude | Revisión final: "plantilla obligatoria" pasa a **"estándar de referencia"**, con desviaciones justificadas permitidas cuando el tipo de documento lo requiera (sección 1); se agrega la sección **12, Ciclo de estados de un documento de arquitectura** (Draft → Architecture Review → Approved → Frozen), mapeada explícitamente sobre el ciclo de 6 estados ya fijado en `DOCUMENTATION_INDEX.md` — Frozen no es un séptimo estado nuevo, es un punto dentro de Approved; se agrega una novena pregunta al checklist de QA ("¿aporta conocimiento nuevo o duplica información ya existente?"). **Decisión de dominio:** se evaluó si este documento pertenece a un dominio de "Documentación/Gobernanza" distinto de los 5 dominios de contenido (Foundation/Engineering/Product/Design/Business) — se concluye que sí: el ADS no describe identidad, producto, diseño ni arquitectura de la plataforma, describe cómo se documenta la arquitectura. Se crea el dominio **Documentación** en `DOCUMENTATION_INDEX.md` sección 5 para este documento, sin mover retroactivamente `MAIEK_AI_ARCHITECTURE_BASELINE_V1.md` (conceptualmente similar, pero no fue pedido). El documento **permanece registrado en el corpus oficial** (tabla de la sección 7) por su relación directa y vinculante con las 8 arquitecturas derivadas — un dominio distinto no significa quedar fuera del índice. Documento congelado como **Approved**. |
+| 1.1 (Approved) | 2026-07-28 | Claude | Se agrega la **Regla de herencia arquitectónica** (sección 7) tras la aprobación de Data Architecture: toda decisión de un documento superior es un contrato — un derivado solo puede implementarla, especializarla, o declarar una incompatibilidad justificada; cualquier cambio de fondo requiere reabrir el documento propietario, nunca modificarse implícitamente desde un derivado. |
+| 1.2 (Approved) | 2026-07-28 | Claude | Se agrega la sección **13, Forma de documentar Architecture Success Criteria**, tras la aprobación del Current State Assessment de Backend: todo documento de arquitectura *objetivo* (no los Current State Assessment) cierra con una sección `## Architecture Success Criteria` — condiciones de éxito verificables sobre el sistema real, nunca tareas ni roadmap — justo antes de la nota de QA arquitectónico. Con esta incorporación, el usuario da por cerrada la metodología de documentación: el esfuerzo se concentra de acá en más en el contenido técnico de cada arquitectura derivada, no en ajustes adicionales al estándar. |
 
 ---
 
@@ -52,8 +52,9 @@ Todo documento derivado sigue este esqueleto, en este orden:
 6. Cuerpo — capítulos/secciones específicas del dominio técnico
 7. Decisiones locales (si el dominio toma alguna — sección 8, abajo)
 8. Brechas conocidas (sección 9, abajo)
-9. Nota de QA arquitectónico (autorevisión, checklist de la sección 11)
-10. Cierre / Estado del documento
+9. `## Architecture Success Criteria` — solo en documentos de arquitectura *objetivo* (Data, Backend, AI, API, Frontend, Security, DevOps, Operations Architecture), nunca en un Current State Assessment (sección 13, abajo)
+10. Nota de QA arquitectónico (autorevisión, checklist de la sección 11)
+11. Cierre / Estado del documento
 
 ## 3. Encabezados obligatorios
 
@@ -128,6 +129,7 @@ Checklist fijo que la nota de QA arquitectónico de cada documento derivado debe
 7. ¿El nivel de detalle es alto nivel, consistente con el resto del corpus, sin caer en implementación completa salvo para ilustrar una decisión ya tomada?
 8. ¿Una persona nueva en el equipo, leyendo solo este documento y el MSA, entendería el dominio sin necesitar preguntar?
 9. ¿Este documento aporta conocimiento nuevo o está duplicando información ya existente?
+10. *(Solo en documentos de arquitectura objetivo)* ¿Cada Architecture Success Criteria es una condición verificable sobre el sistema real, y no una tarea, un roadmap ni una intención?
 
 ## 12. Ciclo de estados de un documento de arquitectura
 
@@ -138,6 +140,16 @@ Todo documento derivado atraviesa 4 momentos, en este orden — lectura específ
 3. **Approved** — igual al `Approved` general: congelado como referencia oficial; cualquier cambio de fondo requiere una nueva entrada en Control de versiones.
 4. **Frozen** — no es un séptimo estado del ciclo general (`DOCUMENTATION_INDEX.md` mantiene sus 6 estados sin excepción, decisión ya tomada y no reabierta acá) — es el punto **dentro de** Approved en que código real ya depende del documento. A partir de ahí, un cambio no es solo una edición de documentación: puede romper una implementación existente, y se evalúa con ese costo adicional antes de aprobarse (mismo criterio de evolución controlada ya definido en MSA Cap. 12 y MPX Cap. 11).
 
+## 13. Forma de documentar Architecture Success Criteria
+
+Todo documento de arquitectura **objetivo** (Data, Backend, AI, API, Frontend, Security, DevOps, Operations Architecture) cierra con una sección `## Architecture Success Criteria`, justo antes de la nota de QA arquitectónico. Un Current State Assessment **nunca** lleva esta sección — no propone una arquitectura sobre la que "tener éxito" todavía.
+
+- Son **condiciones de éxito verificables**, no tareas ni roadmap. La pregunta que cada criterio responde es *"¿cómo sabemos que esto ya se logró?"*, nunca *"¿qué hay que hacer?"*.
+- Cada criterio se redacta como una afirmación evaluable como verdadera o falsa sobre el sistema real — nunca como intención ("se buscará minimizar…") ni como tarea ("implementar X").
+- Se listan como lista simple, sin tabla de Estado/Justificación — eso es para Decisiones (sección 8). Un criterio de éxito no tiene "estado": se cumple o no se cumple.
+- Ejemplo válido: *"Ningún controlador contiene reglas de negocio"* — verificable inspeccionando el código. Ejemplo inválido: *"Reducir el acoplamiento del backend"* — no es medible sin más contexto.
+- El roadmap (sección de Roadmap de evolución del documento) dice *cómo* se llega; Architecture Success Criteria dice *cómo se sabe que se llegó* — no son la misma sección ni se fusionan.
+
 ## Estado del documento
 
-**Approved.** Estándar de referencia para Data Architecture y los 7 documentos técnicos derivados restantes — con desviaciones justificadas permitidas según la sección 1, nunca silenciosas.
+**Approved.** Estándar de referencia para Data Architecture (ya Approved) y los 7 documentos técnicos derivados restantes — con desviaciones justificadas permitidas según la sección 1, nunca silenciosas.
