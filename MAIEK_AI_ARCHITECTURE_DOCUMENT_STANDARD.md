@@ -1,12 +1,12 @@
 # Maiek AI — Architecture Document Standard (ADS)
 
-**Versión 1.2 · Estado: Approved**
+**Versión 1.3 · Estado: Approved**
 
 | | |
 |---|---|
 | Documento | Maiek Architecture Document Standard (ADS) |
 | Proyecto | Maiek AI |
-| Versión | 1.2 |
+| Versión | 1.3 |
 | Estado | **Approved** |
 | Fecha de creación | 2026-07-28 |
 | Autor | Claude, a pedido de Jesús Millones |
@@ -31,6 +31,7 @@ Data, Backend, AI, API, Frontend, Security, DevOps y Operations Architecture —
 | 1.0 (Approved) | 2026-07-28 | Claude | Revisión final: "plantilla obligatoria" pasa a **"estándar de referencia"**, con desviaciones justificadas permitidas cuando el tipo de documento lo requiera (sección 1); se agrega la sección **12, Ciclo de estados de un documento de arquitectura** (Draft → Architecture Review → Approved → Frozen), mapeada explícitamente sobre el ciclo de 6 estados ya fijado en `DOCUMENTATION_INDEX.md` — Frozen no es un séptimo estado nuevo, es un punto dentro de Approved; se agrega una novena pregunta al checklist de QA ("¿aporta conocimiento nuevo o duplica información ya existente?"). **Decisión de dominio:** se evaluó si este documento pertenece a un dominio de "Documentación/Gobernanza" distinto de los 5 dominios de contenido (Foundation/Engineering/Product/Design/Business) — se concluye que sí: el ADS no describe identidad, producto, diseño ni arquitectura de la plataforma, describe cómo se documenta la arquitectura. Se crea el dominio **Documentación** en `DOCUMENTATION_INDEX.md` sección 5 para este documento, sin mover retroactivamente `MAIEK_AI_ARCHITECTURE_BASELINE_V1.md` (conceptualmente similar, pero no fue pedido). El documento **permanece registrado en el corpus oficial** (tabla de la sección 7) por su relación directa y vinculante con las 8 arquitecturas derivadas — un dominio distinto no significa quedar fuera del índice. Documento congelado como **Approved**. |
 | 1.1 (Approved) | 2026-07-28 | Claude | Se agrega la **Regla de herencia arquitectónica** (sección 7) tras la aprobación de Data Architecture: toda decisión de un documento superior es un contrato — un derivado solo puede implementarla, especializarla, o declarar una incompatibilidad justificada; cualquier cambio de fondo requiere reabrir el documento propietario, nunca modificarse implícitamente desde un derivado. |
 | 1.2 (Approved) | 2026-07-28 | Claude | Se agrega la sección **13, Forma de documentar Architecture Success Criteria**, tras la aprobación del Current State Assessment de Backend: todo documento de arquitectura *objetivo* (no los Current State Assessment) cierra con una sección `## Architecture Success Criteria` — condiciones de éxito verificables sobre el sistema real, nunca tareas ni roadmap — justo antes de la nota de QA arquitectónico. Con esta incorporación, el usuario da por cerrada la metodología de documentación: el esfuerzo se concentra de acá en más en el contenido técnico de cada arquitectura derivada, no en ajustes adicionales al estándar. |
+| 1.3 (Approved) | 2026-07-28 | Claude | Durante la revisión de Backend Architecture: **Architectural Constraints** pasa de sección opcional (sección 4) a **sección permanente y obligatoria** de todo documento de arquitectura objetivo — restricciones del entorno que ninguna implementación puede elegir, distintas de riesgos (probabilísticos) y de decisiones (elegidas entre alternativas). Se agrega la sección **14, Forma de documentar Architectural Constraints**, y una undécima pregunta al checklist de QA. |
 
 ---
 
@@ -50,11 +51,12 @@ Todo documento derivado sigue este esqueleto, en este orden:
 4. `## Control de versiones`
 5. Alcance y regla de no-duplicación — qué cubre este documento, qué no, y a qué documento remite lo que no cubre
 6. Cuerpo — capítulos/secciones específicas del dominio técnico
-7. Decisiones locales (si el dominio toma alguna — sección 8, abajo)
-8. Brechas conocidas (sección 9, abajo)
-9. `## Architecture Success Criteria` — solo en documentos de arquitectura *objetivo* (Data, Backend, AI, API, Frontend, Security, DevOps, Operations Architecture), nunca en un Current State Assessment (sección 13, abajo)
-10. Nota de QA arquitectónico (autorevisión, checklist de la sección 11)
-11. Cierre / Estado del documento
+7. `## Architectural Constraints` — obligatoria en documentos de arquitectura *objetivo*, antes de las Decisiones (sección 14, abajo)
+8. Decisiones locales (sección 8, abajo)
+9. Brechas conocidas (sección 9, abajo)
+10. `## Architecture Success Criteria` — solo en documentos de arquitectura *objetivo* (Data, Backend, AI, API, Frontend, Security, DevOps, Operations Architecture), nunca en un Current State Assessment (sección 13, abajo)
+11. Nota de QA arquitectónico (autorevisión, checklist de la sección 11)
+12. Cierre / Estado del documento
 
 ## 3. Encabezados obligatorios
 
@@ -66,9 +68,10 @@ Todo documento derivado sigue este esqueleto, en este orden:
 
 ## 4. Secciones opcionales
 
-- Constraints propias del dominio — solo si existen restricciones no cubiertas ya por MSA Cap. 11 (Architectural Constraints).
 - Glosario — solo si el dominio introduce vocabulario técnico no usado en el resto del corpus.
 - Diagramas Mermaid — cuando un flujo o una relación se entiende mejor visual que en prosa (mismo criterio ya usado en MSA Cap. 10 y MPA).
+
+*(`Architectural Constraints` ya no es opcional — ver sección 7 de la estructura estándar y sección 14 más abajo.)*
 
 ## 5. Convenciones de redacción
 
@@ -130,6 +133,7 @@ Checklist fijo que la nota de QA arquitectónico de cada documento derivado debe
 8. ¿Una persona nueva en el equipo, leyendo solo este documento y el MSA, entendería el dominio sin necesitar preguntar?
 9. ¿Este documento aporta conocimiento nuevo o está duplicando información ya existente?
 10. *(Solo en documentos de arquitectura objetivo)* ¿Cada Architecture Success Criteria es una condición verificable sobre el sistema real, y no una tarea, un roadmap ni una intención?
+11. *(Solo en documentos de arquitectura objetivo)* ¿Architectural Constraints contiene únicamente hechos del entorno no elegidos — ninguna decisión disfrazada de restricción, ningún riesgo probabilístico mezclado ahí?
 
 ## 12. Ciclo de estados de un documento de arquitectura
 
@@ -150,6 +154,23 @@ Todo documento de arquitectura **objetivo** (Data, Backend, AI, API, Frontend, S
 - Ejemplo válido: *"Ningún controlador contiene reglas de negocio"* — verificable inspeccionando el código. Ejemplo inválido: *"Reducir el acoplamiento del backend"* — no es medible sin más contexto.
 - El roadmap (sección de Roadmap de evolución del documento) dice *cómo* se llega; Architecture Success Criteria dice *cómo se sabe que se llegó* — no son la misma sección ni se fusionan.
 
+## 14. Forma de documentar Architectural Constraints
+
+Todo documento de arquitectura **objetivo** cierra con una sección `## Architectural Constraints`, ubicada antes de las Decisiones (sección 8) — las restricciones informan las decisiones, no al revés (mismo orden ya usado en MSA, Cap. 11 antes que Cap. 12).
+
+Tres categorías se confunden fácilmente y este estándar las separa sin ambigüedad:
+
+| | ¿Qué es? | ¿Se eligió? | ¿Dónde se documenta? |
+|---|---|---|---|
+| **Constraint** | Un hecho del entorno | No — es dado | `## Architectural Constraints` |
+| **Decisión** | Una elección entre alternativas | Sí | `## Decisiones arquitectónicas` (sección 8) |
+| **Riesgo** | Algo que podría salir mal | No aplica (es probabilístico) | `## Riesgos` (si el documento la tiene) |
+
+- Una constraint **no se resuelve ni se decide** — se documenta y todo lo demás se diseña alrededor de ella. Ejemplo: "la API de Anthropic tiene una ventana de contexto finita" es una constraint; "truncamos el historial a los últimos N mensajes" es la decisión que responde a esa constraint.
+- Formato: tabla con columnas **Restricción / Naturaleza / Impacto en el diseño** — mismo formato ya usado en MSA Cap. 11, para que todo el corpus documente constraints de la misma forma.
+- Una constraint ya declarada en MSA Cap. 11 **se cita, nunca se repite completa** — el documento derivado documenta solo su instancia específica del dominio (ej. MSA Cap. 11 declara "costo variable por llamada de IA" como constraint de plataforma; Backend Architecture documenta cuántas llamadas por mensaje hace su flujo real, no la constraint genérica de nuevo).
+- Si algo parece una constraint pero en realidad se podría cambiar con un esfuerzo de ingeniería razonable, no es una constraint — es una decisión que todavía no se tomó, y va en la sección 8.
+
 ## Estado del documento
 
-**Approved.** Estándar de referencia para Data Architecture (ya Approved) y los 7 documentos técnicos derivados restantes — con desviaciones justificadas permitidas según la sección 1, nunca silenciosas.
+**Approved.** Estándar de referencia para Data Architecture y Backend Architecture (ya Approved o en revisión final) y los documentos técnicos derivados restantes — con desviaciones justificadas permitidas según la sección 1, nunca silenciosas.
