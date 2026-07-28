@@ -27,8 +27,9 @@
 > actuales hasta que se confirme el cambio) y
 > [`MAIEK_AI_PRODUCT_EXPERIENCE.md`](MAIEK_AI_PRODUCT_EXPERIENCE.md) (MPX v1.0 — cómo debe
 > sentirse, comportarse e interactuar Maiek AI con sus usuarios: Interaction Model, protocolo de
-> interacción con IA, Decision Experience. Se construye y aprueba **por partes** — **Parte I
-> (Capítulos 0-3): Approved**; Partes II y III todavía no iniciadas) y
+> interacción con IA, Decision Experience, voz y contenido, feedback y estados del sistema,
+> onboarding y notificaciones. Se construye y aprueba **por partes** — **Parte I (Capítulos
+> 0-3): Approved** · **Parte II (Capítulos 4-7): Approved**; Parte III todavía no iniciada) y
 > [`GASOPLUS_PRODUCT_FRAMEWORK.md`](GASOPLUS_PRODUCT_FRAMEWORK.md) (visión de producto de Gaso+
 > específicamente: módulos, roadmap, y qué de eso ya existe en el código vs. qué es visión a
 > futuro) y [`CALIDDA_CLIENT_FRAMEWORK.md`](CALIDDA_CLIENT_FRAMEWORK.md) (conocimiento del negocio

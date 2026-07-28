@@ -1,16 +1,16 @@
 # Maiek AI — Product Experience (MPX)
 
-**Versión 1.0 · Estado: Parte I Approved (Partes II y III pendientes)**
+**Versión 1.0 · Estado: Parte I Approved · Parte II Approved (Parte III pendiente)**
 
 | | |
 |---|---|
 | Documento | Maiek Product Experience (MPX) |
 | Proyecto | Maiek AI |
 | Versión | 1.0 (en construcción por partes) |
-| Estado | **Parte I: Approved** · Partes II-III: no iniciadas |
+| Estado | **Parte I: Approved** · **Parte II: Approved** · Parte III: no iniciada |
 | Fecha de creación | 2026-07-26 |
 | Autor | Claude, a pedido de Jesús Millones |
-| Última actualización | 2026-07-26 |
+| Última actualización | 2026-07-28 |
 
 ## Dependencias
 
@@ -35,6 +35,8 @@
 |---|---|---|---|
 | 1.0 (Parte I, borrador) | 2026-07-26 | Claude | Parte I — Fundamentos de la Experiencia: Capítulos 0 (Marco de experiencia), 1 (Interaction Model), 2 (Protocolo de interacción con IA) y 3 (Decision Experience). Partes II (Experiencia del Usuario) y III (Calidad y Evolución) pendientes de desarrollo y aprobación por separado. |
 | 1.0 (Parte I, Approved) | 2026-07-26 | Claude | Revisión de arquitectura de contenido de la Parte I: se agregan 3 principios nuevos (Explainability First, Memory Experience, Progressive Intelligence) declarados en el Capítulo 0 y operados en los Capítulos 2-3; "Confianza media" renombrada a "Requiere validación" (Capítulo 2); se retira el valor fijo de 400ms del Capítulo 1, reemplazado por referencia al umbral del Design System. Parte I congelada como **Approved**. |
+| 1.0 (Parte II, borrador) | 2026-07-28 | Claude | Parte II — Experiencia del Usuario: Capítulos 4 (Voz y contenido), 5 (Feedback y estados del sistema), 6 (Onboarding y primeras impresiones) y 7 (Notificaciones e interrupciones). Estructura revisada y aprobada por partes antes de redactar el contenido (índice, luego 6 principios adicionales integrados: Emotional Feedback, Empty State Intelligence, Building Trust, Delight, Cross-channel Experience, Every Screen Teaches). Regla editorial nueva aplicada en toda la Parte: todo principio importante incluye ejemplo concreto y, cuando aporta valor, contraejemplo de qué no hacer. Pendiente de revisión y aprobación. |
+| 1.0 (Parte II, Approved) | 2026-07-28 | Claude | Revisión final de la Parte II: se agrega un séptimo principio adicional, **Predictable Interaction** (la interacción debe ser anticipable; la sorpresa positiva pertenece al valor entregado, nunca al comportamiento de la interfaz), operado en el límite de Delight (Capítulo 5) y en "Consistencia antes que variedad" de Building Trust (Capítulo 6); se agrega en el Capítulo 6 la definición explícita "el onboarding termina cuando el usuario alcanza autonomía, no cuando termina el tutorial". Parte II congelada como **Approved**. |
 
 Este documento se construye y aprueba **por partes**, a pedido explícito del usuario — cada
 parte se revisa antes de continuar con la siguiente. La tabla de arriba se actualiza al cerrar
@@ -44,7 +46,7 @@ cada parte, no solo al final del documento completo.
 
 # Índice del documento completo
 
-*(referencia — solo la Parte I está desarrollada en este archivo; ver estructura aprobada)*
+*(referencia — la Parte I y la Parte II están desarrolladas en este archivo; ver estructura aprobada)*
 
 **Parte I — Fundamentos de la Experiencia** · "¿Cómo piensa y toma decisiones Maiek AI?"
 - Capítulo 0 — Marco de experiencia
@@ -52,7 +54,7 @@ cada parte, no solo al final del documento completo.
 - Capítulo 2 — Protocolo de interacción con IA
 - Capítulo 3 — Decision Experience
 
-**Parte II — Experiencia del Usuario** *(pendiente)* · "¿Cómo vive el usuario la filosofía definida en la Parte I?"
+**Parte II — Experiencia del Usuario** *(Approved)* · "¿Cómo vive el usuario la filosofía definida en la Parte I?"
 - Capítulo 4 — Voz y contenido
 - Capítulo 5 — Feedback y estados del sistema
 - Capítulo 6 — Onboarding y primeras impresiones
@@ -367,3 +369,371 @@ como regla de producto — no como observación:
 
 *Fin de la Parte I — Approved. Partes II (Experiencia del Usuario) y III (Calidad y Evolución)
 pendientes de desarrollo, siguiendo el mismo proceso: construir, revisar, aprobar por partes.*
+
+---
+
+# PARTE II — Experiencia del Usuario
+
+*Esta parte responde una sola pregunta: ¿cómo vive el usuario, momento a momento, la
+inteligencia que la Parte I ya definió? Ningún capítulo de esta Parte redefine un principio ya
+establecido en la Parte I — toma sus reglas como entrada y define su forma perceptible: qué se
+ve, qué se lee, qué se siente.*
+
+*Regla editorial de esta Parte: todo principio importante incluye un ejemplo concreto de
+aplicación y, cuando aporta valor, un contraejemplo de qué no hacer — breves, prácticos y
+suficientes para que diseño, desarrollo y producto interpreten la regla de la misma manera.*
+
+## Principios adicionales de esta Parte
+
+Tres principios nuevos, transversales a los cuatro capítulos de esta Parte — se declaran una vez
+acá y se operan en cada capítulo, con el mismo criterio ya usado en el Capítulo 0: un principio
+orienta, una regla operable se sigue o se viola de forma verificable.
+
+- **Predictable Interaction.** El usuario puede anticipar razonablemente el resultado de una
+  acción antes de ejecutarla. Acciones similares producen consecuencias similares en cualquier
+  parte del producto — la confianza nace tanto de la capacidad del sistema como de su
+  previsibilidad. La sorpresa positiva pertenece siempre al *valor* que el sistema entrega,
+  nunca al *comportamiento* de la interfaz: el usuario puede sorprenderse gratamente con lo que
+  Maiek AI logra, pero nunca con cómo se comporta un control que ya conoce. Extiende, sin
+  contradecir, la "Consistencia entre pantallas" ya definida en el Capítulo 1 de la Parte I (que
+  fija la *forma* de respuesta — instantánea/optimista/confirmada); este principio cubre el
+  criterio más amplio de que toda la interacción, no solo la forma de respuesta, sea anticipable.
+  **Ejemplo:** un botón "Eliminar" se comporta igual —mismo ícono de advertencia, mismo tipo de
+  confirmación— en Leads, Campañas y Canales; un usuario que aprendió el patrón en un módulo no
+  tiene que reaprenderlo en otro.
+  **Qué no hacer:** que el mismo ícono de "editar" abra un modal en un módulo y navegue a una
+  página completa en otro — la inconsistencia obliga al usuario a probar antes de confiar,
+  exactamente lo opuesto a lo que este principio busca.
+- **Cross-channel Experience.** Las reglas de esta Parte no son específicas de un canal —
+  aplican igual en Web, WhatsApp, Email, SMS o cualquier canal futuro. Un canal puede limitar el
+  *formato* de una regla, nunca su *criterio*.
+  **Ejemplo:** un estado de "solicitud procesada con éxito" transmite la misma sensación de
+  cierre y control tanto en un Toast de la Web como en un mensaje de WhatsApp de texto plano —
+  cambia el contenedor, no la emoción que produce.
+  **Qué no hacer:** escribir un mensaje de confirmación cálido y completo para Web, y en
+  WhatsApp enviar solo "OK" porque "es un canal más informal" — el usuario de WhatsApp merece el
+  mismo nivel de claridad y cuidado, no una versión degradada.
+- **Every Screen Teaches.** Ninguna superficie es "solo informativa" — un tooltip, un estado
+  vacío o un mensaje de error dejan al usuario con más comprensión del producto de la que tenía
+  antes de verlo.
+  **Ejemplo:** un estado vacío de "Campañas" no dice solo "No tienes campañas" — dice "No tienes
+  campañas activas. Una campaña te permite enviar una plantilla aprobada a un grupo de leads a
+  la vez — crea la primera" (enseña qué es una campaña mientras informa que no hay ninguna).
+  **Qué no hacer:** un tooltip que repite el nombre del botón que ya etiqueta ("Botón de
+  Exportar" sobre un botón que dice "Exportar") — ocupa espacio de pantalla sin dejar
+  aprendizaje.
+
+---
+
+# Capítulo 4 — Voz y contenido
+
+## De la personalidad de marca a la voz de producto
+
+El MDL (Capítulo 2) ya definió la personalidad de Maiek AI como marca — este capítulo no la
+repite, la traduce a reglas de escritura verificables para cualquier texto de interfaz, sea o no
+generado por la IA. Donde el Capítulo 2 de la Parte I definió cuándo y cómo habla la IA
+(Gabi/Copiloto), este capítulo cubre el resto de la superficie escrita: botones, labels, errores
+de validación, confirmaciones de sistema, estados vacíos.
+
+## Tono según tipo de mensaje
+
+No existe un tono único de producto — existen cuatro registros, cada uno con una función
+distinta:
+
+1. **Informativo** — neutro, sin adjetivos innecesarios ("Tu plan incluye 3 canales de
+   WhatsApp").
+2. **De error** — directo sobre qué pasó y qué hacer, nunca sobre quién tuvo la culpa ("No
+   pudimos guardar el cambio. Verifica tu conexión e intenta de nuevo" — nunca "Error de
+   validación en el campo X").
+3. **De éxito** — breve, sin celebración excesiva ("Guardado" — no "¡Genial! Guardado con
+   éxito").
+4. **Conversacional** — el único registro donde cabe la voz de Gabi/Copiloto tal como la definió
+   el Capítulo 2 de la Parte I; el resto de la interfaz no imita este registro.
+
+**Qué no hacer:** usar tono conversacional en un mensaje de error del sistema ("¡Ups! Algo salió
+mal 😅") — mezcla el registro de la IA conversacional con el de infraestructura, y le resta
+seriedad a un momento donde el usuario necesita información clara, no simpatía.
+
+## Microcopy: longitud, estructura, vocabulario
+
+- **Botones** — verbo + objeto, nunca solo el verbo cuando hay ambigüedad ("Crear campaña", no
+  solo "Crear" si la pantalla tiene más de una cosa que crear).
+- **Labels de formulario** — sustantivo simple, sin instrucciones dentro del label ("Teléfono",
+  nunca "Escribe el teléfono del cliente aquí" — esa instrucción, si hace falta, va en el
+  placeholder o en un texto de ayuda debajo).
+- **Tooltips** — una sola oración, nunca un párrafo — si necesita más de una oración, no es un
+  tooltip, es contenido que merece su propio espacio en pantalla.
+
+## Consistencia terminológica
+
+Un mismo concepto se nombra exactamente igual en toda la interfaz, en el CDS, en el MPA y en las
+conversaciones de Gabi. Existe una lista viva de términos canónicos (a mantenerse fuera de este
+documento, en un glosario de producto) — este documento solo fija la regla, no la lista.
+
+**Ejemplo:** si el MPA llama "Lead" a un contacto en el embudo comercial, ningún botón,
+notificación o mensaje de Gabi lo llama "Cliente potencial" o "Prospecto" en su lugar.
+**Qué no hacer:** que el módulo de Conversaciones diga "Contacto" y el módulo de Pipeline diga
+"Lead" para referirse exactamente al mismo registro — obliga al usuario a aprender dos
+vocabularios para un mismo concepto.
+
+## Every Screen Teaches aplicado a microcopy
+
+Antes de publicar cualquier texto breve nuevo, la pregunta de control es: *si un usuario nuevo
+lee solo esto, ¿sabe algo más del producto que antes no sabía?* Un texto que solo repite lo que
+ya es visible (el nombre de un botón, un ícono ya claro) falla esta prueba y debe reescribirse o
+eliminarse.
+
+## Cross-channel Experience aplicado a voz
+
+El mismo vocabulario y actitud de este capítulo se sostienen en WhatsApp y Email — lo que cambia
+por canal es exclusivamente extensión (WhatsApp favorece mensajes más cortos) y formalidad de
+apertura (un Email puede abrir con saludo explícito; un mensaje de WhatsApp entra directo al
+punto porque la conversación ya está en curso). El vocabulario canónico y el tono nunca cambian
+entre canales.
+
+---
+
+# Capítulo 5 — Feedback y estados del sistema
+
+## Vocabulario visual de estados
+
+Toda pantalla o componente que espera datos pasa, en algún momento, por uno de cinco estados:
+cargando, vacío, con datos, con error, éxito. Ningún estado se omite ni se combina con otro —
+una pantalla nunca muestra "cargando" y "vacío" a la vez, por ejemplo.
+
+## Emotional Feedback
+
+Cada uno de los cinco estados tiene, además de su forma visual (ya definida en el CDS), una
+emoción objetivo — la reacción que el usuario debería sentir al verlo, usada como criterio de
+diseño antes de que exista una sola línea de copy o color:
+
+| Estado | Emoción objetivo | Qué la sostiene |
+|---|---|---|
+| Cargando | Tranquilidad (no ansiedad de espera) | Skeleton que anticipa la forma del contenido, nunca una pantalla en blanco |
+| Vacío | Claridad + control (sé qué hacer ahora) | Ver Empty State Intelligence, abajo |
+| Con datos | Confianza (la información es correcta y está completa) | Sin indicadores de duda sobre datos ya cargados |
+| Error | Calma + control (sé qué pasó y qué puedo hacer) | Mensaje que explica y ofrece una acción, nunca solo un símbolo rojo |
+| Éxito | Progreso (avancé, puedo seguir) | Confirmación breve, sin fricción para continuar a lo siguiente |
+
+**Ejemplo:** un error de envío de mensaje en el chat de WhatsApp no solo cambia el ícono a rojo
+— agrega el texto "No se pudo enviar. Toca para reintentar", sosteniendo la emoción de calma y
+control en vez de dejar al usuario adivinando.
+**Qué no hacer:** un estado de error que solo muestra un ícono sin texto — técnicamente informa
+que algo falló, pero no sostiene ninguna emoción objetivo: el usuario queda con ansiedad, no con
+calma.
+
+## Cuándo usar skeleton, spinner o progress bar
+
+El CDS ya cataloga los tres componentes — este capítulo define el criterio de elección:
+
+- **Skeleton** — cuando se conoce la forma aproximada del contenido que va a aparecer (una
+  lista, una tarjeta) y la espera es breve. Sostiene mejor la emoción de tranquilidad porque
+  anticipa la forma final.
+- **Spinner** — cuando no se conoce la forma del resultado o la acción es puntual y sin
+  estructura visual asociada (procesar un archivo).
+- **Progress bar** — solo cuando existe un progreso real y medible (subir un archivo grande) —
+  nunca como sustituto decorativo de un spinner cuando no hay un porcentaje real que mostrar.
+
+**Qué no hacer:** una progress bar que avanza de forma simulada sin relación con el progreso
+real de la operación — rompe la confianza que Emotional Feedback busca construir, porque el
+usuario aprende que la barra miente.
+
+## Comunicación de errores (Explainability First aplicado al error)
+
+Todo mensaje de error responde, en un máximo de dos oraciones, las mismas preguntas que
+Explainability First exige para una recomendación (Capítulo 3, Parte I), adaptadas al error: qué
+pasó, y qué puede hacer el usuario ahora.
+
+**Ejemplo:** "No pudimos enviar tu mensaje porque perdiste la conexión. Reintentar" (qué pasó +
+acción concreta, con el botón de acción visible junto al texto).
+**Qué no hacer:** "Error 500" o "Algo salió mal" sin acción disponible — dos formas comunes de
+fallar la misma prueba: la primera es lenguaje de sistema, no de negocio (ver Capítulo 3, Parte
+I); la segunda no deja ninguna acción clara.
+
+## Empty State Intelligence
+
+Regla dura, sin excepciones: ningún estado vacío se limita a comunicar ausencia — siempre
+orienta a la siguiente acción concreta y ejecutable desde esa misma pantalla.
+
+**Ejemplo:** el módulo de Campañas, sin campañas creadas, muestra: "No tienes campañas activas.
+Crea la primera para enviar una plantilla aprobada a un grupo de leads" + botón "Crear campaña"
+en la misma vista.
+**Qué no hacer:** "No hay campañas" sin ninguna acción visible — dos formas distintas de fallar
+la regla: una que dice qué falta pero no qué hacer (parcialmente correcta), y otra que ni
+siquiera dice qué falta ("Sin resultados") — ambas incumplen la regla dura.
+
+Distinto del vacío de primer uso: este cubre los vacíos **recurrentes** — una bandeja filtrada
+sin resultados, un módulo sin actividad reciente. El vacío de la primera vez que el usuario abre
+el producto tiene reglas propias, ver Capítulo 6.
+
+## Delight, acotado por Quiet Confidence
+
+El MDL define "Quiet Confidence" como principio de marca — nunca ruidoso, nunca a costa de
+claridad o velocidad. Delight en esta Parte se limita a momentos de feedback donde un matiz
+humano no añade fricción ni retraso — y respeta siempre Predictable Interaction: el matiz puede
+sorprender gratamente por el *valor* que agrega (una frase que reconoce el logro), nunca por
+cambiar el *comportamiento esperado* del componente (un botón que de pronto se mueve o tarda más
+de lo normal "para lucirse" nunca es delight, es una ruptura de previsibilidad):
+
+**Ejemplo permitido:** un mensaje de éxito tras completar un flujo largo (ej. terminar la
+configuración de un canal de WhatsApp) que además del "Listo" funcional agrega una frase breve
+de reconocimiento del logro ("Tu canal ya está activo. Los próximos mensajes ya llegarán acá") —
+información útil con un matiz cálido, sin animación adicional ni retraso.
+**Qué no hacer:** una animación de confeti o un sonido en cada guardado exitoso de un formulario
+— rompe Quiet Confidence al introducir ruido en una acción rutinaria y frecuente; el delight se
+reserva para logros poco frecuentes, nunca para acciones cotidianas.
+
+---
+
+# Capítulo 6 — Onboarding y primeras impresiones
+
+## Cuándo termina el onboarding
+
+El onboarding no es un tutorial con un número fijo de pasos — termina cuando el usuario alcanza
+autonomía real para operar el producto sin necesitar guía adicional, no cuando se completa una
+secuencia de pantallas de bienvenida. Un usuario puede terminar el tutorial y seguir sin saber
+usar el producto; ese caso sigue siendo onboarding sin resolver, sin importar que la secuencia
+guiada ya haya terminado.
+
+**Ejemplo:** un asesor completó las 4 pantallas de bienvenida del panel, pero todavía no logra
+crear una campaña sin ayuda — el onboarding de ese flujo específico sigue activo (Progressive
+Intelligence sigue revelando ayuda contextual ahí) hasta que lo logre sin asistencia, sin
+importar que el tutorial general ya haya terminado.
+**Qué no hacer:** dar por completado el onboarding en el sistema (dejar de mostrar ayuda
+contextual) solo porque el usuario cerró o saltó el tutorial — confunde "vio la introducción"
+con "ya sabe operar el producto", que es la señal real que debería usarse. Cómo medir esa
+autonomía de forma concreta es una definición que corresponde a la Parte III (Medición de
+experiencia) — acá queda fijado el criterio, no la métrica.
+
+## La primera sesión es un estado distinto del vacío recurrente
+
+La primera vez que un usuario abre Maiek AI, cada pantalla vacía no es un "sin datos todavía" —
+es una introducción a lo que esa pantalla hará cuando tenga datos. El texto y la acción sugerida
+son más explicativos que los de un vacío recurrente (Capítulo 5), porque el usuario todavía no
+sabe qué esperar de esa pantalla en absoluto.
+
+**Ejemplo:** el primer vacío del Pipeline no dice "No tienes leads" (eso asume que el usuario ya
+sabe qué es el Pipeline) — dice "Acá verás a tus clientes potenciales organizados por etapa,
+desde el primer contacto hasta el cierre. Cuando Gabi reciba el primer mensaje, aparecerá acá
+automáticamente."
+
+## Progressive Intelligence aplicado al día 1
+
+El Capítulo 2 de la Parte I ya declaró que la IA revela capacidades gradualmente — este capítulo
+define qué se revela específicamente en el primer uso: solo la capacidad directamente
+relacionada con la primera acción que el usuario necesita completar. Todo lo demás (Copiloto
+avanzado, recomendaciones cruzadas) permanece invisible hasta que el contexto lo amerite,
+siguiendo exactamente el mismo criterio ya definido, sin una lista nueva de reglas.
+
+**Qué no hacer:** un tour guiado de bienvenida que presenta las 9 capacidades del producto antes
+de que el usuario haya completado su primera acción real — contradice directamente Progressive
+Intelligence, que exige mostrar solo lo relevante al momento, no un catálogo completo por
+adelantado.
+
+## Building Trust
+
+La confianza en los primeros días no se declara, se demuestra — este capítulo define cómo:
+
+- **Primera sugerencia de IA verificable.** La primera vez que Gabi o el Copiloto hacen una
+  sugerencia, esa sugerencia debe ser de las más fáciles de verificar como correcta (alta
+  confianza, Capítulo 2 Parte I) — no la más impresionante. Ganar una primera verificación
+  simple construye más confianza que arriesgar una sugerencia ambiciosa que podría fallar.
+- **Consistencia antes que variedad.** En la primera semana, el sistema prioriza comportarse de
+  forma predecible (mismo tipo de sugerencia ante situaciones similares) sobre mostrar la
+  diversidad completa de lo que puede hacer — la variedad se introduce después, cuando ya hay
+  una base de confianza. Es Predictable Interaction aplicado al momento donde más pesa: antes de
+  que exista historial, la previsibilidad es la única señal de confianza disponible.
+- **Nunca prometer lo que todavía no se cumplió.** Ningún texto de onboarding usa lenguaje de
+  capacidad futura como si ya estuviera disponible ("Gabi aprenderá tu negocio automáticamente"
+  antes de que eso realmente haya ocurrido) — se describe lo que el sistema ya hace hoy, no su
+  visión a futuro.
+
+**Ejemplo:** un mensaje de bienvenida que dice "Gabi ya puede responder preguntas frecuentes
+sobre tu catálogo" (verificable de inmediato) construye más confianza que "Gabi entenderá cada
+vez mejor a tus clientes" (promesa sin nada que el usuario pueda comprobar en ese momento).
+**Qué no hacer:** un banner de bienvenida que enumera funciones que el usuario todavía no puede
+usar porque dependen de configuración pendiente (ej. mencionar campañas masivas antes de que el
+usuario tenga una plantilla aprobada) — genera expectativa sin poder cumplirla de inmediato.
+
+## Delight en el primer uso, mismo límite que el Capítulo 5
+
+**Ejemplo permitido:** al completar la entrevista inicial de configuración del negocio, un
+mensaje breve reconoce el paso completado sin exagerar ("Tu negocio ya está configurado. Gabi ya
+puede empezar a conversar") — informa y reconoce sin ceremonia adicional.
+**Qué no hacer:** una pantalla de celebración a pantalla completa con animación al terminar el
+onboarding — rompe Quiet Confidence exactamente igual que en el Capítulo 5, con el agravante de
+que retrasa al usuario justo en el momento en que más quiere empezar a usar el producto.
+
+## Cross-channel Experience aplicado a onboarding
+
+Si el primer contacto de un usuario con Maiek AI ocurre por WhatsApp (ej. un cliente final que
+escribe por primera vez a un negocio que ya usa Gabi) en vez de por la Web (un asesor
+configurando el panel), el nivel de confianza transmitido debe ser equivalente aunque la
+mecánica sea distinta — un primer mensaje de Gabi bien enmarcado en WhatsApp construye la misma
+confianza inicial que un buen primer vacío guiado en el panel Web.
+
+---
+
+# Capítulo 7 — Notificaciones e interrupciones
+
+## Canales de notificación disponibles
+
+Toda notificación se entrega por uno de estos canales, elegido según la urgencia real (nunca por
+defecto ni por preferencia técnica de implementación):
+
+- **In-app silenciosa** (contador, punto en el ítem del menú) — para información que el usuario
+  verá la próxima vez que visite esa sección, sin urgencia de notificarlo activamente.
+- **Banner in-app** — para algo relevante mientras el usuario ya está usando el producto, sin
+  sacarlo de la pantalla actual.
+- **Push / externo (WhatsApp, Email — futuro)** — reservado para lo que requiere atención fuera
+  de una sesión activa del producto.
+
+**Qué no hacer:** usar push para algo que podría esperar a un badge silencioso (ej. "un lead
+cambió de nombre") — degrada la utilidad del canal más intrusivo, entrenando al usuario a
+ignorar todas las notificaciones push, incluidas las que sí importan.
+
+## Agrupación y batching
+
+Eventos de baja urgencia individual que ocurren en ráfaga se agrupan en una sola notificación en
+vez de una por evento.
+
+**Ejemplo:** "3 leads nuevos en la última hora" en vez de tres notificaciones separadas, una por
+cada lead — mismo criterio que la Reducción de carga cognitiva de la Parte I (Capítulo 3)
+aplicado a interrupciones en vez de a pantallas.
+**Qué no hacer:** siete notificaciones separadas en la barra en menos de un minuto porque siete
+eventos ocurrieron casi al mismo tiempo — el volumen, no la urgencia real de cada una, es lo que
+termina generando la sensación de saturación.
+
+## Jerarquía visual: notificación de sistema vs. sugerencia de IA
+
+No toda interrupción viene de la IA — un evento de sistema (ej. "nuevo lead asignado") es
+distinto de una sugerencia de IA (ej. "este lead lleva 3 días sin respuesta, considera
+llamarlo"), y deben verse distinto para que el usuario entienda de inmediato si está ante un
+hecho o ante una recomendación.
+
+**Ejemplo:** una notificación de sistema usa un ícono neutro y lenguaje descriptivo ("Nuevo lead
+asignado: Juan Pérez"); una sugerencia de IA usa el mismo lenguaje visual que la AI Suggestion
+Card del CDS, para que el usuario reconozca de inmediato "esto es una recomendación, no un
+hecho".
+**Qué no hacer:** que ambas usen el mismo componente visual genérico de notificación — obliga al
+usuario a leer el texto completo cada vez para distinguir un hecho de una opinión del sistema,
+en vez de reconocerlo de un vistazo.
+
+## Degradación por fatiga
+
+El mismo criterio del Capítulo 2 de la Parte I ("cómo se retira una sugerencia ignorada") se
+extiende a notificaciones repetidas del mismo tipo: si un tipo específico de notificación se
+ignora de forma consistente, su frecuencia se reduce automáticamente (nunca se apaga por
+completo sin acción explícita del usuario) — el sistema aprende que ese tipo de aviso no le
+aporta valor a esa persona en particular.
+
+## Cross-channel Experience aplicado a notificaciones
+
+El criterio de agrupación, jerarquía y degradación por fatiga es el mismo sin importar si la
+notificación llega dentro del producto o por un canal externo (WhatsApp, Email) — lo que cambia
+es únicamente el formato de entrega, nunca el criterio de cuándo y cuánto notificar.
+
+---
+
+*Fin de la Parte II — Approved. Parte III (Calidad y Evolución) pendiente de desarrollo,
+siguiendo el mismo proceso: construir, revisar, aprobar por partes.*
