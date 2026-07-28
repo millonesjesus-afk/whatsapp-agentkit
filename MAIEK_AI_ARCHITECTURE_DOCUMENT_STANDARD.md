@@ -1,12 +1,12 @@
 # Maiek AI — Architecture Document Standard (ADS)
 
-**Versión 1.0 · Estado: Approved**
+**Versión 1.1 · Estado: Approved**
 
 | | |
 |---|---|
 | Documento | Maiek Architecture Document Standard (ADS) |
 | Proyecto | Maiek AI |
-| Versión | 1.0 |
+| Versión | 1.1 |
 | Estado | **Approved** |
 | Fecha de creación | 2026-07-28 |
 | Autor | Claude, a pedido de Jesús Millones |
@@ -28,6 +28,8 @@ Data, Backend, AI, API, Frontend, Security, DevOps y Operations Architecture —
 | Versión | Fecha | Autor | Descripción |
 |---|---|---|---|
 | 1.0 (borrador) | 2026-07-28 | Claude | Primera versión — plantilla oficial para los 8 documentos técnicos derivados del MSA, extraída de los patrones ya validados en MSA y en el resto del corpus. |
+| 1.0 (Approved) | 2026-07-28 | Claude | "Plantilla obligatoria" → "estándar de referencia" con desviaciones justificadas; ciclo Draft → Architecture Review → Approved → Frozen (sección 12); novena pregunta de QA. Documento congelado como Approved. |
+| 1.1 (Approved) | 2026-07-28 | Claude | Se agrega la **Regla de herencia arquitectónica** (sección 7) tras la aprobación de Data Architecture: toda decisión de un documento superior es un contrato — un derivado solo puede implementarla, especializarla, o declarar una incompatibilidad justificada; cualquier cambio de fondo requiere reabrir el documento propietario, nunca modificarse implícitamente desde un derivado. |
 | 1.0 (Approved) | 2026-07-28 | Claude | Revisión final: "plantilla obligatoria" pasa a **"estándar de referencia"**, con desviaciones justificadas permitidas cuando el tipo de documento lo requiera (sección 1); se agrega la sección **12, Ciclo de estados de un documento de arquitectura** (Draft → Architecture Review → Approved → Frozen), mapeada explícitamente sobre el ciclo de 6 estados ya fijado en `DOCUMENTATION_INDEX.md` — Frozen no es un séptimo estado nuevo, es un punto dentro de Approved; se agrega una novena pregunta al checklist de QA ("¿aporta conocimiento nuevo o duplica información ya existente?"). **Decisión de dominio:** se evaluó si este documento pertenece a un dominio de "Documentación/Gobernanza" distinto de los 5 dominios de contenido (Foundation/Engineering/Product/Design/Business) — se concluye que sí: el ADS no describe identidad, producto, diseño ni arquitectura de la plataforma, describe cómo se documenta la arquitectura. Se crea el dominio **Documentación** en `DOCUMENTATION_INDEX.md` sección 5 para este documento, sin mover retroactivamente `MAIEK_AI_ARCHITECTURE_BASELINE_V1.md` (conceptualmente similar, pero no fue pedido). El documento **permanece registrado en el corpus oficial** (tabla de la sección 7) por su relación directa y vinculante con las 8 arquitecturas derivadas — un dominio distinto no significa quedar fuera del índice. Documento congelado como **Approved**. |
 
 ---
@@ -85,6 +87,13 @@ Todo documento derivado sigue este esqueleto, en este orden:
 - Regla maestra heredada del MSA: ningún documento derivado redefine qué hace el producto (MPA), cómo se ve (MDL/CDS), cómo se comporta (MPX), ni cómo está organizada la plataforma a alto nivel (MSA) — cada uno profundiza exclusivamente el capítulo del MSA que le corresponde.
 - Si dos documentos derivados necesitan el mismo concepto técnico, uno lo declara como fuente única y el otro lo cita — nunca ambos lo definen por separado. Ver la Architecture Baseline v1 (riesgo de terminología CDS/MPX) como ejemplo concreto de qué evitar.
 - Toda cita a otro documento nombra el capítulo o sección exacta — nunca "ver el documento X" sin más precisión.
+
+**Regla de herencia arquitectónica.** Toda decisión arquitectónica aprobada en un documento superior (Framework, MPA, MDL, CDS, MPX, MSA, o cualquier documento derivado ya Approved, ej. Data Architecture para Backend Architecture) es un **contrato**. Un documento derivado no puede modificarla ni reinterpretarla — solo puede:
+- **Implementarla** — ejecutar la decisión tal como está.
+- **Especializarla** — aplicarla al dominio propio sin cambiar su sentido (ej. Backend Architecture especializa la estrategia UUID de Data Architecture a la forma concreta en que el ORM la genera, sin redecidir si se usa UUID).
+- **Declarar una incompatibilidad técnica**, debidamente justificada y explícita — nunca una desviación silenciosa (mismo criterio que Brechas, sección 9).
+
+Si una decisión necesita cambiar de fondo, se abre una revisión del documento **propietario** de esa decisión — nunca se modifica implícitamente desde un documento derivado. Un documento derivado que "ajusta" una decisión ya fijada sin pasar por esa revisión no está especializando, está violando el contrato.
 
 ## 8. Forma de documentar decisiones
 
