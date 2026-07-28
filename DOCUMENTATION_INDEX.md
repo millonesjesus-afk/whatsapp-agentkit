@@ -11,7 +11,7 @@
 | Fecha de creación | 2026-07-26 |
 | Autor | Claude, a pedido de Jesús Millones |
 | Fecha de aprobación | 2026-07-28 |
-| Última actualización | 2026-07-28 (sección 7: alta de `MAIEK_AI_API_ARCHITECTURE.md`) |
+| Última actualización | 2026-07-28 (sección 7: alta de `MAIEK_AI_AI_CURRENT_STATE_ASSESSMENT.md`) |
 
 ## Dependencias
 
@@ -222,6 +222,7 @@ ciclos — cada flecha va de lo más fundacional hacia lo más específico, nunc
 | `MAIEK_AI_BACKEND_ARCHITECTURE.md` | Backend Architecture | Engineering | Engineering | Managed | 1.0 | **Approved** | Jesús Millones | 2026-07-28 | — | MSA (Cap. 4-7, 9, 10, 12), Data Architecture, CSA-Backend, ADS, MPX (Cap. 1-3) | AI/API/Frontend/Security/DevOps Architecture (futuros) |
 | `MAIEK_AI_API_CURRENT_STATE_ASSESSMENT.md` | CSA-API | Engineering | Engineering | Managed | 1.0 | **Approved** | Jesús Millones | 2026-07-28 | — | MSA (Cap. 9, 10, 12), Backend Architecture, ADS | `MAIEK_AI_API_ARCHITECTURE.md` |
 | `MAIEK_AI_API_ARCHITECTURE.md` | API Architecture | Engineering | Engineering | Managed | 1.0 | **Approved** | Jesús Millones | 2026-07-28 | — | MSA (Cap. 6, 9, 10, 12), Backend Architecture, CSA-API, ADS | AI/Frontend/Security/DevOps Architecture (futuros) |
+| `MAIEK_AI_AI_CURRENT_STATE_ASSESSMENT.md` | CSA-AI | Engineering | AI | Managed | 1.0 | **Approved** | Jesús Millones | 2026-07-28 | — | MSA (Cap. 6, 7, 11), Backend Architecture, API Architecture, Data Architecture, MPX (Cap. 2, 8), ADS | `MAIEK_AI_AI_ARCHITECTURE.md` |
 
 ## 8. Reglas de Gobernanza Documental
 
