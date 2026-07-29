@@ -90,7 +90,8 @@ from agent.campanas import resolver_promo, generar_link_whatsapp
 from agent.brain import cargar_system_prompt
 from agent.tools import obtener_producto_por_codigo, buscar_productos
 from agent.notificaciones import notificar_solicitud_reseteo, notificar_lead_derivado
-from agent.asignacion import asignar_lead_pendiente_a_asesor, UMBRAL_SENIOR_DEFAULT, UMBRAL_INTERMEDIO_DEFAULT
+from agent.asignacion import UMBRAL_SENIOR_DEFAULT, UMBRAL_INTERMEDIO_DEFAULT
+from agent.services.servicio_comercial import servicio_comercial
 from agent.providers import obtener_proveedor
 
 logger = logging.getLogger("agentkit")
@@ -3751,7 +3752,7 @@ async def toggle_disponibilidad(usuario: dict = Depends(_usuario_actual)):
     # tampoco se le dumpea toda la cola acumulada a quien se conecta primero;
     # si hay más pendientes, se reparten con el siguiente asesor que conecte.
     if ahora_disponible:
-        telefono_asignado = await asignar_lead_pendiente_a_asesor(usuario["username"], usuario.get("nivel"))
+        telefono_asignado = await servicio_comercial.asignar_lead_pendiente_a_asesor(usuario["username"], usuario.get("nivel"))
         if telefono_asignado:
             lead_asignado = await obtener_lead(telefono_asignado)
             await notificar_lead_derivado(

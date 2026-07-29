@@ -25,7 +25,7 @@ from agent.providers import obtener_proveedor
 from agent.dashboard import router as dashboard_router, NoAutenticado
 from agent.tiempo_real import gestor_conexiones
 from agent.notificaciones import notificar_lead_derivado
-from agent.asignacion import elegir_asesor_automatico
+from agent.services.servicio_comercial import servicio_comercial
 from agent.campanas import (
     detectar_y_asignar_campana, sembrar_campanas_iniciales, corregir_patrones_desalineados,
     procesar_leads_formulario,
@@ -282,7 +282,7 @@ async def webhook_handler(request: Request):
             logger.info(f"Respuesta a {msg.telefono}: {respuesta}")
 
             if escalado_por_falla:
-                asesor = await elegir_asesor_automatico((lead or {}).get("interes") or "")
+                asesor = await servicio_comercial.elegir_asesor_automatico((lead or {}).get("interes") or "")
                 if asesor:
                     await asignar_asesor_a_lead(msg.telefono, asesor)
                 lead_actualizado = await obtener_lead(msg.telefono)
@@ -312,7 +312,7 @@ async def webhook_handler(request: Request):
             if ahora_derivado and not ya_estaba_derivado:
                 lead_actualizado = await obtener_lead(msg.telefono)
                 if lead_actualizado and not lead_actualizado.get("asesor_asignado"):
-                    asesor = await elegir_asesor_automatico(lead_actualizado.get("interes") or "")
+                    asesor = await servicio_comercial.elegir_asesor_automatico(lead_actualizado.get("interes") or "")
                     if asesor:
                         await asignar_asesor_a_lead(msg.telefono, asesor)
                         lead_actualizado = await obtener_lead(msg.telefono)
