@@ -13,6 +13,7 @@ from cryptography.fernet import Fernet
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, aliased
 from sqlalchemy import String, Text, DateTime, select, Integer, Boolean, func, case, delete
+from sqlalchemy.exc import IntegrityError
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -303,6 +304,22 @@ class Configuracion(Base):
     valor: Mapped[str] = mapped_column(String(200))
 
 
+class MensajeProcesado(Base):
+    """Idempotencia general del webhook (API Architecture, Decisión local
+    ya `Objetivo`) — registra el `mensaje_id` de Meta de cada mensaje ya
+    procesado, para no reprocesarlo si Meta lo reenvía (reintentos de
+    entrega, entregas duplicadas). Tabla aditiva, sin dependencia de
+    ninguna otra — solo necesitaba que existiera el baseline de Alembic
+    (Data Architecture Fase 1) para poder agregarse con control de
+    versiones. No tiene limpieza automática todavía (crecimiento sin
+    límite) — proporcional al volumen actual, revisar si se vuelve un
+    problema real (Evidence over Opinion)."""
+    __tablename__ = "mensajes_procesados"
+
+    mensaje_id: Mapped[str] = mapped_column(String(100), primary_key=True)
+    procesado_en: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
 async def obtener_configuracion(clave: str, valor_default: str) -> str:
     """Lee un valor de configuración, o el default si nunca se guardó."""
     async with async_session() as session:
@@ -318,6 +335,25 @@ async def guardar_configuracion(clave: str, valor: str):
             session.add(config)
         config.valor = valor
         await session.commit()
+
+
+async def marcar_mensaje_procesado(mensaje_id: str) -> bool:
+    """Idempotencia general del webhook (API Architecture) — intenta
+    registrar mensaje_id como ya procesado. Usa la restricción de clave
+    primaria de la base como mecanismo de exclusión mutua (seguro ante
+    entregas concurrentes duplicadas, no solo un "check-then-insert" con
+    ventana de carrera).
+
+    Retorna True si mensaje_id YA estaba registrado (no procesar de
+    nuevo), False si es la primera vez que se ve (procesar normal)."""
+    async with async_session() as session:
+        try:
+            session.add(MensajeProcesado(mensaje_id=mensaje_id))
+            await session.commit()
+            return False
+        except IntegrityError:
+            await session.rollback()
+            return True
 
 
 def _canal_a_dict(c: CanalWhatsApp) -> dict:

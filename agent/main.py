@@ -20,6 +20,7 @@ from agent.memory import (
     asignar_asesor_a_lead, marcar_lead_no_visto, liberar_asignacion,
     registrar_fallo_tecnico, resetear_fallos_tecnicos, RESULTADOS_CERRADOS,
     sembrar_canales_desde_env, pausar_gabi_manual, marcar_revision_prioritaria,
+    marcar_mensaje_procesado,
 )
 from agent.providers import obtener_proveedor
 from agent.dashboard import router as dashboard_router, NoAutenticado
@@ -30,13 +31,21 @@ from agent.services.servicio_canales import servicio_canales
 from agent.services.servicio_conversacion import servicio_conversacion
 from agent.rate_limit import limitador_webhook
 from agent.http_utils import cerrar_cliente_http
+from agent.api_contrato import registrar_contrato_interno, FiltroRequestId
 
 load_dotenv()
 
-# Configuración de logging según entorno
+# Configuración de logging según entorno — %(request_id)s correlaciona cada
+# línea de log con la solicitud que la originó (API Architecture, contrato
+# interno). El filtro se agrega a los handlers del logger raíz para que
+# aplique a TODOS los loggers (agentkit, uvicorn, httpx, etc.), no solo al
+# propio — si no, cualquier log de una librería de terceros rompería el
+# formato por no tener el campo request_id.
 ENVIRONMENT = os.getenv("ENVIRONMENT", "development")
 log_level = logging.DEBUG if ENVIRONMENT == "development" else logging.INFO
-logging.basicConfig(level=log_level)
+logging.basicConfig(level=log_level, format="%(asctime)s %(levelname)s [%(request_id)s] %(name)s: %(message)s")
+for _handler in logging.root.handlers:
+    _handler.addFilter(FiltroRequestId())
 logger = logging.getLogger("agentkit")
 
 # La cookie de sesión del panel se firma con esta clave — en producción es
@@ -109,6 +118,7 @@ app.add_middleware(
     session_cookie="gaso_panel_sesion",
     https_only=(ENVIRONMENT == "production"),
 )
+registrar_contrato_interno(app)
 app.include_router(dashboard_router)
 
 
@@ -167,6 +177,17 @@ async def webhook_handler(request: Request):
             # Ignorar mensajes propios
             if msg.es_propio:
                 continue
+
+            # Idempotencia general (API Architecture) — Meta puede reentregar
+            # el mismo mensaje (reintentos de webhook, entregas duplicadas).
+            # mensaje_id vacío (no debería pasar, pero el proveedor no lo
+            # garantiza) se deja procesar en vez de arriesgar colisionar
+            # contra otros mensajes vacíos y descartarlos en silencio.
+            if msg.mensaje_id:
+                ya_procesado = await marcar_mensaje_procesado(msg.mensaje_id)
+                if ya_procesado:
+                    logger.info(f"Mensaje {msg.mensaje_id} ya procesado antes — ignorado (idempotencia)")
+                    continue
 
             # Número de WhatsApp del NEGOCIO por el que entró este mensaje —
             # permite tener varios números activos a la vez (ej. pruebas y
