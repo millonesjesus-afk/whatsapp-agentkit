@@ -40,7 +40,7 @@ from agent.rate_limit import limitador_login, bloqueo_login
 from agent.memory import (
     listar_leads, obtener_lead, obtener_historial, actualizar_lead,
     obtener_usuario, listar_asesores, guardar_mensaje, obtener_ultimos_mensajes,
-    asignar_asesor_a_lead, marcar_lead_visto, actualizar_disponibilidad, actualizar_nivel_asesor,
+    asignar_asesor_a_lead, marcar_lead_visto, limpiar_revision_prioritaria, actualizar_disponibilidad, actualizar_nivel_asesor,
     listar_campanas, crear_campana, actualizar_campana, contar_leads_por_campana, eliminar_campana,
     cambiar_password, contar_leads_activos_por_asesor, RESULTADOS_CERRADOS, listar_leads_agendados,
     obtener_configuracion, guardar_configuracion,
@@ -1341,6 +1341,10 @@ async def _renderizar_lista_conversaciones(
         activo = " activo" if lead["telefono"] == telefono_activo else ""
         es_nuevo = (not vision_total) and not lead.get("visto_asesor", True)
         badge_nuevo = ' <span class="badge text-bg-warning">Nuevo</span>' if es_nuevo else ""
+        badge_revision = (
+            ' <span class="badge text-bg-info" title="La IA respondió, pero un asesor debería revisar esta conversación">Revisión prioritaria</span>'
+            if lead.get("revision_prioritaria") else ""
+        )
         badge_canal = _badge_canal(lead.get("numero_whatsapp_id"), mapa_canales, compacto=True)
         nombre_lead = lead.get("nombre") or lead["telefono"]
         items.append(f"""
@@ -1348,7 +1352,7 @@ async def _renderizar_lista_conversaciones(
             {_avatar(nombre_lead, 30)}
             <div class="flex-grow-1 overflow-hidden">
                 <div class="d-flex justify-content-between align-items-center">
-                    <span class="fw-semibold" style="font-size:13.5px">{html.escape(nombre_lead)}{badge_nuevo}</span>
+                    <span class="fw-semibold" style="font-size:13.5px">{html.escape(nombre_lead)}{badge_nuevo}{badge_revision}</span>
                     <small class="text-muted" style="font-size:10.5px">{hora}</small>
                 </div>
                 <div class="convo-preview text-muted">{html.escape(preview)}</div>
@@ -3117,6 +3121,10 @@ async def detalle_lead(
     if usuario["rol"] == "asesor" and not lead.get("visto_asesor", True):
         await marcar_lead_visto(telefono)
         lead["visto_asesor"] = True
+
+    if lead.get("revision_prioritaria"):
+        await limpiar_revision_prioritaria(telefono)
+        lead["revision_prioritaria"] = False
 
     datos = await _datos_bandeja(usuario, estado, asesor)
     rail = await _renderizar_rail_estados(usuario, datos, estado, asesor)

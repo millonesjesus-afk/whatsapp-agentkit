@@ -19,7 +19,7 @@ from agent.memory import (
     inicializar_db, guardar_mensaje, obtener_historial, obtener_lead, actualizar_lead,
     asignar_asesor_a_lead, marcar_lead_no_visto, liberar_asignacion,
     registrar_fallo_tecnico, resetear_fallos_tecnicos, RESULTADOS_CERRADOS,
-    sembrar_canales_desde_env, pausar_gabi_manual,
+    sembrar_canales_desde_env, pausar_gabi_manual, marcar_revision_prioritaria,
 )
 from agent.providers import obtener_proveedor
 from agent.dashboard import router as dashboard_router, NoAutenticado
@@ -262,12 +262,17 @@ async def webhook_handler(request: Request):
             # el prompt "de pruebas" (config/prompts.yaml tal cual) o el
             # promovido a producción desde el panel.
             modo_canal = (canal or {}).get("modo", "produccion")
-            respuesta, hubo_error = await servicio_inteligencia.generar_respuesta(msg.texto, historial, lead, modo=modo_canal)
+            respuesta, hubo_error, confianza, razon = await servicio_inteligencia.generar_respuesta(
+                msg.texto, historial, lead, modo=modo_canal
+            )
 
             # Si Claude falla, se pide reintentar la primera vez. Si vuelve a
             # fallar (2 veces seguidas), se escala a un asesor en vez de
             # seguir insistiendo — ver conversación sobre las 3 opciones
-            # evaluadas (esperar / escalar / call center 614002).
+            # evaluadas (esperar / escalar / call center 614002). Sin cambios
+            # respecto a antes de esta sub-etapa: esto cubre fallas de la
+            # llamada en sí (API caída), no la confianza de una respuesta
+            # exitosa — ver el bloque de confianza más abajo.
             escalado_por_falla = False
             if hubo_error:
                 fallos = await registrar_fallo_tecnico(msg.telefono)
@@ -276,6 +281,24 @@ async def webhook_handler(request: Request):
                     escalado_por_falla = True
             else:
                 await resetear_fallos_tecnicos(msg.telefono)
+
+            # Protocolo de confianza (solo disponible en modo "pruebas" por
+            # ahora — confianza es None en modo "producción" hasta que se
+            # promueva, ver agent/brain.py). AI Architecture Sec.5: el AI
+            # Engine solo emite la señal, nunca decide la acción — acá es
+            # donde Backend la consume (ServicioInteligencia.resolver_accion_confianza).
+            escalado_por_confianza = False
+            if not hubo_error and confianza is not None:
+                accion_confianza = await servicio_inteligencia.resolver_accion_confianza(confianza)
+                if accion_confianza == "escalar":
+                    respuesta = servicio_inteligencia.obtener_mensaje_escalado_por_confianza()
+                    escalado_por_confianza = True
+                elif accion_confianza == "revision_prioritaria":
+                    await marcar_revision_prioritaria(msg.telefono)
+                logger.info(
+                    f"Confianza emitida para {msg.telefono}: {confianza} "
+                    f"(acción: {accion_confianza}) — razón: {razon}"
+                )
 
             await guardar_mensaje(msg.telefono, "user", msg.texto)
             await guardar_mensaje(msg.telefono, "assistant", respuesta)
@@ -293,6 +316,21 @@ async def webhook_handler(request: Request):
                     "[Escalado automáticamente por fallas técnicas repetidas del bot]",
                 )
                 logger.warning(f"Escalado {msg.telefono} a asesor por fallas técnicas repetidas")
+                continue
+
+            if escalado_por_confianza:
+                # La IA deja de tomar decisiones sobre esta conversación —
+                # mismo patrón de asignación que el escalado por falla técnica,
+                # pero disparado por la señal de confianza real del modelo.
+                asesor = await servicio_comercial.elegir_asesor_automatico((lead or {}).get("interes") or "")
+                if asesor:
+                    await asignar_asesor_a_lead(msg.telefono, asesor)
+                lead_actualizado = await obtener_lead(msg.telefono)
+                await notificar_lead_derivado(
+                    msg.telefono, lead_actualizado or {},
+                    f"[Escalado automáticamente por baja confianza de la IA — razón: {razon}]",
+                )
+                logger.warning(f"Escalado {msg.telefono} a asesor por baja confianza de la IA")
                 continue
 
             if hubo_error:

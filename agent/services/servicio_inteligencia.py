@@ -5,17 +5,45 @@
 Único punto de integración entre el Dominio y el AI Engine (agent/brain.py)
 — Backend Architecture, componente `ServicioInteligencia`.
 
-Fase 1 del Implementation Roadmap: por ahora es una fachada pura sobre la
-implementación actual de brain.py, sin reescribir su comportamiento — el
-resto de Backend deja de importar brain.py directamente y pasa a usar esta
-clase. El protocolo de confianza estructurado (`{respuesta, confianza,
-razon}`) y la escritura en `SugerenciaIA` (Data Architecture) son el
-siguiente paso de esta misma fase, no de este cambio — `SugerenciaIA`
-además depende de Data Architecture Fase 2, todavía no ejecutada
-(MAIEK_AI_PHASE_1_EXECUTION_PLAN.md, sección 2).
+Además de envolver brain.py, resuelve qué acción de negocio corresponde a
+cada nivel de confianza que el AI Engine emite — AI Architecture Sec.5:
+"el AI Engine nunca debe retornar ni implicar una acción de negocio...
+toda acción de negocio sigue siendo responsabilidad exclusiva de
+ServicioInteligencia y las capas que lo consumen". El mapeo confianza→acción
+es configurable (tabla Configuracion), no hardcodeado, tal como se pidió
+explícitamente al definir esta lógica de negocio.
+
+La escritura en `SugerenciaIA` (Data Architecture) sigue diferida — depende
+de Data Architecture Fase 2, todavía no ejecutada.
 """
 
 from agent import brain
+from agent.memory import obtener_configuracion
+
+# Acciones válidas — vocabulario cerrado, igual que el de confianza.
+ACCION_NINGUNA = "ninguna"
+ACCION_REVISION_PRIORITARIA = "revision_prioritaria"
+ACCION_ESCALAR = "escalar"
+ACCIONES_VALIDAS = (ACCION_NINGUNA, ACCION_REVISION_PRIORITARIA, ACCION_ESCALAR)
+
+# Regla de negocio por defecto, definida explícitamente por el usuario al
+# implementar el protocolo de confianza (AI Architecture Sec.6 la dejaba
+# como brecha abierta, "a definir junto con Backend Architecture al
+# implementar" — es este momento): Alta responde y no hace nada más;
+# Requiere validación responde y marca revisión prioritaria, sin
+# transferir la conversación; Baja escala automáticamente y la IA deja de
+# decidir. Cada nivel es una clave independiente en Configuracion para
+# poder cambiar el umbral/acción sin tocar código.
+_ACCION_DEFAULT_POR_CONFIANZA = {
+    brain.CONFIANZA_ALTA: ACCION_NINGUNA,
+    brain.CONFIANZA_REQUIERE_VALIDACION: ACCION_REVISION_PRIORITARIA,
+    brain.CONFIANZA_BAJA: ACCION_ESCALAR,
+}
+_SLUG_CONFIANZA = {
+    brain.CONFIANZA_ALTA: "alta",
+    brain.CONFIANZA_REQUIERE_VALIDACION: "requiere_validacion",
+    brain.CONFIANZA_BAJA: "baja",
+}
 
 
 class ServicioInteligencia:
@@ -24,7 +52,7 @@ class ServicioInteligencia:
 
     async def generar_respuesta(
         self, mensaje: str, historial: list[dict], lead: dict | None = None, modo: str = "produccion",
-    ) -> tuple[str, bool]:
+    ) -> tuple[str, bool, str | None, str | None]:
         return await brain.generar_respuesta(mensaje, historial, lead, modo=modo)
 
     async def extraer_datos_lead(self, mensaje_cliente: str, respuesta_gabi: str, lead_actual: dict | None) -> dict:
@@ -35,6 +63,23 @@ class ServicioInteligencia:
 
     def obtener_mensaje_error_escalado(self) -> str:
         return brain.obtener_mensaje_error_escalado()
+
+    def obtener_mensaje_escalado_por_confianza(self) -> str:
+        return brain.obtener_mensaje_escalado_por_confianza()
+
+    async def resolver_accion_confianza(self, confianza: str) -> str:
+        """Traduce un nivel de confianza emitido por el AI Engine en la
+        acción de negocio configurada para ese nivel — nunca al revés: el
+        AI Engine no sabe ni decide qué acción corresponde."""
+        slug = _SLUG_CONFIANZA.get(confianza)
+        default = _ACCION_DEFAULT_POR_CONFIANZA.get(confianza, ACCION_ESCALAR)
+        if slug is None:
+            # Confianza fuera de vocabulario no debería llegar acá (brain.py
+            # ya hace fail-safe a Baja), pero si pasara, fail-safe también
+            # hacia la acción más conservadora: escalar a un humano.
+            return ACCION_ESCALAR
+        accion = await obtener_configuracion(f"confianza_accion_{slug}", default)
+        return accion if accion in ACCIONES_VALIDAS else default
 
 
 # Instancia compartida por todo el proceso — sin estado propio todavía (pura

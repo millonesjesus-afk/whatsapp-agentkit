@@ -31,6 +31,52 @@ client = AsyncAnthropic(api_key=os.getenv("ANTHROPIC_API_KEY"), timeout=30.0, ma
 MODELO_PRINCIPAL = "claude-sonnet-4-6"
 MODELO_EXTRACCION = "claude-haiku-4-5-20251001"
 
+# Vocabulario del protocolo de confianza — MPX Cap. 2, heredado sin
+# redefinir por Backend/AI Architecture. AI Architecture Sec.6: si el
+# modelo no puede emitir confianza válida en una respuesta dada, el caso
+# se trata como Baja por defecto (fail-safe hacia el humano).
+CONFIANZA_ALTA = "Alta"
+CONFIANZA_REQUIERE_VALIDACION = "Requiere validación"
+CONFIANZA_BAJA = "Baja"
+NIVELES_CONFIANZA = [CONFIANZA_ALTA, CONFIANZA_REQUIERE_VALIDACION, CONFIANZA_BAJA]
+
+# AI Architecture Sec.6/Sec.1 (AI Orchestrator, "Emisión de confianza"):
+# la llamada principal debe retornar el texto de respuesta y la señal de
+# confianza en la misma inferencia, con salida estructurada forzada
+# (Backend Architecture, Decisión local) — nunca texto libre a parsear.
+_HERRAMIENTA_PROTOCOLO_CONFIANZA = {
+    "name": "responder_con_confianza",
+    "description": (
+        "Responde al cliente y emite un nivel de confianza sobre esa "
+        "respuesta, según el protocolo de confianza de Maiek AI."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "respuesta": {
+                "type": "string",
+                "description": "La respuesta para el cliente, en español, siguiendo el system prompt.",
+            },
+            "confianza": {
+                "type": "string",
+                "enum": NIVELES_CONFIANZA,
+                "description": (
+                    "Alta: la respuesta es correcta y completa con la información disponible. "
+                    "Requiere validación: la respuesta es razonable pero un asesor debería "
+                    "revisarla (ambigüedad, información incompleta, o el cliente pide algo fuera "
+                    "de lo usual). Baja: no hay información suficiente o confiable para responder "
+                    "bien — un especialista humano debe tomar la conversación."
+                ),
+            },
+            "razon": {
+                "type": "string",
+                "description": "Justificación breve (una oración) de por qué se emitió ese nivel de confianza.",
+            },
+        },
+        "required": ["respuesta", "confianza", "razon"],
+    },
+}
+
 # Tipos de producto que puede identificar la extracción de datos del lead —
 # basado en las categorías reales del catálogo (columna SUB TIPO de
 # lista_precios_canales_propios.csv), acotado a lo que un cliente pregunta
@@ -101,6 +147,19 @@ def obtener_mensaje_error_escalado() -> str:
     return config.get(
         "error_escalado_message",
         "Sigo con problemas técnicos, ya te conecto con un asesor. También puedes llamarnos al 614-9002.",
+    )
+
+
+def obtener_mensaje_escalado_por_confianza() -> str:
+    """Retorna el mensaje cuando el protocolo de confianza escala
+    automáticamente a un asesor humano (confianza "Baja") — distinto del
+    mensaje de fallas técnicas: acá la IA respondió con éxito, pero
+    decidió que la conversación necesita un especialista."""
+    config = cargar_config_prompts()
+    return config.get(
+        "confianza_baja_escalado_message",
+        "Quiero asegurarme de darte la mejor atención posible — ya te conecto con un especialista "
+        "de nuestro equipo. También puedes llamarnos al 614-9002.",
     )
 
 
@@ -182,7 +241,72 @@ async def _armar_bloques_contexto(mensaje: str, historial: list[dict], lead: dic
     return bloques
 
 
-async def generar_respuesta(mensaje: str, historial: list[dict], lead: dict | None = None, modo: str = "produccion") -> tuple[str, bool]:
+def _delimitar_contexto_y_mensaje(bloques_contexto: list[str], mensaje: str) -> str:
+    """Delimitación estructural del turno `user` (AI Architecture Sec.3):
+    el contexto de confianza (catálogo, promoción, configuración del
+    negocio) y el mensaje del cliente deben ser distinguibles entre sí,
+    mediante bloques marcados — mitigación directa de prompt injection,
+    no una simple preferencia de formato. El contenido dentro de
+    <mensaje_cliente> es SIEMPRE contenido no confiable, nunca
+    instrucciones (AI Architecture Sec.8)."""
+    partes = []
+    if bloques_contexto:
+        partes.append("<contexto_negocio>\n" + "\n\n".join(bloques_contexto) + "\n</contexto_negocio>")
+    partes.append(f"<mensaje_cliente>\n{mensaje}\n</mensaje_cliente>")
+    return "\n".join(partes)
+
+
+async def _generar_respuesta_protocolo_confianza(
+    system_prompt: str, mensajes: list[dict],
+) -> tuple[str, bool, str | None, str | None]:
+    """AI Orchestrator — invocación del modelo con salida estructurada
+    forzada (tool-calling) y prompt caching del system prompt estático
+    (AI Architecture Sec.1, Sec.7). Única llamada por mensaje: la señal
+    de confianza viaja en la misma inferencia que la respuesta
+    (Architectural Constraint, máximo 2 llamadas de IA por mensaje)."""
+    try:
+        response = await client.messages.create(
+            model=MODELO_PRINCIPAL,
+            max_tokens=1024,
+            system=[{"type": "text", "text": system_prompt, "cache_control": {"type": "ephemeral"}}],
+            messages=mensajes,
+            tools=[_HERRAMIENTA_PROTOCOLO_CONFIANZA],
+            tool_choice={"type": "tool", "name": _HERRAMIENTA_PROTOCOLO_CONFIANZA["name"]},
+        )
+
+        bloque_tool = next((b for b in response.content if b.type == "tool_use"), None)
+        if bloque_tool is None:
+            raise ValueError("El modelo no devolvió la herramienta forzada (respuesta sin tool_use)")
+
+        datos = bloque_tool.input
+        respuesta = (datos.get("respuesta") or "").strip()
+        confianza = datos.get("confianza")
+        razon = (datos.get("razon") or "").strip()
+
+        if confianza not in NIVELES_CONFIANZA:
+            # Fail-safe hacia el humano (AI Architecture Sec.6) — nunca se
+            # infiere ni se recalcula la confianza, pero un valor fuera
+            # del vocabulario no puede tratarse como "sin riesgo".
+            logger.warning(f"Confianza fuera de vocabulario ('{confianza}') — fail-safe a '{CONFIANZA_BAJA}'")
+            confianza = CONFIANZA_BAJA
+
+        if not respuesta:
+            return obtener_mensaje_fallback(), False, confianza, razon
+
+        logger.info(
+            f"Respuesta generada con protocolo de confianza ({response.usage.input_tokens} in / "
+            f"{response.usage.output_tokens} out) — confianza={confianza}"
+        )
+        return respuesta, False, confianza, razon
+
+    except Exception as e:
+        logger.error(f"Error Claude API (protocolo de confianza): {e}")
+        return obtener_mensaje_error(), True, None, None
+
+
+async def generar_respuesta(
+    mensaje: str, historial: list[dict], lead: dict | None = None, modo: str = "produccion",
+) -> tuple[str, bool, str | None, str | None]:
     """
     Genera una respuesta usando Claude API.
 
@@ -191,34 +315,50 @@ async def generar_respuesta(mensaje: str, historial: list[dict], lead: dict | No
         historial: Lista de mensajes anteriores [{"role": "user/assistant", "content": "..."}]
         lead: Datos estructurados ya conocidos del cliente (nombre, interes, paso_flujo)
         modo: "produccion" o "pruebas" — el modo del canal por el que llegó
-            este mensaje, para saber qué versión del system prompt usar (ver
-            obtener_system_prompt).
+            este mensaje. Además de decidir qué versión del system prompt
+            usar (ver obtener_system_prompt), en modo "pruebas" activa el
+            protocolo de confianza con salida estructurada forzada,
+            delimitación estructural y prompt caching (Execution Plan
+            v1.2, sección 9 — activación gradual antes de promoverlo a
+            producción). En modo "produccion" el comportamiento es
+            exactamente el mismo que antes de esta sub-etapa: texto libre,
+            sin tools.
 
     Returns:
-        Tupla (texto_respuesta, hubo_error). hubo_error=True solo cuando la
-        llamada a Claude falló (para que main.py pueda escalar a un asesor
-        tras fallas técnicas repetidas, sin confundirlo con un fallback normal).
+        Tupla (texto_respuesta, hubo_error, confianza, razon). hubo_error=True
+        solo cuando la llamada a Claude falló (para que main.py pueda
+        escalar a un asesor tras fallas técnicas repetidas). confianza y
+        razon son None en modo "produccion" (protocolo todavía no
+        activo ahí) o si hubo_error — nunca se inventan ni se infieren.
     """
     # Si el mensaje está vacío, usar fallback (mensajes cortos como "5" o "sí" son válidos)
     if not mensaje or not mensaje.strip():
-        return obtener_mensaje_fallback(), False
+        return obtener_mensaje_fallback(), False, None, None
 
     system_prompt = await obtener_system_prompt(modo)
-
     bloques_contexto = await _armar_bloques_contexto(mensaje, historial, lead)
-    mensaje_para_claude = mensaje
-    if bloques_contexto:
-        mensaje_para_claude = "\n\n".join(bloques_contexto) + f"\n\nMensaje del cliente: {mensaje}"
 
     # Construir mensajes para la API. Claude solo acepta los roles "user" y
     # "assistant" — los mensajes que escribió un asesor humano (guardados con
     # role="asesor" para distinguirlos en el panel) se mapean a "assistant",
     # ya que para el cliente es la misma "voz" del negocio.
-    mensajes = [
+    mensajes_historial = [
         {"role": "assistant" if m["role"] == "asesor" else m["role"], "content": m["content"]}
         for m in historial
     ]
-    mensajes.append({"role": "user", "content": mensaje_para_claude})
+
+    if modo == "pruebas":
+        mensaje_para_claude = _delimitar_contexto_y_mensaje(bloques_contexto, mensaje)
+        mensajes = mensajes_historial + [{"role": "user", "content": mensaje_para_claude}]
+        return await _generar_respuesta_protocolo_confianza(system_prompt, mensajes)
+
+    # modo == "produccion": comportamiento sin cambios respecto a antes de
+    # esta sub-etapa — texto libre, sin tools, sin delimitación estructural
+    # ni prompt caching, hasta que se decida promover el protocolo nuevo.
+    mensaje_para_claude = mensaje
+    if bloques_contexto:
+        mensaje_para_claude = "\n\n".join(bloques_contexto) + f"\n\nMensaje del cliente: {mensaje}"
+    mensajes = mensajes_historial + [{"role": "user", "content": mensaje_para_claude}]
 
     try:
         response = await client.messages.create(
@@ -230,11 +370,11 @@ async def generar_respuesta(mensaje: str, historial: list[dict], lead: dict | No
 
         respuesta = response.content[0].text
         logger.info(f"Respuesta generada ({response.usage.input_tokens} in / {response.usage.output_tokens} out)")
-        return respuesta, False
+        return respuesta, False, None, None
 
     except Exception as e:
         logger.error(f"Error Claude API: {e}")
-        return obtener_mensaje_error(), True
+        return obtener_mensaje_error(), True, None, None
 
 
 async def extraer_datos_lead(mensaje_cliente: str, respuesta_gabi: str, lead_actual: dict | None) -> dict:

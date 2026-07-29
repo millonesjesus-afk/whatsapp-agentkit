@@ -192,6 +192,12 @@ class Lead(Base):
     # activarse, así el caso aparece en listar_leads_esperando_asesor() para
     # que un supervisor lo reclame y lo asigne a una persona real.
     pausado_manual: Mapped[bool] = mapped_column(Boolean, default=False)
+    # True cuando la IA respondió con confianza "Requiere validación"
+    # (protocolo de confianza, AI Architecture Sec.6) — no transfiere la
+    # conversación, solo marca que un asesor debería revisarla con
+    # prioridad. Se limpia cuando alguien del equipo abre el detalle del
+    # lead (ver limpiar_revision_prioritaria).
+    revision_prioritaria: Mapped[bool] = mapped_column(Boolean, default=False)
     # Indexado: listar_leads ordena por esta columna en CADA carga del
     # dashboard (la vista más visitada del panel) — sin índice, ordenar se
     # vuelve más lento a medida que se acumulan leads reales.
@@ -555,6 +561,7 @@ def _lead_a_dict(lead: Lead) -> dict:
         "cuotas": lead.cuotas,
         "medio_pago": lead.medio_pago,
         "visto_asesor": lead.visto_asesor,
+        "revision_prioritaria": lead.revision_prioritaria,
         "fallos_tecnicos": lead.fallos_tecnicos,
         "campana_origen": lead.campana_origen,
         "origen_contacto": lead.origen_contacto,
@@ -779,6 +786,30 @@ async def marcar_lead_visto(telefono: str):
         lead = await session.get(Lead, telefono)
         if lead is not None and not lead.visto_asesor:
             lead.visto_asesor = True
+            await session.commit()
+
+
+async def marcar_revision_prioritaria(telefono: str):
+    """Marca un lead para revisión prioritaria por un asesor — la IA
+    respondió con confianza "Requiere validación" (protocolo de
+    confianza, AI Architecture Sec.6). No transfiere la conversación,
+    solo llama la atención de un humano sobre ella."""
+    async with async_session() as session:
+        lead = await session.get(Lead, telefono)
+        if lead is not None and not lead.revision_prioritaria:
+            lead.revision_prioritaria = True
+            lead.actualizado = datetime.utcnow()
+            await session.commit()
+
+
+async def limpiar_revision_prioritaria(telefono: str):
+    """Limpia la marca de revisión prioritaria — se llama cuando alguien
+    del equipo abre el detalle del lead, ya cumplió su propósito de
+    llamar la atención."""
+    async with async_session() as session:
+        lead = await session.get(Lead, telefono)
+        if lead is not None and lead.revision_prioritaria:
+            lead.revision_prioritaria = False
             await session.commit()
 
 
