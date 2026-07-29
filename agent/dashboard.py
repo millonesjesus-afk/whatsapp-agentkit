@@ -86,7 +86,7 @@ def _badge_canal(numero_whatsapp_id: str | None, mapa_canales: dict, compacto: b
         return f'<span class="badge-suave" style="{extra}background-color:#f1f5f9;color:#64748b">Canal desconocido</span>'
     bg, texto = canal["color"]
     return f'<span class="badge-suave" style="{extra}background-color:{bg};color:{texto}">{html.escape(canal["nombre"])}</span>'
-from agent.campanas import resolver_promo, generar_link_whatsapp
+from agent.services.servicio_canales import servicio_canales
 from agent.brain import cargar_system_prompt
 from agent.tools import obtener_producto_por_codigo, buscar_productos
 from agent.notificaciones import notificar_solicitud_reseteo, notificar_lead_derivado
@@ -3852,7 +3852,7 @@ async def gestionar_campanas(request: Request, usuario: dict = Depends(servicio_
         campana_nueva = next((c for c in campanas if c["id"] == creada), None)
         if campana_nueva:
             if campana_nueva.get("texto_saludo"):
-                link_nueva = generar_link_whatsapp(campana_nueva["texto_saludo"])
+                link_nueva = servicio_canales.generar_link_whatsapp(campana_nueva["texto_saludo"])
                 banner_html = f"""
                 <div class="alert alert-success py-2 px-3 mb-3 d-flex align-items-center gap-2">
                     <i class="bi bi-check-circle-fill"></i>
@@ -3873,7 +3873,7 @@ async def gestionar_campanas(request: Request, usuario: dict = Depends(servicio_
 
     filas = []
     for c in campanas:
-        promo = resolver_promo(c)
+        promo = servicio_canales.resolver_promo(c)
         if promo and promo["fuente"] == "catalogo":
             promo_html = (
                 f'<div><span class="badge text-bg-success-subtle text-success-emphasis">Catálogo</span> '
@@ -3891,7 +3891,7 @@ async def gestionar_campanas(request: Request, usuario: dict = Depends(servicio_
 
         link_html = ""
         if c.get("texto_saludo"):
-            link = generar_link_whatsapp(c["texto_saludo"])
+            link = servicio_canales.generar_link_whatsapp(c["texto_saludo"])
             link_html = (
                 f'<div class="input-group input-group-sm mt-1">'
                 f'<input type="text" class="form-control form-control-sm text-muted" value="{html.escape(link)}" readonly '

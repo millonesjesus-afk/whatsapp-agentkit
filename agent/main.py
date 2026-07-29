@@ -26,10 +26,7 @@ from agent.dashboard import router as dashboard_router, NoAutenticado
 from agent.tiempo_real import gestor_conexiones
 from agent.notificaciones import notificar_lead_derivado
 from agent.services.servicio_comercial import servicio_comercial
-from agent.campanas import (
-    detectar_y_asignar_campana, sembrar_campanas_iniciales, corregir_patrones_desalineados,
-    procesar_leads_formulario,
-)
+from agent.services.servicio_canales import servicio_canales
 from agent.rate_limit import limitador_webhook
 from agent.http_utils import cerrar_cliente_http
 
@@ -84,8 +81,8 @@ async def lifespan(app: FastAPI):
     """Inicializa la base de datos al arrancar el servidor."""
     await inicializar_db()
     await sembrar_canales_desde_env()
-    await sembrar_campanas_iniciales()
-    await corregir_patrones_desalineados()
+    await servicio_canales.sembrar_campanas_iniciales()
+    await servicio_canales.corregir_patrones_desalineados()
     logger.info("Base de datos inicializada")
     logger.info(f"Servidor AgentKit corriendo en puerto {PORT}")
     logger.info(f"Proveedor de WhatsApp: {proveedor.__class__.__name__}")
@@ -159,7 +156,7 @@ async def webhook_handler(request: Request):
         # que este camino no toca nada del flujo normal de mensajes de abajo.
         body = await request.json()
         if body.get("object") == "page":
-            await procesar_leads_formulario(body, proveedor)
+            await servicio_canales.procesar_leads_formulario(body, proveedor)
             return {"status": "ok"}
 
         # Parsear webhook — el proveedor normaliza el formato
@@ -219,7 +216,7 @@ async def webhook_handler(request: Request):
             # Meta — para medir conversión por campaña y ofrecer la promo
             # correcta. Se guarda una sola vez y nunca se sobreescribe.
             if not lead or not lead.get("campana_origen"):
-                campana = await detectar_y_asignar_campana(msg.telefono, msg.texto, msg.referral)
+                campana = await servicio_canales.detectar_y_asignar_campana(msg.telefono, msg.texto, msg.referral)
                 if campana:
                     lead = await obtener_lead(msg.telefono)
 
