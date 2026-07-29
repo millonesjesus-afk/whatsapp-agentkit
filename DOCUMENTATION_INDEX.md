@@ -11,7 +11,7 @@
 | Fecha de creación | 2026-07-26 |
 | Autor | Claude, a pedido de Jesús Millones |
 | Fecha de aprobación | 2026-07-28 |
-| Última actualización | 2026-07-29 (`MAIEK_AI_PHASE_1_EXECUTION_PLAN.md` corregido a v1.2 durante la implementación real de Backend: secuencia interna alineada con la dependencia estricta de `MAIEK_AI_BACKEND_ARCHITECTURE.md` §5 — ver "Fase de Implementación" arriba) |
+| Última actualización | 2026-07-29 (alta de `MAIEK_AI_OPERATIONS_RUNBOOK.md` v1.0 — primer documento hijo de Operations Architecture construido, con el Escenario 1: `alembic stamp head` en producción — ver "Fase de Implementación" arriba) |
 
 ## Dependencias
 
@@ -62,6 +62,15 @@ existente en producción). AI se pausó explícitamente para resolver esta capac
 primero — commit `c04df62`, verificado localmente (equivalencia de esquema con `create_all()`,
 escenario de producción simulado con `stamp`). Pendiente: `alembic stamp head` manual del usuario
 contra la Postgres de producción, antes del próximo deploy que incluya este commit.
+
+**`MAIEK_AI_OPERATIONS_RUNBOOK.md` v1.0 — Approved.** Cierra el punto operativo del `stamp`
+manual: documenta el procedimiento completo (cuándo, en qué entornos, qué verificar antes/después,
+qué hacer si falla) como Escenario 1 del Operations Runbook — primer documento hijo de Operations
+Architecture construido, adelantado desde la Fase 4 original del Roadmap por evidencia real, no
+por planificación. `agent/migraciones.py` ahora también detecta el escenario en el arranque y
+falla con un mensaje explícito remitiendo a este documento, en vez de un error genérico del motor
+de base de datos — sin automatizar el `stamp` en sí, que sigue siendo una decisión administrativa
+manual.
 
 ---
 
@@ -261,12 +270,13 @@ ciclos — cada flecha va de lo más fundacional hacia lo más específico, nunc
 | `MAIEK_AI_DEVOPS_CURRENT_STATE_ASSESSMENT.md` | CSA-DevOps | Engineering | DevOps | Managed | 1.0 | **Approved** | Jesús Millones | 2026-07-28 | — | MSA (Cap. 14, 15), Data Architecture, Security Architecture, API Architecture, AI Architecture, ADS | `MAIEK_AI_DEVOPS_ARCHITECTURE.md` |
 | `MAIEK_AI_DEVOPS_ARCHITECTURE.md` | DevOps Architecture | Engineering | DevOps | Managed | 1.0 | **Approved** | Jesús Millones | 2026-07-28 | — | MSA (Cap. 14, 15), Data Architecture, Security Architecture, API Architecture, AI Architecture, CSA-DevOps, ADS | Frontend/Operations Architecture (futuros) |
 | `MAIEK_AI_OPERATIONS_CURRENT_STATE_ASSESSMENT.md` | CSA-Operations | Engineering | Operations | Managed | 1.0 | **Approved** | Jesús Millones | 2026-07-28 | — | MSA (Cap. 15, 16), DevOps Architecture, Security Architecture, Backend Architecture, AI Architecture, MPA, ADS | `MAIEK_AI_OPERATIONS_ARCHITECTURE.md` |
-| `MAIEK_AI_OPERATIONS_ARCHITECTURE.md` | Operations Architecture | Engineering | Operations | Managed | 1.0 | **Approved** | Jesús Millones | 2026-07-28 | — | MSA (Cap. 15, 16), DevOps Architecture, Security Architecture, Backend Architecture, AI Architecture, CSA-Operations, ADS | Frontend Architecture (futuro), Operations Runbook (futuro) |
+| `MAIEK_AI_OPERATIONS_ARCHITECTURE.md` | Operations Architecture | Engineering | Operations | Managed | 1.0 | **Approved** | Jesús Millones | 2026-07-28 | — | MSA (Cap. 15, 16), DevOps Architecture, Security Architecture, Backend Architecture, AI Architecture, CSA-Operations, ADS | Frontend Architecture (futuro), `MAIEK_AI_OPERATIONS_RUNBOOK.md` |
 | `MAIEK_AI_FRONTEND_CURRENT_STATE_ASSESSMENT.md` | CSA-Frontend | Engineering | Frontend | Managed | 1.0 | **Approved** | Jesús Millones | 2026-07-28 | — | MSA (Cap. 4, 5), MDL, CDS, MPX, Security Architecture, AI Architecture, Operations Architecture, Data Architecture, ADS | `MAIEK_AI_FRONTEND_ARCHITECTURE.md` |
 | `MAIEK_AI_FRONTEND_ARCHITECTURE.md` | Frontend Architecture | Engineering | Frontend | Managed | 1.0 | **Approved** | Jesús Millones | 2026-07-28 | — | MSA (Cap. 4, 5), MDL, CDS, MPX, Security Architecture, AI Architecture, Operations Architecture, Data Architecture, CSA-Frontend, ADS | Ninguno — cierra el corpus arquitectónico principal |
-| `MAIEK_AI_IMPLEMENTATION_ROADMAP.md` | Implementation Roadmap | Foundation | Business | Managed | 1.0 | **Approved** | Jesús Millones | 2026-07-28 | — | Los 8 dominios técnicos (Data, Backend, API, AI, Security, DevOps, Operations, Frontend), MSA, ADS, DOCUMENTATION_INDEX | QA Strategy, Testing Strategy, Operations Runbook, ADR Index, CHANGELOG (todos futuros) |
+| `MAIEK_AI_IMPLEMENTATION_ROADMAP.md` | Implementation Roadmap | Foundation | Business | Managed | 1.0 | **Approved** | Jesús Millones | 2026-07-28 | — | Los 8 dominios técnicos (Data, Backend, API, AI, Security, DevOps, Operations, Frontend), MSA, ADS, DOCUMENTATION_INDEX | QA Strategy, Testing Strategy, `MAIEK_AI_OPERATIONS_RUNBOOK.md`, ADR Index, CHANGELOG (los otros 3, todavía futuros) |
 | `MAIEK_AI_ADR_INDEX.md` | ADR Index | Documentación | Engineering | Managed | 1.0 | **Approved** | Jesús Millones | 2026-07-28 | — | Implementation Roadmap | Toda la Fase de Implementación |
 | `MAIEK_AI_PHASE_1_EXECUTION_PLAN.md` | Phase 1 Execution Plan | Foundation | Business | Managed | 1.2 | **Approved** | Jesús Millones | 2026-07-29 | — | Implementation Roadmap, Backend/AI/API Architecture, Data Architecture | El trabajo real de implementación de la Fase 1 |
+| `MAIEK_AI_OPERATIONS_RUNBOOK.md` | Operations Runbook | Engineering | Operations | Managed | 1.0 | **Approved** | Jesús Millones | 2026-07-29 | — | Operations Architecture, Data Architecture | Quien despliegue el proyecto |
 
 ## 8. Reglas de Gobernanza Documental
 
@@ -322,8 +332,6 @@ El resto sigue en el roadmap general, sin depender directamente del MSA salvo do
   10 (Runtime Architecture): cada paso del flujo de una solicitud es un punto de prueba de
   extremo a extremo.
 - **Testing Strategy** — estrategia concreta de testing (unitario, integración, end-to-end).
-- **Operations Runbook** — procedimientos operativos (incidentes, rollback, monitoreo) — hijo de
-  Operations Architecture (arriba), más operativo que arquitectónico.
 - **ADR Index** — registro de Architecture Decision Records — decisiones técnicas puntuales
   futuras, con su razón, distinto de las decisiones fundacionales ya fijadas en MSA Cap. 12
   (Architectural Decisions), que no crece con cada decisión menor.
