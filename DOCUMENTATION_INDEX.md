@@ -11,7 +11,7 @@
 | Fecha de creación | 2026-07-26 |
 | Autor | Claude, a pedido de Jesús Millones |
 | Fecha de aprobación | 2026-07-28 |
-| Última actualización | 2026-07-28 (sección 7: alta de `MAIEK_AI_FRONTEND_ARCHITECTURE.md` — cierre del corpus arquitectónico principal, 8 dominios técnicos derivados del MSA) |
+| Última actualización | 2026-07-28 (sección 7: alta de `MAIEK_AI_IMPLEMENTATION_ROADMAP.md` — inicio oficial de la Fase de Implementación) |
 
 ## Dependencias
 
@@ -29,7 +29,18 @@ abrir cualquier otro documento oficial.
 (Framework, MPA, MDL, CDS, MPX, MSA, este índice) es consistente y está **Ready for Technical
 Expansion**, con riesgos y vacíos formalmente aceptados y con dueño futuro asignado. Marca el
 cierre oficial de la fase de definición de Maiek AI y el inicio de la fase de construcción
-técnica (Data → Backend → AI → API → Frontend → Security → DevOps → Operations Architecture).
+técnica (Data → Backend → API → AI → Security → DevOps → Operations → Frontend Architecture).
+
+## Fase de Implementación
+
+Con la aprobación de `MAIEK_AI_FRONTEND_ARCHITECTURE.md` (2026-07-28) se cerró el corpus
+arquitectónico principal — los 8 dominios técnicos derivados del MSA, cada uno con su Current
+State Assessment y su arquitectura objetivo, quedan congelados como referencia oficial del
+proyecto. `MAIEK_AI_IMPLEMENTATION_ROADMAP.md` — Approved 2026-07-28 — es el documento puente que
+marca el inicio oficial de la Fase de Implementación: traduce las decisiones `Objetivo` del
+corpus en un plan de ejecución priorizado (no es un documento de arquitectura), con Data
+Architecture Fase 3 (`negocio_id`, Multi-Tenant) como el bloqueante transversal identificado en
+los 8 CSAs.
 
 ---
 
@@ -232,6 +243,7 @@ ciclos — cada flecha va de lo más fundacional hacia lo más específico, nunc
 | `MAIEK_AI_OPERATIONS_ARCHITECTURE.md` | Operations Architecture | Engineering | Operations | Managed | 1.0 | **Approved** | Jesús Millones | 2026-07-28 | — | MSA (Cap. 15, 16), DevOps Architecture, Security Architecture, Backend Architecture, AI Architecture, CSA-Operations, ADS | Frontend Architecture (futuro), Operations Runbook (futuro) |
 | `MAIEK_AI_FRONTEND_CURRENT_STATE_ASSESSMENT.md` | CSA-Frontend | Engineering | Frontend | Managed | 1.0 | **Approved** | Jesús Millones | 2026-07-28 | — | MSA (Cap. 4, 5), MDL, CDS, MPX, Security Architecture, AI Architecture, Operations Architecture, Data Architecture, ADS | `MAIEK_AI_FRONTEND_ARCHITECTURE.md` |
 | `MAIEK_AI_FRONTEND_ARCHITECTURE.md` | Frontend Architecture | Engineering | Frontend | Managed | 1.0 | **Approved** | Jesús Millones | 2026-07-28 | — | MSA (Cap. 4, 5), MDL, CDS, MPX, Security Architecture, AI Architecture, Operations Architecture, Data Architecture, CSA-Frontend, ADS | Ninguno — cierra el corpus arquitectónico principal |
+| `MAIEK_AI_IMPLEMENTATION_ROADMAP.md` | Implementation Roadmap | Foundation | Business | Managed | 1.0 | **Approved** | Jesús Millones | 2026-07-28 | — | Los 8 dominios técnicos (Data, Backend, API, AI, Security, DevOps, Operations, Frontend), MSA, ADS, DOCUMENTATION_INDEX | QA Strategy, Testing Strategy, Operations Runbook, ADR Index, CHANGELOG (todos futuros) |
 
 ## 8. Reglas de Gobernanza Documental
 
