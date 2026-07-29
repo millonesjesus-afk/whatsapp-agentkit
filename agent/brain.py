@@ -5,6 +5,15 @@
 Lógica de IA del agente. Lee el system prompt de prompts.yaml, agrega
 contexto relevante del catálogo/base de conocimiento y genera respuestas
 usando la API de Anthropic Claude.
+
+Implementa el AI Orchestrator (AI Architecture Sec.1) — no como una clase
+separada, sino como las 5 responsabilidades ya distribuidas entre estas
+funciones: recuperación de contexto (_armar_bloques_contexto),
+construcción del prompt (_delimitar_contexto_y_mensaje), invocación del
+modelo y emisión de confianza (_generar_respuesta_protocolo_confianza), y
+registro de inferencias (log estructurado dentro de esa misma función).
+`ServicioInteligencia` (Backend Architecture) es lo único que invoca este
+módulo desde fuera del dominio de AI.
 """
 
 import os
@@ -293,9 +302,29 @@ async def _generar_respuesta_protocolo_confianza(
         if not respuesta:
             return obtener_mensaje_fallback(), False, confianza, razon
 
+        # Registro de inferencias (AI Orchestrator, AI Architecture Sec.1/9):
+        # log estructurado con las dos capas de trazabilidad que exige
+        # Explainability First — qué vio el modelo (turno user delimitado,
+        # ya incluye el contexto de negocio) y qué decidió (confianza,
+        # razón, respuesta). Persistencia formal como SugerenciaIA queda
+        # diferida a Data Architecture Fase 2 (Execution Plan v1.2, sección 2)
+        # — esto es evidencia suficiente para verificar manualmente en esta fase.
+        turno_user = mensajes[-1]["content"] if mensajes else None
         logger.info(
-            f"Respuesta generada con protocolo de confianza ({response.usage.input_tokens} in / "
-            f"{response.usage.output_tokens} out) — confianza={confianza}"
+            "inferencia_ia "
+            + json.dumps(
+                {
+                    "modelo": MODELO_PRINCIPAL,
+                    "prompt_usuario": turno_user,
+                    "confianza": confianza,
+                    "razon": razon,
+                    "respuesta_preview": respuesta[:200],
+                    "tokens_in": response.usage.input_tokens,
+                    "tokens_out": response.usage.output_tokens,
+                    "cache_read_tokens": getattr(response.usage, "cache_read_input_tokens", None),
+                },
+                ensure_ascii=False,
+            )
         )
         return respuesta, False, confianza, razon
 
