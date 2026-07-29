@@ -16,7 +16,7 @@ from dotenv import load_dotenv
 
 from agent.services.servicio_inteligencia import servicio_inteligencia
 from agent.memory import (
-    inicializar_db, guardar_mensaje, obtener_historial, obtener_lead, actualizar_lead,
+    inicializar_db, obtener_lead, actualizar_lead,
     asignar_asesor_a_lead, marcar_lead_no_visto, liberar_asignacion,
     registrar_fallo_tecnico, resetear_fallos_tecnicos, RESULTADOS_CERRADOS,
     sembrar_canales_desde_env, pausar_gabi_manual, marcar_revision_prioritaria,
@@ -27,6 +27,7 @@ from agent.tiempo_real import gestor_conexiones
 from agent.notificaciones import notificar_lead_derivado
 from agent.services.servicio_comercial import servicio_comercial
 from agent.services.servicio_canales import servicio_canales
+from agent.services.servicio_conversacion import servicio_conversacion
 from agent.rate_limit import limitador_webhook
 from agent.http_utils import cerrar_cliente_http
 
@@ -184,7 +185,7 @@ async def webhook_handler(request: Request):
             # respuesta, porque no es un mensaje nuevo del cliente.
             if msg.tipo_evento == "echo":
                 contenido = msg.texto if msg.texto else f"[{msg.tipo}]"
-                await guardar_mensaje(msg.telefono, "assistant", contenido, via_app=True)
+                await servicio_conversacion.guardar_mensaje(msg.telefono, "assistant", contenido, via_app=True)
                 lead_actual = await obtener_lead(msg.telefono)
                 if not (lead_actual and lead_actual.get("asesor_asignado")):
                     await pausar_gabi_manual(msg.telefono)
@@ -197,8 +198,8 @@ async def webhook_handler(request: Request):
             if msg.tipo != "text":
                 logger.info(f"Mensaje no soportado ({msg.tipo}) de {msg.telefono}")
                 respuesta = servicio_inteligencia.obtener_mensaje_no_soportado()
-                await guardar_mensaje(msg.telefono, "user", f"[{msg.tipo}]")
-                await guardar_mensaje(msg.telefono, "assistant", respuesta)
+                await servicio_conversacion.guardar_mensaje(msg.telefono, "user", f"[{msg.tipo}]")
+                await servicio_conversacion.guardar_mensaje(msg.telefono, "assistant", respuesta)
                 await proveedor.enviar_mensaje(msg.telefono, respuesta, canal=canal)
                 await gestor_conexiones.emitir_mensaje_nuevo(msg.telefono)
                 continue
@@ -237,7 +238,7 @@ async def webhook_handler(request: Request):
                     # Caso todavía abierto: se guarda el mensaje y se reactiva
                     # el indicador de "Nuevo" para que el asesor no se lo pierda,
                     # aunque ya hubiera visto mensajes anteriores de este lead.
-                    await guardar_mensaje(msg.telefono, "user", msg.texto)
+                    await servicio_conversacion.guardar_mensaje(msg.telefono, "user", msg.texto)
                     await marcar_lead_no_visto(msg.telefono)
                     logger.info(
                         f"Mensaje de {msg.telefono} guardado sin respuesta automática "
@@ -248,7 +249,7 @@ async def webhook_handler(request: Request):
 
             # Obtener historial ANTES de guardar el mensaje actual
             # (brain.py agrega el mensaje actual, evitando duplicados)
-            historial = await obtener_historial(msg.telefono)
+            historial = await servicio_conversacion.obtener_historial(msg.telefono)
 
             # Le muestra "escribiendo..." en WhatsApp mientras Claude genera
             # la respuesta (puede tardar unos segundos) — así el cliente sabe
@@ -297,8 +298,8 @@ async def webhook_handler(request: Request):
                     f"(acción: {accion_confianza}) — razón: {razon}"
                 )
 
-            await guardar_mensaje(msg.telefono, "user", msg.texto)
-            await guardar_mensaje(msg.telefono, "assistant", respuesta)
+            await servicio_conversacion.guardar_mensaje(msg.telefono, "user", msg.texto)
+            await servicio_conversacion.guardar_mensaje(msg.telefono, "assistant", respuesta)
             await proveedor.enviar_mensaje(msg.telefono, respuesta, canal=canal)
             await gestor_conexiones.emitir_mensaje_nuevo(msg.telefono)
             logger.info(f"Respuesta a {msg.telefono}: {respuesta}")

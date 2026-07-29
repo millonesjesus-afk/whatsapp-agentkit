@@ -38,17 +38,16 @@ from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse, Resp
 from agent.tiempo_real import gestor_conexiones
 from agent.rate_limit import limitador_login, bloqueo_login
 from agent.memory import (
-    listar_leads, obtener_lead, obtener_historial, actualizar_lead,
-    obtener_usuario, listar_asesores, guardar_mensaje, obtener_ultimos_mensajes,
+    listar_leads, obtener_lead, actualizar_lead,
+    obtener_usuario, listar_asesores,
     asignar_asesor_a_lead, marcar_lead_visto, limpiar_revision_prioritaria, actualizar_disponibilidad, actualizar_nivel_asesor,
     listar_campanas, crear_campana, actualizar_campana, contar_leads_por_campana, eliminar_campana,
     cambiar_password, contar_leads_activos_por_asesor, RESULTADOS_CERRADOS, listar_leads_agendados,
     obtener_configuracion, guardar_configuracion,
-    crear_archivo_adjunto, obtener_archivo_adjunto, listar_archivos_reutilizables,
-    eliminar_archivo_reutilizable, obtener_telefono_de_archivo,
     listar_lineas_venta, listar_lineas_venta_de_muchos,
     listar_canales_whatsapp, crear_canal_whatsapp, actualizar_canal_whatsapp,
 )
+from agent.services.servicio_conversacion import servicio_conversacion
 
 # Paleta de colores para distinguir canales de WhatsApp en el panel — se
 # asigna por posición (orden de creación), no por nombre, así que un canal
@@ -1331,7 +1330,7 @@ async def _renderizar_lista_conversaciones(
     # Una sola consulta para el último mensaje de TODOS los leads visibles,
     # no una por lead (ver obtener_ultimos_mensajes) — con Postgres en
     # producción, N consultas secuenciales se sienten en cada carga de página.
-    ultimos_mensajes = await obtener_ultimos_mensajes([l["telefono"] for l in leads_filtrados])
+    ultimos_mensajes = await servicio_conversacion.obtener_ultimos_mensajes([l["telefono"] for l in leads_filtrados])
 
     items = []
     for lead in leads_filtrados:
@@ -2061,7 +2060,7 @@ async def _bloque_respuesta(telefono: str, lead: dict) -> str:
             '<i class="bi bi-info-circle"></i> Asigna este lead a un asesor para poder responder '
             'manualmente (mientras tanto, Gabi sigue atendiendo automáticamente).</p>'
         )
-    catalogos = await listar_archivos_reutilizables()
+    catalogos = await servicio_conversacion.listar_archivos_reutilizables()
     opciones_catalogos = "".join(
         f'<li><button type="button" class="dropdown-item small catalogo-item" data-archivo-id="{c["id"]}">'
         f'<i class="bi bi-file-earmark-fill me-1"></i>{html.escape(c["etiqueta"] or c["nombre_original"])}</button></li>'
@@ -3239,7 +3238,7 @@ async def mensajes_json(telefono: str, usuario: dict = Depends(_usuario_actual))
     if lead is None:
         raise HTTPException(status_code=404, detail="Lead no encontrado")
     _verificar_acceso_lead(usuario, lead)
-    historial = await obtener_historial(telefono, limite=200)
+    historial = await servicio_conversacion.obtener_historial(telefono, limite=200)
     return JSONResponse(historial)
 
 
@@ -3303,7 +3302,7 @@ async def responder_cliente(
     if not enviado:
         raise HTTPException(status_code=502, detail="No se pudo enviar el mensaje por WhatsApp")
 
-    await guardar_mensaje(telefono, "asesor", mensaje)
+    await servicio_conversacion.guardar_mensaje(telefono, "asesor", mensaje)
     await gestor_conexiones.emitir_mensaje_nuevo(telefono)
     return JSONResponse({"status": "ok"})
 
@@ -3402,11 +3401,11 @@ async def enviar_archivo_chat(
     await _subir_y_enviar_media(telefono, archivo.filename, content_type, contenido, caption.strip(), canal=canal)
 
     ruta_disco = _guardar_archivo_en_disco(archivo.filename, contenido)
-    archivo_guardado = await crear_archivo_adjunto(
+    archivo_guardado = await servicio_conversacion.crear_archivo_adjunto(
         nombre_original=archivo.filename, ruta_disco=ruta_disco, content_type=content_type,
         tamano_bytes=len(contenido), subido_por=usuario["username"], reutilizable=False,
     )
-    await guardar_mensaje(telefono, "asesor", caption.strip() or archivo.filename, archivo_id=archivo_guardado["id"])
+    await servicio_conversacion.guardar_mensaje(telefono, "asesor", caption.strip() or archivo.filename, archivo_id=archivo_guardado["id"])
     await gestor_conexiones.emitir_mensaje_nuevo(telefono)
     return JSONResponse({"status": "ok"})
 
@@ -3444,11 +3443,11 @@ async def enviar_audio_chat(
         raise HTTPException(status_code=502, detail="No se pudo enviar el audio por WhatsApp")
 
     ruta_disco = _guardar_archivo_en_disco("nota_de_voz.ogg", contenido_ogg)
-    archivo_guardado = await crear_archivo_adjunto(
+    archivo_guardado = await servicio_conversacion.crear_archivo_adjunto(
         nombre_original="nota_de_voz.ogg", ruta_disco=ruta_disco, content_type="audio/ogg",
         tamano_bytes=len(contenido_ogg), subido_por=usuario["username"], reutilizable=False,
     )
-    await guardar_mensaje(telefono, "asesor", "Nota de voz", archivo_id=archivo_guardado["id"])
+    await servicio_conversacion.guardar_mensaje(telefono, "asesor", "Nota de voz", archivo_id=archivo_guardado["id"])
     await gestor_conexiones.emitir_mensaje_nuevo(telefono)
     return JSONResponse({"status": "ok"})
 
@@ -3465,7 +3464,7 @@ async def enviar_catalogo_chat(telefono: str, archivo_id: int, usuario: dict = D
     if not lead.get("asesor_asignado"):
         raise HTTPException(status_code=400, detail="Este lead aún no está asignado a un asesor")
 
-    archivo = await obtener_archivo_adjunto(archivo_id)
+    archivo = await servicio_conversacion.obtener_archivo_adjunto(archivo_id)
     if archivo is None or not archivo["reutilizable"]:
         raise HTTPException(status_code=404, detail="Catálogo no encontrado")
 
@@ -3474,7 +3473,7 @@ async def enviar_catalogo_chat(telefono: str, archivo_id: int, usuario: dict = D
     canal = await obtener_proveedor().resolver_canal(lead.get("numero_whatsapp_id"))
     await _subir_y_enviar_media(telefono, archivo["nombre_original"], archivo["content_type"], contenido, "", canal=canal)
 
-    await guardar_mensaje(telefono, "asesor", archivo["nombre_original"], archivo_id=archivo["id"])
+    await servicio_conversacion.guardar_mensaje(telefono, "asesor", archivo["nombre_original"], archivo_id=archivo["id"])
     await gestor_conexiones.emitir_mensaje_nuevo(telefono)
     return JSONResponse({"status": "ok"})
 
@@ -3484,11 +3483,11 @@ async def descargar_archivo(archivo_id: int, usuario: dict = Depends(_usuario_ac
     """Sirve un archivo adjunto ya enviado — si es una proforma puntual (no
     reutilizable), verifica que el usuario tenga acceso al lead al que se le
     mandó, igual que para ver la conversación misma."""
-    archivo = await obtener_archivo_adjunto(archivo_id)
+    archivo = await servicio_conversacion.obtener_archivo_adjunto(archivo_id)
     if archivo is None:
         raise HTTPException(status_code=404, detail="Archivo no encontrado")
     if not archivo["reutilizable"]:
-        telefono_lead = await obtener_telefono_de_archivo(archivo_id)
+        telefono_lead = await servicio_conversacion.obtener_telefono_de_archivo(archivo_id)
         if telefono_lead:
             lead = await obtener_lead(telefono_lead)
             if lead:
@@ -3503,7 +3502,7 @@ async def gestionar_catalogos(request: Request, usuario: dict = Depends(servicio
     """Librería de catálogos reutilizables — subir una vez, cualquier asesor
     los puede mandar en cualquier conversación sin volver a subirlos."""
     sidebar = await _renderizar_sidebar(usuario, telefono_activo=None)
-    archivos = await listar_archivos_reutilizables()
+    archivos = await servicio_conversacion.listar_archivos_reutilizables()
 
     mensaje_html = ""
     if subido:
@@ -3582,7 +3581,7 @@ async def subir_catalogo(
         raise HTTPException(status_code=400, detail=f"El archivo supera los {TAMANO_MAXIMO_ARCHIVO_MB}MB permitidos")
 
     ruta_disco = _guardar_archivo_en_disco(archivo.filename, contenido)
-    await crear_archivo_adjunto(
+    await servicio_conversacion.crear_archivo_adjunto(
         nombre_original=archivo.filename, ruta_disco=ruta_disco,
         content_type=archivo.content_type or "application/octet-stream",
         tamano_bytes=len(contenido), subido_por=usuario["username"],
@@ -3593,7 +3592,7 @@ async def subir_catalogo(
 
 @router.post("/catalogos/{archivo_id}/eliminar")
 async def quitar_catalogo(archivo_id: int, usuario: dict = Depends(servicio_identidad.requiere_rol("admin"))):
-    await eliminar_archivo_reutilizable(archivo_id)
+    await servicio_conversacion.eliminar_archivo_reutilizable(archivo_id)
     return RedirectResponse(url="/dashboard/catalogos", status_code=303)
 
 
