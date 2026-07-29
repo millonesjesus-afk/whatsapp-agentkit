@@ -3,7 +3,7 @@
 
 """
 Servidor principal del agente de WhatsApp.
-Funciona con cualquier proveedor (Meta, Twilio) gracias a la capa de providers.
+Funciona con el proveedor Meta Cloud API a través de la capa de providers.
 """
 
 import os
@@ -14,9 +14,7 @@ from fastapi.responses import PlainTextResponse, RedirectResponse
 from starlette.middleware.sessions import SessionMiddleware
 from dotenv import load_dotenv
 
-from agent.brain import (
-    generar_respuesta, obtener_mensaje_no_soportado, extraer_datos_lead, obtener_mensaje_error_escalado,
-)
+from agent.services.servicio_inteligencia import servicio_inteligencia
 from agent.memory import (
     inicializar_db, guardar_mensaje, obtener_historial, obtener_lead, actualizar_lead,
     asignar_asesor_a_lead, marcar_lead_no_visto, liberar_asignacion,
@@ -199,7 +197,7 @@ async def webhook_handler(request: Request):
             # avisamos al cliente en vez de dejarlo sin respuesta
             if msg.tipo != "text":
                 logger.info(f"Mensaje no soportado ({msg.tipo}) de {msg.telefono}")
-                respuesta = obtener_mensaje_no_soportado()
+                respuesta = servicio_inteligencia.obtener_mensaje_no_soportado()
                 await guardar_mensaje(msg.telefono, "user", f"[{msg.tipo}]")
                 await guardar_mensaje(msg.telefono, "assistant", respuesta)
                 await proveedor.enviar_mensaje(msg.telefono, respuesta, canal=canal)
@@ -262,7 +260,7 @@ async def webhook_handler(request: Request):
             # el prompt "de pruebas" (config/prompts.yaml tal cual) o el
             # promovido a producción desde el panel.
             modo_canal = (canal or {}).get("modo", "produccion")
-            respuesta, hubo_error = await generar_respuesta(msg.texto, historial, lead, modo=modo_canal)
+            respuesta, hubo_error = await servicio_inteligencia.generar_respuesta(msg.texto, historial, lead, modo=modo_canal)
 
             # Si Claude falla, se pide reintentar la primera vez. Si vuelve a
             # fallar (2 veces seguidas), se escala a un asesor en vez de
@@ -272,7 +270,7 @@ async def webhook_handler(request: Request):
             if hubo_error:
                 fallos = await registrar_fallo_tecnico(msg.telefono)
                 if fallos >= 2:
-                    respuesta = obtener_mensaje_error_escalado()
+                    respuesta = servicio_inteligencia.obtener_mensaje_error_escalado()
                     escalado_por_falla = True
             else:
                 await resetear_fallos_tecnicos(msg.telefono)
@@ -302,7 +300,7 @@ async def webhook_handler(request: Request):
 
             # Actualizar datos estructurados del lead (nombre, interés, paso del
             # flujo) para que no dependan de sobrevivir en el historial crudo
-            datos_lead = await extraer_datos_lead(msg.texto, respuesta, lead)
+            datos_lead = await servicio_inteligencia.extraer_datos_lead(msg.texto, respuesta, lead)
             await actualizar_lead(msg.telefono, **datos_lead)
 
             # Si el lead recién pasa a "derivado_asesor" (no lo estaba antes):
