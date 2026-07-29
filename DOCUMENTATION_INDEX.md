@@ -11,7 +11,7 @@
 | Fecha de creación | 2026-07-26 |
 | Autor | Claude, a pedido de Jesús Millones |
 | Fecha de aprobación | 2026-07-28 |
-| Última actualización | 2026-07-29 (`IMPLEMENTATION_REVIEW_FASE_1.md` — cierra la implementación de la Fase 1 completa, Code Freeze activo — ver "Fase de Implementación" arriba) |
+| Última actualización | 2026-07-29 (`RELEASE_NOTES_v0.2.0.md` y `DEPLOYMENT_CHECKLIST_v0.2.0.md` — entregables finales de versión bajo Code Freeze, previos al primer despliegue controlado — ver "Fase de Implementación" arriba) |
 
 ## Dependencias
 
@@ -110,6 +110,15 @@ correlación real de `request_id` entre logs y respuesta.
 Architecture Fase 1 + API completos y validados localmente, 22 commits, 0 desplegados. **Code Freeze
 activo** a partir de esta aprobación — solo correcciones de hallazgos de validación/despliegue hasta
 completar el primer despliegue controlado y su validación en producción real.
+
+**Entregables finales de versión — `RELEASE_NOTES_v0.2.0.md` y `DEPLOYMENT_CHECKLIST_v0.2.0.md`.**
+Preparados bajo Code Freeze, sin código adicional: notas de versión (resumen ejecutivo,
+funcionalidades, cambios internos, las 3 migraciones incluidas, riesgos y limitaciones conocidas,
+próximos pasos de Fase 2) y el checklist operativo del primer despliegue controlado (backup, `alembic
+stamp head`, verificación de migraciones, push, deploy, smoke tests, validación de logs/`request_id`/
+idempotencia/protocolo de confianza/revisión prioritaria, criterios de éxito, y procedimiento de
+rollback). Pendiente: ejecutar el checklist y registrar acá la fecha real de despliegue una vez
+cerrado.
 
 ---
 
