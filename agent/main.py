@@ -31,6 +31,7 @@ from agent.campanas import (
     procesar_leads_formulario,
 )
 from agent.rate_limit import limitador_webhook
+from agent.http_utils import cerrar_cliente_http
 
 load_dotenv()
 
@@ -89,6 +90,7 @@ async def lifespan(app: FastAPI):
     logger.info(f"Servidor AgentKit corriendo en puerto {PORT}")
     logger.info(f"Proveedor de WhatsApp: {proveedor.__class__.__name__}")
     yield
+    await cerrar_cliente_http()
 
 
 # /docs, /redoc y /openapi.json quedan deshabilitados por defecto (API
