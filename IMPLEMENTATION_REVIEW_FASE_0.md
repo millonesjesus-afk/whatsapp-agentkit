@@ -1,6 +1,19 @@
 # Implementation Review — Fase 0 (Estabilización)
 
-**Fecha:** 2026-07-28 · **Rango revisado:** commits `c063091`..`b64ac9d` en `deploy-main` · **Estado:** cerrada, lista para push/merge
+**Fecha:** 2026-07-28 · **Rango revisado:** commits `c063091`..`b64ac9d` en `deploy-main` · **Estado:** desplegada y verificada en producción, Fase 0 oficialmente cerrada (2026-07-29)
+
+## 0. Verificación post-deploy en producción
+
+Antes del push se confirmó el único punto de riesgo real identificado en el análisis operacional: el canal activo (`Principal`, `Phone Number ID` `1187325441132776`) ya tenía `app_secret` configurado (verificado directamente en `/dashboard/canales-whatsapp` con sesión ya autenticada del usuario) — el cambio de fail-closed del webhook era, por tanto, un no-op seguro en producción.
+
+Push realizado a `deploy/main` (`1ae3b48..8d300c7`, 32 commits) tras resolver un bloqueo de permisos de GitHub (el token de `gh` carecía del scope `workflow`, requerido para `.github/workflows/ci.yml`; resuelto con `gh auth refresh -s workflow`, aprobado por el usuario en su navegador). Deploy confirmado `Active`/`Deployment successful` en Railway.
+
+Logs de producción tras el deploy confirman:
+- Arranque limpio (`Application startup complete.`) — confirma que el fail-fast de `ANTHROPIC_API_KEY`/`CANAL_ENCRYPTION_KEY` no rompió el arranque (ambas ya estaban configuradas).
+- Dos mensajes reales de prueba (`51998130455: hola`, `51998130455: hi`) generaron `POST /webhook HTTP/1.1 200 OK` — la verificación de firma con `app_secret` real funciona correctamente en producción.
+- Sin respuesta automática de Gabi en ninguno de los dos casos — comportamiento esperado, no relacionado con Fase 0: el lead ya tenía un asesor asignado (`gsandoval`), lo que pausa a Gabi por diseño (Backend Architecture).
+
+**Ningún efecto adverso observado.** Fase 0 cerrada oficialmente.
 
 ## 1. Archivos modificados (17)
 
@@ -76,8 +89,8 @@ Ninguna deuda de esta lista es oculta — las tres ya estaban anticipadas en el 
 
 ## 7. Recomendación
 
-**Lista para push y merge.** No hay desviaciones arquitectónicas, la deuda técnica introducida está identificada y tiene criterio de revisión, y los Architecture Success Criteria de alcance de Fase 0 están cumplidos o correctamente marcados como pendientes de configuración externa (no de código). Los dos pendientes de infraestructura (backup verificado, branch protection) no bloquean el push — son follow-ups operativos que no requieren código adicional.
+**Lista para push y merge — ejecutado y verificado.** No hay desviaciones arquitectónicas, la deuda técnica introducida está identificada y tiene criterio de revisión, y los Architecture Success Criteria de alcance de Fase 0 están cumplidos o correctamente marcados como pendientes de configuración externa (no de código). Push realizado a `deploy/main`, deploy activo confirmado en Railway, y validación end-to-end con tráfico real (sección 0) sin efectos adversos. Los dos pendientes de infraestructura (backup verificado, branch protection) quedan como follow-ups operativos, sin bloquear el cierre de esta fase.
 
 ---
 
-*Cierra oficialmente la Fase 0 del `MAIEK_AI_IMPLEMENTATION_ROADMAP.md`. Siguiente: Fase 1 — Núcleo técnico (Backend/AI/API).*
+*Cierra oficialmente la Fase 0 del `MAIEK_AI_IMPLEMENTATION_ROADMAP.md` — verificada en producción el 2026-07-29. Siguiente: Fase 1 — Núcleo técnico (Backend/AI/API).*
