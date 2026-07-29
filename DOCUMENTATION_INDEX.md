@@ -55,6 +55,14 @@ Fase 1 (baseline de migraciones con Alembic) no tenía ubicación explícita en 
 prerrequisito declarado de la Fase 2 completa (`negocio_id`) — el Implementation Roadmap ya se actualizó para
 incorporarla como pista transversal de su Fase 1, sin bloquear el inicio de Backend/AI/API.
 
+**Data Architecture Fase 1 (baseline de Alembic) — Implementada.** Surgió como bloqueo real
+durante la sub-etapa de AI (el marcador de "revisión prioritaria" del protocolo de confianza
+necesitaba una columna nueva en `leads`, que `create_all()` no puede agregar a una tabla ya
+existente en producción). AI se pausó explícitamente para resolver esta capacidad habilitadora
+primero — commit `c04df62`, verificado localmente (equivalencia de esquema con `create_all()`,
+escenario de producción simulado con `stamp`). Pendiente: `alembic stamp head` manual del usuario
+contra la Postgres de producción, antes del próximo deploy que incluya este commit.
+
 ---
 
 ## 1. Propósito del índice

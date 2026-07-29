@@ -11,7 +11,7 @@
 | Fecha de creación | 2026-07-28 |
 | Autor | Claude, a pedido de Jesús Millones |
 | Fecha de aprobación | 2026-07-28 |
-| Última actualización | 2026-07-29 (Data Architecture Fase 1 incorporada como pista transversal de la Fase 1) |
+| Última actualización | 2026-07-29 (Data Architecture Fase 1 — baseline de Alembic — implementada en código, ver Control de versiones) |
 
 ## Dependencias
 
@@ -37,6 +37,7 @@ Todo trabajo de implementación futuro sobre el repositorio; los cinco documento
 | 1.0 | 2026-07-28 | Claude | Aprobado sin reapertura del contenido. Marca oficialmente el inicio de la Fase de Implementación de Maiek AI. El usuario registró 2 mejoras futuras no bloqueantes, a incorporar en una versión posterior: (1) **métricas ejecutivas de avance** del roadmap (porcentaje de decisiones `Objetivo`→`Activa`, brechas cerradas, fases completadas); (2) **criterios explícitos para declarar cerrada la Fase de Implementación** y dar inicio a una fase de operación y evolución continua — hoy el documento define criterios de cierre por fase (sección 7) pero no un criterio de cierre de la fase completa. |
 | 1.0 | 2026-07-29 | Claude | **Fase 0 (Estabilización) declarada oficialmente cerrada** — 32 commits desplegados a producción y verificados con tráfico real (ver `IMPLEMENTATION_REVIEW_FASE_0.md`): rama remota sincronizada, deploy de Railway `Active`/`Deployment successful`, arranque limpio, health check OK, `POST /webhook` → `200 OK` con mensajes reales, sin errores relevantes posteriores al despliegue. Sin desviaciones respecto al corpus arquitectónico. **Fase 1 (Núcleo técnico — Backend/AI/API) queda iniciada.** |
 | 1.0 | 2026-07-29 | Claude | **Incorporada Data Architecture Fase 1 (baseline de Alembic) como pista transversal dentro de la Fase 1** (secciones 1, 3, 4, 8), sin bloquear el inicio de Backend/AI/API. Surgió de una revisión independiente (Opus, Principal Architect/CTO externo) del `MAIEK_AI_PHASE_1_EXECUTION_PLAN.md`, que identificó que Data Architecture ya declara su propia Fase 1 como prerrequisito de "todas las siguientes" — incluida la Fase 2 de este roadmap (`negocio_id`), que ahora declara depender también de Data Architecture Fase 1 y Fase 2, no solo del núcleo técnico. No redefine ninguna decisión ya tomada — corrige una secuenciación no declarada explícitamente hasta ahora. |
+| 1.0 | 2026-07-29 | Claude | **Data Architecture Fase 1 (baseline de Alembic) implementada en código**, adelantada respecto al resto del núcleo técnico: surgió como bloqueo real durante la sub-etapa de AI (el marcador de "revisión prioritaria" del protocolo de confianza necesitaba una columna nueva en `leads`, que `create_all()` no puede agregar a una tabla ya existente en producción). El trabajo de AI se pausó explícitamente para resolver esta capacidad habilitadora antes de seguir acumulando entregables diferidos por la misma causa (Evidence over Opinion) — ver Implementation Review de esta sub-etapa. Pendiente de acción manual del usuario antes del próximo deploy: `alembic stamp head` contra la Postgres de producción. |
 
 ## Alcance
 
