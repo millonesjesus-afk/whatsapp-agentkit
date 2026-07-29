@@ -11,7 +11,7 @@
 | Fecha de creación | 2026-07-26 |
 | Autor | Claude, a pedido de Jesús Millones |
 | Fecha de aprobación | 2026-07-28 |
-| Última actualización | 2026-07-29 (alta de `MAIEK_AI_PHASE_1_EXECUTION_PLAN.md`; Roadmap actualizado con Data Architecture Fase 1 transversal — ver "Fase de Implementación" arriba) |
+| Última actualización | 2026-07-29 (`MAIEK_AI_PHASE_1_EXECUTION_PLAN.md` corregido a v1.2 durante la implementación real de Backend: secuencia interna alineada con la dependencia estricta de `MAIEK_AI_BACKEND_ARCHITECTURE.md` §5 — ver "Fase de Implementación" arriba) |
 
 ## Dependencias
 
@@ -47,12 +47,12 @@ verificados con tráfico real de WhatsApp (`IMPLEMENTATION_REVIEW_FASE_0.md`): s
 respecto al corpus, deuda técnica identificada y con criterio de revisión.
 
 **Fase 1 (Núcleo técnico — Backend/AI/API) — Planificación cerrada, implementación en curso.**
-`MAIEK_AI_PHASE_1_EXECUTION_PLAN.md` v1.1 — Approved 2026-07-29 — traduce la Fase 1 del Roadmap en
-un plan de ejecución (orden Backend → AI → API, paralelización, riesgos, criterios de aceptación),
-revisado por una auditoría independiente (Opus, como Principal Architect/CTO externo) antes de
-aprobarse. Esa revisión detectó que `MAIEK_AI_DATA_ARCHITECTURE.md` Fase 1 (baseline de
-migraciones con Alembic) no tenía ubicación explícita en el Roadmap pese a ser prerrequisito
-declarado de la Fase 2 completa (`negocio_id`) — el Implementation Roadmap ya se actualizó para
+`MAIEK_AI_PHASE_1_EXECUTION_PLAN.md` v1.2 — Approved 2026-07-29 — traduce la Fase 1 del Roadmap en
+un plan de ejecución (orden Backend (parcial) → AI → Backend (resto) → API, paralelización,
+riesgos, criterios de aceptación), revisado por una auditoría independiente (Opus, como Principal
+Architect/CTO externo) antes de aprobarse. Esa revisión detectó que `MAIEK_AI_DATA_ARCHITECTURE.md`
+Fase 1 (baseline de migraciones con Alembic) no tenía ubicación explícita en el Roadmap pese a ser
+prerrequisito declarado de la Fase 2 completa (`negocio_id`) — el Implementation Roadmap ya se actualizó para
 incorporarla como pista transversal de su Fase 1, sin bloquear el inicio de Backend/AI/API.
 
 ---
@@ -258,7 +258,7 @@ ciclos — cada flecha va de lo más fundacional hacia lo más específico, nunc
 | `MAIEK_AI_FRONTEND_ARCHITECTURE.md` | Frontend Architecture | Engineering | Frontend | Managed | 1.0 | **Approved** | Jesús Millones | 2026-07-28 | — | MSA (Cap. 4, 5), MDL, CDS, MPX, Security Architecture, AI Architecture, Operations Architecture, Data Architecture, CSA-Frontend, ADS | Ninguno — cierra el corpus arquitectónico principal |
 | `MAIEK_AI_IMPLEMENTATION_ROADMAP.md` | Implementation Roadmap | Foundation | Business | Managed | 1.0 | **Approved** | Jesús Millones | 2026-07-28 | — | Los 8 dominios técnicos (Data, Backend, API, AI, Security, DevOps, Operations, Frontend), MSA, ADS, DOCUMENTATION_INDEX | QA Strategy, Testing Strategy, Operations Runbook, ADR Index, CHANGELOG (todos futuros) |
 | `MAIEK_AI_ADR_INDEX.md` | ADR Index | Documentación | Engineering | Managed | 1.0 | **Approved** | Jesús Millones | 2026-07-28 | — | Implementation Roadmap | Toda la Fase de Implementación |
-| `MAIEK_AI_PHASE_1_EXECUTION_PLAN.md` | Phase 1 Execution Plan | Foundation | Business | Managed | 1.1 | **Approved** | Jesús Millones | 2026-07-29 | — | Implementation Roadmap, Backend/AI/API Architecture, Data Architecture | El trabajo real de implementación de la Fase 1 |
+| `MAIEK_AI_PHASE_1_EXECUTION_PLAN.md` | Phase 1 Execution Plan | Foundation | Business | Managed | 1.2 | **Approved** | Jesús Millones | 2026-07-29 | — | Implementation Roadmap, Backend/AI/API Architecture, Data Architecture | El trabajo real de implementación de la Fase 1 |
 
 ## 8. Reglas de Gobernanza Documental
 
