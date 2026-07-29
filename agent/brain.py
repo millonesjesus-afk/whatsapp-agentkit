@@ -21,8 +21,12 @@ from agent.campanas import resolver_promo, resolver_familia_promo, obtener_codig
 load_dotenv()
 logger = logging.getLogger("agentkit")
 
-# Cliente de Anthropic
-client = AsyncAnthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+# Cliente de Anthropic — timeout y reintentos explícitos (DevOps Architecture,
+# Decisión local: toda llamada externa debe tener timeout explícito y al menos
+# un reintento con backoff, en vez de depender de los defaults implícitos del
+# SDK). 30s alcanza de sobra para una respuesta conversacional; una llamada
+# colgada más que eso bloquea el mensaje de WhatsApp que depende de ella.
+client = AsyncAnthropic(api_key=os.getenv("ANTHROPIC_API_KEY"), timeout=30.0, max_retries=2)
 
 MODELO_PRINCIPAL = "claude-sonnet-4-6"
 MODELO_EXTRACCION = "claude-haiku-4-5-20251001"

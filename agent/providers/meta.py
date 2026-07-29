@@ -5,10 +5,10 @@ import os
 import hmac
 import hashlib
 import logging
-import httpx
 from fastapi import Request
 from agent.providers.base import ProveedorWhatsApp, MensajeEntrante
 from agent.memory import listar_canales_whatsapp
+from agent.http_utils import post_con_reintentos, get_con_reintentos
 
 logger = logging.getLogger("agentkit")
 
@@ -41,15 +41,20 @@ class ProveedorMeta(ProveedorWhatsApp):
         para confirmar que el webhook realmente viene de Meta y no de un
         tercero. Prueba contra el app_secret de cada canal activo (hoy
         normalmente el mismo para todos, pero no se asume) — basta con que
-        uno coincida."""
+        uno coincida.
+
+        Fail-closed: si ningún canal tiene app_secret configurado, se rechaza
+        la solicitud en vez de aceptarla por default (implementa la Decisión
+        local ya Objetivo de Security Architecture, sección 3 — antes esto
+        fallaba abierto)."""
         canales = await listar_canales_whatsapp(solo_activos=True)
         secretos = {c["app_secret"] for c in canales if c.get("app_secret")}
         if not secretos:
-            logger.warning(
-                "Ningún canal tiene app_secret configurado — el webhook NO está "
-                "verificando la firma de Meta. Configúralo antes de ir a producción."
+            logger.error(
+                "Ningún canal tiene app_secret configurado — el webhook rechaza "
+                "la solicitud (fail-closed). Configura app_secret en al menos un canal."
             )
-            return True
+            return False
         firma_header = request.headers.get("x-hub-signature-256", "")
         if not firma_header.startswith("sha256="):
             return False
@@ -142,11 +147,10 @@ class ProveedorMeta(ProveedorWhatsApp):
             "message_id": mensaje_id,
             "typing_indicator": {"type": "text"},
         }
-        async with httpx.AsyncClient() as client:
-            r = await client.post(url, json=payload, headers=headers)
-            if r.status_code != 200:
-                logger.warning(f"No se pudo marcar leído/escribiendo: {r.status_code} — {r.text}")
-            return r.status_code == 200
+        r = await post_con_reintentos(url, json=payload, headers=headers)
+        if r.status_code != 200:
+            logger.warning(f"No se pudo marcar leído/escribiendo: {r.status_code} — {r.text}")
+        return r.status_code == 200
 
     async def enviar_mensaje(self, telefono: str, mensaje: str, canal: dict | None = None) -> bool:
         """Envía mensaje via Meta WhatsApp Cloud API."""
@@ -165,11 +169,10 @@ class ProveedorMeta(ProveedorWhatsApp):
             "type": "text",
             "text": {"body": mensaje},
         }
-        async with httpx.AsyncClient() as client:
-            r = await client.post(url, json=payload, headers=headers)
-            if r.status_code != 200:
-                logger.error(f"Error Meta API: {r.status_code} — {r.text}")
-            return r.status_code == 200
+        r = await post_con_reintentos(url, json=payload, headers=headers)
+        if r.status_code != 200:
+            logger.error(f"Error Meta API: {r.status_code} — {r.text}")
+        return r.status_code == 200
 
     async def subir_media(self, contenido: bytes, nombre_archivo: str, content_type: str, canal: dict | None = None) -> str | None:
         """Sube un archivo a los servidores de Meta (quedan alojados ahí
@@ -184,12 +187,11 @@ class ProveedorMeta(ProveedorWhatsApp):
         headers = {"Authorization": f"Bearer {canal['access_token']}"}
         data = {"messaging_product": "whatsapp"}
         files = {"file": (nombre_archivo, contenido, content_type)}
-        async with httpx.AsyncClient() as client:
-            r = await client.post(url, headers=headers, data=data, files=files)
-            if r.status_code != 200:
-                logger.error(f"Error subiendo media a Meta: {r.status_code} — {r.text}")
-                return None
-            return r.json().get("id")
+        r = await post_con_reintentos(url, headers=headers, data=data, files=files)
+        if r.status_code != 200:
+            logger.error(f"Error subiendo media a Meta: {r.status_code} — {r.text}")
+            return None
+        return r.json().get("id")
 
     async def enviar_documento(self, telefono: str, media_id: str, nombre_archivo: str, caption: str = "", canal: dict | None = None) -> bool:
         """Envía un documento (PDF, etc.) ya subido con subir_media."""
@@ -211,11 +213,10 @@ class ProveedorMeta(ProveedorWhatsApp):
             "type": "document",
             "document": documento,
         }
-        async with httpx.AsyncClient() as client:
-            r = await client.post(url, json=payload, headers=headers)
-            if r.status_code != 200:
-                logger.error(f"Error Meta API (documento): {r.status_code} — {r.text}")
-            return r.status_code == 200
+        r = await post_con_reintentos(url, json=payload, headers=headers)
+        if r.status_code != 200:
+            logger.error(f"Error Meta API (documento): {r.status_code} — {r.text}")
+        return r.status_code == 200
 
     async def enviar_imagen(self, telefono: str, media_id: str, caption: str = "", canal: dict | None = None) -> bool:
         """Envía una imagen ya subida con subir_media."""
@@ -237,11 +238,10 @@ class ProveedorMeta(ProveedorWhatsApp):
             "type": "image",
             "image": imagen,
         }
-        async with httpx.AsyncClient() as client:
-            r = await client.post(url, json=payload, headers=headers)
-            if r.status_code != 200:
-                logger.error(f"Error Meta API (imagen): {r.status_code} — {r.text}")
-            return r.status_code == 200
+        r = await post_con_reintentos(url, json=payload, headers=headers)
+        if r.status_code != 200:
+            logger.error(f"Error Meta API (imagen): {r.status_code} — {r.text}")
+        return r.status_code == 200
 
     async def enviar_audio(self, telefono: str, media_id: str, canal: dict | None = None) -> bool:
         """Envía una nota de voz ya subida con subir_media (debe ser OGG/Opus
@@ -261,11 +261,10 @@ class ProveedorMeta(ProveedorWhatsApp):
             "type": "audio",
             "audio": {"id": media_id},
         }
-        async with httpx.AsyncClient() as client:
-            r = await client.post(url, json=payload, headers=headers)
-            if r.status_code != 200:
-                logger.error(f"Error Meta API (audio): {r.status_code} — {r.text}")
-            return r.status_code == 200
+        r = await post_con_reintentos(url, json=payload, headers=headers)
+        if r.status_code != 200:
+            logger.error(f"Error Meta API (audio): {r.status_code} — {r.text}")
+        return r.status_code == 200
 
     async def obtener_datos_leadgen(self, leadgen_id: str, canal: dict | None = None) -> dict | None:
         """Trae nombre/teléfono/formulario de origen de un lead de Meta Lead
@@ -277,26 +276,25 @@ class ProveedorMeta(ProveedorWhatsApp):
             return None
         url = f"https://graph.facebook.com/{self.api_version}/{leadgen_id}"
         params = {"access_token": page_access_token}
-        async with httpx.AsyncClient() as client:
-            r = await client.get(url, params=params)
-            if r.status_code != 200:
-                logger.error(f"Error trayendo datos de leadgen {leadgen_id}: {r.status_code} — {r.text}")
-                return None
-            datos = r.json()
-            # field_data trae los campos del formulario como una lista de
-            # {name, values} — los nombres estándar son full_name/phone_number,
-            # pero puede haber preguntas personalizadas con otros nombres.
-            campos = {
-                f.get("name", ""): (f.get("values") or [""])[0]
-                for f in datos.get("field_data", [])
-            }
-            return {
-                "leadgen_id": leadgen_id,
-                "nombre": campos.get("full_name") or campos.get("nombre") or "",
-                "telefono": campos.get("phone_number") or campos.get("telefono") or "",
-                "ad_id": datos.get("ad_id", ""),
-                "form_id": datos.get("form_id", ""),
-            }
+        r = await get_con_reintentos(url, params=params)
+        if r.status_code != 200:
+            logger.error(f"Error trayendo datos de leadgen {leadgen_id}: {r.status_code} — {r.text}")
+            return None
+        datos = r.json()
+        # field_data trae los campos del formulario como una lista de
+        # {name, values} — los nombres estándar son full_name/phone_number,
+        # pero puede haber preguntas personalizadas con otros nombres.
+        campos = {
+            f.get("name", ""): (f.get("values") or [""])[0]
+            for f in datos.get("field_data", [])
+        }
+        return {
+            "leadgen_id": leadgen_id,
+            "nombre": campos.get("full_name") or campos.get("nombre") or "",
+            "telefono": campos.get("phone_number") or campos.get("telefono") or "",
+            "ad_id": datos.get("ad_id", ""),
+            "form_id": datos.get("form_id", ""),
+        }
 
     async def enviar_plantilla(
         self, telefono: str, nombre_plantilla: str, parametros: list[str], idioma: str = "es", canal: dict | None = None
@@ -328,8 +326,7 @@ class ProveedorMeta(ProveedorWhatsApp):
                 "components": componentes,
             },
         }
-        async with httpx.AsyncClient() as client:
-            r = await client.post(url, json=payload, headers=headers)
-            if r.status_code != 200:
-                logger.error(f"Error Meta API (plantilla): {r.status_code} — {r.text}")
-            return r.status_code == 200
+        r = await post_con_reintentos(url, json=payload, headers=headers)
+        if r.status_code != 200:
+            logger.error(f"Error Meta API (plantilla): {r.status_code} — {r.text}")
+        return r.status_code == 200

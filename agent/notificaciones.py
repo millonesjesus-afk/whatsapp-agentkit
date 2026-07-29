@@ -10,7 +10,8 @@ actual (supervisor de ventas deriva manualmente al asesor por WhatsApp).
 
 import os
 import logging
-import httpx
+
+from agent.http_utils import post_con_reintentos
 
 logger = logging.getLogger("agentkit")
 
@@ -71,13 +72,12 @@ async def notificar_lead_derivado(telefono: str, lead: dict, ultimo_mensaje: str
         "html": cuerpo_html,
     }
 
-    async with httpx.AsyncClient() as client:
-        r = await client.post("https://api.resend.com/emails", json=payload, headers=headers)
-        if r.status_code >= 300:
-            logger.error(f"Error enviando notificación Resend: {r.status_code} — {r.text}")
-            return False
-        logger.info(f"Notificación de lead derivado enviada a {DESTINATARIOS}")
-        return True
+    r = await post_con_reintentos("https://api.resend.com/emails", json=payload, headers=headers)
+    if r.status_code >= 300:
+        logger.error(f"Error enviando notificación Resend: {r.status_code} — {r.text}")
+        return False
+    logger.info(f"Notificación de lead derivado enviada a {DESTINATARIOS}")
+    return True
 
 
 async def notificar_solicitud_reseteo(username: str) -> bool:
@@ -109,10 +109,9 @@ async def notificar_solicitud_reseteo(username: str) -> bool:
         "html": cuerpo_html,
     }
 
-    async with httpx.AsyncClient() as client:
-        r = await client.post("https://api.resend.com/emails", json=payload, headers=headers)
-        if r.status_code >= 300:
-            logger.error(f"Error enviando notificación de reseteo: {r.status_code} — {r.text}")
-            return False
-        logger.info(f"Notificación de reseteo de contraseña enviada para {username}")
-        return True
+    r = await post_con_reintentos("https://api.resend.com/emails", json=payload, headers=headers)
+    if r.status_code >= 300:
+        logger.error(f"Error enviando notificación de reseteo: {r.status_code} — {r.text}")
+        return False
+    logger.info(f"Notificación de reseteo de contraseña enviada para {username}")
+    return True
