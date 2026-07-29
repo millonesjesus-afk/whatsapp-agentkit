@@ -11,13 +11,13 @@
 | Fecha de creación | 2026-07-28 |
 | Autor | Claude, a pedido de Jesús Millones |
 | Fecha de aprobación | 2026-07-28 |
-| Última actualización | 2026-07-29 (Fase 0 cerrada, Fase 1 iniciada) |
+| Última actualización | 2026-07-29 (Data Architecture Fase 1 incorporada como pista transversal de la Fase 1) |
 
 ## Dependencias
 
 Los ocho documentos técnicos del corpus arquitectónico principal, todos Approved — este roadmap no decide nada que no esté ya decidido ahí, solo secuencia y prioriza:
 
-- `MAIEK_AI_DATA_ARCHITECTURE.md` — en particular, Fase 3 (`negocio_id`, Multi-Tenant), el bloqueante transversal que este roadmap prioriza explícitamente.
+- `MAIEK_AI_DATA_ARCHITECTURE.md` — en particular, Fase 3 (`negocio_id`, Multi-Tenant), el bloqueante transversal que este roadmap prioriza explícitamente; y su Fase 1 (baseline de migraciones con Alembic — *"sin esta fase, ninguna de las siguientes puede desplegarse con seguridad"*), incorporada como pista transversal dentro de la Fase 1 de este roadmap (sección 4) tras una revisión independiente del `MAIEK_AI_PHASE_1_EXECUTION_PLAN.md`.
 - `MAIEK_AI_BACKEND_ARCHITECTURE.md`, `MAIEK_AI_API_ARCHITECTURE.md`, `MAIEK_AI_AI_ARCHITECTURE.md` — núcleo técnico objetivo (`ServicioInteligencia`, contrato interno, AI Orchestrator, protocolo de confianza).
 - `MAIEK_AI_SECURITY_ARCHITECTURE.md`, `MAIEK_AI_DEVOPS_ARCHITECTURE.md` — Decisiones locales P1 (fail-open del webhook, rate limiting, backups, gate de CI, retries).
 - `MAIEK_AI_OPERATIONS_ARCHITECTURE.md`, `MAIEK_AI_FRONTEND_ARCHITECTURE.md` — marco de incidentes, manejo de errores, adopción de MDL.
@@ -36,6 +36,7 @@ Todo trabajo de implementación futuro sobre el repositorio; los cinco documento
 | 1.0 (borrador) | 2026-07-28 | Claude | Primera versión — plan maestro de ejecución, puente entre el corpus arquitectónico aprobado y el inicio de la implementación. Prioriza explícitamente Data Architecture Fase 3 (`negocio_id`) como el bloqueante transversal identificado en los 8 CSAs. No es un documento de arquitectura ni contiene tareas técnicas o historias de usuario. Pendiente de revisión y aprobación. |
 | 1.0 | 2026-07-28 | Claude | Aprobado sin reapertura del contenido. Marca oficialmente el inicio de la Fase de Implementación de Maiek AI. El usuario registró 2 mejoras futuras no bloqueantes, a incorporar en una versión posterior: (1) **métricas ejecutivas de avance** del roadmap (porcentaje de decisiones `Objetivo`→`Activa`, brechas cerradas, fases completadas); (2) **criterios explícitos para declarar cerrada la Fase de Implementación** y dar inicio a una fase de operación y evolución continua — hoy el documento define criterios de cierre por fase (sección 7) pero no un criterio de cierre de la fase completa. |
 | 1.0 | 2026-07-29 | Claude | **Fase 0 (Estabilización) declarada oficialmente cerrada** — 32 commits desplegados a producción y verificados con tráfico real (ver `IMPLEMENTATION_REVIEW_FASE_0.md`): rama remota sincronizada, deploy de Railway `Active`/`Deployment successful`, arranque limpio, health check OK, `POST /webhook` → `200 OK` con mensajes reales, sin errores relevantes posteriores al despliegue. Sin desviaciones respecto al corpus arquitectónico. **Fase 1 (Núcleo técnico — Backend/AI/API) queda iniciada.** |
+| 1.0 | 2026-07-29 | Claude | **Incorporada Data Architecture Fase 1 (baseline de Alembic) como pista transversal dentro de la Fase 1** (secciones 1, 3, 4, 8), sin bloquear el inicio de Backend/AI/API. Surgió de una revisión independiente (Opus, Principal Architect/CTO externo) del `MAIEK_AI_PHASE_1_EXECUTION_PLAN.md`, que identificó que Data Architecture ya declara su propia Fase 1 como prerrequisito de "todas las siguientes" — incluida la Fase 2 de este roadmap (`negocio_id`), que ahora declara depender también de Data Architecture Fase 1 y Fase 2, no solo del núcleo técnico. No redefine ninguna decisión ya tomada — corrige una secuenciación no declarada explícitamente hasta ahora. |
 
 ## Alcance
 
@@ -62,8 +63,8 @@ Este documento no toma decisiones de diseño nuevas. Cuando la implementación r
 El orden no sigue la secuencia en que los documentos se aprobaron — sigue las dependencias técnicas reales que esos mismos documentos ya declararon entre sí:
 
 1. **Estabilización** (DevOps + Security P1) no depende de ningún otro trabajo — es la base de seguridad para construir encima.
-2. **Núcleo técnico objetivo** (Backend, AI, API) depende de que el sistema esté estabilizado, pero **no depende de `negocio_id`** — el protocolo de confianza, el AI Orchestrator y el contrato interno pueden implementarse en el modelo actual de un solo negocio.
-3. **Data Architecture Fase 3** (`negocio_id`) depende de que el núcleo técnico ya esté implementado (tocar el modelo de datos es más seguro sobre una base ya estabilizada) — y es, a su vez, la dependencia declarada explícitamente por Security, AI, DevOps, Operations y Frontend para su propio trabajo Multi-Tenant.
+2. **Núcleo técnico objetivo** (Backend, AI, API) depende de que el sistema esté estabilizado, pero **no depende de `negocio_id`** — el protocolo de confianza, el AI Orchestrator y el contrato interno pueden implementarse en el modelo actual de un solo negocio. **Data Architecture Fase 1** (baseline de migraciones con Alembic) corre en paralelo desde el inicio de esta fase — no bloquea el arranque de Backend/AI/API, pero condiciona los entregables de esta fase que tocan esquema (sección 4).
+3. **Data Architecture Fase 3** (`negocio_id`) depende de que el núcleo técnico ya esté implementado, y **de que Data Architecture Fase 1 y Fase 2 ya estén activas** (Data Architecture lo declara explícitamente: *"depende de Fase 1 y Fase 2"*) — tocar el modelo de datos para Multi-Tenant no es seguro sin ese baseline de migraciones e integridad ya resuelto. Es, a su vez, la dependencia declarada explícitamente por Security, AI, DevOps, Operations y Frontend para su propio trabajo Multi-Tenant.
 4. **Extensión Multi-Tenant** a los demás dominios depende directamente de que `negocio_id` ya exista — no puede empezar antes.
 5. **Observabilidad y calidad operativa** puede avanzar en paralelo a partir de la Fase 1, sin bloquear ni ser bloqueada por el trabajo Multi-Tenant.
 
@@ -77,8 +78,10 @@ Cerrada con `IMPLEMENTATION_REVIEW_FASE_0.md`: 32 commits desplegados a producci
 ### Fase 1 — Núcleo técnico objetivo · 🔵 En curso
 Implementa, sobre un solo negocio, las decisiones `Objetivo` de Backend (las 4 capas, `ServicioInteligencia`, los 5 servicios de dominio), AI (AI Orchestrator explícito, protocolo de confianza `{respuesta, confianza, razon}`, delimitación estructural anti-prompt-injection, prompt caching) y API (contrato interno de plataforma formalizado, idempotencia, `request_id`, modelo uniforme de errores). Los tres se implementan juntos porque están acoplados: la señal de confianza de AI fluye a través de `ServicioInteligencia`, expuesto vía el contrato interno de API.
 
+**Pista transversal — Data Architecture Fase 1 (baseline de migraciones con Alembic).** Corre en paralelo desde el inicio de esta fase, sin bloquear el arranque de Backend/AI/API — la mayoría del trabajo del núcleo técnico no la necesita. Sí condiciona dos entregables que tocan esquema y que por eso quedan diferidos hasta que esté activa (detalle exacto en `MAIEK_AI_PHASE_1_EXECUTION_PLAN.md`, incorporado tras una revisión independiente del plan: uno depende solo de esta pista, el otro depende además de Data Architecture Fase 2). Incorporada explícitamente al roadmap porque Data Architecture ya declara que es prerrequisito no solo de estos dos entregables, sino de la Fase 2 completa (`negocio_id`) — ver punto 3 de la sección 3.
+
 ### Fase 2 — Data Architecture Fase 3 (el bloqueante transversal)
-Implementa `negocio_id`, el diseño de aislamiento de datos ya definido en Data Architecture, y migra el modelo actual a una base Multi-Tenant-ready — aunque en producción siga operando un solo negocio real durante esta fase. Es el punto de inflexión que el usuario priorizó explícitamente: resuelve el hallazgo repetido en los 8 CSAs.
+Implementa `negocio_id`, el diseño de aislamiento de datos ya definido en Data Architecture, y migra el modelo actual a una base Multi-Tenant-ready — aunque en producción siga operando un solo negocio real durante esta fase. Depende de que Data Architecture Fase 1 y Fase 2 ya estén activas (sección 3, punto 3) — no solo de que el núcleo técnico de la Fase 1 de este roadmap esté listo. Es el punto de inflexión que el usuario priorizó explícitamente: resuelve el hallazgo repetido en los 8 CSAs.
 
 ### Fase 3 — Extensión Multi-Tenant a los demás dominios
 Solo puede empezar cuando la Fase 2 esté completa. Extiende `negocio_id` a: autorización/visión total (Security), prompt y configuración por negocio (AI), principio de aislamiento de recursos si se decide (DevOps), segmentación de procesos operativos (Operations), identidad de marca resoluble por negocio (Frontend).
@@ -127,7 +130,8 @@ Los P3 restantes de todos los dominios: lockfile de dependencias, Subresource In
 | Backend Architecture — 4 capas, `ServicioInteligencia`, 5 servicios de dominio | Backend completo | P1 (Fase 1) | Fase 0 completa |
 | AI Architecture — AI Orchestrator, protocolo de confianza, delimitación estructural | AI Engine, prompts | P1 (Fase 1) | `ServicioInteligencia` (Backend, misma fase) |
 | API Architecture — contrato interno, idempotencia, `request_id` | Capa de integración interna | P1 (Fase 1) | `ServicioInteligencia` (Backend, misma fase) |
-| Data Architecture Fase 3 — `negocio_id`, aislamiento de datos | Modelo de datos completo | **P1 — bloqueante transversal** (Fase 2) | Fase 1 completa |
+| Data Architecture Fase 1 — baseline de migraciones (Alembic) | Infraestructura de datos, transversal | P1 (paralela a Fase 1, condiciona 2 entregables) | Ninguna — no bloquea el inicio de Backend/AI/API |
+| Data Architecture Fase 3 — `negocio_id`, aislamiento de datos | Modelo de datos completo | **P1 — bloqueante transversal** (Fase 2) | Fase 1 completa + Data Architecture Fase 1 y Fase 2 |
 | Security Architecture — aislamiento Multi-Tenant en autorización | Modelo de autorización | P2 (Fase 3) | Data Architecture Fase 3 |
 | AI Architecture — prompt/configuración por `negocio_id` | AI Engine | P2 (Fase 3) | Data Architecture Fase 3 |
 | Operations Architecture — segmentación de procesos por negocio | Dashboards, KPIs | P2 (Fase 3) | Data Architecture Fase 3 |
