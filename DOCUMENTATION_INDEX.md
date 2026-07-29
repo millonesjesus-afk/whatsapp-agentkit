@@ -11,7 +11,7 @@
 | Fecha de creación | 2026-07-26 |
 | Autor | Claude, a pedido de Jesús Millones |
 | Fecha de aprobación | 2026-07-28 |
-| Última actualización | 2026-07-29 (`IMPLEMENTATION_REVIEW_PRE_DEPLOYMENT_FASE_1.md` — gate de integración de Backend+AI+Data Architecture Fase 1 antes de continuar con API — ver "Fase de Implementación" arriba) |
+| Última actualización | 2026-07-29 (`IMPLEMENTATION_REVIEW_FASE_1.md` — cierra la implementación de la Fase 1 completa, Code Freeze activo — ver "Fase de Implementación" arriba) |
 
 ## Dependencias
 
@@ -97,6 +97,19 @@ riesgos reales pre-despliegue, prerrequisitos operativos exactos, y recomendaci�
 núcleo técnico ya implementado antes de seguir sumando cambios sin verificar en producción real —
 mismo criterio ya sostenido desde el cierre de Fase 0. 16 commits locales acumulados, 0 desplegados
 al momento de este gate.
+
+**Sub-etapa de API — Implementada y Approved.** `request_id` (middleware + correlación con logs),
+modelo uniforme de errores (`{código, mensaje, detalle, request_id}`), e idempotencia general del
+webhook (tabla `MensajeProcesado`, ya desbloqueada por Data Architecture Fase 1) — commit `b350ad1`.
+Confirmado con el usuario antes de implementar que esta sub-etapa no requería refactorizaciones
+estructurales sobre Backend ni AI (el contrato interno con AI ya es la interfaz de
+`ServicioInteligencia`). Validado con envíos reales de webhook duplicados (idempotencia) y
+correlación real de `request_id` entre logs y respuesta.
+
+**`IMPLEMENTATION_REVIEW_FASE_1.md` — cierra la implementación de la Fase 1.** Backend + AI + Data
+Architecture Fase 1 + API completos y validados localmente, 22 commits, 0 desplegados. **Code Freeze
+activo** a partir de esta aprobación — solo correcciones de hallazgos de validación/despliegue hasta
+completar el primer despliegue controlado y su validación en producción real.
 
 ---
 
