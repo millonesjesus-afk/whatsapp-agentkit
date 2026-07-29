@@ -60,6 +60,7 @@ Secuencial, sin huecos, nunca reutilizada — un ADR reemplazado conserva su nú
 | # | Título | Estado | Fecha | Documento de arquitectura afectado | Fase |
 |---|---|---|---|---|---|
 | [0001](adr/0001-backup-postgres-pg-dump-s3.md) | Backups de Postgres vía pg_dump + almacenamiento S3-compatible, no vía Railway nativo | Aceptada | 2026-07-28 | DevOps Architecture | Fase 0 |
+| [0002](adr/0002-independencia-proveedor-backups.md) | Independencia de proveedor como motivo principal de la estrategia de backups | Aceptada — complementa a 0001 | 2026-07-28 | DevOps Architecture | Fase 0 |
 
 ---
 

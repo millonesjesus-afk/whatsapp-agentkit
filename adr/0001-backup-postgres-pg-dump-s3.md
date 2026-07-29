@@ -6,6 +6,7 @@
 | Fecha | 2026-07-28 |
 | Documento de arquitectura afectado | `MAIEK_AI_DEVOPS_ARCHITECTURE.md` — Decisión local "Backups automatizados de Postgres, verificados independientemente del plan de Railway"; Architectural Constraint "Si el plan de Railway contratado incluye backups automáticos de Postgres es un hecho externo no confirmado" |
 | Fase del roadmap | Fase 0 — Estabilización |
+| Relación | Complementado por [ADR-0002](0002-independencia-proveedor-backups.md) — precisa que el motivo principal es independencia de proveedor, no solo la ausencia actual de la función nativa |
 
 ## Contexto
 
