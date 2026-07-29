@@ -93,10 +93,17 @@ async def lifespan(app: FastAPI):
     yield
 
 
+# /docs, /redoc y /openapi.json quedan deshabilitados por defecto (API
+# Architecture, Architecture Success Criteria: "no son accesibles sin
+# autenticación") hasta que exista una decisión explícita de Security
+# Architecture de publicarlos — hoy no existe esa decisión.
 app = FastAPI(
     title="Gaso+ — Agente Gabi",
     version="1.0.0",
-    lifespan=lifespan
+    lifespan=lifespan,
+    docs_url=None,
+    redoc_url=None,
+    openapi_url=None,
 )
 app.add_middleware(
     SessionMiddleware,
