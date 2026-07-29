@@ -94,6 +94,7 @@ from agent.asignacion import UMBRAL_SENIOR_DEFAULT, UMBRAL_INTERMEDIO_DEFAULT
 from agent.services.servicio_comercial import (
     servicio_comercial, MODALIDADES_PAGO, CUOTAS_DISPONIBLES, MEDIO_PAGO_FINANCIADO, MEDIOS_PAGO_CONTADO,
 )
+from agent.services.servicio_identidad import servicio_identidad, NoAutenticado
 from agent.providers import obtener_proveedor
 
 logger = logging.getLogger("agentkit")
@@ -242,19 +243,11 @@ def _calcular_embudo(leads: list[dict]) -> list[tuple[str, int, int]]:
     return resultado
 
 
-class NoAutenticado(Exception):
-    """Se lanza cuando no hay una sesión válida; el handler redirige al login."""
-    pass
-
-
-async def _usuario_actual(request: Request) -> dict:
-    username = request.session.get("username")
-    if not username:
-        raise NoAutenticado()
-    usuario = await obtener_usuario(username)
-    if usuario is None:
-        raise NoAutenticado()
-    return usuario
+# NoAutenticado y la resolución de usuario actual viven ahora en
+# ServicioIdentidad (Backend Architecture) — se mantienen estos nombres
+# como alias para no tocar los ~50 call sites existentes de
+# Depends(_usuario_actual) en este archivo.
+_usuario_actual = servicio_identidad.usuario_actual
 
 
 def _verificar_acceso_lead(usuario: dict, lead: dict):
@@ -3789,20 +3782,16 @@ async def _pagina_gestionar_asesores(usuario: dict, mensaje_html: str = "") -> s
 
 
 @router.get("/asesores", response_class=HTMLResponse)
-async def gestionar_asesores(request: Request, usuario: dict = Depends(_usuario_actual)):
-    if usuario["rol"] not in ROLES_CON_VISION_TOTAL:
-        raise HTTPException(status_code=403, detail="Solo un supervisor puede gestionar asesores")
+async def gestionar_asesores(request: Request, usuario: dict = Depends(servicio_identidad.requiere_rol(*ROLES_CON_VISION_TOTAL))):
     cuerpo = await _pagina_gestionar_asesores(usuario)
     return _pagina("Gestionar asesores", usuario, cuerpo, request=request)
 
 
 @router.post("/asesores/{username}/resetear", response_class=HTMLResponse)
-async def resetear_password_asesor(username: str, usuario: dict = Depends(_usuario_actual)):
+async def resetear_password_asesor(username: str, usuario: dict = Depends(servicio_identidad.requiere_rol(*ROLES_CON_VISION_TOTAL))):
     """Genera una contraseña temporal nueva para un asesor — para cuando pide
     recuperar acceso. Se muestra una sola vez aquí; el admin debe pasársela
     por su canal habitual, y el asesor puede cambiarla luego desde su perfil."""
-    if usuario["rol"] not in ROLES_CON_VISION_TOTAL:
-        raise HTTPException(status_code=403, detail="Solo un supervisor puede resetear contraseñas")
     objetivo = await obtener_usuario(username)
     if objetivo is None:
         raise HTTPException(status_code=404, detail="Usuario no encontrado")
@@ -3824,10 +3813,8 @@ async def resetear_password_asesor(username: str, usuario: dict = Depends(_usuar
 async def actualizar_nivel(
     username: str,
     nivel: str = Form(...),
-    usuario: dict = Depends(_usuario_actual),
+    usuario: dict = Depends(servicio_identidad.requiere_rol(*ROLES_CON_VISION_TOTAL)),
 ):
-    if usuario["rol"] not in ROLES_CON_VISION_TOTAL:
-        raise HTTPException(status_code=403, detail="Solo un supervisor puede editar el nivel de un asesor")
     if nivel not in NIVELES_ASESOR:
         raise HTTPException(status_code=400, detail="Nivel inválido")
     await actualizar_nivel_asesor(username, nivel)
@@ -3838,10 +3825,8 @@ async def actualizar_nivel(
 async def actualizar_umbrales_asignacion(
     umbral_intermedio: str = Form(...),
     umbral_senior: str = Form(...),
-    usuario: dict = Depends(_usuario_actual),
+    usuario: dict = Depends(servicio_identidad.requiere_rol(*ROLES_CON_VISION_TOTAL)),
 ):
-    if usuario["rol"] not in ROLES_CON_VISION_TOTAL:
-        raise HTTPException(status_code=403, detail="Solo un supervisor puede editar los umbrales de asignación")
     try:
         valor_intermedio = float(umbral_intermedio)
         valor_senior = float(umbral_senior)
@@ -4352,10 +4337,7 @@ async def _bloque_promover_prompt() -> str:
 
 
 @router.get("/canales-whatsapp", response_class=HTMLResponse)
-async def gestionar_canales_whatsapp(request: Request, usuario: dict = Depends(_usuario_actual)):
-    if usuario["rol"] != "admin":
-        raise HTTPException(status_code=403, detail="Solo un administrador puede gestionar los canales de WhatsApp")
-
+async def gestionar_canales_whatsapp(request: Request, usuario: dict = Depends(servicio_identidad.requiere_rol("admin"))):
     sidebar = await _renderizar_sidebar(usuario, telefono_activo=None)
     canales = await listar_canales_whatsapp()
 
@@ -4470,10 +4452,8 @@ async def crear_canal_whatsapp_nuevo(
     app_secret: str = Form(""),
     page_access_token: str = Form(""),
     modo: str = Form("produccion"),
-    usuario: dict = Depends(_usuario_actual),
+    usuario: dict = Depends(servicio_identidad.requiere_rol("admin")),
 ):
-    if usuario["rol"] != "admin":
-        raise HTTPException(status_code=403, detail="Solo un administrador puede gestionar los canales de WhatsApp")
     await crear_canal_whatsapp(
         nombre=nombre.strip(), phone_number_id=phone_number_id.strip(),
         access_token=access_token.strip(), app_secret=app_secret.strip(),
@@ -4483,9 +4463,7 @@ async def crear_canal_whatsapp_nuevo(
 
 
 @router.post("/canales-whatsapp/{canal_id}/toggle")
-async def toggle_canal_whatsapp(canal_id: int, usuario: dict = Depends(_usuario_actual)):
-    if usuario["rol"] != "admin":
-        raise HTTPException(status_code=403, detail="Solo un administrador puede gestionar los canales de WhatsApp")
+async def toggle_canal_whatsapp(canal_id: int, usuario: dict = Depends(servicio_identidad.requiere_rol("admin"))):
     canales = await listar_canales_whatsapp()
     actual = next((c for c in canales if c["id"] == canal_id), None)
     if actual is None:
@@ -4495,9 +4473,7 @@ async def toggle_canal_whatsapp(canal_id: int, usuario: dict = Depends(_usuario_
 
 
 @router.post("/canales-whatsapp/{canal_id}/modo")
-async def toggle_modo_canal_whatsapp(canal_id: int, usuario: dict = Depends(_usuario_actual)):
-    if usuario["rol"] != "admin":
-        raise HTTPException(status_code=403, detail="Solo un administrador puede gestionar los canales de WhatsApp")
+async def toggle_modo_canal_whatsapp(canal_id: int, usuario: dict = Depends(servicio_identidad.requiere_rol("admin"))):
     canales = await listar_canales_whatsapp()
     actual = next((c for c in canales if c["id"] == canal_id), None)
     if actual is None:
@@ -4508,12 +4484,10 @@ async def toggle_modo_canal_whatsapp(canal_id: int, usuario: dict = Depends(_usu
 
 
 @router.post("/canales-whatsapp/promover-prompt")
-async def promover_prompt_produccion_route(usuario: dict = Depends(_usuario_actual)):
+async def promover_prompt_produccion_route(usuario: dict = Depends(servicio_identidad.requiere_rol("admin"))):
     """Copia el prompt recién desplegado (config/prompts.yaml) hacia la
     versión que usan los canales de producción — sin necesitar un deploy
     para que el cambio ya probado en el número de pruebas llegue allá."""
-    if usuario["rol"] != "admin":
-        raise HTTPException(status_code=403, detail="Solo un administrador puede promover el prompt de Gabi")
     await guardar_configuracion("system_prompt_produccion", cargar_system_prompt())
     return RedirectResponse(url="/dashboard/canales-whatsapp", status_code=303)
 
