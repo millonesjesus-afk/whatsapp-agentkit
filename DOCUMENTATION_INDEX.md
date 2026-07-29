@@ -11,7 +11,7 @@
 | Fecha de creación | 2026-07-26 |
 | Autor | Claude, a pedido de Jesús Millones |
 | Fecha de aprobación | 2026-07-28 |
-| Última actualización | 2026-07-28 (sección 7: alta de `MAIEK_AI_DEVOPS_CURRENT_STATE_ASSESSMENT.md`) |
+| Última actualización | 2026-07-28 (sección 7: alta de `MAIEK_AI_DEVOPS_ARCHITECTURE.md`) |
 
 ## Dependencias
 
@@ -227,6 +227,7 @@ ciclos — cada flecha va de lo más fundacional hacia lo más específico, nunc
 | `MAIEK_AI_SECURITY_CURRENT_STATE_ASSESSMENT.md` | CSA-Security | Engineering | Security | Managed | 1.0 | **Approved** | Jesús Millones | 2026-07-28 | — | MSA (Cap. 11, 13), Data Architecture, Backend Architecture, API Architecture, AI Architecture, ADS | `MAIEK_AI_SECURITY_ARCHITECTURE.md` |
 | `MAIEK_AI_SECURITY_ARCHITECTURE.md` | Security Architecture | Engineering | Security | Managed | 1.0 | **Approved** | Jesús Millones | 2026-07-28 | — | MSA (Cap. 11, 13), Data Architecture, Backend Architecture, API Architecture, AI Architecture, CSA-Security, ADS | Frontend/DevOps/Operations Architecture (futuros) |
 | `MAIEK_AI_DEVOPS_CURRENT_STATE_ASSESSMENT.md` | CSA-DevOps | Engineering | DevOps | Managed | 1.0 | **Approved** | Jesús Millones | 2026-07-28 | — | MSA (Cap. 14, 15), Data Architecture, Security Architecture, API Architecture, AI Architecture, ADS | `MAIEK_AI_DEVOPS_ARCHITECTURE.md` |
+| `MAIEK_AI_DEVOPS_ARCHITECTURE.md` | DevOps Architecture | Engineering | DevOps | Managed | 1.0 | **Approved** | Jesús Millones | 2026-07-28 | — | MSA (Cap. 14, 15), Data Architecture, Security Architecture, API Architecture, AI Architecture, CSA-DevOps, ADS | Frontend/Operations Architecture (futuros) |
 
 ## 8. Reglas de Gobernanza Documental
 
