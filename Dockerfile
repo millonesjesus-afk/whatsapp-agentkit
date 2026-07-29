@@ -3,7 +3,10 @@ WORKDIR /app
 # ffmpeg: convierte las notas de voz grabadas en el navegador (WebM/Opus,
 # lo único que produce MediaRecorder de forma confiable) a OGG/Opus, el
 # único formato de audio que acepta la API de WhatsApp para notas de voz.
-RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg && rm -rf /var/lib/apt/lists/*
+# postgresql-client: da el binario pg_dump que usa scripts/backup_postgres.py
+# (ADR-0001) — misma imagen se reutiliza para el servicio de Cron Schedule
+# de Railway que corre ese script, no solo para el proceso web.
+RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg postgresql-client && rm -rf /var/lib/apt/lists/*
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 COPY . .

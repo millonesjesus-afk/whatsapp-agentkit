@@ -59,7 +59,7 @@ Secuencial, sin huecos, nunca reutilizada — un ADR reemplazado conserva su nú
 
 | # | Título | Estado | Fecha | Documento de arquitectura afectado | Fase |
 |---|---|---|---|---|---|
-| — | *(ninguno registrado todavía)* | — | — | — | — |
+| [0001](adr/0001-backup-postgres-pg-dump-s3.md) | Backups de Postgres vía pg_dump + almacenamiento S3-compatible, no vía Railway nativo | Aceptada | 2026-07-28 | DevOps Architecture | Fase 0 |
 
 ---
 
