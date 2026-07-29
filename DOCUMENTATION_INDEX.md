@@ -11,7 +11,7 @@
 | Fecha de creación | 2026-07-26 |
 | Autor | Claude, a pedido de Jesús Millones |
 | Fecha de aprobación | 2026-07-28 |
-| Última actualización | 2026-07-28 (sección 7: alta de `MAIEK_AI_IMPLEMENTATION_ROADMAP.md` — inicio oficial de la Fase de Implementación) |
+| Última actualización | 2026-07-28 (sección 7: alta de `MAIEK_AI_ADR_INDEX.md`) |
 
 ## Dependencias
 
@@ -244,6 +244,7 @@ ciclos — cada flecha va de lo más fundacional hacia lo más específico, nunc
 | `MAIEK_AI_FRONTEND_CURRENT_STATE_ASSESSMENT.md` | CSA-Frontend | Engineering | Frontend | Managed | 1.0 | **Approved** | Jesús Millones | 2026-07-28 | — | MSA (Cap. 4, 5), MDL, CDS, MPX, Security Architecture, AI Architecture, Operations Architecture, Data Architecture, ADS | `MAIEK_AI_FRONTEND_ARCHITECTURE.md` |
 | `MAIEK_AI_FRONTEND_ARCHITECTURE.md` | Frontend Architecture | Engineering | Frontend | Managed | 1.0 | **Approved** | Jesús Millones | 2026-07-28 | — | MSA (Cap. 4, 5), MDL, CDS, MPX, Security Architecture, AI Architecture, Operations Architecture, Data Architecture, CSA-Frontend, ADS | Ninguno — cierra el corpus arquitectónico principal |
 | `MAIEK_AI_IMPLEMENTATION_ROADMAP.md` | Implementation Roadmap | Foundation | Business | Managed | 1.0 | **Approved** | Jesús Millones | 2026-07-28 | — | Los 8 dominios técnicos (Data, Backend, API, AI, Security, DevOps, Operations, Frontend), MSA, ADS, DOCUMENTATION_INDEX | QA Strategy, Testing Strategy, Operations Runbook, ADR Index, CHANGELOG (todos futuros) |
+| `MAIEK_AI_ADR_INDEX.md` | ADR Index | Documentación | Engineering | Managed | 1.0 | **Approved** | Jesús Millones | 2026-07-28 | — | Implementation Roadmap | Toda la Fase de Implementación |
 
 ## 8. Reglas de Gobernanza Documental
 
