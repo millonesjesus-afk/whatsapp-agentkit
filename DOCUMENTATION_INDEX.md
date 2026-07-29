@@ -11,7 +11,7 @@
 | Fecha de creación | 2026-07-26 |
 | Autor | Claude, a pedido de Jesús Millones |
 | Fecha de aprobación | 2026-07-28 |
-| Última actualización | 2026-07-28 (sección 7: alta de `MAIEK_AI_ADR_INDEX.md`) |
+| Última actualización | 2026-07-29 (Fase 0 cerrada en producción; proyecto en Fase 1 — ver "Fase de Implementación" arriba) |
 
 ## Dependencias
 
@@ -41,6 +41,12 @@ marca el inicio oficial de la Fase de Implementación: traduce las decisiones `O
 corpus en un plan de ejecución priorizado (no es un documento de arquitectura), con Data
 Architecture Fase 3 (`negocio_id`, Multi-Tenant) como el bloqueante transversal identificado en
 los 8 CSAs.
+
+**Fase 0 (Estabilización) — Cerrada el 2026-07-29.** 32 commits desplegados a producción y
+verificados con tráfico real de WhatsApp (`IMPLEMENTATION_REVIEW_FASE_0.md`): sin desviaciones
+respecto al corpus, deuda técnica identificada y con criterio de revisión. **El proyecto se
+encuentra ahora en Fase 1 (Núcleo técnico — Backend/AI/API)**, según el orden de dependencias ya
+fijado en el Implementation Roadmap.
 
 ---
 

@@ -11,7 +11,7 @@
 | Fecha de creación | 2026-07-28 |
 | Autor | Claude, a pedido de Jesús Millones |
 | Fecha de aprobación | 2026-07-28 |
-| Última actualización | 2026-07-28 |
+| Última actualización | 2026-07-29 (Fase 0 cerrada, Fase 1 iniciada) |
 
 ## Dependencias
 
@@ -35,6 +35,7 @@ Todo trabajo de implementación futuro sobre el repositorio; los cinco documento
 |---|---|---|---|
 | 1.0 (borrador) | 2026-07-28 | Claude | Primera versión — plan maestro de ejecución, puente entre el corpus arquitectónico aprobado y el inicio de la implementación. Prioriza explícitamente Data Architecture Fase 3 (`negocio_id`) como el bloqueante transversal identificado en los 8 CSAs. No es un documento de arquitectura ni contiene tareas técnicas o historias de usuario. Pendiente de revisión y aprobación. |
 | 1.0 | 2026-07-28 | Claude | Aprobado sin reapertura del contenido. Marca oficialmente el inicio de la Fase de Implementación de Maiek AI. El usuario registró 2 mejoras futuras no bloqueantes, a incorporar en una versión posterior: (1) **métricas ejecutivas de avance** del roadmap (porcentaje de decisiones `Objetivo`→`Activa`, brechas cerradas, fases completadas); (2) **criterios explícitos para declarar cerrada la Fase de Implementación** y dar inicio a una fase de operación y evolución continua — hoy el documento define criterios de cierre por fase (sección 7) pero no un criterio de cierre de la fase completa. |
+| 1.0 | 2026-07-29 | Claude | **Fase 0 (Estabilización) declarada oficialmente cerrada** — 32 commits desplegados a producción y verificados con tráfico real (ver `IMPLEMENTATION_REVIEW_FASE_0.md`): rama remota sincronizada, deploy de Railway `Active`/`Deployment successful`, arranque limpio, health check OK, `POST /webhook` → `200 OK` con mensajes reales, sin errores relevantes posteriores al despliegue. Sin desviaciones respecto al corpus arquitectónico. **Fase 1 (Núcleo técnico — Backend/AI/API) queda iniciada.** |
 
 ## Alcance
 
@@ -68,10 +69,12 @@ El orden no sigue la secuencia en que los documentos se aprobaron — sigue las 
 
 ## 4. Fases de implementación
 
-### Fase 0 — Estabilización
+### Fase 0 — Estabilización · ✅ Cerrada (verificada en producción, 2026-07-29)
 Cierra los P1 de DevOps y Security sobre el sistema actual, sin tocar el modelo de negocio: backups automatizados, gate de CI, retries/timeout en llamadas externas (DevOps); eliminar el fail-open de verificación de firma del webhook, rate limiting en `/login` y `/webhook` (Security); marco mínimo de gestión de incidentes y roles operativos nombrados (Operations).
 
-### Fase 1 — Núcleo técnico objetivo
+Cerrada con `IMPLEMENTATION_REVIEW_FASE_0.md`: 32 commits desplegados a producción (`deploy/main`), sin desviaciones respecto al corpus, deuda técnica identificada y con criterio de revisión, validación end-to-end con tráfico real de WhatsApp (`POST /webhook` → `200 OK`). Pendientes operativos que no bloquearon el cierre: configuración de Railway para el backup (bucket S3 + Cron Schedule) y activar "Require status checks to pass" en GitHub.
+
+### Fase 1 — Núcleo técnico objetivo · 🔵 En curso
 Implementa, sobre un solo negocio, las decisiones `Objetivo` de Backend (las 4 capas, `ServicioInteligencia`, los 5 servicios de dominio), AI (AI Orchestrator explícito, protocolo de confianza `{respuesta, confianza, razon}`, delimitación estructural anti-prompt-injection, prompt caching) y API (contrato interno de plataforma formalizado, idempotencia, `request_id`, modelo uniforme de errores). Los tres se implementan juntos porque están acoplados: la señal de confianza de AI fluye a través de `ServicioInteligencia`, expuesto vía el contrato interno de API.
 
 ### Fase 2 — Data Architecture Fase 3 (el bloqueante transversal)
