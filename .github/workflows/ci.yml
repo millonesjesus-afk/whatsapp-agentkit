@@ -1,0 +1,73 @@
+name: CI
+
+# Gate minimo de la Fase 0 (Estabilizacion) del Implementation Roadmap --
+# DevOps Architecture, Decision local P1: ningun despliegue a produccion
+# sin pasar antes por un paso de verificacion automatizada. Deliberadamente
+# simple (sin suite de pruebas ni integracion) -- se amplia cuando exista
+# Testing Strategy (proximo documento derivado del roadmap).
+
+on:
+  push:
+    branches: [deploy-main]
+  pull_request:
+    branches: [deploy-main]
+
+jobs:
+  build-and-smoke-test:
+    runs-on: ubuntu-latest
+    env:
+      WHATSAPP_PROVIDER: meta
+      DATABASE_URL: sqlite+aiosqlite:///./ci.db
+      ENVIRONMENT: development
+      ANTHROPIC_API_KEY: sk-ant-ci-placeholder
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Instalar dependencias
+        run: pip install -r requirements.txt
+
+      - name: Generar clave de cifrado para este run de CI
+        # CANAL_ENCRYPTION_KEY es obligatoria desde la Fase 0 (fail-fast en
+        # agent/main.py) -- acá generamos una válida solo para este job, no
+        # se usa en ningún ambiente real.
+        run: echo "CANAL_ENCRYPTION_KEY=$(python -c 'from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())')" >> "$GITHUB_ENV"
+
+      - name: Verificar sintaxis de todos los módulos
+        run: python -m compileall -q agent scripts
+
+      - name: Importar los módulos principales
+        run: python -c "import agent.main; print('agent.main importa correctamente')"
+
+      - name: Levantar el servidor y probar el endpoint de salud
+        run: |
+          set -e
+          python -m uvicorn agent.main:app --host 0.0.0.0 --port 8000 &
+          SERVER_PID=$!
+          trap 'kill "$SERVER_PID" 2>/dev/null || true' EXIT
+
+          listo=""
+          for intento in $(seq 1 20); do
+            if curl -sf http://localhost:8000/ > /dev/null 2>&1; then
+              listo="1"
+              break
+            fi
+            sleep 1
+          done
+          if [ -z "$listo" ]; then
+            echo "El servidor no respondió a tiempo en el puerto 8000"
+            exit 1
+          fi
+
+          respuesta=$(curl -sf http://localhost:8000/)
+          echo "Respuesta del health check: $respuesta"
+          echo "$respuesta" | grep -q '"status":"ok"' || {
+            echo "El health check no respondió status: ok"
+            exit 1
+          }
+          echo "Servidor arrancó correctamente y el health check respondió OK"
