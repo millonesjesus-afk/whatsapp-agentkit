@@ -1840,9 +1840,7 @@ async def _contenido_metricas(leads: list[dict]) -> str:
 
 
 @router.get("/metricas", response_class=HTMLResponse)
-async def metricas(request: Request, usuario: dict = Depends(_usuario_actual)):
-    if usuario["rol"] not in ROLES_CON_VISION_TOTAL:
-        raise HTTPException(status_code=403, detail="Solo un supervisor puede ver las métricas")
+async def metricas(request: Request, usuario: dict = Depends(servicio_identidad.requiere_rol(*ROLES_CON_VISION_TOTAL))):
     sidebar = await _renderizar_sidebar(usuario, telefono_activo=None)
     leads = await _adjuntar_resumen_ventas(await listar_leads())
     panel = await _contenido_metricas(leads)
@@ -1876,9 +1874,7 @@ def _filas_exportacion(leads: list[dict]) -> list[list[str]]:
 
 
 @router.get("/metricas/exportar.csv")
-async def exportar_metricas_csv(usuario: dict = Depends(_usuario_actual)):
-    if usuario["rol"] not in ROLES_CON_VISION_TOTAL:
-        raise HTTPException(status_code=403, detail="Solo un supervisor puede exportar las métricas")
+async def exportar_metricas_csv(usuario: dict = Depends(servicio_identidad.requiere_rol(*ROLES_CON_VISION_TOTAL))):
     import csv
     import io
 
@@ -1897,9 +1893,7 @@ async def exportar_metricas_csv(usuario: dict = Depends(_usuario_actual)):
 
 
 @router.get("/metricas/exportar.xlsx")
-async def exportar_metricas_xlsx(usuario: dict = Depends(_usuario_actual)):
-    if usuario["rol"] not in ROLES_CON_VISION_TOTAL:
-        raise HTTPException(status_code=403, detail="Solo un supervisor puede exportar las métricas")
+async def exportar_metricas_xlsx(usuario: dict = Depends(servicio_identidad.requiere_rol(*ROLES_CON_VISION_TOTAL))):
     import io
     from openpyxl import Workbook
     from openpyxl.styles import Font
@@ -3505,12 +3499,9 @@ async def descargar_archivo(archivo_id: int, usuario: dict = Depends(_usuario_ac
 
 
 @router.get("/catalogos", response_class=HTMLResponse)
-async def gestionar_catalogos(request: Request, usuario: dict = Depends(_usuario_actual), subido: str = ""):
+async def gestionar_catalogos(request: Request, usuario: dict = Depends(servicio_identidad.requiere_rol("admin")), subido: str = ""):
     """Librería de catálogos reutilizables — subir una vez, cualquier asesor
     los puede mandar en cualquier conversación sin volver a subirlos."""
-    if usuario["rol"] != "admin":
-        raise HTTPException(status_code=403, detail="Solo un administrador puede gestionar catálogos")
-
     sidebar = await _renderizar_sidebar(usuario, telefono_activo=None)
     archivos = await listar_archivos_reutilizables()
 
@@ -3580,11 +3571,8 @@ async def gestionar_catalogos(request: Request, usuario: dict = Depends(_usuario
 async def subir_catalogo(
     etiqueta: str = Form(...),
     archivo: UploadFile = File(...),
-    usuario: dict = Depends(_usuario_actual),
+    usuario: dict = Depends(servicio_identidad.requiere_rol("admin")),
 ):
-    if usuario["rol"] != "admin":
-        raise HTTPException(status_code=403, detail="Solo un administrador puede gestionar catálogos")
-
     extension = os.path.splitext(archivo.filename or "")[1].lower()
     if extension not in EXTENSIONES_ARCHIVO_PERMITIDAS:
         raise HTTPException(status_code=400, detail="Solo se aceptan PDF, JPG o PNG")
@@ -3604,9 +3592,7 @@ async def subir_catalogo(
 
 
 @router.post("/catalogos/{archivo_id}/eliminar")
-async def quitar_catalogo(archivo_id: int, usuario: dict = Depends(_usuario_actual)):
-    if usuario["rol"] != "admin":
-        raise HTTPException(status_code=403, detail="Solo un administrador puede gestionar catálogos")
+async def quitar_catalogo(archivo_id: int, usuario: dict = Depends(servicio_identidad.requiere_rol("admin"))):
     await eliminar_archivo_reutilizable(archivo_id)
     return RedirectResponse(url="/dashboard/catalogos", status_code=303)
 
@@ -3681,10 +3667,8 @@ async def registrar_venta(
 async def asignar_lead(
     telefono: str,
     asesor_asignado: str = Form(""),
-    usuario: dict = Depends(_usuario_actual),
+    usuario: dict = Depends(servicio_identidad.requiere_rol(*ROLES_CON_VISION_TOTAL)),
 ):
-    if usuario["rol"] not in ROLES_CON_VISION_TOTAL:
-        raise HTTPException(status_code=403, detail="Solo un supervisor puede asignar leads")
     lead = await obtener_lead(telefono)
     if lead is None:
         raise HTTPException(status_code=404, detail="Lead no encontrado")
@@ -3694,10 +3678,8 @@ async def asignar_lead(
 
 
 @router.post("/disponibilidad")
-async def toggle_disponibilidad(usuario: dict = Depends(_usuario_actual)):
+async def toggle_disponibilidad(usuario: dict = Depends(servicio_identidad.requiere_rol("asesor"))):
     """El asesor togglea si está disponible para recibir leads nuevos automáticamente."""
-    if usuario["rol"] != "asesor":
-        raise HTTPException(status_code=403, detail="Solo un asesor tiene disponibilidad")
     ahora_disponible = not usuario.get("disponible", True)
     await actualizar_disponibilidad(usuario["username"], ahora_disponible)
 
@@ -3860,10 +3842,7 @@ TIPOS_DETECCION = {
 
 
 @router.get("/campanas", response_class=HTMLResponse)
-async def gestionar_campanas(request: Request, usuario: dict = Depends(_usuario_actual), creada: int | None = None):
-    if usuario["rol"] != "admin":
-        raise HTTPException(status_code=403, detail="Solo un administrador puede gestionar campañas")
-
+async def gestionar_campanas(request: Request, usuario: dict = Depends(servicio_identidad.requiere_rol("admin")), creada: int | None = None):
     sidebar = await _renderizar_sidebar(usuario, telefono_activo=None)
     campanas = await listar_campanas()
     conteos = {c["campana"]: c for c in await contar_leads_por_campana()}
@@ -4179,12 +4158,10 @@ async def gestionar_campanas(request: Request, usuario: dict = Depends(_usuario_
 
 
 @router.get("/campanas/buscar-producto")
-async def buscar_producto_campana(q: str = "", usuario: dict = Depends(_usuario_actual)):
+async def buscar_producto_campana(q: str = "", usuario: dict = Depends(servicio_identidad.requiere_rol("admin"))):
     """Autocompletar del catálogo real para el producto de una campaña — mismo
     buscador que ya usa Gabi por chat y el Cierre de venta, para que la promo
     siempre salga de la lista de precios vigente en vez de tipearla a mano."""
-    if usuario["rol"] != "admin":
-        raise HTTPException(status_code=403, detail="Solo un administrador puede gestionar campañas")
     if len(q.strip()) < 2:
         return JSONResponse([])
     productos = buscar_productos(q, limite=8)
@@ -4209,10 +4186,8 @@ async def crear_campana_nueva(
     codigo_material: str = Form(""),
     producto_promocional: str = Form(""),
     precio_promocional: str = Form(""),
-    usuario: dict = Depends(_usuario_actual),
+    usuario: dict = Depends(servicio_identidad.requiere_rol("admin")),
 ):
-    if usuario["rol"] != "admin":
-        raise HTTPException(status_code=403, detail="Solo un administrador puede crear campañas")
     if tipo_deteccion not in TIPOS_DETECCION:
         raise HTTPException(status_code=400, detail="Tipo de detección inválido")
     codigo_material = codigo_material.strip()
@@ -4242,10 +4217,8 @@ async def editar_promo_campana(
     codigo_material: str = Form(""),
     producto_promocional: str = Form(""),
     precio_promocional: str = Form(""),
-    usuario: dict = Depends(_usuario_actual),
+    usuario: dict = Depends(servicio_identidad.requiere_rol("admin")),
 ):
-    if usuario["rol"] != "admin":
-        raise HTTPException(status_code=403, detail="Solo un administrador puede editar campañas")
     codigo_material = codigo_material.strip()
     if codigo_material and obtener_producto_por_codigo(codigo_material) is None:
         raise HTTPException(status_code=400, detail=f"El código de material '{codigo_material}' no existe en la lista de precios vigente")
@@ -4259,9 +4232,7 @@ async def editar_promo_campana(
 
 
 @router.post("/campanas/{campana_id}/toggle")
-async def toggle_campana(campana_id: int, usuario: dict = Depends(_usuario_actual)):
-    if usuario["rol"] != "admin":
-        raise HTTPException(status_code=403, detail="Solo un administrador puede activar/desactivar campañas")
+async def toggle_campana(campana_id: int, usuario: dict = Depends(servicio_identidad.requiere_rol("admin"))):
     campanas = await listar_campanas()
     actual = next((c for c in campanas if c["id"] == campana_id), None)
     if actual is None:
@@ -4271,9 +4242,7 @@ async def toggle_campana(campana_id: int, usuario: dict = Depends(_usuario_actua
 
 
 @router.post("/campanas/{campana_id}/eliminar")
-async def eliminar_campana_ruta(campana_id: int, usuario: dict = Depends(_usuario_actual)):
-    if usuario["rol"] != "admin":
-        raise HTTPException(status_code=403, detail="Solo un administrador puede eliminar campañas")
+async def eliminar_campana_ruta(campana_id: int, usuario: dict = Depends(servicio_identidad.requiere_rol("admin"))):
     borrada = await eliminar_campana(campana_id)
     if not borrada:
         raise HTTPException(
