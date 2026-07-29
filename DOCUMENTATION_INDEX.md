@@ -11,7 +11,7 @@
 | Fecha de creación | 2026-07-26 |
 | Autor | Claude, a pedido de Jesús Millones |
 | Fecha de aprobación | 2026-07-28 |
-| Última actualización | 2026-07-29 (alta de `MAIEK_AI_OPERATIONS_RUNBOOK.md` v1.0 — primer documento hijo de Operations Architecture construido, con el Escenario 1: `alembic stamp head` en producción — ver "Fase de Implementación" arriba) |
+| Última actualización | 2026-07-29 (alta de `MAIEK_AI_CONVERSATIONAL_VALIDATION_PLAN.md` v1.0 — cierra la sub-etapa de AI (protocolo de confianza) antes de continuar con Backend — ver "Fase de Implementación" arriba) |
 
 ## Dependencias
 
@@ -71,6 +71,17 @@ por planificación. `agent/migraciones.py` ahora también detecta el escenario e
 falla con un mensaje explícito remitiendo a este documento, en vez de un error genérico del motor
 de base de datos — sin automatizar el `stamp` en sí, que sigue siendo una decisión administrativa
 manual.
+
+**Sub-etapa de AI (protocolo de confianza) — Implementada y Approved.** `agent/brain.py` implementa
+las 5 responsabilidades del AI Orchestrator (AI Architecture Sec.1): protocolo de confianza con
+salida estructurada forzada, delimitación estructural anti-prompt-injection, prompt caching activo,
+y registro de cada inferencia como log estructurado — commits `93ba623`, `171a38f`. Activación
+gradual detrás de `modo="pruebas"`; `modo="producción"` sigue sin cambios, verificado con llamadas
+reales a la API de Anthropic (no solo mocks). Regla de negocio de escalamiento (Alta/Requiere
+validación/Baja) definida y parametrizada vía `Configuracion`. `MAIEK_AI_CONVERSATIONAL_VALIDATION_PLAN.md`
+v1.0 — Approved — cierra el punto pendiente antes de promover cualquier canal a producción: define
+objetivos, casos representativos, criterios de calidad, métricas y criterios de promoción, citando
+las métricas ya definidas en MPX Cap. 10 en vez de redefinirlas.
 
 ---
 
@@ -277,6 +288,7 @@ ciclos — cada flecha va de lo más fundacional hacia lo más específico, nunc
 | `MAIEK_AI_ADR_INDEX.md` | ADR Index | Documentación | Engineering | Managed | 1.0 | **Approved** | Jesús Millones | 2026-07-28 | — | Implementation Roadmap | Toda la Fase de Implementación |
 | `MAIEK_AI_PHASE_1_EXECUTION_PLAN.md` | Phase 1 Execution Plan | Foundation | Business | Managed | 1.2 | **Approved** | Jesús Millones | 2026-07-29 | — | Implementation Roadmap, Backend/AI/API Architecture, Data Architecture | El trabajo real de implementación de la Fase 1 |
 | `MAIEK_AI_OPERATIONS_RUNBOOK.md` | Operations Runbook | Engineering | Operations | Managed | 1.0 | **Approved** | Jesús Millones | 2026-07-29 | — | Operations Architecture, Data Architecture | Quien despliegue el proyecto |
+| `MAIEK_AI_CONVERSATIONAL_VALIDATION_PLAN.md` | Conversational Validation Plan | Engineering | AI | Managed | 1.0 | **Approved** | Jesús Millones | 2026-07-29 | — | AI Architecture, MPX (Cap. 2, 3, 10), Phase 1 Execution Plan | Decisión de promover un canal de modo="pruebas" a modo="producción" |
 
 ## 8. Reglas de Gobernanza Documental
 
