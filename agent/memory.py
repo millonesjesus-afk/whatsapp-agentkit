@@ -436,9 +436,11 @@ async def sembrar_canales_desde_env():
 
 
 async def inicializar_db():
-    """Crea las tablas si no existen."""
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+    """Aplica las migraciones de Alembic hasta la última versión — Data
+    Architecture Fase 1: create_all() deja de usarse como mecanismo de
+    cambio de esquema en producción, ver agent/migraciones.py."""
+    from agent.migraciones import aplicar_migraciones
+    await aplicar_migraciones()
 
 
 async def guardar_mensaje(telefono: str, role: str, content: str, archivo_id: int | None = None, via_app: bool = False):
