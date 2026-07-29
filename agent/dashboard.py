@@ -36,6 +36,7 @@ from fastapi import APIRouter, Depends, HTTPException, Form, Request, UploadFile
 from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse, Response, FileResponse
 
 from agent.tiempo_real import gestor_conexiones
+from agent.rate_limit import limitador_login, bloqueo_login
 from agent.memory import (
     listar_leads, obtener_lead, obtener_historial, actualizar_lead,
     obtener_usuario, listar_asesores, guardar_mensaje, obtener_ultimos_mensajes,
@@ -1664,14 +1665,41 @@ async def recuperar_submit(username: str = Form(...)):
     return RedirectResponse(url="/dashboard/recuperar?enviado=1", status_code=303)
 
 
+MAX_INTENTOS_LOGIN = 5
+BLOQUEO_LOGIN_SEGUNDOS = 15 * 60
+MAX_LOGIN_POR_IP_POR_MINUTO = 10
+
+
 @router.post("/login")
 async def login_submit(request: Request, username: str = Form(...), password: str = Form(...)):
+    # Rate limiting por IP — mitiga fuerza bruta distribuida entre varios
+    # usuarios probados desde el mismo origen (Security Architecture, P1).
+    ip = request.client.host if request.client else "desconocida"
+    if not limitador_login.permitir(ip, MAX_LOGIN_POR_IP_POR_MINUTO, 60):
+        return RedirectResponse(
+            url="/dashboard/login?error=Demasiados+intentos+—+espera+un+minuto+y+vuelve+a+intentar",
+            status_code=303,
+        )
+
+    # Bloqueo por intentos fallidos consecutivos sobre el mismo username
+    # (Security Architecture, P1 — antes no había ningún límite).
+    restante = bloqueo_login.segundos_restantes(username)
+    if restante is not None:
+        minutos = max(1, round(restante / 60))
+        return RedirectResponse(
+            url=f"/dashboard/login?error=Cuenta+bloqueada+temporalmente+—+intenta+en+{minutos}+minuto(s)",
+            status_code=303,
+        )
+
     usuario = await obtener_usuario(username)
     credenciales_validas = usuario is not None and bcrypt.checkpw(
         password.encode(), usuario["password_hash"].encode()
     )
     if not credenciales_validas:
+        bloqueo_login.registrar_fallo(username, MAX_INTENTOS_LOGIN, BLOQUEO_LOGIN_SEGUNDOS)
         return RedirectResponse(url="/dashboard/login?error=Usuario+o+contraseña+incorrectos", status_code=303)
+
+    bloqueo_login.registrar_exito(username)
     request.session["username"] = usuario["username"]
     return RedirectResponse(url="/dashboard", status_code=303)
 

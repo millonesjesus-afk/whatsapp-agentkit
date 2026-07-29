@@ -32,6 +32,7 @@ from agent.campanas import (
     detectar_y_asignar_campana, sembrar_campanas_iniciales, corregir_patrones_desalineados,
     procesar_leads_formulario,
 )
+from agent.rate_limit import limitador_webhook
 
 load_dotenv()
 
@@ -53,9 +54,30 @@ if ENVIRONMENT == "production" and not SESSION_SECRET_KEY:
     )
 SESSION_SECRET_KEY = SESSION_SECRET_KEY or "cambia-esta-clave-solo-para-desarrollo-local"
 
+# Variables cuya ausencia antes causaba una falla silenciosa más adelante
+# (el proceso arrancaba "bien" y solo fallaba al primer uso real) — DevOps
+# Architecture, Decisión local: toda variable crítica falla el arranque,
+# no su primer uso. ANTHROPIC_API_KEY es el núcleo del producto (sin ella
+# ningún mensaje se puede responder); CANAL_ENCRYPTION_KEY antes fallaba
+# recién al primer intento de leer/guardar un canal de WhatsApp cifrado
+# (ver agent/memory.py:_obtener_fernet).
+_VARIABLES_CRITICAS = ["ANTHROPIC_API_KEY", "CANAL_ENCRYPTION_KEY"]
+_faltantes = [v for v in _VARIABLES_CRITICAS if not os.getenv(v)]
+if _faltantes:
+    raise RuntimeError(
+        f"Faltan variables de entorno obligatorias: {', '.join(_faltantes)}. "
+        "Configúralas antes de arrancar — ver .env.example."
+    )
+
 # Proveedor de WhatsApp (se configura en .env con WHATSAPP_PROVIDER)
 proveedor = obtener_proveedor()
 PORT = int(os.getenv("PORT", 8000))
+
+# Rate limiting del webhook — Security Architecture, Decisión local P1.
+# Por IP de origen (request.client.host); si Railway antepone un proxy que
+# oculta la IP real, esto limita por la IP que el proxy expone, no por
+# cliente final — suficiente hoy, sin evidencia de que haga falta más.
+MAX_WEBHOOK_POR_IP_POR_MINUTO = 60
 
 
 @asynccontextmanager
@@ -112,6 +134,11 @@ async def webhook_handler(request: Request):
     Recibe mensajes de WhatsApp via el proveedor configurado.
     Procesa el mensaje, genera respuesta con Claude y la envía de vuelta.
     """
+    ip = request.client.host if request.client else "desconocida"
+    if not limitador_webhook.permitir(ip, MAX_WEBHOOK_POR_IP_POR_MINUTO, 60):
+        logger.warning(f"Rate limit excedido en /webhook desde {ip}")
+        raise HTTPException(status_code=429, detail="Demasiadas solicitudes")
+
     try:
         # Verificar que el webhook realmente venga de Meta antes de procesar nada
         cuerpo_crudo = await request.body()
