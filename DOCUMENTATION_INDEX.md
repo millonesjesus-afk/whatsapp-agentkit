@@ -11,7 +11,7 @@
 | Fecha de creación | 2026-07-26 |
 | Autor | Claude, a pedido de Jesús Millones |
 | Fecha de aprobación | 2026-07-28 |
-| Última actualización | 2026-07-29 (alta de `MAIEK_AI_CONVERSATIONAL_VALIDATION_PLAN.md` v1.0 — cierra la sub-etapa de AI (protocolo de confianza) antes de continuar con Backend — ver "Fase de Implementación" arriba) |
+| Última actualización | 2026-07-29 (`IMPLEMENTATION_REVIEW_PRE_DEPLOYMENT_FASE_1.md` — gate de integración de Backend+AI+Data Architecture Fase 1 antes de continuar con API — ver "Fase de Implementación" arriba) |
 
 ## Dependencias
 
@@ -82,6 +82,21 @@ validación/Baja) definida y parametrizada vía `Configuracion`. `MAIEK_AI_CONVE
 v1.0 — Approved — cierra el punto pendiente antes de promover cualquier canal a producción: define
 objetivos, casos representativos, criterios de calidad, métricas y criterios de promoción, citando
 las métricas ya definidas en MPX Cap. 10 en vez de redefinirlas.
+
+**Sub-etapa de Backend (tramo 2 — resto) — Implementada y Approved.** `requiere_rol` completado
+(cero checks de rol inline en gates de endpoint), `ServicioCanales` (fachada sobre `campanas.py`) y
+`ServicioConversacion` (fachada sobre mensajes/adjuntos/memoria conversacional, 28 call sites
+migrados) — commits `d318a04`, `0e02ed1`, `9098c33`. Con esto quedan extraídos los 5 servicios de
+dominio que Backend Architecture define. Validado con un flujo autenticado real de punta a punta
+(login, asesor responde, mensaje persistido), no solo mocks.
+
+**`IMPLEMENTATION_REVIEW_PRE_DEPLOYMENT_FASE_1.md` — gate de integración.** Antes de continuar con
+la sub-etapa de API, verifica que Backend + AI + Data Architecture Fase 1 funcionan como conjunto
+coherente: matriz de cumplimiento contra las 3 arquitecturas, mapa de dependencias actualizado,
+riesgos reales pre-despliegue, prerrequisitos operativos exactos, y recomendación de desplegar el
+núcleo técnico ya implementado antes de seguir sumando cambios sin verificar en producción real —
+mismo criterio ya sostenido desde el cierre de Fase 0. 16 commits locales acumulados, 0 desplegados
+al momento de este gate.
 
 ---
 
