@@ -10,7 +10,7 @@
 | Estado | **Approved** |
 | Fecha de creación | 2026-07-26 |
 | Autor | Claude, a pedido de Jesús Millones |
-| Última actualización | 2026-07-26 |
+| Última actualización | 2026-07-30 |
 
 > Depende de [`MAIEK_AI_DESIGN_SYSTEM.md`](MAIEK_AI_DESIGN_SYSTEM.md) (Design Language v1.1,
 > Approved) — todo componente de este catálogo se construye exclusivamente con los tokens
@@ -27,6 +27,7 @@
 | Versión | Fecha | Autor | Descripción |
 |---|---|---|---|
 | 1.0 | 2026-07-26 | Claude | Primera versión — catálogo completo de ~48 componentes en 8 categorías (Navegación, Botones, Formularios, Información, Datos, Feedback, IA, Conversación), matriz de principios y orden recomendado de implementación. Congelado como referencia oficial. |
+| 1.0.1 | 2026-07-30 | Claude, a pedido de Jesús Millones | Aclaración de una relación ambigua detectada al redactar MAIEK_AI_PRODUCT_PATTERNS.md (Cap. 5, patrón de Copiloto IA): Quick Actions vive únicamente dentro de Chat (una sola instancia real, junto al Text Area de respuesta); AI Action Panel no la contiene como componente hijo, sino que dispara/referencia las mismas acciones. Corregidas las secciones "Relación con otros componentes" de ambas entradas para que sean consistentes entre sí. No es una decisión de fondo nueva, solo una aclaración. |
 
 A partir de esta versión, cualquier componente nuevo o modificación de uno existente debe
 respetar este catálogo y mantener consistencia con el MDL — este documento no se edita en
@@ -1451,7 +1452,9 @@ acción disponible ahí (agendar, cotizar) también debe ser alcanzable por el f
 normal, la IA acelera, nunca bloquea.
 
 **Relación con otros componentes.** Contenedor de AI Suggestion Card, AI Recommendation, AI
-Summary, Statistic Card, Quick Actions.
+Summary, Statistic Card. No contiene a Quick Actions como componente hijo — Quick Actions vive
+como instancia única dentro de Chat (ver su propia entrada); el panel puede disparar/referenciar
+esas mismas acciones contextuales cuando aplican al caso, pero sin duplicar el componente.
 
 ---
 
@@ -1666,7 +1669,10 @@ una acción que "aparece de la nada" sugerida por IA debe notarse distinta de un
 estuvo ahí (mismo ícono de marca sutil del Capítulo 6 del MDL).
 
 **Relación con otros componentes.** Vive dentro de Chat, junto al campo de Text Area de
-respuesta; puede disparar AI Suggestion Card, Modal (cotización), Attachment (catálogo).
+respuesta — instancia única, no se duplica en otras pantallas; puede disparar AI Suggestion
+Card, Modal (cotización), Attachment (catálogo). Cuando AI Action Panel está expandido en la
+misma vista, referencia estas mismas acciones contextuales en vez de contener una copia propia
+del componente.
 
 ---
 
