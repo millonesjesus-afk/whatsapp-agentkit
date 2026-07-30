@@ -11,7 +11,7 @@
 | Fecha de creación | 2026-07-26 |
 | Autor | Claude, a pedido de Jesús Millones |
 | Fecha de aprobación | 2026-07-28 |
-| Última actualización | 2026-07-30 (Fase 1 cerrada oficialmente — primer despliegue controlado de v0.2.0 ejecutado, hallazgo real corregido y documentado en `MAIEK_AI_OPERATIONS_RUNBOOK.md` v1.1 y `DEPLOYMENT_CHECKLIST_v0.2.0.md` — ver "Fase de Implementación" arriba) |
+| Última actualización | 2026-07-30 (`MAIEK_AI_PRODUCT_PATTERNS.md` v1.0 Approved — primera especificación derivada de patrones visuales completos del producto, ver "Fase de Implementación" abajo) |
 
 ## Dependencias
 
@@ -149,6 +149,25 @@ documentado como aprendizaje operativo reutilizable. v0.2.0 queda como la nueva 
 proyecto. Code Freeze levantado — la Fase 2 (`MAIEK_AI_IMPLEMENTATION_ROADMAP.md`) puede empezar a
 planificarse.
 
+**Reorganización en tracks Product/Platform/SaaS — 2026-07-30.** El proyecto pasa de fases
+secuenciales a tres tracks estratégicos permanentes con foco único (Product → Platform → SaaS,
+re-priorizable por evidencia de uso real). Antes de crear documentación nueva, una auditoría
+documental completa de Product/UX/Frontend/Design confirmó que la Jerarquía documental ya
+declarada por `MAIEK_AI_PRODUCT_EXPERIENCE.md` (Framework → MPA → MDL → CDS → MPX →
+Especificaciones derivadas) es consistente y no requiere un documento rector nuevo — la deuda real
+identificada era de materialización (ningún patrón visual completo existía como referencia
+oficial), no de arquitectura documental.
+
+**`MAIEK_AI_PRODUCT_PATTERNS.md` v1.0 — Approved.** Primera especificación derivada de patrones
+visuales completos del producto, cerrando exactamente la brecha de materialización identificada en
+la auditoría — MDL y CDS ya definían lenguaje visual y componentes sueltos, pero ninguna pantalla
+ensamblada existía como referencia canónica. Construido capítulo por capítulo, cada uno revisado y
+ajustado por el usuario antes de continuar: Shell de Navegación, Bandeja de Conversaciones, Inicio,
+Analítica, Copiloto IA, CRM/Pipeline, Catálogo/Campañas/Equipo, y un capítulo de cierre de
+Principios Transversales de Producto (Plataforma primero, Capacidad vs. alcance, Acción antes que
+observación, Human Decision Gate, Única fuente de verdad, La IA asiste-nunca reemplaza el criterio
+humano). Auditoría de calidad y consistencia final sin observaciones de fondo.
+
 ---
 
 ## 1. Propósito del índice
@@ -252,9 +271,10 @@ qué orden conviene leerlo:
 - MPA (Product Architecture)
 - MPX (Product Experience)
 
-**Design** — lenguaje visual y componentes.
+**Design** — lenguaje visual, componentes y patrones compuestos.
 - MDL (Design Language)
 - CDS (Component Design System)
+- Product Patterns
 
 **Business** — implementaciones concretas para un producto y un cliente reales.
 - Gaso+ Product Framework
@@ -355,6 +375,7 @@ ciclos — cada flecha va de lo más fundacional hacia lo más específico, nunc
 | `MAIEK_AI_PHASE_1_EXECUTION_PLAN.md` | Phase 1 Execution Plan | Foundation | Business | Managed | 1.2 | **Approved** | Jesús Millones | 2026-07-29 | — | Implementation Roadmap, Backend/AI/API Architecture, Data Architecture | El trabajo real de implementación de la Fase 1 |
 | `MAIEK_AI_OPERATIONS_RUNBOOK.md` | Operations Runbook | Engineering | Operations | Managed | 1.1 | **Approved** | Jesús Millones | 2026-07-29 | — | Operations Architecture, Data Architecture | Quien despliegue el proyecto |
 | `MAIEK_AI_CONVERSATIONAL_VALIDATION_PLAN.md` | Conversational Validation Plan | Engineering | AI | Managed | 1.0 | **Approved** | Jesús Millones | 2026-07-29 | — | AI Architecture, MPX (Cap. 2, 3, 10), Phase 1 Execution Plan | Decisión de promover un canal de modo="pruebas" a modo="producción" |
+| `MAIEK_AI_PRODUCT_PATTERNS.md` | Product Patterns | Design | UX | Managed | 1.0 | **Approved** | Jesús Millones | 2026-07-30 | — | Framework, MPA, MDL, CDS, MPX, Frontend Architecture | Próxima revisión de Frontend Architecture (primer patrón visual concreto del que partir); toda implementación futura del frontend |
 
 ## 8. Reglas de Gobernanza Documental
 
