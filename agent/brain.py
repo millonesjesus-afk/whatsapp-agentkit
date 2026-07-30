@@ -18,6 +18,7 @@ módulo desde fuera del dominio de AI.
 
 import os
 import json
+import time
 import yaml
 import logging
 from anthropic import AsyncAnthropic
@@ -470,9 +471,24 @@ async def generar_resumen_conversacion(historial: list[dict]) -> str:
     confianza (_generar_respuesta_protocolo_confianza): no emite confianza/razon
     ni pasa por tool-calling — es una sola inferencia de lectura, sin decisión
     de negocio que justificar. Usa el modelo económico, igual que
-    extraer_datos_lead, porque resumir no necesita el modelo principal."""
+    extraer_datos_lead, porque resumir no necesita el modelo principal.
+
+    Logging estructurado (evento "resumen_ia", mismo criterio que
+    "inferencia_ia" del protocolo de confianza) — prerrequisito del Sprint de
+    Validación del Copiloto (MAIEK_AI_CONVERSATIONAL_VALIDATION_PLAN.md v1.1):
+    sin esto no había ningún rastro de latencia ni de qué se generó, más allá
+    de lo que se veía en pantalla en el momento."""
+    inicio = time.monotonic()
     if not historial:
+        logger.info(
+            "resumen_ia "
+            + json.dumps(
+                {"cantidad_mensajes": 0, "historial_vacio": True, "latencia_ms": 0, "error": None},
+                ensure_ascii=False,
+            )
+        )
         return "Todavía no hay mensajes en esta conversación."
+
     texto_historial = "\n".join(
         f"{'Cliente' if m['role'] == 'user' else 'Asesor/Gabi'}: {m['content']}"
         for m in historial if m.get("content")
@@ -491,7 +507,38 @@ async def generar_resumen_conversacion(historial: list[dict]) -> str:
             max_tokens=300,
             messages=[{"role": "user", "content": prompt}],
         )
-        return response.content[0].text.strip()
+        resumen = response.content[0].text.strip()
+        latencia_ms = round((time.monotonic() - inicio) * 1000)
+        logger.info(
+            "resumen_ia "
+            + json.dumps(
+                {
+                    "cantidad_mensajes": len(historial),
+                    "historial_vacio": False,
+                    "latencia_ms": latencia_ms,
+                    "resumen_preview": resumen[:300],
+                    "tokens_in": response.usage.input_tokens,
+                    "tokens_out": response.usage.output_tokens,
+                    "error": None,
+                },
+                ensure_ascii=False,
+            )
+        )
+        return resumen
     except Exception as e:
+        latencia_ms = round((time.monotonic() - inicio) * 1000)
         logger.warning(f"No se pudo generar el resumen de la conversación: {e}")
+        logger.info(
+            "resumen_ia "
+            + json.dumps(
+                {
+                    "cantidad_mensajes": len(historial),
+                    "historial_vacio": False,
+                    "latencia_ms": latencia_ms,
+                    "resumen_preview": None,
+                    "error": str(e),
+                },
+                ensure_ascii=False,
+            )
+        )
         return "No se pudo generar el resumen — intentá de nuevo en un momento."
