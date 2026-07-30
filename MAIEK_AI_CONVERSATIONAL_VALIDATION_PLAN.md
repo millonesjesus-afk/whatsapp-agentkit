@@ -1,16 +1,16 @@
 # Maiek AI — Conversational Validation Plan
 
-**Versión 1.1 · Estado: Approved**
+**Versión 1.2 · Estado: Approved**
 
 | | |
 |---|---|
 | Documento | Conversational Validation Plan |
 | Proyecto | Maiek AI |
-| Versión | 1.1 |
+| Versión | 1.2 |
 | Estado | **Approved** |
 | Fecha de creación | 2026-07-29 |
 | Autor | Claude, a pedido de Jesús Millones |
-| Fecha de aprobación | 2026-07-30 (v1.1) / 2026-07-29 (v1.0) |
+| Fecha de aprobación | 2026-07-30 (v1.1 y v1.2) / 2026-07-29 (v1.0) |
 | Última actualización | 2026-07-30 |
 
 ## Dependencias
@@ -38,6 +38,7 @@ construye sin la evidencia de la sección 6.
 |---|---|---|---|
 | 1.0 | 2026-07-29 | Claude | Primera versión — pedida explícitamente al cerrar la sub-etapa de AI (protocolo de confianza), antes de continuar con Backend. El riesgo restante del protocolo ya no es técnico (validado con llamadas reales a la API) sino conversacional — este documento define cómo se valida eso antes de exponerlo a clientes reales. |
 | 1.1 | 2026-07-30 | Claude | Agrega la sección 6 (Validación del Copiloto IA / Resumen IA), tras la primera implementación del Copiloto (Sprint 3, Product Patterns Cap. 5). Se mantiene como el único plan de validación conversacional del producto — no se crea un documento separado. Motivado por decisión explícita del usuario de generar evidencia objetiva antes de avanzar a Sugerencias/Indicador de confianza/Acciones IA. |
+| 1.2 | 2026-07-30 | Claude | Agrega "Entorno de validación confirmado": el usuario confirmó que ya existe un canal real en `modo="pruebas"` (el que está en operación hoy) — ese es el canal oficial de validación hasta que exista el número de producción de Gaso+. Cierra el prerrequisito operativo del checklist Go/No-Go del Sprint de Validación del Copiloto. |
 
 ## Alcance y desviación declarada del ADS
 
@@ -47,6 +48,14 @@ y autorizada por `MAIEK_AI_ARCHITECTURE_DOCUMENT_STANDARD.md` §2 para este tipo
 validación en sí — la ejecución ocurre cuando exista tráfico real en un canal `modo="pruebas"` con
 el protocolo activo, y sus resultados no forman parte de este documento sino de la revisión que
 autorice cada promoción puntual.
+
+## Entorno de validación confirmado (2026-07-30)
+
+Existe hoy un único canal real de WhatsApp configurado en `modo="pruebas"` — es el canal con el que
+ya se opera. **Ese es el canal oficial de validación**, tanto para el protocolo de confianza de Gabi
+(secciones 1-5) como para el Copiloto IA / Resumen IA (sección 6), hasta que exista el número
+oficial de producción de Gaso+ (todavía no asignado). La promoción a ese futuro número es una
+decisión posterior, separada de esta validación, y no se adelanta acá.
 
 ---
 
