@@ -89,7 +89,7 @@ def _badge_canal(numero_whatsapp_id: str | None, mapa_canales: dict, compacto: b
     bg, texto = canal["color"]
     return f'<span class="badge-suave" style="{extra}background-color:{bg};color:{texto}">{html.escape(canal["nombre"])}</span>'
 from agent.services.servicio_canales import servicio_canales
-from agent.brain import cargar_system_prompt
+from agent.brain import cargar_system_prompt, generar_resumen_conversacion
 from agent.tools import obtener_producto_por_codigo, buscar_productos
 from agent.notificaciones import notificar_solicitud_reseteo, notificar_lead_derivado
 from agent.asignacion import UMBRAL_SENIOR_DEFAULT, UMBRAL_INTERMEDIO_DEFAULT
@@ -647,6 +647,24 @@ ESTILOS_PROPIOS = """
     font-variant-numeric: tabular-nums;
   }
   .kpi-card .kpi-etiqueta { font-size: .78rem; color: var(--mdl-neutral-600); margin-top: 4px; }
+
+  /* ── Copiloto IA (MAIEK_AI_PRODUCT_PATTERNS.md, Cap. 5) ──────────────
+     Primera implementación: contenedor extensible (AI Action Panel, CDS)
+     con 3 zonas; en este Sprint solo la Zona de contexto tiene una
+     capacidad activa (Resumen IA / AI Summary). Colapsado por defecto —
+     "el panel nunca se auto-expande sin que el usuario lo pida". */
+  .copiloto-panel { border: 1px solid var(--mdl-border); border-radius: var(--mdl-radius-lg); background: var(--mdl-neutral-0); margin-bottom: 10px; overflow: hidden; box-shadow: var(--mdl-elev-1); }
+  .copiloto-header { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 10px 14px; cursor: pointer; user-select: none; }
+  .copiloto-header .titulo { display: flex; align-items: center; gap: 8px; font-weight: 600; font-size: .85rem; color: var(--mdl-navy-900); }
+  .copiloto-header i.bi-stars { color: var(--mdl-primary-600); }
+  .copiloto-cuerpo { display: none; padding: 0 14px 14px; border-top: 1px solid var(--mdl-border); }
+  .copiloto-panel.abierto .copiloto-cuerpo { display: block; padding-top: 12px; }
+  .copiloto-panel.abierto .copiloto-chevron { transform: rotate(180deg); }
+  .copiloto-chevron { transition: transform .15s ease; color: var(--mdl-neutral-400); }
+  .copiloto-zona-titulo { font-size: .72rem; font-weight: 600; text-transform: uppercase; letter-spacing: .03em; color: var(--mdl-neutral-600); margin-bottom: 6px; }
+  .copiloto-resumen-texto { font-size: .83rem; color: var(--mdl-navy-900); line-height: 1.45; white-space: pre-wrap; }
+  .copiloto-resumen-meta { font-size: .7rem; color: var(--mdl-neutral-400); margin-top: 6px; }
+  .copiloto-resumen-desactualizado { color: #b45309 !important; font-weight: 600; }
 """
 
 ICONO_ETAPA = {
@@ -3480,6 +3498,98 @@ async def _bloque_gestion_lead(
     """
 
 
+# ── Copiloto IA (MAIEK_AI_PRODUCT_PATTERNS.md, Cap. 5) ─────────────────
+#
+# Primera implementación: contenedor extensible con 3 zonas (equivalente al
+# `AI Action Panel` del CDS). Solo la Zona de contexto tiene una capacidad
+# activa en este Sprint — Resumen IA (`AI Summary`), bajo demanda, sin
+# protocolo de confianza ni persistencia (independiente de brain.py del
+# todo). La Zona de sugerencias (`AI Suggestion Card` + `AI Confidence
+# Indicator`) y la Zona de métricas de apoyo NO se renderizan todavía — no
+# hay nada real que mostrar ahí (depende de persistir SugerenciaIA, todavía
+# diferido a Data Architecture Fase 2) y el propio Cap. 5 prohíbe mostrar un
+# ítem vacío/deshabilitado en vez de omitirlo. Cuando esas capacidades
+# existan, se agregan como bloques nuevos dentro de _copiloto_ia() sin tocar
+# el contenedor ni el mecanismo de colapso.
+
+
+def _script_copiloto_ia(telefono: str) -> str:
+    return f"""
+    <script>
+    (function() {{
+        const telefono = {telefono!r};
+        const contenedor = document.getElementById('copiloto-resumen-contenido');
+        if (!contenedor) return;
+        let resumenGenerado = false;
+
+        function pintarCargando() {{
+            contenedor.innerHTML = '<div class="copiloto-resumen-texto text-muted">'
+                + '<span class="spinner-border spinner-border-sm"></span> Generando resumen...</div>';
+        }}
+
+        function pintarResumen(texto) {{
+            resumenGenerado = true;
+            contenedor.innerHTML =
+                '<div class="copiloto-resumen-texto"></div>'
+                + '<div class="copiloto-resumen-meta">Generado ahora</div>'
+                + '<button type="button" class="btn btn-sm btn-link p-0 mt-1" id="copiloto-btn-resumen">Actualizar resumen</button>';
+            contenedor.querySelector('.copiloto-resumen-texto').textContent = texto;
+        }}
+
+        function generar() {{
+            pintarCargando();
+            fetch('/dashboard/lead/' + encodeURIComponent(telefono) + '/resumen-ia', {{ method: 'POST' }})
+                .then(function(r) {{ return r.json(); }})
+                .then(function(datos) {{ pintarResumen(datos.resumen); }})
+                .catch(function() {{ pintarResumen('No se pudo generar el resumen — intentá de nuevo.'); }});
+        }}
+
+        contenedor.addEventListener('click', function(ev) {{
+            if (ev.target.closest('#copiloto-btn-resumen')) generar();
+        }});
+
+        // Marca el resumen ya mostrado como desactualizado si llega un
+        // mensaje nuevo de ESTE lead mientras tanto — nunca se regenera
+        // solo (el usuario decide cuándo pedir uno nuevo).
+        function alEventoWS(evento) {{
+            if (!document.getElementById('copiloto-resumen-contenido')) {{
+                if (window.__gasoWS) window.__gasoWS.off(alEventoWS);
+                return;
+            }}
+            if (evento.tipo === 'mensaje_nuevo' && evento.telefono === telefono && resumenGenerado) {{
+                var meta = contenedor.querySelector('.copiloto-resumen-meta');
+                if (meta && !meta.classList.contains('copiloto-resumen-desactualizado')) {{
+                    meta.classList.add('copiloto-resumen-desactualizado');
+                    meta.innerHTML = '<i class="bi bi-arrow-clockwise"></i> Hay mensajes nuevos — este resumen puede estar desactualizado.';
+                }}
+            }}
+        }}
+        if (window.__gasoWS) window.__gasoWS.on(alEventoWS);
+    }})();
+    </script>
+    """
+
+
+def _copiloto_ia(telefono: str) -> str:
+    return f"""
+    <div class="copiloto-panel" id="copiloto-panel">
+        <div class="copiloto-header" onclick="document.getElementById('copiloto-panel').classList.toggle('abierto')">
+            <span class="titulo"><i class="bi bi-stars"></i> Copiloto IA</span>
+            <i class="bi bi-chevron-down copiloto-chevron"></i>
+        </div>
+        <div class="copiloto-cuerpo">
+            <div class="copiloto-zona-titulo">Resumen de la conversación</div>
+            <div id="copiloto-resumen-contenido">
+                <button type="button" class="btn btn-sm btn-outline-primary" id="copiloto-btn-resumen">
+                    <i class="bi bi-magic"></i> Generar resumen
+                </button>
+            </div>
+        </div>
+    </div>
+    {_script_copiloto_ia(telefono)}
+    """
+
+
 _ICONOS_EVENTO_LEAD = {
     "resultado_cambiado": "bi-flag-fill",
     "asignado": "bi-person-check-fill",
@@ -3560,6 +3670,7 @@ async def _bloque_resumen_cliente(
         """
 
     return f"""
+    {_copiloto_ia(telefono)}
     <div class="card leads-card shadow-sm mb-2">
         <div class="barra-acento"></div>
         <div class="card-body p-3">
@@ -3739,6 +3850,21 @@ async def mensajes_json(telefono: str, usuario: dict = Depends(_usuario_actual))
     _verificar_acceso_lead(usuario, lead)
     historial = await servicio_conversacion.obtener_historial(telefono, limite=200)
     return JSONResponse(historial)
+
+
+@router.post("/lead/{telefono}/resumen-ia")
+async def generar_resumen_ia(telefono: str, usuario: dict = Depends(_usuario_actual)):
+    """Resumen IA bajo demanda (Copiloto — Cap. 5, primera capacidad activa)
+    — sin persistir nada: se genera cada vez que se pide, no hay "el" resumen
+    guardado del lead. Mismo control de acceso que el resto de endpoints del
+    lead (un Asesor solo puede pedirlo de sus propios leads)."""
+    lead = await obtener_lead(telefono)
+    if lead is None:
+        raise HTTPException(status_code=404, detail="Lead no encontrado")
+    _verificar_acceso_lead(usuario, lead)
+    historial = await servicio_conversacion.obtener_historial(telefono, limite=200)
+    resumen = await generar_resumen_conversacion(historial)
+    return JSONResponse({"resumen": resumen})
 
 
 @router.get("/notificaciones.json")

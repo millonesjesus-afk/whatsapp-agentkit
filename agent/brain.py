@@ -462,3 +462,36 @@ async def extraer_datos_lead(mensaje_cliente: str, respuesta_gabi: str, lead_act
     except Exception as e:
         logger.warning(f"No se pudo extraer datos del lead: {e}")
         return {}
+
+
+async def generar_resumen_conversacion(historial: list[dict]) -> str:
+    """Resumen IA bajo demanda (Copiloto — MAIEK_AI_PRODUCT_PATTERNS.md, Cap. 5,
+    primera capacidad activa). Deliberadamente independiente del protocolo de
+    confianza (_generar_respuesta_protocolo_confianza): no emite confianza/razon
+    ni pasa por tool-calling — es una sola inferencia de lectura, sin decisión
+    de negocio que justificar. Usa el modelo económico, igual que
+    extraer_datos_lead, porque resumir no necesita el modelo principal."""
+    if not historial:
+        return "Todavía no hay mensajes en esta conversación."
+    texto_historial = "\n".join(
+        f"{'Cliente' if m['role'] == 'user' else 'Asesor/Gabi'}: {m['content']}"
+        for m in historial if m.get("content")
+    )
+    prompt = (
+        "Resumí esta conversación entre un cliente y el equipo comercial (Gabi, la IA, o un asesor "
+        "humano) para que un asesor que recién la abre entienda de un vistazo qué pasó, sin tener que "
+        "leer todos los mensajes. 3-5 líneas como máximo, en español, tono directo. Incluí: qué busca "
+        "el cliente, en qué quedó la conversación, y cualquier dato clave (producto, presupuesto, "
+        "urgencia) si se mencionó.\n\n"
+        f"Conversación:\n{texto_historial}"
+    )
+    try:
+        response = await client.messages.create(
+            model=MODELO_EXTRACCION,
+            max_tokens=300,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        return response.content[0].text.strip()
+    except Exception as e:
+        logger.warning(f"No se pudo generar el resumen de la conversación: {e}")
+        return "No se pudo generar el resumen — intentá de nuevo en un momento."
