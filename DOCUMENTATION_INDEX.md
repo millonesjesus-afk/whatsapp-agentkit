@@ -11,7 +11,7 @@
 | Fecha de creación | 2026-07-26 |
 | Autor | Claude, a pedido de Jesús Millones |
 | Fecha de aprobación | 2026-07-28 |
-| Última actualización | 2026-07-29 (`RELEASE_NOTES_v0.2.0.md` y `DEPLOYMENT_CHECKLIST_v0.2.0.md` — entregables finales de versión bajo Code Freeze, previos al primer despliegue controlado — ver "Fase de Implementación" arriba) |
+| Última actualización | 2026-07-30 (Fase 1 cerrada oficialmente — primer despliegue controlado de v0.2.0 ejecutado, hallazgo real corregido y documentado en `MAIEK_AI_OPERATIONS_RUNBOOK.md` v1.1 y `DEPLOYMENT_CHECKLIST_v0.2.0.md` — ver "Fase de Implementación" arriba) |
 
 ## Dependencias
 
@@ -46,7 +46,9 @@ los 8 CSAs.
 verificados con tráfico real de WhatsApp (`IMPLEMENTATION_REVIEW_FASE_0.md`): sin desviaciones
 respecto al corpus, deuda técnica identificada y con criterio de revisión.
 
-**Fase 1 (Núcleo técnico — Backend/AI/API) — Planificación cerrada, implementación en curso.**
+**Fase 1 (Núcleo técnico — Backend/AI/API) — Cerrada oficialmente el 2026-07-30** (ver el cierre
+completo al final de esta sección; el resto de este párrafo y los siguientes documentan cómo se
+llegó ahí).
 `MAIEK_AI_PHASE_1_EXECUTION_PLAN.md` v1.2 — Approved 2026-07-29 — traduce la Fase 1 del Roadmap en
 un plan de ejecución (orden Backend (parcial) → AI → Backend (resto) → API, paralelización,
 riesgos, criterios de aceptación), revisado por una auditoría independiente (Opus, como Principal
@@ -60,8 +62,9 @@ durante la sub-etapa de AI (el marcador de "revisión prioritaria" del protocolo
 necesitaba una columna nueva en `leads`, que `create_all()` no puede agregar a una tabla ya
 existente en producción). AI se pausó explícitamente para resolver esta capacidad habilitadora
 primero — commit `c04df62`, verificado localmente (equivalencia de esquema con `create_all()`,
-escenario de producción simulado con `stamp`). Pendiente: `alembic stamp head` manual del usuario
-contra la Postgres de producción, antes del próximo deploy que incluya este commit.
+escenario de producción simulado con `stamp`). El stamp manual contra producción se ejecutó el
+2026-07-30 como parte del primer despliegue controlado — ver más abajo el hallazgo real que ese
+paso reveló y su corrección.
 
 **`MAIEK_AI_OPERATIONS_RUNBOOK.md` v1.0 — Approved.** Cierra el punto operativo del `stamp`
 manual: documenta el procedimiento completo (cuándo, en qué entornos, qué verificar antes/después,
@@ -114,11 +117,37 @@ completar el primer despliegue controlado y su validación en producción real.
 **Entregables finales de versión — `RELEASE_NOTES_v0.2.0.md` y `DEPLOYMENT_CHECKLIST_v0.2.0.md`.**
 Preparados bajo Code Freeze, sin código adicional: notas de versión (resumen ejecutivo,
 funcionalidades, cambios internos, las 3 migraciones incluidas, riesgos y limitaciones conocidas,
-próximos pasos de Fase 2) y el checklist operativo del primer despliegue controlado (backup, `alembic
-stamp head`, verificación de migraciones, push, deploy, smoke tests, validación de logs/`request_id`/
-idempotencia/protocolo de confianza/revisión prioritaria, criterios de éxito, y procedimiento de
-rollback). Pendiente: ejecutar el checklist y registrar acá la fecha real de despliegue una vez
-cerrado.
+próximos pasos de Fase 2) y el checklist operativo del primer despliegue controlado (backup,
+migraciones, push, deploy, smoke tests, validación de logs/`request_id`/idempotencia/protocolo de
+confianza/revisión prioritaria, criterios de éxito, y procedimiento de rollback).
+
+**Primer despliegue controlado de v0.2.0 — Ejecutado el 2026-07-30.** Backup manual de producción
+verificado (`pg_dump`, restaurabilidad confirmada con `pg_restore --list`), push a `deploy/main`
+(`c808b8d`), deploy exitoso en Railway, arranque limpio, smoke tests y validación de logs/
+`request_id` pasadas.
+
+**Hallazgo real durante el despliegue — criticidad Alta, resuelto sin pérdida de datos.** El
+procedimiento original (`alembic stamp head` directo) resultó incorrecto: `head` ya incluía dos
+migraciones incrementales (`124cb805569e`, `925ec2d81736`) agregadas después del baseline, sin
+aplicar todavía contra la base real. El `stamp` marcó la base como "al día" sin ejecutar ese DDL,
+y el panel de leads quedó devolviendo `500` (`column leads.revision_prioritaria does not exist`)
+desde el deploy (06:53 UTC) hasta la corrección (06:59 UTC) — unos 6 minutos, sin afectar el
+webhook de WhatsApp. Corregido en el momento: `alembic stamp` al baseline real (`8bf43ecd3785`) +
+`alembic upgrade head` (esta vez ejecutando el DDL real). Verificado con `psql` y con el panel
+cargando con normalidad. `MAIEK_AI_OPERATIONS_RUNBOOK.md` (v1.1) y `DEPLOYMENT_CHECKLIST_v0.2.0.md`
+se corrigieron el mismo día con la secuencia validada (verificar estado → stamp al baseline real →
+`upgrade head` → verificar versión final) y una sección "Lecciones aprendidas del primer
+despliegue" — commit `b1b6f4c`, pusheado a `deploy/main`. Validación de idempotencia y protocolo de
+confianza quedan como monitoreo pasivo continuo (dependen de tráfico real de WhatsApp y de un canal
+en `modo="pruebas"`, respectivamente) — no bloquean el cierre, según el propio criterio del
+checklist.
+
+**Fase 1 (Núcleo técnico) — Cerrada oficialmente el 2026-07-30.** Backend + AI + Data Architecture
+Fase 1 + API implementados, desplegados a producción real, validados con el
+`DEPLOYMENT_CHECKLIST_v0.2.0.md` completo, con el único hallazgo real del despliegue ya corregido y
+documentado como aprendizaje operativo reutilizable. v0.2.0 queda como la nueva línea base del
+proyecto. Code Freeze levantado — la Fase 2 (`MAIEK_AI_IMPLEMENTATION_ROADMAP.md`) puede empezar a
+planificarse.
 
 ---
 
@@ -324,7 +353,7 @@ ciclos — cada flecha va de lo más fundacional hacia lo más específico, nunc
 | `MAIEK_AI_IMPLEMENTATION_ROADMAP.md` | Implementation Roadmap | Foundation | Business | Managed | 1.0 | **Approved** | Jesús Millones | 2026-07-28 | — | Los 8 dominios técnicos (Data, Backend, API, AI, Security, DevOps, Operations, Frontend), MSA, ADS, DOCUMENTATION_INDEX | QA Strategy, Testing Strategy, `MAIEK_AI_OPERATIONS_RUNBOOK.md`, ADR Index, CHANGELOG (los otros 3, todavía futuros) |
 | `MAIEK_AI_ADR_INDEX.md` | ADR Index | Documentación | Engineering | Managed | 1.0 | **Approved** | Jesús Millones | 2026-07-28 | — | Implementation Roadmap | Toda la Fase de Implementación |
 | `MAIEK_AI_PHASE_1_EXECUTION_PLAN.md` | Phase 1 Execution Plan | Foundation | Business | Managed | 1.2 | **Approved** | Jesús Millones | 2026-07-29 | — | Implementation Roadmap, Backend/AI/API Architecture, Data Architecture | El trabajo real de implementación de la Fase 1 |
-| `MAIEK_AI_OPERATIONS_RUNBOOK.md` | Operations Runbook | Engineering | Operations | Managed | 1.0 | **Approved** | Jesús Millones | 2026-07-29 | — | Operations Architecture, Data Architecture | Quien despliegue el proyecto |
+| `MAIEK_AI_OPERATIONS_RUNBOOK.md` | Operations Runbook | Engineering | Operations | Managed | 1.1 | **Approved** | Jesús Millones | 2026-07-29 | — | Operations Architecture, Data Architecture | Quien despliegue el proyecto |
 | `MAIEK_AI_CONVERSATIONAL_VALIDATION_PLAN.md` | Conversational Validation Plan | Engineering | AI | Managed | 1.0 | **Approved** | Jesús Millones | 2026-07-29 | — | AI Architecture, MPX (Cap. 2, 3, 10), Phase 1 Execution Plan | Decisión de promover un canal de modo="pruebas" a modo="producción" |
 
 ## 8. Reglas de Gobernanza Documental
