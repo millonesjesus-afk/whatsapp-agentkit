@@ -43,6 +43,7 @@ from agent.memory import (
     asignar_asesor_a_lead, marcar_lead_visto, limpiar_revision_prioritaria, actualizar_disponibilidad, actualizar_nivel_asesor,
     listar_campanas, crear_campana, actualizar_campana, contar_leads_por_campana, eliminar_campana,
     cambiar_password, contar_leads_activos_por_asesor, RESULTADOS_CERRADOS, listar_leads_agendados,
+    listar_leads_esperando_asesor,
     obtener_configuracion, guardar_configuracion,
     listar_lineas_venta, listar_lineas_venta_de_muchos,
     listar_canales_whatsapp, crear_canal_whatsapp, actualizar_canal_whatsapp,
@@ -569,6 +570,58 @@ ESTILOS_PROPIOS = """
   .login-shell { flex: 1 1 auto; background: radial-gradient(circle at top left, #e0f7fa, var(--gaso-fondo) 60%); }
   .login-card { border-radius: 16px !important; }
   .link-btn { border: none; margin: 0; }
+
+  /* ── Inicio (MAIEK_AI_PRODUCT_PATTERNS.md, Cap. 3) ──────────────────
+     Construido directamente con tokens del MDL (namespace --mdl-*, para no
+     chocar con --gaso-*) — migración incremental (Principio 3 del corpus):
+     el resto del panel no se toca, solo lo nuevo nace ya alineado. */
+  :root {
+    --mdl-primary-600: #1677FF; --mdl-navy-900: #0B1D3A; --mdl-navy-800: #0F2647;
+    --mdl-neutral-0: #FFFFFF; --mdl-neutral-50: #F2F4F7; --mdl-neutral-200: #D2D7E0;
+    --mdl-neutral-400: #9AA3B2; --mdl-neutral-600: #626C7E; --mdl-border: #E7EAEF;
+    --mdl-success-text: #0F6E3B; --mdl-error-text: #9E1F1F;
+    --mdl-space-4: 16px; --mdl-space-5: 20px; --mdl-space-6: 24px;
+    --mdl-radius-lg: 14px;
+    --mdl-elev-1: 0 1px 2px rgba(11,29,58,.06);
+    --mdl-elev-2: 0 4px 12px rgba(11,29,58,.08), 0 1px 3px rgba(11,29,58,.06);
+  }
+
+  .vista-inicio { padding: var(--mdl-space-6); overflow-y: auto; flex: 1 1 auto; }
+
+  /* Zona de acción — siempre primera, nunca la Zona de indicadores
+     (Cap. 3: "acción antes que observación", en todo breakpoint). */
+  .zona-accion { margin-bottom: var(--mdl-space-6); max-width: 640px; }
+  .zona-accion-titulo {
+    font-size: .8rem; font-weight: 600; color: var(--mdl-navy-900);
+    text-transform: uppercase; letter-spacing: .04em; margin-bottom: var(--mdl-space-4);
+  }
+  .zona-accion-item {
+    display: flex; align-items: center; gap: var(--mdl-space-4);
+    background: var(--mdl-neutral-0); border: 1px solid var(--mdl-border);
+    border-radius: var(--mdl-radius-lg); padding: var(--mdl-space-4) var(--mdl-space-5);
+    margin-bottom: 10px; text-decoration: none; color: inherit;
+    box-shadow: var(--mdl-elev-1); transition: box-shadow .15s ease;
+  }
+  .zona-accion-item:hover { box-shadow: var(--mdl-elev-2); color: inherit; }
+  .zona-accion-item .nombre { font-weight: 600; color: var(--mdl-navy-900); font-size: .92rem; }
+  .zona-accion-item .motivo { font-size: .78rem; color: var(--mdl-neutral-600); margin-top: 2px; }
+  .zona-accion-vacio {
+    background: var(--mdl-neutral-50); border-radius: var(--mdl-radius-lg);
+    padding: var(--mdl-space-6); text-align: center; color: var(--mdl-neutral-600); font-size: .85rem;
+  }
+
+  /* Zona de indicadores — segunda, de apoyo (Cap. 3). */
+  .zona-indicadores { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: var(--mdl-space-4); max-width: 640px; }
+  .kpi-card {
+    background: var(--mdl-neutral-0); border: 1px solid var(--mdl-border);
+    border-radius: var(--mdl-radius-lg); padding: var(--mdl-space-5);
+    box-shadow: var(--mdl-elev-1);
+  }
+  .kpi-card .kpi-numero {
+    font-size: 2rem; font-weight: 700; color: var(--mdl-navy-900); line-height: 1.1;
+    font-variant-numeric: tabular-nums;
+  }
+  .kpi-card .kpi-etiqueta { font-size: .78rem; color: var(--mdl-neutral-600); margin-top: 4px; }
 """
 
 ICONO_ETAPA = {
@@ -1931,10 +1984,140 @@ async def exportar_metricas_xlsx(usuario: dict = Depends(servicio_identidad.requ
     )
 
 
+# ── Inicio (MAIEK_AI_PRODUCT_PATTERNS.md, Cap. 3) ──────────────────────
+
+def _kpi_card(numero, etiqueta: str) -> str:
+    """KPI Card del CDS — el número es el protagonista, nunca más de 8 en
+    una franja (regla ya fijada por el propio componente)."""
+    return (
+        f'<div class="kpi-card">'
+        f'<div class="kpi-numero">{numero}</div>'
+        f'<div class="kpi-etiqueta">{html.escape(etiqueta)}</div>'
+        f'</div>'
+    )
+
+
+def _item_zona_accion(telefono: str, nombre: str, motivo: str) -> str:
+    """Un ítem de la Zona de acción — lleva directo a esa conversación
+    específica dentro de la Bandeja (Cap. 2), nunca a la lista completa."""
+    return (
+        f'<a href="/dashboard/lead/{html.escape(telefono)}" data-ajax="1" class="zona-accion-item">'
+        f'{_avatar(nombre or telefono, 40)}'
+        f'<div><div class="nombre">{html.escape(nombre or telefono)}</div>'
+        f'<div class="motivo">{html.escape(motivo)}</div></div>'
+        f'</a>'
+    )
+
+
+def _zona_accion_vacia(mensaje: str) -> str:
+    return f'<div class="zona-accion-vacio">{html.escape(mensaje)}</div>'
+
+
+async def _zona_accion_asesor(usuario: dict, datos: dict) -> str:
+    """Deterministica, sin depender del Copiloto IA ni de ninguna señal de
+    protocolo de confianza (Cap. 3 de Product Patterns) — reglas sobre datos
+    ya existentes: conversaciones esperando respuesta humana primero (más
+    antiguas primero), después próximas citas agendadas."""
+    esperando = sorted(
+        (l for l in datos["leads_todos"] if l.get("pausado_manual")),
+        key=lambda l: l.get("actualizado") or datetime.min,
+    )
+    agendados = await listar_leads_agendados(asesor_asignado=usuario["username"])
+
+    if not esperando and not agendados:
+        return _zona_accion_vacia("No tenés conversaciones que requieran tu atención ahora mismo.")
+
+    items = [_item_zona_accion(l["telefono"], l.get("nombre"), "Esperando tu respuesta") for l in esperando[:5]]
+    for l in agendados[:3]:
+        fecha = l["fecha_agendada"].strftime("%d/%m %H:%M") if l.get("fecha_agendada") else "sin hora"
+        items.append(_item_zona_accion(l["telefono"], l.get("nombre"), f"Cita agendada — {fecha}"))
+    return "".join(items)
+
+
+async def _zona_accion_admin(datos: dict) -> str:
+    """Deterministica, misma disciplina que la del Asesor — qué requiere
+    intervención de Administrador/Supervisor hoy, no un resumen pasivo."""
+    esperando_asignar = await listar_leads_esperando_asesor()
+    esperando_respuesta = sorted(
+        (l for l in datos["leads_todos"] if l.get("pausado_manual")),
+        key=lambda l: l.get("actualizado") or datetime.min,
+    )
+    agendados = await listar_leads_agendados()
+
+    if not esperando_asignar and not esperando_respuesta and not agendados:
+        return _zona_accion_vacia("El equipo no tiene conversaciones que requieran tu intervención ahora mismo.")
+
+    items = [_item_zona_accion(l["telefono"], l.get("nombre"), "Sin asesor asignado") for l in esperando_asignar[:5]]
+    for l in esperando_respuesta[:5]:
+        asesor_nombre = l.get("asesor_asignado") or "sin asesor"
+        items.append(_item_zona_accion(l["telefono"], l.get("nombre"), f"Esperando respuesta — {asesor_nombre}"))
+    for l in agendados[:3]:
+        fecha = l["fecha_agendada"].strftime("%d/%m %H:%M") if l.get("fecha_agendada") else "sin hora"
+        items.append(_item_zona_accion(l["telefono"], l.get("nombre"), f"Cita agendada — {fecha}"))
+    return "".join(items)
+
+
+def _zona_indicadores_asesor(datos: dict) -> str:
+    activas = len(datos["leads_derivados"]) + len(datos["leads_con_gabi"])
+    return (
+        '<div class="zona-indicadores">'
+        + _kpi_card(activas, "Conversaciones activas")
+        + _kpi_card(len(datos["leads_todos"]), "Leads asignados")
+        + '</div>'
+    )
+
+
+def _zona_indicadores_admin(datos: dict, asesores: list[dict]) -> str:
+    disponibles = sum(1 for a in asesores if a.get("disponible"))
+    activas = len(datos["leads_derivados"]) + len(datos["leads_con_gabi"])
+    return (
+        '<div class="zona-indicadores">'
+        + _kpi_card(activas, "Conversaciones activas")
+        + _kpi_card(len(datos["leads_todos"]), "Leads en curso")
+        + _kpi_card(f"{disponibles}/{len(asesores)}", "Asesores disponibles")
+        + '</div>'
+    )
+
+
+async def _vista_inicio(request: Request, usuario: dict) -> HTMLResponse:
+    """Patrón Inicio (MAIEK_AI_PRODUCT_PATTERNS.md, Cap. 3) — único patrón
+    para los 3 roles; cambia el contenido de cada zona según el rol, nunca
+    su existencia ni el orden: Zona de acción siempre antes que Zona de
+    indicadores (Principio "acción antes que observación", Cap. 8)."""
+    datos = await _datos_bandeja(usuario, "todos", "", "")
+
+    if datos["vision_total"]:
+        zona_accion_html = await _zona_accion_admin(datos)
+        asesores = await listar_asesores()
+        zona_indicadores_html = _zona_indicadores_admin(datos, asesores)
+    else:
+        zona_accion_html = await _zona_accion_asesor(usuario, datos)
+        zona_indicadores_html = _zona_indicadores_asesor(datos)
+
+    cuerpo = f"""
+    <div class="vista-inicio">
+        <div class="zona-accion">
+            <div class="zona-accion-titulo">Tu siguiente mejor acción</div>
+            {zona_accion_html}
+        </div>
+        {zona_indicadores_html}
+    </div>
+    """
+    return _pagina("Inicio", usuario, cuerpo, request=request)
+
+
 @router.get("", response_class=HTMLResponse)
 async def panel_principal(
     request: Request, usuario: dict = Depends(_usuario_actual), estado: str = "todos", asesor: str = "", canal: str = "",
 ):
+    # Orquestador del flujo de entrada (MAIEK_AI_PRODUCT_PATTERNS.md, Cap. 3):
+    # sin ningún filtro explícito en la URL (aterrizaje real, no un clic
+    # desde el rail) se muestra Inicio. Cualquier filtro explícito —incluido
+    # "?estado=todos" al hacer clic en "Todos" del rail— sigue mostrando la
+    # Bandeja exactamente como funciona hoy, sin cambios.
+    if not any(k in request.query_params for k in ("estado", "asesor", "canal")):
+        return await _vista_inicio(request, usuario)
+
     datos = await _datos_bandeja(usuario, estado, asesor, canal)
     rail = await _renderizar_rail_estados(usuario, datos, estado, asesor, canal)
 
