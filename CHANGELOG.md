@@ -27,6 +27,16 @@ Trabajo local sobre `deploy-main`, todavía no desplegado — Track Product, gui
   escritura ya no sobrescribe en silencio — se avisa explícitamente quién cambió qué y cuándo antes
   de dejar decidir cómo seguir.
 
+### Added — Sprint 3 (Copiloto IA, Cap. 5 — primera implementación)
+- Panel "Copiloto IA" en la vista de detalle de un lead, colapsado por defecto. Primera capacidad
+  activa: **Resumen de la conversación bajo demanda** — condensa el historial en 3-5 líneas,
+  independiente del protocolo de confianza (sin tools, sin acciones, sin persistencia propia).
+  Marca el resumen como desactualizado si llega un mensaje nuevo mientras está en pantalla.
+- Estructura pensada para crecer: las próximas capacidades (Sugerencias IA, Indicador de confianza,
+  Acciones IA) se incorporan sobre el mismo contenedor, sin rediseñar la interfaz — deliberadamente
+  no activadas todavía porque dependen de dos decisiones no tomadas (persistencia de decisiones de
+  IA, y una definición de seguridad sobre qué puede ejecutar la IA por sí misma).
+
 ### Changed
 - La barra superior (Top Navigation) deja de tener enlaces de navegación de producto (Métricas,
   Campañas, Catálogos, etc.) — se movieron al nuevo Sidebar; la barra superior queda solo con
@@ -37,6 +47,10 @@ Trabajo local sobre `deploy-main`, todavía no desplegado — Track Product, gui
   anterior del usuario, salvo en el formulario de resultado/asignación, donde alcanza con volver a
   guardar (la versión ya quedó actualizada).
 - Un conflicto en el formulario de Cierre de venta descarta el carrito armado; hay que rearmarlo.
+- El indicador de "resumen desactualizado" del Copiloto no fue validado de punta a punta con
+  tráfico real de WhatsApp — reutiliza el mismo mecanismo de tiempo real ya probado por el chat, así
+  que el riesgo se considera bajo, pero la validación definitiva queda para el Sprint de Validación
+  del Copiloto (próximo).
 
 ## [0.2.0] - 2026-07-29
 

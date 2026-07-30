@@ -11,7 +11,7 @@
 | Fecha de creación | 2026-07-26 |
 | Autor | Claude, a pedido de Jesús Millones |
 | Fecha de aprobación | 2026-07-28 |
-| Última actualización | 2026-07-30 (Sprint 2 cerrado — Sidebar + CRM/Pipeline (Product Patterns Cap. 1 y 6) materializados en código; `CHANGELOG.md` creado, ver "Fase de Implementación" abajo) |
+| Última actualización | 2026-07-30 (Sprint 3 cerrado — primera implementación del Copiloto IA (Cap. 5): Resumen bajo demanda; validación con tráfico real queda como próximo sprint, ver "Fase de Implementación" abajo) |
 
 ## Dependencias
 
@@ -200,6 +200,23 @@ Gate) antes de dejar reintentar. Deuda técnica aceptada explícitamente: el rei
 conflicto es manual (sin pre-cargar el intento previo) y el carrito de Cierre de venta se
 reconstruye a mano si hay conflicto en ese formulario. Validado localmente en los 3 roles,
 incluyendo un conflicto de edición simulado — commit `bd44489`.
+
+**Sprint 3 — Primera implementación del Copiloto IA (Cap. 5) — Implementado.** Gap Analysis previo
+confirmó que el Shell residual no bloquea el Copiloto, pero sí existe un prerrequisito real: las
+capas de Sugerencias (`AI Suggestion Card`, `AI Confidence Indicator`) y Acciones dependen de
+persistir `SugerenciaIA` (todavía diferido a Data Architecture Fase 2) y de una decisión de Security
+Architecture sobre tool-calling (todavía no tomada) — ninguna de las dos se adelantó. Se construyó
+en cambio un contenedor extensible (`_copiloto_ia()`, equivalente al `AI Action Panel` del CDS) con
+las 3 zonas ya previstas en el código, activando únicamente la que no depende de nada de eso:
+Resumen IA bajo demanda (`AI Summary`), independiente del protocolo de confianza de `brain.py`, sin
+tools, sin persistencia propia. Estado de carga, indicador de "desactualizado" al llegar un mensaje
+nuevo (reutiliza `window.__gasoWS`, el mismo mecanismo ya probado del chat en vivo), sin
+autoexpansión. Validado localmente con conversaciones reales (calidad del resumen verificada a
+simple vista) en los 3 roles — commit `c34a1a8`. **Validación pendiente, explícita:** el
+comportamiento de "desactualizado" no se disparó con tráfico real de WhatsApp en esta sesión (solo
+se verificó por equivalencia de código con el mecanismo ya probado del chat) — se valida junto con
+la calidad de los resúmenes, alucinaciones y latencia en el próximo Sprint de Validación del
+Copiloto, ejecutando `MAIEK_AI_CONVERSATIONAL_VALIDATION_PLAN.md` con tráfico real.
 
 ---
 
