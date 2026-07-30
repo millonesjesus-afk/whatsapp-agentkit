@@ -12,7 +12,7 @@ from datetime import datetime
 from cryptography.fernet import Fernet
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, aliased
-from sqlalchemy import String, Text, DateTime, select, Integer, Boolean, func, case, delete
+from sqlalchemy import String, Text, DateTime, select, Integer, Boolean, func, case, delete, JSON
 from sqlalchemy.exc import IntegrityError
 from dotenv import load_dotenv
 
@@ -199,11 +199,83 @@ class Lead(Base):
     # prioridad. Se limpia cuando alguien del equipo abre el detalle del
     # lead (ver limpiar_revision_prioritaria).
     revision_prioritaria: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Concurrencia optimista (MAIEK_AI_PRODUCT_PATTERNS.md, Cap. 6 — conflicto
+    # de edición): se incrementa SOLO en las 3 escrituras humanas del CRM
+    # (resultado, venta, asignación), no en las automáticas de Gabi — a
+    # propósito distinto de `actualizado` (que sí se pisa en cada mensaje
+    # entrante y generaría conflictos falsos si se usara para esto). Ver
+    # intentar_avanzar_version().
+    version: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     # Indexado: listar_leads ordena por esta columna en CADA carga del
     # dashboard (la vista más visitada del panel) — sin índice, ordenar se
     # vuelve más lento a medida que se acumulan leads reales.
     actualizado: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, index=True)
     creado: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class EventoLead(Base):
+    """Conversation Timeline (MAIEK_AI_PRODUCT_PATTERNS.md, Cap. 6) — eventos
+    de NEGOCIO sobre un lead (resultado cambiado, asignado, venta registrada),
+    distintos de los mensajes de chat crudos. Append-only: nunca se actualiza
+    ni se borra una fila existente. `payload` guarda valores estructurados
+    (campo/anterior/nuevo, líneas de venta, etc.) — no solo el texto de
+    `descripcion` — para que el evento sea una fuente de datos reutilizable
+    por auditoría, analítica y el Copiloto IA más adelante, no únicamente
+    una lista para mostrar en pantalla. `autor` guarda el nombre de quien
+    hizo el cambio TAL COMO ERA en ese momento (no una referencia viva a
+    Usuario) — práctica estándar de bitácora: el registro histórico no debe
+    cambiar si alguien edita su nombre después. None si el cambio fue
+    automático (Gabi)."""
+    __tablename__ = "eventos_lead"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    telefono: Mapped[str] = mapped_column(String(50), index=True)
+    tipo: Mapped[str] = mapped_column(String(30))  # resultado_cambiado | asignado | venta_registrada
+    descripcion: Mapped[str] = mapped_column(String(300))
+    payload: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    autor: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    creado: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+
+
+async def registrar_evento_lead(telefono: str, tipo: str, descripcion: str, autor: str | None, payload: dict | None = None):
+    async with async_session() as session:
+        session.add(EventoLead(telefono=telefono, tipo=tipo, descripcion=descripcion, autor=autor, payload=payload))
+        await session.commit()
+
+
+async def listar_eventos_lead(telefono: str, limite: int | None = None) -> list[dict]:
+    """Del más reciente al más antiguo — para el Conversation Timeline y,
+    tomando solo el primero, para el aviso de conflicto de edición (quién,
+    cuándo, qué cambió)."""
+    async with async_session() as session:
+        query = select(EventoLead).where(EventoLead.telefono == telefono).order_by(EventoLead.creado.desc())
+        if limite:
+            query = query.limit(limite)
+        result = await session.execute(query)
+        return [
+            {
+                "tipo": e.tipo, "descripcion": e.descripcion, "payload": e.payload,
+                "autor": e.autor, "creado": e.creado,
+            }
+            for e in result.scalars().all()
+        ]
+
+
+async def intentar_avanzar_version(telefono: str, version_esperada: int) -> bool:
+    """Concurrencia optimista (MAIEK_AI_PRODUCT_PATTERNS.md, Cap. 6 —
+    conflicto de edición): avanza la versión del lead en +1 SOLO si sigue en
+    la versión esperada (la que tenía cuando el usuario abrió el formulario).
+    True si se pudo (nadie más escribió antes) — en ese caso, quien llama
+    debe aplicar su cambio a continuación. False si alguien más ya avanzó la
+    versión — no se aplica nada, y quien llama debe mostrar el conflicto
+    explícitamente en vez de sobrescribir en silencio (Human Decision Gate)."""
+    async with async_session() as session:
+        lead = await session.get(Lead, telefono)
+        if lead is None or lead.version != version_esperada:
+            return False
+        lead.version += 1
+        await session.commit()
+        return True
 
 
 class LineaVenta(Base):
@@ -598,6 +670,7 @@ def _lead_a_dict(lead: Lead) -> dict:
         "medio_pago": lead.medio_pago,
         "visto_asesor": lead.visto_asesor,
         "revision_prioritaria": lead.revision_prioritaria,
+        "version": lead.version,
         "fallos_tecnicos": lead.fallos_tecnicos,
         "campana_origen": lead.campana_origen,
         "origen_contacto": lead.origen_contacto,
@@ -625,6 +698,53 @@ async def listar_leads(asesor_asignado: str | None = None) -> list[dict]:
             query = query.where(Lead.asesor_asignado == asesor_asignado)
         result = await session.execute(query)
         return [_lead_a_dict(lead) for lead in result.scalars().all()]
+
+
+COLUMNAS_ORDEN_PIPELINE = {
+    "nombre": Lead.nombre,
+    "resultado": Lead.resultado,
+    "asesor": Lead.asesor_asignado,
+    "actualizado": Lead.actualizado,
+    "creado": Lead.creado,
+}
+
+
+async def listar_leads_pipeline(
+    asesor_asignado: str | None = None,
+    resultado: str | None = None,
+    busqueda: str = "",
+    orden: str = "actualizado",
+    direccion: str = "desc",
+    pagina: int = 1,
+    por_pagina: int = 20,
+) -> tuple[list[dict], int]:
+    """Consulta para CRM/Pipeline (MAIEK_AI_PRODUCT_PATTERNS.md, Cap. 6) — a
+    diferencia de listar_leads (que siempre trae todo y deja orden/paginación
+    al cliente), acá se resuelven en el servidor para que puedan persistirse
+    como parámetros de la URL. Función independiente a propósito — duplica
+    parte de listar_leads en vez de generalizarla, mismo criterio del Sprint 2
+    de aceptar duplicación temporal antes que abstraer un Data Grid que
+    todavía está evolucionando. Retorna (leads de la página, total sin paginar)."""
+    columna = COLUMNAS_ORDEN_PIPELINE.get(orden, Lead.actualizado)
+    async with async_session() as session:
+        query = select(Lead)
+        if asesor_asignado:
+            query = query.where(Lead.asesor_asignado == asesor_asignado)
+        if resultado:
+            query = query.where(Lead.resultado == resultado)
+        if busqueda:
+            patron = f"%{busqueda}%"
+            query = query.where(
+                Lead.nombre.ilike(patron) | Lead.telefono.ilike(patron) | Lead.interes.ilike(patron)
+            )
+
+        total = (await session.execute(select(func.count()).select_from(query.subquery()))).scalar_one()
+
+        orden_columna = columna.asc() if direccion == "asc" else columna.desc()
+        query = query.order_by(orden_columna).offset((pagina - 1) * por_pagina).limit(por_pagina)
+        result = await session.execute(query)
+        leads = [_lead_a_dict(lead) for lead in result.scalars().all()]
+        return leads, total
 
 
 async def listar_leads_agendados(asesor_asignado: str | None = None) -> list[dict]:

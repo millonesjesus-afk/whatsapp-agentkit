@@ -32,6 +32,7 @@ import tempfile
 import uuid
 import bcrypt
 from datetime import datetime, timedelta
+from urllib.parse import urlencode
 from fastapi import APIRouter, Depends, HTTPException, Form, Request, UploadFile, File, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse, Response, FileResponse
 
@@ -43,7 +44,8 @@ from agent.memory import (
     asignar_asesor_a_lead, marcar_lead_visto, limpiar_revision_prioritaria, actualizar_disponibilidad, actualizar_nivel_asesor,
     listar_campanas, crear_campana, actualizar_campana, contar_leads_por_campana, eliminar_campana,
     cambiar_password, contar_leads_activos_por_asesor, RESULTADOS_CERRADOS, listar_leads_agendados,
-    listar_leads_esperando_asesor,
+    listar_leads_esperando_asesor, listar_leads_pipeline, COLUMNAS_ORDEN_PIPELINE,
+    registrar_evento_lead, listar_eventos_lead, intentar_avanzar_version,
     obtener_configuracion, guardar_configuracion,
     listar_lineas_venta, listar_lineas_venta_de_muchos,
     listar_canales_whatsapp, crear_canal_whatsapp, actualizar_canal_whatsapp,
@@ -374,6 +376,28 @@ ESTILOS_PROPIOS = """
     background: linear-gradient(135deg, var(--gaso-azul), var(--gaso-secundario));
   }
 
+  /* Sidebar de navegación de nivel 1 (MAIEK_AI_PRODUCT_PATTERNS.md, Cap. 1 —
+     Shell de Navegación), implementación incremental — lista vertical fija,
+     hermana de #contenido-app dentro de .app-shell, así que el shell no se
+     reconstruye en cada navegación AJAX interna (solo #contenido-app se
+     reemplaza). Colores del Gaso+ actual (no --mdl-*): queda pegado al
+     navbar, que todavía no migró — un segundo azul de marca ahí se vería
+     como dos identidades distintas en la misma franja. */
+  .app-shell { flex: 1 1 auto; min-height: 0; display: flex; overflow: hidden; }
+  .nav-lateral {
+    width: 210px; min-width: 210px; flex-shrink: 0; overflow-y: auto;
+    background: #fff; border-right: 1px solid #e2e8f0; padding: 10px 8px;
+  }
+  .nav-lateral-link {
+    display: flex; align-items: center; gap: 10px; padding: 8px 12px; margin-bottom: 2px;
+    border-radius: 8px; color: #334155; text-decoration: none; font-size: .87rem; font-weight: 500;
+    transition: background-color .15s ease, color .15s ease;
+  }
+  .nav-lateral-link i { font-size: .95rem; width: 18px; text-align: center; color: #64748b; }
+  .nav-lateral-link:hover { background: #f1f5f9; color: #0f172a; }
+  .nav-lateral-link.activo { background: #e0f2fe; color: var(--gaso-azul-osc); }
+  .nav-lateral-link.activo i { color: var(--gaso-azul); }
+
   .shell { flex: 1 1 auto; min-height: 0; }
   .rail-estados { width: 230px; min-width: 230px; flex-shrink: 0; overflow-y: auto; background: #fbfcfe; }
   .sidebar { width: 320px; min-width: 320px; flex-shrink: 0; overflow-y: auto; background: #fff; }
@@ -479,20 +503,21 @@ ESTILOS_PROPIOS = """
        queda solo "Gaso+", igual que antes del rebrand. */
     .brand-subtitulo { display: none; }
 
-    /* Links de gestión (Métricas, Catálogos, Campañas...) no entran en el
-       ancho del navbar en mobile — se ocultan detrás de un botón ☰ y se
-       despliegan como panel, mismo patrón que .rail-estados.abierto. */
-    #menu-gestion-movil { display: none !important; }
-    #menu-gestion-movil.abierto {
+    /* Sidebar de navegación (.nav-lateral) no entra apretado en el navbar de
+       mobile — se oculta detrás de un botón ☰ y se despliega como panel,
+       mismo patrón que .rail-estados.abierto. */
+    .nav-lateral { display: none !important; }
+    .nav-lateral.abierto {
       display: flex !important; flex-direction: column; align-items: stretch !important;
-      position: fixed; top: 58px; left: 0; right: 0; z-index: 1600;
-      background: var(--gaso-azul-osc); padding: 10px 12px; gap: 2px !important;
+      position: fixed; inset: 0; top: 58px; z-index: 1600;
+      background: #fff; padding: 10px 8px; gap: 2px !important;
       box-shadow: 0 4px 12px rgba(0,0,0,.25);
     }
     .btn-menu-movil { display: inline-flex !important; }
 
     /* Con un chat abierto: solo el chat se ve, a pantalla completa */
     body.pagina-chat .rail-estados,
+    body.pagina-chat .nav-lateral,
     body.pagina-chat .sidebar { display: none !important; }
     body.pagina-chat .main-pane.chat-mode { width: 100%; }
     .btn-volver-movil { display: inline-flex; align-items: center; }
@@ -909,6 +934,41 @@ def _script_tiempo_real(usuario: dict | None) -> str:
     """
 
 
+# Destinos de navegación de nivel 1 (MAIEK_AI_PRODUCT_ARCHITECTURE.md §10),
+# en su mismo orden. "Conversaciones" y "CRM / Pipeline" comparten la misma
+# ruta /dashboard con Inicio/Bandeja hoy (Inicio se llega sin query string) —
+# se separan explícitamente en data-ruta para que actualizarNavActiva() los
+# distinga (ver _pagina) hasta la futura migración a /dashboard/conversations.
+_NAV_LATERAL_ITEMS = [
+    ("inicio", "Inicio", "bi-house-door-fill", "/dashboard", "/dashboard", None),
+    ("conversaciones", "Conversaciones", "bi-chat-dots-fill", "/dashboard?estado=todos", "/dashboard?estado=todos", None),
+    ("pipeline", "CRM / Pipeline", "bi-briefcase-fill", "/dashboard/pipeline", "/dashboard/pipeline", None),
+    ("campanas", "Campañas", "bi-megaphone-fill", "/dashboard/campanas", "/dashboard/campanas", ("admin",)),
+    ("catalogos", "Catálogo", "bi-folder-fill", "/dashboard/catalogos", "/dashboard/catalogos", ("admin",)),
+    ("equipo", "Equipo", "bi-people-fill", "/dashboard/asesores", "/dashboard/asesores", ROLES_CON_VISION_TOTAL),
+    ("analitica", "Analítica", "bi-graph-up-arrow", "/dashboard/metricas", "/dashboard/metricas", ROLES_CON_VISION_TOTAL),
+    ("canales", "Canales de WhatsApp", "bi-whatsapp", "/dashboard/canales-whatsapp", "/dashboard/canales-whatsapp", ("admin",)),
+]
+
+
+def _nav_lateral(usuario: dict) -> str:
+    """Sidebar de navegación (MAIEK_AI_PRODUCT_PATTERNS.md, Cap. 1 — Shell de
+    Navegación) — implementación incremental: lista vertical con los destinos
+    de MPA §10, filtrados por rol con el mismo criterio de permisos que ya
+    usan las rutas (no se agregan accesos nuevos). Sin la variante colapsable
+    280px/64px ni el buscador global de la versión completa del capítulo —
+    se agregan cuando el próximo módulo lo justifique, no por anticipación."""
+    items = []
+    for _, etiqueta, icono, href, data_ruta, roles in _NAV_LATERAL_ITEMS:
+        if roles and usuario["rol"] not in roles:
+            continue
+        items.append(
+            f'<a href="{href}" data-ajax="1" data-ruta="{data_ruta}" class="nav-lateral-link">'
+            f'<i class="bi {icono}"></i><span>{html.escape(etiqueta)}</span></a>'
+        )
+    return f'<div class="nav-lateral" id="nav-lateral">{"".join(items)}</div>'
+
+
 def _pagina(
     titulo: str,
     usuario: dict | None,
@@ -931,7 +991,9 @@ def _pagina(
         return HTMLResponse(cuerpo, headers=headers)
 
     topbar = ""
+    nav_lateral = ""
     if usuario:
+        nav_lateral = _nav_lateral(usuario)
         disp_html = ""
         if usuario["rol"] == "asesor":
             en_linea = usuario.get("disponible", True)
@@ -941,35 +1003,24 @@ def _pagina(
                 f'{"text-bg-success" if en_linea else "text-bg-secondary"}">'
                 f'{"🟢 Disponible" if en_linea else "⚪ No disponible"}</button></form>'
             )
-        gestion_html = ""
-        if usuario["rol"] in ROLES_CON_VISION_TOTAL:
-            gestion_html = (
-                '<a href="/dashboard/metricas" data-ajax="1" data-ruta="/dashboard/metricas" class="link-light small text-decoration-none nav-superior-link"><i class="bi bi-graph-up-arrow"></i> Métricas</a>'
-                '<a href="/dashboard/asesores" data-ajax="1" data-ruta="/dashboard/asesores" class="link-light small text-decoration-none nav-superior-link"><i class="bi bi-people-fill"></i> Gestionar asesores</a>'
-            )
-        if usuario["rol"] == "admin":
-            gestion_html += '<a href="/dashboard/campanas" data-ajax="1" data-ruta="/dashboard/campanas" class="link-light small text-decoration-none nav-superior-link"><i class="bi bi-megaphone-fill"></i> Campañas</a>'
-            gestion_html += '<a href="/dashboard/catalogos" data-ajax="1" data-ruta="/dashboard/catalogos" class="link-light small text-decoration-none nav-superior-link"><i class="bi bi-folder-fill"></i> Catálogos</a>'
-            gestion_html += '<a href="/dashboard/canales-whatsapp" data-ajax="1" data-ruta="/dashboard/canales-whatsapp" class="link-light small text-decoration-none nav-superior-link"><i class="bi bi-whatsapp"></i> Canales de WhatsApp</a>'
         topbar = f"""
         <nav class="navbar navbar-gaso navbar-dark px-3 py-2">
-            <a class="navbar-brand mb-0 d-flex align-items-center gap-2" href="/dashboard" data-ajax="1">
-                <i class="bi bi-droplet-fill" style="color:var(--gaso-secundario)"></i>
-                <span class="d-flex flex-column lh-1">
-                    <span>Gaso<span class="plus">+</span></span>
-                    <span class="fw-normal opacity-75 brand-subtitulo" style="font-size:.62rem;letter-spacing:.02em">Commercial Operating System <span class="opacity-50">&middot; Powered by Maiek <span style="font-weight:300">AI</span></span></span>
-                </span>
-            </a>
+            <div class="d-flex align-items-center gap-2">
+                <button type="button" class="btn btn-sm btn-outline-light rounded-circle btn-menu-movil" onclick="var m=document.getElementById(&#39;nav-lateral&#39;); if (m) m.classList.toggle(&#39;abierto&#39;)" aria-label="Menú de navegación"><i class="bi bi-list"></i></button>
+                <a class="navbar-brand mb-0 d-flex align-items-center gap-2" href="/dashboard" data-ajax="1">
+                    <i class="bi bi-droplet-fill" style="color:var(--gaso-secundario)"></i>
+                    <span class="d-flex flex-column lh-1">
+                        <span>Gaso<span class="plus">+</span></span>
+                        <span class="fw-normal opacity-75 brand-subtitulo" style="font-size:.62rem;letter-spacing:.02em">Commercial Operating System <span class="opacity-50">&middot; Powered by Maiek <span style="font-weight:300">AI</span></span></span>
+                    </span>
+                </a>
+            </div>
             <div class="d-flex align-items-center gap-3 text-white-50 small">
                 <a href="/dashboard/perfil" data-ajax="1" class="text-white d-flex align-items-center gap-2 text-decoration-none">
                     {_avatar(usuario['nombre'], 30, 'avatar-sm')}
                     {html.escape(usuario['nombre'])} &middot; {html.escape(usuario['rol'])}
                 </a>
                 {disp_html}
-                <div id="menu-gestion-movil" class="d-flex align-items-center gap-3">
-                    {gestion_html}
-                </div>
-                {'<button type="button" class="btn btn-sm btn-outline-light rounded-circle btn-menu-movil" onclick="var m=document.getElementById(&#39;menu-gestion-movil&#39;); if (m) m.classList.toggle(&#39;abierto&#39;)" aria-label="Menú de gestión"><i class="bi bi-list"></i></button>' if gestion_html else ''}
                 <form method="post" action="/dashboard/logout" class="d-inline m-0">
                     <button type="submit" class="btn btn-sm btn-outline-light rounded-pill"><i class="bi bi-box-arrow-right"></i> Salir</button>
                 </form>
@@ -1001,8 +1052,11 @@ def _pagina(
 {_script_tiempo_real(usuario)}
 <div id="barra-carga"></div>
 {topbar}
+<div class="app-shell">
+{nav_lateral}
 {boton_filtros_movil}
 <div id="contenido-app">{cuerpo}</div>
+</div>
 {BOOTSTRAP_JS}
 <script>
 (function() {{
@@ -1044,8 +1098,19 @@ def _pagina(
     // navegación (normal o silenciosa).
     function actualizarNavActiva() {{
         var ruta = window.location.pathname;
-        document.querySelectorAll('.nav-superior-link').forEach(function(link) {{
-            link.classList.toggle('activo', link.getAttribute('data-ruta') === ruta);
+        // Caso especial temporal: Inicio y Conversaciones comparten la misma
+        // ruta /dashboard (se bifurcan por query string, ver panel_principal)
+        // — hasta que exista /dashboard/conversations como ruta propia, acá
+        // se decide cuál de las dos marcar activa según haya o no query string.
+        var esInicio = ruta === '/dashboard' && !window.location.search;
+        var esConversaciones = ruta === '/dashboard' && !!window.location.search;
+        document.querySelectorAll('.nav-superior-link, .nav-lateral-link').forEach(function(link) {{
+            var destino = link.getAttribute('data-ruta');
+            var activo;
+            if (destino === '/dashboard') activo = esInicio;
+            else if (destino === '/dashboard?estado=todos') activo = esConversaciones;
+            else activo = (destino === ruta);
+            link.classList.toggle('activo', activo);
         }});
     }}
     actualizarNavActiva();
@@ -1898,6 +1963,177 @@ async def metricas(request: Request, usuario: dict = Depends(servicio_identidad.
     panel = await _contenido_metricas(leads)
     cuerpo = f"""<div class="shell d-flex">{sidebar}<div class="main-pane flex-grow-1 p-4">{panel}</div></div>"""
     return _pagina("Métricas", usuario, cuerpo, request=request)
+
+
+# ── CRM / Pipeline (MAIEK_AI_PRODUCT_PATTERNS.md, Cap. 6) ──────────────
+#
+# Destino de navegación propio (decisión de producto 2026-07-30): "gestionar
+# la cartera de oportunidades", distinto de la Bandeja ("qué hacer ahora en
+# mis conversaciones"). Construido de forma independiente de
+# _tabla_todos_los_leads/_contenido_metricas a propósito — mismo criterio
+# del Sprint 2 de aceptar duplicación temporal antes que forzar una
+# abstracción compartida sobre un Data Grid que todavía está evolucionando.
+# Reutiliza sí las clases CSS ya existentes (tabla-ejecutiva, leads-card,
+# barra-acento) para consistencia visual, y reutiliza detalle_lead sin
+# cambios como vista de detalle (clic en una fila).
+
+_COLUMNAS_PIPELINE = [
+    (None, "Cliente"), (None, "Interés"), ("resultado", "Resultado"),
+    ("asesor", "Asesor"), ("actualizado", "Actividad"),
+]
+
+
+def _badge_resultado(lead: dict) -> str:
+    resultado = lead.get("resultado")
+    if not resultado:
+        return '<span class="badge-suave" style="background-color:#f1f5f9;color:#64748b">Sin resultado</span>'
+    color = COLOR_RESULTADO.get(resultado, "#6b7280")
+    etiqueta = ETIQUETAS_RESULTADO.get(resultado, resultado)
+    return f'<span class="badge-suave" style="background-color:{color}22;color:{color}">{html.escape(etiqueta)}</span>'
+
+
+def _fila_pipeline(lead: dict) -> str:
+    nombre = lead.get("nombre") or lead["telefono"]
+    return f"""<tr>
+        <td class="ps-4">
+            <a href="/dashboard/lead/{html.escape(lead['telefono'])}" class="d-flex align-items-center gap-2 text-decoration-none text-dark" data-ajax="1">
+                {_avatar(nombre, 26)}
+                <span class="text-truncate"><span class="fw-semibold">{html.escape(nombre)}</span>
+                <span class="text-muted" style="font-size:.8rem"> &middot; {html.escape(lead['telefono'])}</span></span>
+            </a>
+        </td>
+        <td class="text-muted"><span class="d-inline-block text-truncate align-bottom" style="max-width:220px" title="{html.escape(lead.get('interes') or '')}">{html.escape(lead.get('interes') or '-')}</span></td>
+        <td>{_badge_resultado(lead)}</td>
+        <td class="text-muted">{html.escape(lead.get('asesor_asignado') or 'Sin asignar')}</td>
+        <td class="text-muted text-end pe-4" title="{lead['actualizado'].strftime('%d/%m/%Y %H:%M')}">{_tiempo_relativo(lead['actualizado'])}</td>
+    </tr>"""
+
+
+def _url_pipeline(params: dict) -> str:
+    limpio = {k: v for k, v in params.items() if v not in (None, "") and not (k == "pagina" and v == 1)}
+    return "/dashboard/pipeline?" + urlencode(limpio)
+
+
+def _header_pipeline(col_key: str | None, etiqueta: str, params: dict, orden_actual: str, dir_actual: str) -> str:
+    if not col_key:
+        clase = ' class="ps-4"' if etiqueta == "Cliente" else ""
+        return f'<th{clase}>{html.escape(etiqueta)}</th>'
+    activa = orden_actual == col_key
+    nuevo_dir = "asc" if (activa and dir_actual == "desc") else "desc" if activa else "asc"
+    href = _url_pipeline({**params, "orden": col_key, "dir": nuevo_dir, "pagina": 1})
+    icono = ("bi-arrow-down" if dir_actual == "desc" else "bi-arrow-up") if activa else "bi-arrow-down-up"
+    return (
+        f'<th><a href="{href}" data-ajax="1" class="text-decoration-none text-dark d-inline-flex align-items-center gap-1">'
+        f'{html.escape(etiqueta)} <i class="bi {icono}" style="font-size:.7em"></i></a></th>'
+    )
+
+
+def _contenido_pipeline(
+    leads: list[dict], total: int, q: str, resultado: str, asesor: str,
+    orden: str, dir_: str, pagina: int, por_pagina: int, asesores: list[dict], vision_total: bool,
+) -> str:
+    params = {"q": q, "resultado": resultado, "asesor": asesor, "orden": orden, "dir": dir_}
+    opciones_resultado = "".join(
+        f'<option value="{r}"{" selected" if resultado == r else ""}>{html.escape(ETIQUETAS_RESULTADO[r])}</option>'
+        for r in RESULTADOS
+    )
+    select_asesor = ""
+    if vision_total:
+        opciones_asesor = "".join(
+            f'<option value="{html.escape(a["username"])}"{" selected" if asesor == a["username"] else ""}>{html.escape(a["nombre"])}</option>'
+            for a in asesores
+        )
+        select_asesor = f"""
+        <select name="asesor" id="pipeline-asesor" class="form-select form-select-sm" style="max-width:200px">
+            <option value="">Todos los asesores</option>
+            {opciones_asesor}
+        </select>"""
+    encabezados = "".join(_header_pipeline(col, etiqueta, params, orden, dir_) for col, etiqueta in _COLUMNAS_PIPELINE)
+    filas = "".join(_fila_pipeline(lead) for lead in leads) or (
+        f'<tr><td colspan="{len(_COLUMNAS_PIPELINE)}" class="text-center text-muted py-5">'
+        f'{"No hay leads que coincidan con los filtros." if (q or resultado or asesor) else "Todavía no hay leads en tu cartera."}</td></tr>'
+    )
+    total_paginas = max(1, -(-total // por_pagina))
+    href_prev = _url_pipeline({**params, "pagina": pagina - 1}) if pagina > 1 else ""
+    href_next = _url_pipeline({**params, "pagina": pagina + 1}) if pagina < total_paginas else ""
+    return f"""
+    {_titulo_seccion('bi-briefcase-fill', f'CRM / Pipeline ({total})')}
+    <form id="form-filtros-pipeline" class="d-flex flex-wrap align-items-center gap-2 mb-3">
+        <input type="hidden" name="orden" value="{html.escape(orden)}">
+        <input type="hidden" name="dir" value="{html.escape(dir_)}">
+        <div class="input-group input-group-sm" style="max-width:280px">
+            <span class="input-group-text bg-white border-end-0"><i class="bi bi-search text-muted"></i></span>
+            <input type="text" name="q" value="{html.escape(q)}" class="form-control border-start-0" placeholder="Buscar por nombre, teléfono o interés...">
+        </div>
+        <select name="resultado" class="form-select form-select-sm" style="max-width:200px">
+            <option value="">Todos los resultados</option>
+            {opciones_resultado}
+        </select>
+        {select_asesor}
+        <button type="submit" class="btn btn-sm btn-outline-primary">Filtrar</button>
+    </form>
+    <div class="card leads-card shadow-sm">
+        <div class="barra-acento"></div>
+        <div class="table-responsive">
+            <table class="table align-middle mb-0 tabla-ejecutiva">
+                <thead><tr>{encabezados}</tr></thead>
+                <tbody>{filas}</tbody>
+            </table>
+        </div>
+        <div class="d-flex justify-content-between align-items-center p-3 border-top small">
+            <a href="{href_prev}" data-ajax="1" class="btn btn-sm btn-outline-secondary{' disabled' if not href_prev else ''}">&laquo; Anterior</a>
+            <span class="text-muted">Página {pagina} de {total_paginas}</span>
+            <a href="{href_next}" data-ajax="1" class="btn btn-sm btn-outline-secondary{' disabled' if not href_next else ''}">Siguiente &raquo;</a>
+        </div>
+    </div>
+    <script>
+    (function() {{
+        var form = document.getElementById('form-filtros-pipeline');
+        if (!form) return;
+        form.addEventListener('submit', function(ev) {{
+            ev.preventDefault();
+            var datos = new FormData(form);
+            var params = new URLSearchParams();
+            datos.forEach(function(valor, clave) {{ if (valor) params.set(clave, valor); }});
+            window.__navegarAjax('/dashboard/pipeline?' + params.toString(), true);
+        }});
+    }})();
+    </script>
+    """
+
+
+@router.get("/pipeline", response_class=HTMLResponse)
+async def crm_pipeline(
+    request: Request,
+    usuario: dict = Depends(_usuario_actual),
+    q: str = "",
+    resultado: str = "",
+    asesor: str = "",
+    orden: str = "actualizado",
+    dir: str = "desc",
+    pagina: int = 1,
+):
+    """CRM / Pipeline — alcance por rol: admin/supervisor ven toda la
+    cartera (con filtro opcional por asesor); asesor ve solo sus propios
+    leads (MPA §9: 'Solo sus leads'), sin poder elegir otro asesor."""
+    vision_total = usuario["rol"] in ROLES_CON_VISION_TOTAL
+    asesor_filtro = (asesor or None) if vision_total else usuario["username"]
+    if orden not in COLUMNAS_ORDEN_PIPELINE:
+        orden = "actualizado"
+    if dir not in ("asc", "desc"):
+        dir = "desc"
+    pagina = max(1, pagina)
+    por_pagina = 20
+    leads, total = await listar_leads_pipeline(
+        asesor_asignado=asesor_filtro, resultado=resultado or None, busqueda=q.strip(),
+        orden=orden, direccion=dir, pagina=pagina, por_pagina=por_pagina,
+    )
+    asesores = await listar_asesores() if vision_total else []
+    panel = _contenido_pipeline(
+        leads, total, q, resultado, asesor if vision_total else "", orden, dir, pagina, por_pagina, asesores, vision_total,
+    )
+    cuerpo = f"""<div class="shell d-flex"><div class="main-pane flex-grow-1 p-4">{panel}</div></div>"""
+    return _pagina("CRM / Pipeline", usuario, cuerpo, request=request)
 
 
 COLUMNAS_EXPORTACION = [
@@ -2820,7 +3056,29 @@ def _script_chat_en_vivo(telefono: str, tiene_asesor: bool) -> str:
     """
 
 
-async def _bloque_gestion_lead(telefono: str, lead: dict, usuario: dict) -> str:
+def _banner_conflicto_edicion(evento: dict | None) -> str:
+    """Human Decision Gate ante un conflicto de edición (MAIEK_AI_PRODUCT_PATTERNS.md,
+    Cap. 6 y 8) — el cambio del usuario NO se aplicó; se le muestra quién
+    escribió último, cuándo y qué, para que decida cómo seguir: recargar
+    (descartar su intento y ver el estado actual) o rehacer su cambio, que
+    esta vez sí se guardará porque el formulario ya quedó con la versión
+    vigente. Nunca se sobrescribe en silencio."""
+    if evento:
+        autor = html.escape(evento.get("autor") or "otro usuario")
+        detalle = f"{autor} hizo un cambio ({html.escape(evento['descripcion'])}) {_tiempo_relativo(evento['creado'])}."
+    else:
+        detalle = "El lead cambió mientras editabas."
+    return f"""
+    <div class="alert alert-warning py-2 px-3 mb-2">
+        <div><i class="bi bi-exclamation-triangle-fill"></i> <strong>Conflicto de edición.</strong> {detalle}</div>
+        <div class="small text-muted mt-1">Tu cambio NO se guardó. Los datos de abajo ya están actualizados — revisalos y, si querés, volvé a intentar tu cambio.</div>
+    </div>
+    """
+
+
+async def _bloque_gestion_lead(
+    telefono: str, lead: dict, usuario: dict, hay_conflicto: bool = False, evento_conflicto: dict | None = None,
+) -> str:
     """Formularios de Asignación / Resultado / Cierre de venta — se muestran
     siempre junto al resumen del cliente (columna del lead), así que el POST
     siempre vuelve a la misma página del lead."""
@@ -2844,6 +3102,7 @@ async def _bloque_gestion_lead(telefono: str, lead: dict, usuario: dict) -> str:
             <div class="card-body p-3">
                 <h6 class="text-uppercase text-muted small fw-bold mb-2">Asignación</h6>
                 <form method="post" action="/dashboard/lead/{html.escape(telefono)}/asignar" class="d-flex gap-2">
+                    <input type="hidden" name="version" value="{lead.get('version', 0)}">
                     <select name="asesor_asignado" class="form-select form-select-sm">{opciones_asesor}</select>
                     <button type="submit" class="btn btn-sm btn-primary">Asignar</button>
                 </form>
@@ -2880,12 +3139,14 @@ async def _bloque_gestion_lead(telefono: str, lead: dict, usuario: dict) -> str:
     lineas_venta_json = json.dumps(lineas_venta).replace("</", "<\\/")
 
     return f"""
+    {_banner_conflicto_edicion(evento_conflicto) if hay_conflicto else ""}
     {bloque_asignacion}
     <div class="card leads-card shadow-sm mb-2">
         <div class="barra-acento"></div>
         <div class="card-body p-3">
             <h6 class="text-uppercase text-muted small fw-bold mb-2">Resultado tras derivación a asesor</h6>
             <form method="post" action="/dashboard/lead/{html.escape(telefono)}/resultado" id="form-resultado">
+                <input type="hidden" name="version" value="{lead.get('version', 0)}">
                 <div class="d-flex gap-2">
                     <select name="resultado" id="resultado-select" class="form-select form-select-sm">{opciones_resultado}</select>
                     <button type="submit" class="btn btn-sm btn-primary flex-shrink-0">Guardar</button>
@@ -2917,6 +3178,7 @@ async def _bloque_gestion_lead(telefono: str, lead: dict, usuario: dict) -> str:
         <div class="card-body p-3">
             <h6 class="text-uppercase text-muted small fw-bold mb-2">Cierre de venta (si corresponde)</h6>
             <form method="post" action="/dashboard/lead/{html.escape(telefono)}/venta" id="form-venta">
+                <input type="hidden" name="version" value="{lead.get('version', 0)}">
                 <div class="mb-2">
                     <label class="form-label small text-muted mb-0">Productos vendidos</label>
                     <div id="venta-carrito-lista" class="mb-1"></div>
@@ -3218,7 +3480,43 @@ async def _bloque_gestion_lead(telefono: str, lead: dict, usuario: dict) -> str:
     """
 
 
-async def _bloque_resumen_cliente(telefono: str, lead: dict, usuario: dict) -> str:
+_ICONOS_EVENTO_LEAD = {
+    "resultado_cambiado": "bi-flag-fill",
+    "asignado": "bi-person-check-fill",
+    "venta_registrada": "bi-cash-coin",
+}
+
+
+async def _render_timeline_lead(telefono: str) -> str:
+    """Conversation Timeline (MAIEK_AI_PRODUCT_PATTERNS.md, Cap. 6) — eventos
+    de NEGOCIO del lead (resultado/asignación/venta), del más reciente al más
+    antiguo; distinto del chat crudo, que se ve aparte en la columna del chat."""
+    eventos = await listar_eventos_lead(telefono)
+    if not eventos:
+        return ""
+    items = "".join(
+        f'<div class="d-flex align-items-start gap-2 py-1">'
+        f'<i class="bi {_ICONOS_EVENTO_LEAD.get(e["tipo"], "bi-dot")} text-muted" style="font-size:.8rem;margin-top:3px"></i>'
+        f'<div class="flex-grow-1" style="font-size:.78rem">'
+        f'<div>{html.escape(e["descripcion"])}</div>'
+        f'<div class="text-muted" style="font-size:.7rem">{html.escape(e.get("autor") or "Automático")} &middot; {_tiempo_relativo(e["creado"])}</div>'
+        f'</div></div>'
+        for e in eventos
+    )
+    return f"""
+    <div class="card leads-card shadow-sm mb-2">
+        <div class="barra-acento"></div>
+        <div class="card-body p-3">
+            <h6 class="text-uppercase text-muted small fw-bold mb-2">Historial</h6>
+            {items}
+        </div>
+    </div>
+    """
+
+
+async def _bloque_resumen_cliente(
+    telefono: str, lead: dict, usuario: dict, hay_conflicto: bool = False, evento_conflicto: dict | None = None,
+) -> str:
     """Resumen del cliente con el mismo lenguaje visual 'ejecutivo' de la
     tabla de leads (card con barra de acento, badge suave, tipografía
     compacta) — seguido de los formularios de gestión, todo en una sola
@@ -3278,17 +3576,21 @@ async def _bloque_resumen_cliente(telefono: str, lead: dict, usuario: dict) -> s
             {bloque_lineas_venta}
         </div>
     </div>
-    {await _bloque_gestion_lead(telefono, lead, usuario)}
+    {await _render_timeline_lead(telefono)}
+    {await _bloque_gestion_lead(telefono, lead, usuario, hay_conflicto=hay_conflicto, evento_conflicto=evento_conflicto)}
     """
 
 
-@router.get("/lead/{telefono}", response_class=HTMLResponse)
-async def detalle_lead(
-    telefono: str, request: Request, usuario: dict = Depends(_usuario_actual), estado: str = "todos", asesor: str = "",
-):
+async def _renderizar_detalle_lead(
+    telefono: str, request: Request, usuario: dict, estado: str = "todos", asesor: str = "",
+    hay_conflicto: bool = False,
+) -> HTMLResponse:
     """Vista de un lead: resumen del cliente (datos + formularios de gestión)
     y la conversación completa visibles a la vez, sin tener que saltar entre
-    dos páginas distintas."""
+    dos páginas distintas. Función interna (no ruta) para que los 3 endpoints
+    de escritura del CRM (resultado/venta/asignar) puedan reusarla tal cual
+    cuando detectan un conflicto de edición (Cap. 6) — mismo render que la
+    ruta GET, con el banner de conflicto de más."""
     lead = await obtener_lead(telefono)
     if lead is None:
         raise HTTPException(status_code=404, detail="Lead no encontrado")
@@ -3313,8 +3615,15 @@ async def detalle_lead(
     # la tabla de "Todos los leads", no hace falta y solo quita espacio.
     lista = await _renderizar_lista_conversaciones(usuario, datos, telefono_activo=telefono, asesor_filtro=asesor) if asesor else ""
 
+    evento_conflicto = None
+    if hay_conflicto:
+        eventos_recientes = await listar_eventos_lead(telefono, limite=1)
+        evento_conflicto = eventos_recientes[0] if eventos_recientes else None
+
     nombre_mostrado = lead.get("nombre") or "(sin nombre)"
-    resumen_cliente_html = await _bloque_resumen_cliente(telefono, lead, usuario)
+    resumen_cliente_html = await _bloque_resumen_cliente(
+        telefono, lead, usuario, hay_conflicto=hay_conflicto, evento_conflicto=evento_conflicto,
+    )
     bloque_respuesta_html = await _bloque_respuesta(telefono, lead)
 
     if asesor:
@@ -3412,6 +3721,13 @@ async def detalle_lead(
     </div>
     """
     return _pagina(nombre_mostrado, usuario, cuerpo, es_chat=True, request=request)
+
+
+@router.get("/lead/{telefono}", response_class=HTMLResponse)
+async def detalle_lead(
+    telefono: str, request: Request, usuario: dict = Depends(_usuario_actual), estado: str = "todos", asesor: str = "",
+):
+    return await _renderizar_detalle_lead(telefono, request, usuario, estado, asesor)
 
 
 @router.get("/lead/{telefono}/mensajes.json")
@@ -3782,8 +4098,10 @@ async def quitar_catalogo(archivo_id: int, usuario: dict = Depends(servicio_iden
 @router.post("/lead/{telefono}/resultado")
 async def actualizar_resultado(
     telefono: str,
+    request: Request,
     resultado: str = Form(...),
     fecha_agendada: str = Form(""),
+    version: int = Form(...),
     usuario: dict = Depends(_usuario_actual),
 ):
     lead = await obtener_lead(telefono)
@@ -3800,7 +4118,22 @@ async def actualizar_resultado(
         except ValueError:
             raise HTTPException(status_code=400, detail="Fecha de la cita inválida")
 
+    # Concurrencia optimista (MAIEK_AI_PRODUCT_PATTERNS.md, Cap. 6): si alguien
+    # más ya escribió sobre este lead desde que se abrió el formulario, no se
+    # aplica nada — se muestra el conflicto (Human Decision Gate) en vez de
+    # sobrescribir en silencio.
+    if not await intentar_avanzar_version(telefono, version):
+        return await _renderizar_detalle_lead(telefono, request, usuario, hay_conflicto=True)
+
     await actualizar_lead(telefono, resultado=resultado, fecha_agendada=fecha_agendada_dt)
+    descripcion = (
+        f"Cambió el resultado a «{ETIQUETAS_RESULTADO.get(resultado, resultado)}»"
+        if resultado else "Quitó el resultado"
+    )
+    await registrar_evento_lead(
+        telefono, tipo="resultado_cambiado", descripcion=descripcion, autor=usuario["nombre"],
+        payload={"campo": "resultado", "anterior": lead.get("resultado"), "nuevo": resultado or None},
+    )
     return RedirectResponse(url=f"/dashboard/lead/{telefono}", status_code=303)
 
 
@@ -3828,34 +4161,72 @@ async def buscar_producto_venta(telefono: str, q: str = "", usuario: dict = Depe
 @router.post("/lead/{telefono}/venta")
 async def registrar_venta(
     telefono: str,
+    request: Request,
     lineas_venta: str = Form("[]"),
     modalidad_pago: str = Form(""),
     cuotas: str = Form(""),
     medio_pago: str = Form(""),
+    version: int = Form(...),
     usuario: dict = Depends(_usuario_actual),
 ):
     lead = await obtener_lead(telefono)
     if lead is None:
         raise HTTPException(status_code=404, detail="Lead no encontrado")
     _verificar_acceso_lead(usuario, lead)
+
+    if not await intentar_avanzar_version(telefono, version):
+        # Simplificación deliberada (Sprint 2): a diferencia de resultado/
+        # asignación, acá no se reintenta precargando el carrito que el
+        # usuario armó — se descarta y se le pide rearmarlo contra el estado
+        # ya actualizado. Evita tener que hacer viajar el carrito completo
+        # (JSON del catálogo) de ida y vuelta solo para este caso, poco
+        # frecuente en la práctica (dos cierres de venta simultáneos sobre
+        # el mismo lead).
+        return await _renderizar_detalle_lead(telefono, request, usuario, hay_conflicto=True)
+
+    try:
+        cantidad_lineas = len(json.loads(lineas_venta))
+    except (json.JSONDecodeError, TypeError, ValueError):
+        cantidad_lineas = 0
     try:
         await servicio_comercial.registrar_venta(telefono, lineas_venta, modalidad_pago, cuotas, medio_pago)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    await registrar_evento_lead(
+        telefono, tipo="venta_registrada",
+        descripcion=f"Registró una venta ({cantidad_lineas} producto(s), {modalidad_pago or 'sin modalidad'})",
+        autor=usuario["nombre"],
+        payload={
+            "lineas_venta": json.loads(lineas_venta) if cantidad_lineas else [],
+            "modalidad_pago": modalidad_pago, "cuotas": cuotas, "medio_pago": medio_pago,
+        },
+    )
     return RedirectResponse(url=f"/dashboard/lead/{telefono}", status_code=303)
 
 
 @router.post("/lead/{telefono}/asignar")
 async def asignar_lead(
     telefono: str,
+    request: Request,
     asesor_asignado: str = Form(""),
+    version: int = Form(...),
     usuario: dict = Depends(servicio_identidad.requiere_rol(*ROLES_CON_VISION_TOTAL)),
 ):
     lead = await obtener_lead(telefono)
     if lead is None:
         raise HTTPException(status_code=404, detail="Lead no encontrado")
+
+    if not await intentar_avanzar_version(telefono, version):
+        return await _renderizar_detalle_lead(telefono, request, usuario, hay_conflicto=True)
+
     if asesor_asignado:
         await asignar_asesor_a_lead(telefono, asesor_asignado)
+        asesor_info = await obtener_usuario(asesor_asignado)
+        nombre_asesor = asesor_info["nombre"] if asesor_info else asesor_asignado
+        await registrar_evento_lead(
+            telefono, tipo="asignado", descripcion=f"Asignó el lead a {nombre_asesor}", autor=usuario["nombre"],
+            payload={"campo": "asesor_asignado", "anterior": lead.get("asesor_asignado"), "nuevo": asesor_asignado},
+        )
     return RedirectResponse(url=f"/dashboard/lead/{telefono}", status_code=303)
 
 
