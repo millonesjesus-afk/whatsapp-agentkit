@@ -14,22 +14,47 @@ del punto de mayor riesgo (Alembic): `MAIEK_AI_OPERATIONS_RUNBOOK.md`, Escenario
 - [ ] Confirmar que el backup es restaurable (no solo que el archivo existe) — si nunca se probó una
       restauración real, este es el momento de decidir si vale la pena hacerlo antes de continuar.
 
-## 2. Ejecución de `alembic stamp head`
+## 2. Ejecución de migraciones (stamp al baseline + upgrade head)
+
+> **Corregido el 2026-07-30**, a partir de un hallazgo real del primer despliegue de esta misma
+> versión — ver `MAIEK_AI_OPERATIONS_RUNBOOK.md`, Escenario 1, "Lecciones aprendidas del primer
+> despliegue". La versión original de este paso indicaba `alembic stamp head` directo. Eso es
+> incorrecto en cuanto el código tiene migraciones incrementales posteriores al baseline sin
+> aplicar contra la base real — que era exactamente el caso acá (`124cb805569e`, `925ec2d81736`
+> ya existían en el código, pero la base de producción todavía tenía solo el esquema baseline). El
+> resultado real: el panel de leads quedó devolviendo `500` (`column leads.revision_prioritaria
+> does not exist`) hasta corregirlo. Sin pérdida de datos — la corrección fue puramente aditiva.
 
 - [ ] Confirmar la `DATABASE_URL` real de producción (Railway → servicio Postgres → Variables) — este
       es el paso de mayor riesgo real: aplicar el stamp contra la base equivocada.
-- [ ] Ejecutar:
+- [ ] Verificar estado actual: `DATABASE_URL="<...>" python -m alembic current` — sin salida
+      significa que la base todavía no está registrada en Alembic (caso esperado la primera vez).
+- [ ] Ejecutar el stamp **al baseline, no a `head`**:
       ```
-      DATABASE_URL="<DATABASE_URL real de Railway>" python -m alembic stamp head
+      DATABASE_URL="<DATABASE_URL real de Railway>" python -m alembic stamp 8bf43ecd3785
       ```
-- [ ] El comando no debería imprimir nada si sale bien (comportamiento normal de Alembic).
+      (`8bf43ecd3785` es el baseline vigente hoy — confirmar contra `migrations/versions/` si en el
+      futuro se agrega un baseline nuevo.) No imprime nada si sale bien.
+- [ ] Ejecutar el upgrade real, que aplica el DDL de cualquier migración incremental pendiente:
+      ```
+      DATABASE_URL="<misma DATABASE_URL>" python -m alembic upgrade head
+      ```
+      Cada migración aplicada se imprime en pantalla (`Running upgrade <a> -> <b>, <mensaje>`) — a
+      diferencia del `stamp`, que no imprime nada.
 
 ## 3. Verificación de migraciones
 
-- [ ] `DATABASE_URL="<misma URL>" python -m alembic current` debe mostrar `925ec2d81736 (head)`.
+- [ ] `DATABASE_URL="<misma URL>" python -m alembic current` debe mostrar `925ec2d81736 (head)`
+      **después de completar el paso 2 entero** (stamp + upgrade) — no alcanza con verificar
+      justo después del stamp, que no ejecuta ningún DDL por sí solo.
 - [ ] Verificación directa en la base (`psql`): `SELECT * FROM alembic_version;` debe retornar
       exactamente una fila, con `version_num = '925ec2d81736'`.
-- [ ] Si cualquiera de las dos verificaciones falla, **no continuar** — repetir el paso 2, no el
+- [ ] **Además de las dos verificaciones anteriores, probar activamente una ruta real que dependa
+      de las columnas/tablas más recientes** (ej. cargar el panel de leads logueado) antes de dar
+      por cerrado este paso — un `alembic current` en `(head)` confirma que Alembic *cree* que el
+      esquema está completo, no que las columnas/tablas realmente existan si hubo algún problema
+      en el camino.
+- [ ] Si cualquiera de las verificaciones falla, **no continuar** — repetir el paso 2, no el
       despliegue.
 
 ## 4. Push
