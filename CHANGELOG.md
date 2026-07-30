@@ -42,6 +42,15 @@ Trabajo local sobre `deploy-main`, todavía no desplegado — Track Product, gui
   Campañas, Catálogos, etc.) — se movieron al nuevo Sidebar; la barra superior queda solo con
   identidad y accesos de cuenta (perfil, disponibilidad, salir).
 
+### Added — Preparación del Sprint de Validación del Copiloto
+- Logging estructurado (`resumen_ia`) para el Resumen IA: latencia, cantidad de mensajes de
+  entrada, preview del resultado, manejo explícito de historial vacío — sin esto no había forma de
+  medir calidad ni latencia con evidencia real.
+- `MAIEK_AI_CONVERSATIONAL_VALIDATION_PLAN.md` evoluciona a v1.1: nueva sección 6 con criterios
+  objetivos para validar el Resumen IA (fidelidad, cobertura, claridad/utilidad, latencia, manejo
+  de conversaciones vacías o con poco contexto) y sus propios criterios de avance hacia
+  Sugerencias/Indicador de confianza/Acciones IA.
+
 ### Known limitations (deuda técnica aceptada)
 - Tras un conflicto de edición, el reintento es manual — el sistema no pre-carga el intento
   anterior del usuario, salvo en el formulario de resultado/asignación, donde alcanza con volver a

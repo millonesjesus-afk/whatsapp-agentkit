@@ -218,6 +218,24 @@ se verificó por equivalencia de código con el mecanismo ya probado del chat) �
 la calidad de los resúmenes, alucinaciones y latencia en el próximo Sprint de Validación del
 Copiloto, ejecutando `MAIEK_AI_CONVERSATIONAL_VALIDATION_PLAN.md` con tráfico real.
 
+**Sprint de Validación del Copiloto — preparación (instrumentación + plan) completa, ejecución
+pendiente.** Gap Analysis previo detectó que `MAIEK_AI_CONVERSATIONAL_VALIDATION_PLAN.md` v1.0 no
+cubría el Copiloto/Resumen (fue escrito antes de que existiera) y que `generar_resumen_conversacion`
+no tenía ninguna instrumentación — sin eso no había forma de medir latencia ni de auditar
+retroactivamente qué se generó. Se agregó logging estructurado (`resumen_ia`, mismo criterio que
+`inferencia_ia` del protocolo de confianza) — latencia, cantidad de mensajes de entrada, preview del
+resultado, manejo explícito de historial vacío. El plan de validación evolucionó a **v1.1**,
+incorporando una sección 6 dedicada al Copiloto con 5 criterios objetivos (fidelidad, cobertura,
+claridad/utilidad, latencia, manejo de conversaciones vacías o con poco contexto) y sus propios
+criterios de avance hacia Sugerencias/Indicador de confianza/Acciones IA — sigue siendo el único
+plan de validación conversacional del producto, no se creó un documento aparte. Diferencia de riesgo
+documentada explícitamente en la nueva sección: a diferencia del protocolo de confianza de Gabi (que
+sí depende de un canal en `modo="pruebas"`), el Resumen IA es una herramienta interna sin bandera de
+activación gradual — su prerrequisito operativo real es desplegar el Sprint 3 a producción, una
+decisión y una acción separadas de esta preparación. Commit `c4347cd` (logging). El plan final de
+ejecución de la validación (con el estado real del canal `modo="pruebas"` ya confirmado) queda
+pendiente de presentarse antes de empezar las pruebas con tráfico real.
+
 ---
 
 ## 1. Propósito del índice
@@ -424,7 +442,7 @@ ciclos — cada flecha va de lo más fundacional hacia lo más específico, nunc
 | `MAIEK_AI_ADR_INDEX.md` | ADR Index | Documentación | Engineering | Managed | 1.0 | **Approved** | Jesús Millones | 2026-07-28 | — | Implementation Roadmap | Toda la Fase de Implementación |
 | `MAIEK_AI_PHASE_1_EXECUTION_PLAN.md` | Phase 1 Execution Plan | Foundation | Business | Managed | 1.2 | **Approved** | Jesús Millones | 2026-07-29 | — | Implementation Roadmap, Backend/AI/API Architecture, Data Architecture | El trabajo real de implementación de la Fase 1 |
 | `MAIEK_AI_OPERATIONS_RUNBOOK.md` | Operations Runbook | Engineering | Operations | Managed | 1.1 | **Approved** | Jesús Millones | 2026-07-29 | — | Operations Architecture, Data Architecture | Quien despliegue el proyecto |
-| `MAIEK_AI_CONVERSATIONAL_VALIDATION_PLAN.md` | Conversational Validation Plan | Engineering | AI | Managed | 1.0 | **Approved** | Jesús Millones | 2026-07-29 | — | AI Architecture, MPX (Cap. 2, 3, 10), Phase 1 Execution Plan | Decisión de promover un canal de modo="pruebas" a modo="producción" |
+| `MAIEK_AI_CONVERSATIONAL_VALIDATION_PLAN.md` | Conversational Validation Plan | Engineering | AI | Managed | 1.1 | **Approved** | Jesús Millones | 2026-07-30 (v1.1) | — | AI Architecture, MPX (Cap. 2, 3, 10), Phase 1 Execution Plan, Product Patterns (Cap. 5, desde v1.1) | Decisión de promover un canal de modo="pruebas" a modo="producción"; decisión de avanzar el Copiloto IA hacia Sugerencias/Indicador de confianza/Acciones (desde v1.1) |
 | `MAIEK_AI_PRODUCT_PATTERNS.md` | Product Patterns | Design | UX | Managed | 1.0 | **Approved** | Jesús Millones | 2026-07-30 | — | Framework, MPA, MDL, CDS, MPX, Frontend Architecture | Próxima revisión de Frontend Architecture (primer patrón visual concreto del que partir); toda implementación futura del frontend |
 | `CHANGELOG.md` | Changelog | Documentación | Engineering | Managed | — (vive en actualización continua, sin número de versión propio) | **Approved** | Jesús Millones | 2026-07-30 | — | Implementation Roadmap, `RELEASE_NOTES_v0.2.0.md` | Cualquier persona que necesite saber qué cambió recientemente sin leer commits uno por uno |
 

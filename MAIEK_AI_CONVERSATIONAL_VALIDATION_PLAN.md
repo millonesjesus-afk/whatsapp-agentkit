@@ -1,17 +1,17 @@
 # Maiek AI — Conversational Validation Plan
 
-**Versión 1.0 · Estado: Approved**
+**Versión 1.1 · Estado: Approved**
 
 | | |
 |---|---|
 | Documento | Conversational Validation Plan |
 | Proyecto | Maiek AI |
-| Versión | 1.0 |
+| Versión | 1.1 |
 | Estado | **Approved** |
 | Fecha de creación | 2026-07-29 |
 | Autor | Claude, a pedido de Jesús Millones |
-| Fecha de aprobación | 2026-07-29 |
-| Última actualización | 2026-07-29 |
+| Fecha de aprobación | 2026-07-30 (v1.1) / 2026-07-29 (v1.0) |
+| Última actualización | 2026-07-30 |
 
 ## Dependencias
 
@@ -21,18 +21,23 @@ Cap. 2 (vocabulario Alta/Requiere validación/Baja), Cap. 3 (Explainability Firs
 (Experience Metrics — la "Tasa de aceptación de sugerencias" ya definida ahí es la métrica núcleo
 de este plan, no se redefine); `MAIEK_AI_PHASE_1_EXECUTION_PLAN.md` (identificó la validación
 conversacional como el riesgo más alto de la Fase 1); implementación real del protocolo de
-confianza en `agent/brain.py` (commits `93ba623`, `171a38f`).
+confianza en `agent/brain.py` (commits `93ba623`, `171a38f`). Desde v1.1, también:
+`MAIEK_AI_PRODUCT_PATTERNS.md` Cap. 5 (Copiloto IA) y la primera implementación del Resumen IA
+(commit `c34a1a8`) — ver sección 6.
 
 ## Consumido por
 
 La decisión de promover cualquier canal de `modo="pruebas"` a `modo="producción"` — ningún canal
-se promueve sin haber pasado por este plan.
+se promueve sin haber pasado por este plan. Desde v1.1, también la decisión de avanzar el Copiloto
+IA hacia sus siguientes capas (Sugerencias, Indicador de confianza, Acciones) — ninguna se
+construye sin la evidencia de la sección 6.
 
 ## Control de versiones
 
 | Versión | Fecha | Autor | Descripción |
 |---|---|---|---|
 | 1.0 | 2026-07-29 | Claude | Primera versión — pedida explícitamente al cerrar la sub-etapa de AI (protocolo de confianza), antes de continuar con Backend. El riesgo restante del protocolo ya no es técnico (validado con llamadas reales a la API) sino conversacional — este documento define cómo se valida eso antes de exponerlo a clientes reales. |
+| 1.1 | 2026-07-30 | Claude | Agrega la sección 6 (Validación del Copiloto IA / Resumen IA), tras la primera implementación del Copiloto (Sprint 3, Product Patterns Cap. 5). Se mantiene como el único plan de validación conversacional del producto — no se crea un documento separado. Motivado por decisión explícita del usuario de generar evidencia objetiva antes de avanzar a Sugerencias/Indicador de confianza/Acciones IA. |
 
 ## Alcance y desviación declarada del ADS
 
@@ -129,6 +134,74 @@ que está listo:
 
 ---
 
-*Fin del documento. Approved el 2026-07-29. Se ejecuta cuando exista tráfico real en un canal
-`modo="pruebas"` con el protocolo de confianza activo — su resultado condiciona cada decisión de
-promoción, documentada aparte en el momento en que ocurra.*
+## 6. Validación del Copiloto IA (Resumen IA) — agregado en v1.1
+
+El Copiloto IA (`MAIEK_AI_PRODUCT_PATTERNS.md` Cap. 5) tiene, tras el Sprint 3, una única capacidad
+activa: Resumen de la conversación bajo demanda (`generar_resumen_conversacion`, `agent/brain.py`).
+Esta sección define cómo se valida esa capacidad con conversaciones reales — la sección 1-5 de
+arriba sigue siendo exclusivamente sobre el protocolo de confianza de Gabi, no se modifica.
+
+### 6.1 Diferencia de riesgo con el protocolo de confianza (por qué el entorno de validación es distinto)
+
+El Resumen IA es una herramienta **interna**: solo lo ve un Administrador/Supervisor/Asesor dentro
+del panel, nunca se envía al cliente por WhatsApp. Un resumen de mala calidad no llega al cliente
+— en el peor caso, confunde momentáneamente a quien lo lee, que tiene el chat real ahí mismo para
+verificar. Es un riesgo estructuralmente menor al de una respuesta de Gabi con confianza mal
+calibrada. Por eso el Resumen IA **no pasa por `modo="pruebas"`** — no hay una bandera que lo
+active gradualmente; si el código llega a producción, cualquier asesor puede usarlo en cualquier
+lead desde el primer momento. El prerrequisito operativo para validarlo con tráfico real no es
+"activar un canal de pruebas" (eso ya existe para Gabi) sino **desplegar el Sprint 3 a
+producción** — una decisión y una acción explícitas, separadas de esta validación.
+
+### 6.2 Criterios objetivos de evaluación
+
+Un resumen se considera satisfactorio cuando cumple **todos** estos criterios (revisión manual,
+mismo criterio que la sección 3 para Gabi — no automatizable todavía):
+
+1. **Fidelidad al contenido** — no inventa productos, precios, plazos ni compromisos que no
+   aparecen en la conversación real (alucinación cero tolerada, mismo estándar que la sección 3).
+2. **Cobertura** — no omite información relevante para que un asesor retome la conversación (ej.
+   una urgencia mencionada, un dato de contacto, una objeción del cliente).
+3. **Claridad y utilidad** — un asesor que no leyó el chat todavía debería poder actuar con lo que
+   el resumen le da, sin tener que releer todo para confirmar de qué se trata.
+4. **Latencia de generación** — medida ahora por el log estructurado `resumen_ia`
+   (`agent/brain.py`, agregado como prerrequisito de esta validación); un valor de referencia
+   aceptable se define con la primera muestra real, no se inventa de antemano.
+5. **Manejo de conversaciones vacías o con poco contexto** — el caso de historial vacío ya
+   devuelve un mensaje explícito ("Todavía no hay mensajes en esta conversación") en vez de
+   inventar contenido; revisar además conversaciones de 1-2 mensajes, donde el riesgo de que el
+   modelo "rellene" con suposiciones es mayor.
+
+### 6.3 Evidencia a recolectar
+
+Igual que la sección 4, ninguna métrica decide sola — alimentan la decisión de avanzar de la
+sección 6.4:
+
+| Métrica | Cómo se obtiene |
+|---|---|
+| Latencia de generación (ms) | Log `resumen_ia` (`agent/brain.py`) |
+| Tasa de conversaciones vacías/con poco contexto sobre el total de resúmenes pedidos | Log `resumen_ia` (campo `historial_vacio` + `cantidad_mensajes`) |
+| Tasa de error (falla la llamada al modelo) | Log `resumen_ia` (campo `error`) |
+| Revisión cualitativa de una muestra contra los 5 criterios de 6.2 | Lectura manual del equipo — comparando el resumen contra la conversación real completa |
+
+### 6.4 Criterios para avanzar hacia Sugerencias IA / Indicador de confianza / Acciones IA
+
+Todos deben cumplirse — mismo principio que la sección 5 (ausencia de evidencia no es evidencia de
+que está listo):
+
+1. **Volumen mínimo de resúmenes revisados** con conversaciones reales (no solo las de prueba de
+   este Sprint), cubriendo al menos casos típicos y casos de poco contexto (criterio 6.2.5).
+2. **Cero alucinaciones detectadas** en la muestra revisada.
+3. **Latencia dentro de un rango que el equipo considere aceptable** para un uso bajo demanda
+   (nadie espera un resumen instantáneo, pero tampoco debería sentirse roto).
+4. **Aprobación explícita del usuario** tras revisar los puntos anteriores — igual que la
+   promoción de un canal, avanzar el Copiloto es una decisión de producto, no un umbral
+   automático.
+
+---
+
+*Fin del documento. v1.0 Approved el 2026-07-29, v1.1 Approved el 2026-07-30. Las secciones 1-5 se
+ejecutan cuando exista tráfico real en un canal `modo="pruebas"` con el protocolo de confianza
+activo; la sección 6 se ejecuta cuando el Sprint 3 (Resumen IA) esté desplegado a producción y
+haya conversaciones reales usándolo — ambos resultados condicionan cada decisión de promoción o
+avance, documentada aparte en el momento en que ocurra.*
