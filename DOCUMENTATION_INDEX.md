@@ -11,7 +11,7 @@
 | Fecha de creación | 2026-07-26 |
 | Autor | Claude, a pedido de Jesús Millones |
 | Fecha de aprobación | 2026-07-28 |
-| Última actualización | 2026-07-30 (Sprint 3 cerrado — primera implementación del Copiloto IA (Cap. 5): Resumen bajo demanda; validación con tráfico real queda como próximo sprint, ver "Fase de Implementación" abajo) |
+| Última actualización | 2026-07-30 (Sprints 1-3 y preparación del Sprint de Validación cerrados — commits locales, sin pushear; a la espera de autorización para iniciar validación con tráfico real, ver "Fase de Implementación" abajo) |
 
 ## Dependencias
 
@@ -241,6 +241,19 @@ producción — ninguna de las dos ocurrida todavía. Se confirmó además que, 
 a la rama `deploy-main` (remoto `deploy`) dispara el deploy en Railway automáticamente — push y
 deploy no son pasos separables acá, así que el código de esta preparación permanece sin pushear
 hasta que ambas autorizaciones lleguen juntas.
+
+**Sprints 1, 2, 3 y preparación del Sprint de Validación — cerrados (2026-07-30).** El usuario
+aprobó el plan de reversión propuesto (oculta el botón de Resumen IA, o revierte el commit
+`c34a1a8`, sin necesitar entorno de staging) y decidió, por criterio de producto — no técnico —
+mantener el Copiloto IA fuera del canal real todavía: el push (= deploy, según el hallazgo de
+arriba) queda reservado para el momento en que se autorice formalmente el inicio de la validación
+con tráfico real. Todo el trabajo de estos 4 sprints permanece commiteado solo en la rama local
+`deploy-main`, sin push. Se registró como **deuda de infraestructura** en
+`MAIEK_AI_DEVOPS_ARCHITECTURE.md` (Control de versiones) el acoplamiento Push=Deploy, con evidencia
+real — la mejora futura "Deployment Strategy" ya anticipada en la v1.0 del documento (2026-07-28)
+ahora tiene un caso concreto que la justifica; el ambiente de staging que la resolvería sigue
+`Objetivo`, no bloqueante para este Sprint. Queda pendiente únicamente la autorización del usuario
+para iniciar la validación con tráfico real (push + deploy del Sprint 3, como una sola decisión).
 
 ---
 

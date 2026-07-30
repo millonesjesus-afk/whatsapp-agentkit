@@ -60,6 +60,12 @@ Trabajo local sobre `deploy-main`, todavía no desplegado — Track Product, gui
   tráfico real de WhatsApp — reutiliza el mismo mecanismo de tiempo real ya probado por el chat, así
   que el riesgo se considera bajo, pero la validación definitiva queda para el Sprint de Validación
   del Copiloto (próximo).
+- **Infraestructura**: en este repositorio, `push` a `deploy-main` dispara el deploy en Railway
+  automáticamente — no hay separación entre publicar el código y desplegarlo a producción, ni un
+  ambiente de staging intermedio. Documentado como deuda en `MAIEK_AI_DEVOPS_ARCHITECTURE.md`
+  (ligado a la mejora futura "Deployment Strategy" ya registrada el 2026-07-28). Por esto, el Sprint
+  3 (Copiloto IA) permanece commiteado solo en local — el push queda reservado para el momento en
+  que se autorice explícitamente el inicio de la validación con tráfico real.
 
 ## [0.2.0] - 2026-07-29
 
