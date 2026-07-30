@@ -11,7 +11,7 @@
 | Fecha de creación | 2026-07-26 |
 | Autor | Claude, a pedido de Jesús Millones |
 | Fecha de aprobación | 2026-07-28 |
-| Última actualización | 2026-07-30 (`MAIEK_AI_PRODUCT_PATTERNS.md` v1.0 Approved — primera especificación derivada de patrones visuales completos del producto, ver "Fase de Implementación" abajo) |
+| Última actualización | 2026-07-30 (Sprint 2 cerrado — Sidebar + CRM/Pipeline (Product Patterns Cap. 1 y 6) materializados en código; `CHANGELOG.md` creado, ver "Fase de Implementación" abajo) |
 
 ## Dependencias
 
@@ -167,6 +167,39 @@ Analítica, Copiloto IA, CRM/Pipeline, Catálogo/Campañas/Equipo, y un capítul
 Principios Transversales de Producto (Plataforma primero, Capacidad vs. alcance, Acción antes que
 observación, Human Decision Gate, Única fuente de verdad, La IA asiste-nunca reemplaza el criterio
 humano). Auditoría de calidad y consistencia final sin observaciones de fondo.
+
+**Product Patterns pasa a guiar la implementación real — nuevo flujo de trabajo.** Con la v1.0
+aprobada, el Track Product deja de producir documentación por anticipación: cada funcionalidad
+prioritaria se compara primero contra el código real y el corpus, se identifica el gap real, se
+propone un plan técnico, se implementa y se valida — el corpus solo se actualiza si la
+implementación lo justifica. Orden de prioridad acordado: Inicio (Cap. 3) → CRM/Pipeline (Cap. 6)
+→ revisión del Shell residual → Copiloto IA (una vez validado el protocolo de confianza) →
+Analítica y patrones administrativos.
+
+**Sprint 1 — Patrón Inicio (Cap. 3) materializado — Implementado.** `panel_principal()` evoluciona
+a orquestador del flujo de entrada: sin filtros explícitos en la URL aterriza en Inicio (Zona de
+acción determinística, sin depender del Copiloto IA, + Zona de indicadores), único patrón para los
+3 roles; con cualquier filtro explícito la Bandeja sigue funcionando exactamente igual. Construido
+con namespace de tokens `--mdl-*` (migración incremental — el resto del panel no se toca). Validado
+localmente con los 3 roles — commit `98098fc`.
+
+**Sprint 2 — Sidebar + patrón CRM/Pipeline (Cap. 1 y 6) materializados — Implementado.** Decisión de
+producto explícita: CRM/Pipeline es un destino de navegación propio ("gestionar mi cartera de
+oportunidades"), no una evolución de la Bandeja ("qué hacer ahora"). Se construyó un Sidebar mínimo
+(implementación incremental del Cap. 1 — Shell de Navegación, con los destinos de MPA §10 y sus
+mismos permisos ya vigentes) que reemplaza los links sueltos que antes vivían en la Top Navigation
+(el propio Cap. 1 señala eso como error común). Nuevo destino
+`/dashboard/pipeline`: Data Grid con búsqueda/filtro/orden/paginación resueltos en el servidor y
+persistidos en la URL, alcance por rol, reutilizando `detalle_lead` sin cambios como vista de
+detalle. Sobre esa misma pantalla se completaron los dos comportamientos restantes del patrón:
+Conversation Timeline (tabla `eventos_lead`, append-only, con payload estructurado además del texto
+— pensada como fuente reutilizable por auditoría/analítica/Copiloto IA futuro, no solo una lista
+para pantalla) y concurrencia optimista (`Lead.version`) en los 3 endpoints de escritura del lead —
+un conflicto de edición no sobrescribe en silencio: muestra quién/cuándo/qué cambió (Human Decision
+Gate) antes de dejar reintentar. Deuda técnica aceptada explícitamente: el reintento tras un
+conflicto es manual (sin pre-cargar el intento previo) y el carrito de Cierre de venta se
+reconstruye a mano si hay conflicto en ese formulario. Validado localmente en los 3 roles,
+incluyendo un conflicto de edición simulado — commit `bd44489`.
 
 ---
 
@@ -376,6 +409,7 @@ ciclos — cada flecha va de lo más fundacional hacia lo más específico, nunc
 | `MAIEK_AI_OPERATIONS_RUNBOOK.md` | Operations Runbook | Engineering | Operations | Managed | 1.1 | **Approved** | Jesús Millones | 2026-07-29 | — | Operations Architecture, Data Architecture | Quien despliegue el proyecto |
 | `MAIEK_AI_CONVERSATIONAL_VALIDATION_PLAN.md` | Conversational Validation Plan | Engineering | AI | Managed | 1.0 | **Approved** | Jesús Millones | 2026-07-29 | — | AI Architecture, MPX (Cap. 2, 3, 10), Phase 1 Execution Plan | Decisión de promover un canal de modo="pruebas" a modo="producción" |
 | `MAIEK_AI_PRODUCT_PATTERNS.md` | Product Patterns | Design | UX | Managed | 1.0 | **Approved** | Jesús Millones | 2026-07-30 | — | Framework, MPA, MDL, CDS, MPX, Frontend Architecture | Próxima revisión de Frontend Architecture (primer patrón visual concreto del que partir); toda implementación futura del frontend |
+| `CHANGELOG.md` | Changelog | Documentación | Engineering | Managed | — (vive en actualización continua, sin número de versión propio) | **Approved** | Jesús Millones | 2026-07-30 | — | Implementation Roadmap, `RELEASE_NOTES_v0.2.0.md` | Cualquier persona que necesite saber qué cambió recientemente sin leer commits uno por uno |
 
 ## 8. Reglas de Gobernanza Documental
 
@@ -434,9 +468,6 @@ El resto sigue en el roadmap general, sin depender directamente del MSA salvo do
 - **ADR Index** — registro de Architecture Decision Records — decisiones técnicas puntuales
   futuras, con su razón, distinto de las decisiones fundacionales ya fijadas en MSA Cap. 12
   (Architectural Decisions), que no crece con cada decisión menor.
-- **CHANGELOG** — historial de cambios de producto de cara afuera, distinto del control de
-  versiones interno de cada documento. Una vez exista, la regla 6 de gobernanza (sección 8)
-  empieza a aplicar en la práctica.
 
 Ningún documento de esta lista se desarrolla hasta que se pida explícitamente — quedan acá
 únicamente para que el roadmap documental sea visible desde ahora.
