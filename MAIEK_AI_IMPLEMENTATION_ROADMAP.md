@@ -11,7 +11,7 @@
 | Fecha de creación | 2026-07-28 |
 | Autor | Claude, a pedido de Jesús Millones |
 | Fecha de aprobación | 2026-07-28 |
-| Última actualización | 2026-07-29 (Data Architecture Fase 1 — baseline de Alembic — implementada en código, ver Control de versiones) |
+| Última actualización | 2026-07-30 (sección 2.1 nueva — Ciclo de trabajo por incremento, institucionalizado, ver Control de versiones) |
 
 ## Dependencias
 
@@ -38,6 +38,7 @@ Todo trabajo de implementación futuro sobre el repositorio; los cinco documento
 | 1.0 | 2026-07-29 | Claude | **Fase 0 (Estabilización) declarada oficialmente cerrada** — 32 commits desplegados a producción y verificados con tráfico real (ver `IMPLEMENTATION_REVIEW_FASE_0.md`): rama remota sincronizada, deploy de Railway `Active`/`Deployment successful`, arranque limpio, health check OK, `POST /webhook` → `200 OK` con mensajes reales, sin errores relevantes posteriores al despliegue. Sin desviaciones respecto al corpus arquitectónico. **Fase 1 (Núcleo técnico — Backend/AI/API) queda iniciada.** |
 | 1.0 | 2026-07-29 | Claude | **Incorporada Data Architecture Fase 1 (baseline de Alembic) como pista transversal dentro de la Fase 1** (secciones 1, 3, 4, 8), sin bloquear el inicio de Backend/AI/API. Surgió de una revisión independiente (Opus, Principal Architect/CTO externo) del `MAIEK_AI_PHASE_1_EXECUTION_PLAN.md`, que identificó que Data Architecture ya declara su propia Fase 1 como prerrequisito de "todas las siguientes" — incluida la Fase 2 de este roadmap (`negocio_id`), que ahora declara depender también de Data Architecture Fase 1 y Fase 2, no solo del núcleo técnico. No redefine ninguna decisión ya tomada — corrige una secuenciación no declarada explícitamente hasta ahora. |
 | 1.0 | 2026-07-29 | Claude | **Data Architecture Fase 1 (baseline de Alembic) implementada en código**, adelantada respecto al resto del núcleo técnico: surgió como bloqueo real durante la sub-etapa de AI (el marcador de "revisión prioritaria" del protocolo de confianza necesitaba una columna nueva en `leads`, que `create_all()` no puede agregar a una tabla ya existente en producción). El trabajo de AI se pausó explícitamente para resolver esta capacidad habilitadora antes de seguir acumulando entregables diferidos por la misma causa (Evidence over Opinion) — ver Implementation Review de esta sub-etapa. Pendiente de acción manual del usuario antes del próximo deploy: `alembic stamp head` contra la Postgres de producción. |
+| 1.0 | 2026-07-30 | Claude | Aprobado sin reapertura del contenido existente. **Agrega la sección 2.1 (Ciclo de trabajo por incremento)**: institucionaliza el proceso de 8 pasos (Gap Analysis → Diseño técnico → Revisión y aprobación → Implementación → Validación → Documentación → Commit → Push y Deploy) ya aplicado y validado empíricamente en los Sprints 1-3 y la preparación del Sprint de Validación del Copiloto. Pedido explícito del usuario: que el proceso "quede definido por el proyecto y no por el contexto de una conversación" — deja de depender de la memoria de sesión. |
 
 ## Alcance
 
@@ -58,6 +59,39 @@ Este documento no toma decisiones de diseño nuevas. Cuando la implementación r
 - **Evidence over Opinion se mantiene**: el orden y las fases de este roadmap (sección 3-4) se basan en las dependencias ya declaradas explícitamente en cada documento (Brechas conocidas, Decisiones locales "dependiente de X", Architectural Decision Impact) — no en preferencias nuevas de secuenciación.
 - **Separación de responsabilidades se mantiene**: este documento prioriza y secuencia a nivel de fase; no re-especifica cómo se implementa cada decisión — ese detalle vive fuera de este roadmap, en el trabajo técnico real de cada fase.
 - **Toda decisión heredada de un documento Approved rige sin excepción** — en particular, el principio ya fijado en Operations Architecture de que todo cambio que afecte a Gabi o al flujo de venta se comunica al equipo comercial antes de producción, se hereda sin repetirse.
+
+## 2.1 Ciclo de trabajo por incremento (Sprint)
+
+Todo incremento de implementación — cada Sprint, cada patrón de `MAIEK_AI_PRODUCT_PATTERNS.md` que
+se materializa, cada decisión `Objetivo`→`Activa` de cualquiera de los 8 dominios técnicos — sigue
+este ciclo, en este orden, sin saltar ni fusionar pasos:
+
+1. **Gap Analysis** — revisar el código real (con evidencia verificable, no asumir) y compararlo
+   contra el corpus documental que corresponda (Framework/MPA/MDL/CDS/MPX/Product Patterns, y/o las
+   arquitecturas técnicas derivadas). Identificar qué ya existe y qué falta realmente.
+2. **Diseño técnico** — propuesta corta y concreta (estructura de datos, impacto en el modelo,
+   cambios mínimos necesarios, estrategia de migración si aplica) antes de escribir código.
+3. **Revisión y aprobación** — el Responsable (sección "Convenciones" de `DOCUMENTATION_INDEX.md`)
+   aprueba el diseño explícitamente. Sin aprobación, no hay paso 4.
+4. **Implementación** — solo después de la aprobación del paso 3, nunca antes ni en paralelo.
+5. **Validación** — probar de verdad (local primero; con tráfico/datos reales cuando corresponda,
+   ver sección 6 de `MAIEK_AI_CONVERSATIONAL_VALIDATION_PLAN.md` como ejemplo ya vigente). No se da
+   por terminado un incremento sin evidencia de que funciona.
+6. **Documentación** — sincronizar `DOCUMENTATION_INDEX.md`, `CHANGELOG.md`, y cualquier documento
+   del corpus que la implementación real justifique actualizar — nunca por anticipación (Principio
+   "Evidence over Opinion" de la sección 2).
+7. **Commit** — captura el estado ya validado y documentado.
+8. **Push y Deploy** (cuando corresponda) — **decisión operativa separada de las anteriores, nunca
+   implícita**. En la infraestructura actual del proyecto, Push a `deploy-main` y Deploy en Railway
+   ocurren de forma acoplada (deuda de infraestructura registrada en
+   `MAIEK_AI_DEVOPS_ARCHITECTURE.md`, Control de versiones, 2026-07-30) — hasta que se separen
+   (ambiente de staging, todavía `Objetivo`), autorizar el paso 8 equivale a autorizar el despliegue
+   a producción, y se trata como tal.
+
+Validado empíricamente en los Sprints 1-3 (Inicio, Sidebar + CRM/Pipeline, primera implementación
+del Copiloto IA) y en la preparación del Sprint de Validación del Copiloto — confirmado
+explícitamente por el usuario el 2026-07-30 como el proceso a mantener, sin excepciones, en toda
+fase futura del proyecto.
 
 ## 3. Orden recomendado de implementación basado en dependencias arquitectónicas
 

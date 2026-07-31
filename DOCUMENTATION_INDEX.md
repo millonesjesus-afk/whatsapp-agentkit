@@ -11,7 +11,7 @@
 | Fecha de creación | 2026-07-26 |
 | Autor | Claude, a pedido de Jesús Millones |
 | Fecha de aprobación | 2026-07-28 |
-| Última actualización | 2026-07-30 (Sprints 1-3 y preparación del Sprint de Validación cerrados — commits locales, sin pushear; a la espera de autorización para iniciar validación con tráfico real, ver "Fase de Implementación" abajo) |
+| Última actualización | 2026-07-30 (ciclo de trabajo por incremento institucionalizado en `MAIEK_AI_IMPLEMENTATION_ROADMAP.md` §2.1 y en `CLAUDE.md`; Sprints 1-3 y preparación del Sprint de Validación cerrados, sin pushear, ver "Fase de Implementación" abajo) |
 
 ## Dependencias
 
@@ -254,6 +254,15 @@ real — la mejora futura "Deployment Strategy" ya anticipada en la v1.0 del doc
 ahora tiene un caso concreto que la justifica; el ambiente de staging que la resolvería sigue
 `Objetivo`, no bloqueante para este Sprint. Queda pendiente únicamente la autorización del usuario
 para iniciar la validación con tráfico real (push + deploy del Sprint 3, como una sola decisión).
+
+**Proceso de trabajo institucionalizado — `MAIEK_AI_IMPLEMENTATION_ROADMAP.md` §2.1 (nueva,
+2026-07-30).** Pedido explícito del usuario al cerrar los Sprints 1-3: que el ciclo Gap Analysis →
+Diseño técnico → Revisión y aprobación → Implementación → Validación → Documentación → Commit →
+Push y Deploy deje de depender de la memoria de una conversación puntual y quede definido por el
+proyecto. Agregado como sección propia del Roadmap (documento puente entre arquitectura e
+implementación, lugar natural para un proceso de ejecución) y referenciado desde `CLAUDE.md` —
+auto-cargado en cada sesión — para que cualquier agente que trabaje en este repo lo siga sin
+depender de haber leído esta conversación.
 
 ---
 

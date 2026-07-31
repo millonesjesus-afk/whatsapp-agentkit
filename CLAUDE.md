@@ -46,6 +46,15 @@
 > Gabi/`/knowledge`/`prompts.yaml`**, es config del panel/CRM interno, no contenido para
 > conversaciones de WhatsApp). Los nueve deben guiar las decisiones de arquitectura y diseño en
 > este repo (Platform Architecture, Superseded, se mantiene solo por trazabilidad histórica).
+>
+> **Todo trabajo de implementación sobre este repo sigue el ciclo institucionalizado en
+> [`MAIEK_AI_IMPLEMENTATION_ROADMAP.md`](MAIEK_AI_IMPLEMENTATION_ROADMAP.md) §2.1** (Gap Analysis →
+> Diseño técnico → Revisión y aprobación → Implementación → Validación → Documentación → Commit →
+> Push y Deploy), sin saltar ni fusionar pasos — pedido explícito del usuario (2026-07-30) para que
+> el proceso no dependa de la memoria de una conversación puntual. Push y Deploy son, en la
+> infraestructura actual del proyecto, una sola decisión operativa (ver `MAIEK_AI_DEVOPS_ARCHITECTURE.md`,
+> Control de versiones): nunca hacer `git push` sobre la rama de despliegue sin autorización
+> explícita y separada del usuario para desplegar.
 
 ---
 
