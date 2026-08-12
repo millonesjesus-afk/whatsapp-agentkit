@@ -8,9 +8,9 @@ name: CI
 
 on:
   push:
-    branches: [deploy-main]
+    branches: [main]
   pull_request:
-    branches: [deploy-main]
+    branches: [main]
 
 jobs:
   build-and-smoke-test:
