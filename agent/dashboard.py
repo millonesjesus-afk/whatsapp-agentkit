@@ -1976,10 +1976,13 @@ async def _contenido_metricas(leads: list[dict]) -> str:
 
 @router.get("/metricas", response_class=HTMLResponse)
 async def metricas(request: Request, usuario: dict = Depends(servicio_identidad.requiere_rol(*ROLES_CON_VISION_TOTAL))):
-    sidebar = await _renderizar_sidebar(usuario, telefono_activo=None)
+    # Sin rail de conversaciones acá a propósito (a diferencia de otras
+    # páginas secundarias) — esta vista ya muestra su propio embudo
+    # (Cap. 4.3), repetirlo en el rail era literalmente la misma
+    # información duplicada dos veces en la misma pantalla.
     leads = await _adjuntar_resumen_ventas(await listar_leads())
     panel = await _contenido_metricas(leads)
-    cuerpo = f"""<div class="shell d-flex">{sidebar}<div class="main-pane flex-grow-1 p-4">{panel}</div></div>"""
+    cuerpo = f"""<div class="shell d-flex"><div class="main-pane flex-grow-1 p-4">{panel}</div></div>"""
     return _pagina("Métricas", usuario, cuerpo, request=request)
 
 
@@ -4522,7 +4525,10 @@ TIPOS_DETECCION = {
 
 @router.get("/campanas", response_class=HTMLResponse)
 async def gestionar_campanas(request: Request, usuario: dict = Depends(servicio_identidad.requiere_rol("admin")), creada: int | None = None):
-    sidebar = await _renderizar_sidebar(usuario, telefono_activo=None)
+    # Sin rail de conversaciones acá a propósito — esta pantalla gestiona
+    # campañas de Meta Ads, no conversaciones; el rail de estados no aporta
+    # contexto útil acá (a diferencia de Catálogo/Equipo/Canales/Perfil,
+    # donde sí queda).
     campanas = await listar_campanas()
     conteos = {c["campana"]: c for c in await contar_leads_por_campana()}
 
@@ -4832,7 +4838,7 @@ async def gestionar_campanas(request: Request, usuario: dict = Depends(servicio_
     }})();
     </script>
     """
-    cuerpo = f"""<div class="shell d-flex">{sidebar}<div class="main-pane flex-grow-1 p-4">{panel}</div></div>"""
+    cuerpo = f"""<div class="shell d-flex"><div class="main-pane flex-grow-1 p-4">{panel}</div></div>"""
     return _pagina("Gestionar campañas", usuario, cuerpo, request=request)
 
 
