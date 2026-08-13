@@ -398,6 +398,28 @@ ESTILOS_PROPIOS = """
   .nav-lateral-link.activo { background: #e0f2fe; color: var(--gaso-azul-osc); }
   .nav-lateral-link.activo i { color: var(--gaso-azul); }
 
+  /* Sidebar colapsable a solo íconos (MAIEK_AI_PRODUCT_PATTERNS.md, Cap. 1,
+     sección 5 — "280px expandido / 64px colapsado"). Solo en desktop: en
+     mobile el Sidebar ya es un overlay a pantalla completa (más abajo, con
+     !important) y nunca debe reducirse a un ancho intermedio ilegible —
+     por eso esta regla vive detrás de min-width, nunca puede pisar esa otra. */
+  @media (min-width: 769px) {
+    .nav-lateral { transition: width var(--t-fast, .15s) ease; }
+    .nav-lateral.colapsado { width: 56px !important; min-width: 56px; flex-basis: 56px; }
+    .nav-lateral.colapsado .nav-lateral-link { justify-content: center; padding: 8px; }
+    .nav-lateral.colapsado .nav-lateral-link span { display: none; }
+  }
+  .nav-lateral-toggle {
+    display: flex; align-items: center; gap: 10px; width: 100%;
+    padding: 8px 12px; margin-top: 4px; border: none; background: none;
+    border-radius: 8px; color: #64748b; font-size: .82rem; font-weight: 500;
+    cursor: pointer; transition: background-color .15s ease, color .15s ease;
+  }
+  .nav-lateral-toggle i { font-size: .95rem; width: 18px; text-align: center; flex-shrink: 0; }
+  .nav-lateral-toggle:hover { background: #f1f5f9; color: #0f172a; }
+  .nav-lateral.colapsado .nav-lateral-toggle { justify-content: center; padding: 8px; }
+  .nav-lateral.colapsado .nav-lateral-toggle span { display: none; }
+
   .shell { flex: 1 1 auto; min-height: 0; }
   .rail-estados { width: 230px; min-width: 230px; flex-shrink: 0; overflow-y: auto; background: #fbfcfe; }
   .sidebar { width: 320px; min-width: 320px; flex-shrink: 0; overflow-y: auto; background: #fff; }
@@ -514,6 +536,11 @@ ESTILOS_PROPIOS = """
       box-shadow: 0 4px 12px rgba(0,0,0,.25);
     }
     .btn-menu-movil { display: inline-flex !important; }
+
+    /* El toggle de colapsar a íconos no existe en mobile — acá el Sidebar
+       siempre es overlay a pantalla completa, nunca íconos solos (Cap. 1,
+       sección 7: "nunca se comprime a un ancho intermedio ilegible"). */
+    .nav-lateral-toggle { display: none !important; }
 
     /* Con un chat abierto: solo el chat se ve, a pantalla completa */
     body.pagina-chat .rail-estados,
@@ -984,7 +1011,15 @@ def _nav_lateral(usuario: dict) -> str:
             f'<a href="{href}" data-ajax="1" data-ruta="{data_ruta}" class="nav-lateral-link">'
             f'<i class="bi {icono}"></i><span>{html.escape(etiqueta)}</span></a>'
         )
-    return f'<div class="nav-lateral" id="nav-lateral">{"".join(items)}</div>'
+    # Toggle expandido/colapsado (Cap. 1, sección 5) — solo desktop, el CSS
+    # de mobile ya oculta/expande el Sidebar completo por su cuenta y no
+    # depende de este botón para nada.
+    toggle = (
+        '<button type="button" class="nav-lateral-toggle" id="nav-lateral-toggle" '
+        'title="Contraer o expandir el menú">'
+        '<i class="bi bi-arrow-bar-left"></i><span>Contraer</span></button>'
+    )
+    return f'<div class="nav-lateral" id="nav-lateral">{"".join(items)}{toggle}</div>'
 
 
 def _pagina(
@@ -1132,6 +1167,29 @@ def _pagina(
         }});
     }}
     actualizarNavActiva();
+
+    // Sidebar colapsable a solo íconos (Product Patterns Cap. 1, sección 5:
+    // "reposo — Sidebar en el estado que el usuario dejó en su sesión
+    // anterior, persistido entre sesiones"). El Sidebar no se reconstruye
+    // en cada navegación AJAX (ver comentario más arriba), así que esto
+    // corre una sola vez por carga real de página, no por cada navegación.
+    (function() {{
+        var nav = document.getElementById('nav-lateral');
+        var toggle = document.getElementById('nav-lateral-toggle');
+        if (!nav || !toggle) return;
+        var CLAVE = 'gaso_nav_colapsado';
+        function aplicar(colapsado) {{
+            nav.classList.toggle('colapsado', colapsado);
+            toggle.querySelector('i').className = 'bi ' + (colapsado ? 'bi-arrow-bar-right' : 'bi-arrow-bar-left');
+            toggle.querySelector('span').textContent = colapsado ? 'Expandir' : 'Contraer';
+        }}
+        aplicar(localStorage.getItem(CLAVE) === '1');
+        toggle.addEventListener('click', function() {{
+            var colapsado = !nav.classList.contains('colapsado');
+            localStorage.setItem(CLAVE, colapsado ? '1' : '0');
+            aplicar(colapsado);
+        }});
+    }})();
 
     function navegarAjax(url, agregarHistorial, silencioso) {{
         if (!silencioso) iniciar();
