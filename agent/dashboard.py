@@ -989,7 +989,7 @@ _NAV_LATERAL_ITEMS = [
     ("conversaciones", "Conversaciones", "bi-chat-dots-fill", "/dashboard?estado=todos", "/dashboard?estado=todos", None),
     ("pipeline", "CRM / Pipeline", "bi-briefcase-fill", "/dashboard/pipeline", "/dashboard/pipeline", None),
     ("campanas", "Campañas", "bi-megaphone-fill", "/dashboard/campanas", "/dashboard/campanas", ("admin",)),
-    ("catalogos", "Catálogo", "bi-folder-fill", "/dashboard/catalogos", "/dashboard/catalogos", ("admin",)),
+    ("catalogos", "Catálogo", "bi-folder-fill", "/dashboard/catalogos", "/dashboard/catalogos", None),
     ("equipo", "Equipo", "bi-people-fill", "/dashboard/asesores", "/dashboard/asesores", ROLES_CON_VISION_TOTAL),
     ("analitica", "Analítica", "bi-graph-up-arrow", "/dashboard/metricas", "/dashboard/metricas", ROLES_CON_VISION_TOTAL),
     ("canales", "Canales de WhatsApp", "bi-whatsapp", "/dashboard/canales-whatsapp", "/dashboard/canales-whatsapp", ("admin",)),
@@ -4184,16 +4184,22 @@ async def descargar_archivo(archivo_id: int, usuario: dict = Depends(_usuario_ac
 
 
 @router.get("/catalogos", response_class=HTMLResponse)
-async def gestionar_catalogos(request: Request, usuario: dict = Depends(servicio_identidad.requiere_rol("admin")), subido: str = ""):
+async def gestionar_catalogos(request: Request, usuario: dict = Depends(_usuario_actual), subido: str = ""):
     """Librería de catálogos reutilizables — subir una vez, cualquier asesor
-    los puede mandar en cualquier conversación sin volver a subirlos."""
+    los puede mandar en cualquier conversación sin volver a subirlos.
+    Visible a los 3 roles (Product Patterns Cap. 7.A §4: "el patrón existe
+    para los tres roles"); solo Administrador puede subir o eliminar —
+    Supervisor y Asesor tienen alcance de solo lectura, para citar en la
+    conversación."""
     sidebar = await _renderizar_sidebar(usuario, telefono_activo=None)
     archivos = await servicio_conversacion.listar_archivos_reutilizables()
+    es_admin = usuario["rol"] == "admin"
 
     mensaje_html = ""
     if subido:
         mensaje_html = '<div class="alert alert-success py-2 px-3 mb-3"><i class="bi bi-check-circle-fill"></i> Catálogo subido.</div>'
 
+    columna_eliminar = '<th class="pe-3"></th>' if es_admin else ''
     filas = "".join(
         f"""<tr>
             <td class="ps-3">
@@ -4202,32 +4208,16 @@ async def gestionar_catalogos(request: Request, usuario: dict = Depends(servicio
             </td>
             <td class="text-muted">{html.escape(a['subido_por'])}</td>
             <td><a href="/dashboard/archivo/{a['id']}" target="_blank" class="btn btn-sm btn-outline-secondary"><i class="bi bi-download"></i> Ver</a></td>
-            <td class="pe-3">
+            {f'''<td class="pe-3">
                 <form method="post" action="/dashboard/catalogos/{a['id']}/eliminar" onsubmit="return confirm('¿Quitar este catálogo de la librería? Ya no se podrá elegir para enviar en nuevas conversaciones.')">
                     <button type="submit" class="btn btn-sm btn-outline-danger"><i class="bi bi-trash"></i></button>
                 </form>
-            </td>
+            </td>''' if es_admin else ''}
         </tr>"""
         for a in archivos
     )
 
-    panel = f"""
-    {_titulo_seccion('bi-folder-fill', 'Librería de catálogos')}
-    <p class="text-muted small mb-3">
-        Sube catálogos, listas de precios en PDF o imágenes de referencia una sola vez — cualquier
-        asesor los va a poder elegir y enviar desde el chat sin tener que subirlos de nuevo cada vez.
-    </p>
-    {mensaje_html}
-    <div class="card leads-card shadow-sm mb-4">
-        <div class="barra-acento"></div>
-        <div class="table-responsive">
-            <table class="table table-hover align-middle mb-0 tabla-ejecutiva">
-                <thead><tr><th class="ps-3">Catálogo</th><th>Subido por</th><th></th><th class="pe-3"></th></tr></thead>
-                <tbody>{filas or '<tr><td colspan="4" class="text-center text-muted py-4">Aún no hay catálogos.</td></tr>'}</tbody>
-            </table>
-        </div>
-    </div>
-
+    subir_html = f"""
     {_titulo_seccion('bi-plus-circle-fill', 'Subir catálogo nuevo')}
     <div class="card leads-card shadow-sm">
         <div class="barra-acento"></div>
@@ -4247,6 +4237,26 @@ async def gestionar_catalogos(request: Request, usuario: dict = Depends(servicio
             </form>
         </div>
     </div>
+    """ if es_admin else ""
+
+    panel = f"""
+    {_titulo_seccion('bi-folder-fill', 'Librería de catálogos')}
+    <p class="text-muted small mb-3">
+        Catálogos, listas de precios en PDF o imágenes de referencia disponibles para elegir y
+        enviar desde el chat en cualquier conversación.
+    </p>
+    {mensaje_html}
+    <div class="card leads-card shadow-sm mb-4">
+        <div class="barra-acento"></div>
+        <div class="table-responsive">
+            <table class="table table-hover align-middle mb-0 tabla-ejecutiva">
+                <thead><tr><th class="ps-3">Catálogo</th><th>Subido por</th><th></th>{columna_eliminar}</tr></thead>
+                <tbody>{filas or f'<tr><td colspan="{4 if es_admin else 3}" class="text-center text-muted py-4">Aún no hay catálogos.</td></tr>'}</tbody>
+            </table>
+        </div>
+    </div>
+
+    {subir_html}
     """
     cuerpo = f"""<div class="shell d-flex">{sidebar}<div class="main-pane flex-grow-1 p-4">{panel}</div></div>"""
     return _pagina("Librería de catálogos", usuario, cuerpo, request=request)
