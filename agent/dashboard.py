@@ -51,6 +51,7 @@ from agent.memory import (
     listar_canales_whatsapp, crear_canal_whatsapp, actualizar_canal_whatsapp,
 )
 from agent.services.servicio_conversacion import servicio_conversacion
+from agent.http_utils import get_con_reintentos, post_con_reintentos
 
 # Paleta de colores para distinguir canales de WhatsApp en el panel — se
 # asigna por posición (orden de creación), no por nombre, así que un canal
@@ -5100,6 +5101,134 @@ async def gestionar_canales_whatsapp(request: Request, usuario: dict = Depends(s
             </td>
         </tr>""")
 
+    app_id = os.getenv("META_APP_ID", "")
+    config_id = os.getenv("META_EMBEDDED_SIGNUP_CONFIG_ID", "")
+    if app_id and config_id:
+        conectar_html = f"""
+        <p class="text-muted small mb-3">
+            El único camino soportado por Meta para conectar un número que sigue usando la app de
+            WhatsApp Business en el celular sin perder su historial (Coexistencia). Para números
+            nuevos sin nada que conservar, el formulario manual de abajo alcanza igual.
+        </p>
+        <div id="estado-conectar-whatsapp" class="small mb-2"></div>
+        <div class="row g-2">
+            <div class="col-md-4">
+                <label class="form-label small text-muted mb-0">Nombre (para identificarlo en el panel)</label>
+                <input type="text" id="conectar-whatsapp-nombre" class="form-control form-control-sm" placeholder="Ej: Cálidda - Producción">
+            </div>
+            <div class="col-md-4">
+                <label class="form-label small text-muted mb-0">PIN de verificación en dos pasos (6 dígitos)</label>
+                <input type="text" id="conectar-whatsapp-pin" class="form-control form-control-sm" maxlength="6" placeholder="El que ya tenga el número, o uno nuevo">
+            </div>
+            <div class="col-md-4 d-flex align-items-end">
+                <button type="button" id="btn-conectar-whatsapp" class="btn btn-sm btn-primary w-100">
+                    <i class="bi bi-whatsapp"></i> Conectar WhatsApp
+                </button>
+            </div>
+        </div>
+        <script>
+        (function() {{
+            var appId = '{html.escape(app_id)}';
+            var configId = '{html.escape(config_id)}';
+            var btn = document.getElementById('btn-conectar-whatsapp');
+            var estado = document.getElementById('estado-conectar-whatsapp');
+            var pinInput = document.getElementById('conectar-whatsapp-pin');
+            var nombreInput = document.getElementById('conectar-whatsapp-nombre');
+            var datosSignup = {{}};
+
+            function mostrarEstado(texto, tipo) {{
+                estado.className = 'small mb-2 text-' + (tipo || 'muted');
+                estado.textContent = texto;
+            }}
+
+            window.fbAsyncInit = function() {{
+                FB.init({{ appId: appId, version: 'v21.0' }});
+            }};
+            (function(d, s, id) {{
+                if (d.getElementById(id)) return;
+                var js = d.createElement(s);
+                js.id = id;
+                js.src = 'https://connect.facebook.net/es_LA/sdk.js';
+                d.getElementsByTagName(s)[0].parentNode.insertBefore(js, d.getElementsByTagName(s)[0]);
+            }})(document, 'script', 'facebook-jssdk-conectar');
+
+            window.addEventListener('message', function(event) {{
+                if (!event.origin || event.origin.indexOf('facebook.com') === -1) return;
+                var datos;
+                try {{ datos = JSON.parse(event.data); }} catch (e) {{ return; }}
+                if (datos.type !== 'WA_EMBEDDED_SIGNUP') return;
+                if (datos.event === 'CANCEL') {{
+                    mostrarEstado('Conexión cancelada.', 'muted');
+                }} else if (datos.event === 'ERROR') {{
+                    mostrarEstado('Meta reportó un error: ' + ((datos.data && datos.data.error_message) || 'desconocido'), 'danger');
+                }} else if (datos.event === 'FINISH' && datos.data) {{
+                    datosSignup = datos.data;
+                }}
+            }});
+
+            if (btn) {{
+                btn.addEventListener('click', function() {{
+                    if (!nombreInput.value.trim()) {{
+                        mostrarEstado('Ingresa un nombre para identificar el canal.', 'danger');
+                        nombreInput.focus();
+                        return;
+                    }}
+                    if (!/^\\d{{6}}$/.test(pinInput.value)) {{
+                        mostrarEstado('Ingresa el PIN de verificación en dos pasos (6 dígitos).', 'danger');
+                        pinInput.focus();
+                        return;
+                    }}
+                    mostrarEstado('Abriendo ventana de Meta...', 'muted');
+                    FB.login(function(response) {{
+                        if (!response.authResponse || !response.authResponse.code) {{
+                            mostrarEstado('No se completó la conexión.', 'muted');
+                            return;
+                        }}
+                        mostrarEstado('Conectando...', 'muted');
+                        fetch('/dashboard/canales-whatsapp/embedded-signup/callback', {{
+                            method: 'POST',
+                            headers: {{ 'Content-Type': 'application/json' }},
+                            body: JSON.stringify({{
+                                code: response.authResponse.code,
+                                waba_id: datosSignup.waba_id || '',
+                                phone_number_id: datosSignup.phone_number_id || '',
+                                pin: pinInput.value,
+                                nombre: nombreInput.value.trim(),
+                            }}),
+                        }}).then(function(r) {{
+                            return r.json().then(function(j) {{ return {{ status: r.status, j: j }}; }});
+                        }}).then(function(res) {{
+                            if (res.j.ok) {{
+                                window.location.href = '/dashboard/canales-whatsapp?conectado=1';
+                            }} else {{
+                                mostrarEstado(res.j.detail || 'No se pudo completar la conexión.', 'danger');
+                            }}
+                        }}).catch(function() {{
+                            mostrarEstado('Error de red al conectar.', 'danger');
+                        }});
+                    }}, {{
+                        config_id: configId,
+                        response_type: 'code',
+                        override_default_response_type: true,
+                        extras: {{ setup: {{}} }},
+                    }});
+                }});
+            }}
+        }})();
+        </script>
+        """
+    else:
+        conectar_html = (
+            '<p class="text-muted small mb-0">'
+            'No configurado todavía — faltan <code>META_APP_ID</code> y '
+            '<code>META_EMBEDDED_SIGNUP_CONFIG_ID</code> en las variables de entorno del servidor. '
+            'Mientras tanto, usa el formulario manual de abajo.</p>'
+        )
+    conectado_ok = (
+        '<div class="alert alert-success py-2 px-3 mb-3"><i class="bi bi-check-circle-fill"></i> '
+        'Canal conectado.</div>'
+    ) if request.query_params.get("conectado") else ""
+
     panel = f"""
     {_titulo_seccion('bi-whatsapp', 'Canales de WhatsApp')}
     <p class="text-muted small mb-3">
@@ -5108,6 +5237,7 @@ async def gestionar_canales_whatsapp(request: Request, usuario: dict = Depends(s
         cada mensaje se identifica y se responde siempre por el mismo número por el que entró.
         Los tokens se guardan cifrados en la base de datos.
     </p>
+    {conectado_ok}
 
     <div class="card leads-card shadow-sm mb-4">
         <div class="barra-acento"></div>
@@ -5121,7 +5251,15 @@ async def gestionar_canales_whatsapp(request: Request, usuario: dict = Depends(s
         </div>
     </div>
 
-    {_titulo_seccion('bi-plus-circle-fill', 'Nuevo canal')}
+    {_titulo_seccion('bi-plug-fill', 'Conectar WhatsApp')}
+    <div class="card leads-card shadow-sm mb-4">
+        <div class="barra-acento"></div>
+        <div class="card-body">
+            {conectar_html}
+        </div>
+    </div>
+
+    {_titulo_seccion('bi-plus-circle-fill', 'Nuevo canal (manual)')}
     <p class="text-muted small mb-2">
         Estos datos se obtienen desde Meta for Developers → tu app → WhatsApp → Configuración de la API.
     </p>
@@ -5190,6 +5328,78 @@ async def crear_canal_whatsapp_nuevo(
         page_access_token=page_access_token.strip(), modo=modo,
     )
     return RedirectResponse(url="/dashboard/canales-whatsapp", status_code=303)
+
+
+@router.post("/canales-whatsapp/embedded-signup/callback")
+async def conectar_whatsapp_embedded_signup(
+    request: Request,
+    usuario: dict = Depends(servicio_identidad.requiere_rol("admin")),
+):
+    """Recibe el `code` que entrega el SDK de Facebook Login for Business al
+    completar Embedded Signup ("Conectar WhatsApp") y termina de registrar
+    el número para Cloud API — reemplaza, para el caso de Coexistencia, el
+    copiar/pegar manual del formulario "Nuevo canal" de abajo. Ver plan en
+    memoria del proyecto: project_coexistencia_embedded_signup_requerido."""
+    datos = await request.json()
+    code = (datos.get("code") or "").strip()
+    waba_id = (datos.get("waba_id") or "").strip()
+    phone_number_id = (datos.get("phone_number_id") or "").strip()
+    pin = (datos.get("pin") or "").strip()
+    nombre = (datos.get("nombre") or "").strip()
+
+    if not code or not waba_id or not phone_number_id or not nombre or len(pin) != 6:
+        return JSONResponse({"ok": False, "detail": "Faltan datos para completar la conexión."}, status_code=400)
+
+    app_id = os.getenv("META_APP_ID", "")
+    app_secret = os.getenv("META_APP_SECRET", "")
+    if not app_id or not app_secret:
+        return JSONResponse(
+            {"ok": False, "detail": "META_APP_ID/META_APP_SECRET no están configurados en el servidor."},
+            status_code=500,
+        )
+
+    api_version = "v21.0"
+
+    r = await get_con_reintentos(
+        f"https://graph.facebook.com/{api_version}/oauth/access_token",
+        params={"client_id": app_id, "client_secret": app_secret, "code": code},
+    )
+    if r.status_code != 200:
+        logger.error(f"Embedded Signup: fallo al intercambiar code — {r.status_code} {r.text}")
+        return JSONResponse({"ok": False, "detail": "Meta rechazó el código de conexión. Intenta de nuevo."}, status_code=400)
+    access_token = r.json().get("access_token", "")
+    if not access_token:
+        return JSONResponse({"ok": False, "detail": "Meta no devolvió un token válido."}, status_code=400)
+
+    headers = {"Authorization": f"Bearer {access_token}"}
+
+    r = await post_con_reintentos(
+        f"https://graph.facebook.com/{api_version}/{phone_number_id}/register",
+        headers=headers, json={"messaging_product": "whatsapp", "pin": pin},
+    )
+    if r.status_code != 200:
+        logger.error(f"Embedded Signup: fallo al registrar el número — {r.status_code} {r.text}")
+        return JSONResponse(
+            {"ok": False, "detail": "No se pudo registrar el número en Cloud API. Verifica el PIN e intenta de nuevo."},
+            status_code=400,
+        )
+
+    # Sin esto, ningún mensaje de esta WABA llegaría a nuestro /webhook — el
+    # número quedaría registrado pero mudo. Si falla, no abortamos: el canal
+    # se guarda igual y queda pendiente suscribir a mano desde WhatsApp
+    # Manager (mejor eso que perder todo el trabajo de arriba).
+    r_webhook = await post_con_reintentos(
+        f"https://graph.facebook.com/{api_version}/{waba_id}/subscribed_apps",
+        headers=headers,
+    )
+    if r_webhook.status_code != 200:
+        logger.error(f"Embedded Signup: fallo al suscribir la WABA a los webhooks — {r_webhook.status_code} {r_webhook.text}")
+
+    await crear_canal_whatsapp(
+        nombre=nombre, phone_number_id=phone_number_id,
+        access_token=access_token, app_secret=app_secret, waba_id=waba_id,
+    )
+    return JSONResponse({"ok": True})
 
 
 @router.post("/canales-whatsapp/{canal_id}/toggle")

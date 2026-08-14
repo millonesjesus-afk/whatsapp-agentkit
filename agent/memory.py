@@ -341,6 +341,11 @@ class CanalWhatsApp(Base):
     access_token_cifrado: Mapped[str | None] = mapped_column(Text, nullable=True)
     app_secret_cifrado: Mapped[str | None] = mapped_column(Text, nullable=True)
     page_access_token_cifrado: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # WhatsApp Business Account ID — solo lo devuelve Embedded Signup (Conectar
+    # WhatsApp); un canal creado a mano con el formulario clásico se queda sin
+    # esto, por eso es nullable. Necesario para suscribir la app a los webhooks
+    # de esa WABA específica.
+    waba_id: Mapped[str | None] = mapped_column(String(50), nullable=True)
     activo: Mapped[bool] = mapped_column(Boolean, default=True)
     # "produccion" (usa el prompt promovido, guardado en Configuracion — no
     # cambia solo con un deploy) o "pruebas" (usa siempre config/prompts.yaml
@@ -440,6 +445,7 @@ def _canal_a_dict(c: CanalWhatsApp) -> dict:
         "access_token": _descifrar(c.access_token_cifrado),
         "app_secret": _descifrar(c.app_secret_cifrado),
         "page_access_token": _descifrar(c.page_access_token_cifrado),
+        "waba_id": c.waba_id,
         "activo": c.activo,
         "modo": c.modo,
         "creado": c.creado,
@@ -450,6 +456,7 @@ def _canal_a_dict(c: CanalWhatsApp) -> dict:
 async def crear_canal_whatsapp(
     nombre: str, phone_number_id: str, access_token: str = "",
     app_secret: str = "", page_access_token: str = "", modo: str = "produccion",
+    waba_id: str = "",
 ) -> dict:
     """Agrega un número de WhatsApp nuevo administrable desde el panel."""
     async with async_session() as session:
@@ -459,6 +466,7 @@ async def crear_canal_whatsapp(
             access_token_cifrado=_cifrar(access_token),
             app_secret_cifrado=_cifrar(app_secret),
             page_access_token_cifrado=_cifrar(page_access_token),
+            waba_id=waba_id or None,
             modo=modo if modo in ("produccion", "pruebas") else "produccion",
         )
         session.add(canal)
