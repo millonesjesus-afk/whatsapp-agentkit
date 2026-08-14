@@ -4154,6 +4154,8 @@ async def enviar_catalogo_chat(telefono: str, archivo_id: int, usuario: dict = D
     archivo = await servicio_conversacion.obtener_archivo_adjunto(archivo_id)
     if archivo is None or not archivo["reutilizable"]:
         raise HTTPException(status_code=404, detail="Catálogo no encontrado")
+    if not os.path.exists(archivo["ruta_disco"]):
+        raise HTTPException(status_code=404, detail="Este catálogo ya no está disponible en el servidor — vuelve a subirlo desde Catálogo.")
 
     with open(archivo["ruta_disco"], "rb") as f:
         contenido = f.read()
