@@ -989,7 +989,7 @@ _NAV_LATERAL_ITEMS = [
     ("inicio", "Inicio", "bi-house-door-fill", "/dashboard", "/dashboard", None),
     ("conversaciones", "Conversaciones", "bi-chat-dots-fill", "/dashboard?estado=todos", "/dashboard?estado=todos", None),
     ("pipeline", "CRM / Pipeline", "bi-briefcase-fill", "/dashboard/pipeline", "/dashboard/pipeline", None),
-    ("campanas", "Campañas", "bi-megaphone-fill", "/dashboard/campanas", "/dashboard/campanas", ("admin",)),
+    ("campanas", "Campañas", "bi-megaphone-fill", "/dashboard/campanas", "/dashboard/campanas", ("admin", "supervisor")),
     ("catalogos", "Catálogo", "bi-folder-fill", "/dashboard/catalogos", "/dashboard/catalogos", None),
     ("equipo", "Equipo", "bi-people-fill", "/dashboard/asesores", "/dashboard/asesores", ROLES_CON_VISION_TOTAL),
     ("analitica", "Analítica", "bi-graph-up-arrow", "/dashboard/metricas", "/dashboard/metricas", ROLES_CON_VISION_TOTAL),
@@ -4680,11 +4680,16 @@ TIPOS_DETECCION = {
 
 
 @router.get("/campanas", response_class=HTMLResponse)
-async def gestionar_campanas(request: Request, usuario: dict = Depends(servicio_identidad.requiere_rol("admin")), creada: int | None = None):
+async def gestionar_campanas(request: Request, usuario: dict = Depends(servicio_identidad.requiere_rol("admin", "supervisor")), creada: int | None = None):
     # Sin rail de conversaciones acá a propósito — esta pantalla gestiona
     # campañas de Meta Ads, no conversaciones; el rail de estados no aporta
     # contexto útil acá (a diferencia de Catálogo/Equipo/Canales/Perfil,
     # donde sí queda).
+    # Supervisor entra en modo solo lectura (Bloque Campañas — Supervisor
+    # solo lectura): ve la misma tabla, sin ningún form de escritura ni la
+    # card "Nueva campaña". Las rutas POST de escritura siguen siendo
+    # admin-only del lado del servidor, no solo ocultas acá.
+    puede_escribir = usuario["rol"] == "admin"
     campanas = await listar_campanas()
     conteos = {c["campana"]: c for c in await contar_leads_por_campana()}
 
@@ -4748,7 +4753,7 @@ async def gestionar_campanas(request: Request, usuario: dict = Depends(servicio_
         # el otro caso (ver memory.py:eliminar_campana, que igual lo valida
         # de nuevo del lado del servidor).
         boton_eliminar_campana = ""
-        if conteos.get(c["nombre"], {}).get("total", 0) == 0:
+        if puede_escribir and conteos.get(c["nombre"], {}).get("total", 0) == 0:
             nombre_js = html.escape(c["nombre"]).replace("'", "\\'")
             boton_eliminar_campana = (
                 f'<form method="post" action="/dashboard/campanas/{c["id"]}/eliminar" '
@@ -4764,15 +4769,8 @@ async def gestionar_campanas(request: Request, usuario: dict = Depends(servicio_
         rowid = str(c["id"])
         manual_activo = bool(c.get("producto_promocional")) and not c.get("codigo_material")
 
-        filas.append(f"""<tr>
-            <td class="ps-3">
-                <div class="fw-semibold">{html.escape(c['nombre'])}</div>
-                <div class="text-muted" style="font-size:.75rem">{html.escape(TIPOS_DETECCION.get(c['tipo_deteccion'], c['tipo_deteccion']))} &middot; patrón: &ldquo;{html.escape(c['patron'])}&rdquo;</div>
-                {link_html}
-            </td>
-            <td class="text-muted">{conteos.get(c['nombre'], {}).get('total', 0)} leads / {conteos.get(c['nombre'], {}).get('vendidos', 0)} vendidos</td>
-            <td>
-                {promo_html}
+        if puede_escribir:
+            promo_celda = f"""{promo_html}
                 <form method="post" action="/dashboard/campanas/{c['id']}/editar" class="d-flex flex-column gap-1 mt-2" style="min-width:240px">
                     <div id="campana-producto-catalogo-{rowid}" style="{'display:none' if manual_activo else ''}">
                         <div class="position-relative">
@@ -4789,48 +4787,41 @@ async def gestionar_campanas(request: Request, usuario: dict = Depends(servicio_
                         <button type="button" class="btn btn-link btn-sm p-0 campana-btn-catalogo" data-rowid="{rowid}">Volver a buscar en el catálogo</button>
                     </div>
                     <button type="submit" class="btn btn-sm btn-outline-primary align-self-start">Guardar promo</button>
-                </form>
-            </td>
-            <td class="pe-3">
-                <div class="d-flex gap-1">
+                </form>"""
+            estado_celda = f"""<div class="d-flex gap-1">
                     <form method="post" action="/dashboard/campanas/{c['id']}/toggle">
                         <button type="submit" class="btn btn-sm {'btn-success' if c['activa'] else 'btn-outline-secondary'}">
                             {'Activa' if c['activa'] else 'Inactiva'}
                         </button>
                     </form>
                     {boton_eliminar_campana}
-                </div>
+                </div>"""
+        else:
+            # Supervisor — solo lectura: mismo dato, sin ningún form de
+            # escritura (Bloque Campañas — Supervisor solo lectura).
+            promo_celda = promo_html
+            estado_celda = (
+                '<span class="badge rounded-pill text-bg-success">Activa</span>' if c['activa']
+                else '<span class="badge rounded-pill text-bg-secondary">Inactiva</span>'
+            )
+
+        filas.append(f"""<tr>
+            <td class="ps-3">
+                <div class="fw-semibold">{html.escape(c['nombre'])}</div>
+                <div class="text-muted" style="font-size:.75rem">{html.escape(TIPOS_DETECCION.get(c['tipo_deteccion'], c['tipo_deteccion']))} &middot; patrón: &ldquo;{html.escape(c['patron'])}&rdquo;</div>
+                {link_html}
             </td>
+            <td class="text-muted">{conteos.get(c['nombre'], {}).get('total', 0)} leads / {conteos.get(c['nombre'], {}).get('vendidos', 0)} vendidos</td>
+            <td>{promo_celda}</td>
+            <td class="pe-3">{estado_celda}</td>
         </tr>""")
 
     opciones_tipo = "".join(f'<option value="{v}">{html.escape(t)}</option>' for v, t in TIPOS_DETECCION.items())
-    ids_filas_js = "".join(f"inicializarBuscadorCampana('{c['id']}');\n        " for c in campanas)
+    ids_filas_js = "".join(f"inicializarBuscadorCampana('{c['id']}');\n        " for c in campanas) if puede_escribir else ""
 
-    panel = f"""
-    {_titulo_seccion('bi-megaphone-fill', 'Gestionar campañas')}
-    <p class="text-muted small mb-3">
-        Cada campaña se detecta una sola vez, en el primer contacto del lead, y ya no cambia
-        durante la conversación. Si eliges un <strong>producto del catálogo</strong>, el precio
-        que ofrece Gabi se toma siempre en vivo de la lista de precios vigente — no puede
-        desincronizarse. El producto/precio manual es solo un respaldo para promociones que no
-        están en la lista de precios.
-    </p>
-    {banner_html}
-
-    <div class="card leads-card shadow-sm mb-4">
-        <div class="barra-acento"></div>
-        <div class="table-responsive">
-            <table class="table table-hover align-middle mb-0 tabla-ejecutiva">
-                <thead>
-                    <tr>
-                        <th class="ps-3">Campaña / enlace de WhatsApp</th><th>Leads / Ventas</th><th>Promoción vigente</th><th class="pe-3">Estado</th>
-                    </tr>
-                </thead>
-                <tbody>{''.join(filas) or '<tr><td colspan="4" class="text-center text-muted py-4">Aún no hay campañas.</td></tr>'}</tbody>
-            </table>
-        </div>
-    </div>
-
+    nueva_campana_html = ""
+    if puede_escribir:
+        nueva_campana_html = f"""
     {_titulo_seccion('bi-plus-circle-fill', 'Nueva campaña')}
     <p class="text-muted small mb-2">
         Escribe el mensaje de saludo tal como debe llegar por SMS/anuncio — se usa para detectar
@@ -4993,6 +4984,34 @@ async def gestionar_campanas(request: Request, usuario: dict = Depends(servicio_
         {ids_filas_js}
     }})();
     </script>
+    """
+
+    panel = f"""
+    {_titulo_seccion('bi-megaphone-fill', 'Gestionar campañas')}
+    <p class="text-muted small mb-3">
+        Cada campaña se detecta una sola vez, en el primer contacto del lead, y ya no cambia
+        durante la conversación. Si eliges un <strong>producto del catálogo</strong>, el precio
+        que ofrece Gabi se toma siempre en vivo de la lista de precios vigente — no puede
+        desincronizarse. El producto/precio manual es solo un respaldo para promociones que no
+        están en la lista de precios.
+    </p>
+    {banner_html}
+
+    <div class="card leads-card shadow-sm mb-4">
+        <div class="barra-acento"></div>
+        <div class="table-responsive">
+            <table class="table table-hover align-middle mb-0 tabla-ejecutiva">
+                <thead>
+                    <tr>
+                        <th class="ps-3">Campaña / enlace de WhatsApp</th><th>Leads / Ventas</th><th>Promoción vigente</th><th class="pe-3">Estado</th>
+                    </tr>
+                </thead>
+                <tbody>{''.join(filas) or '<tr><td colspan="4" class="text-center text-muted py-4">Aún no hay campañas.</td></tr>'}</tbody>
+            </table>
+        </div>
+    </div>
+
+    {nueva_campana_html}
     """
     cuerpo = f"""<div class="shell d-flex"><div class="main-pane flex-grow-1 p-4">{panel}</div></div>"""
     return _pagina("Gestionar campañas", usuario, cuerpo, request=request)
