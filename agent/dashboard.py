@@ -992,7 +992,7 @@ _NAV_LATERAL_ITEMS = [
     ("campanas", "Campañas", "bi-megaphone-fill", "/dashboard/campanas", "/dashboard/campanas", ("admin", "supervisor")),
     ("catalogos", "Catálogo", "bi-folder-fill", "/dashboard/catalogos", "/dashboard/catalogos", None),
     ("equipo", "Equipo", "bi-people-fill", "/dashboard/asesores", "/dashboard/asesores", ROLES_CON_VISION_TOTAL),
-    ("analitica", "Analítica", "bi-graph-up-arrow", "/dashboard/metricas", "/dashboard/metricas", ROLES_CON_VISION_TOTAL),
+    ("analitica", "Analítica", "bi-graph-up-arrow", "/dashboard/metricas", "/dashboard/metricas", ("admin", "supervisor", "asesor")),
     ("canales", "Canales de WhatsApp", "bi-whatsapp", "/dashboard/canales-whatsapp", "/dashboard/canales-whatsapp", ("admin",)),
 ]
 
@@ -1902,9 +1902,12 @@ async def logout(request: Request):
 
 # ── Bandeja principal (sin conversación seleccionada) ─────────────────
 
-async def _contenido_metricas(leads: list[dict]) -> str:
-    """Embudo + tabla completa de leads + exportar — página separada de Métricas
-    (admin/supervisor), fuera de la bandeja operativa de 3 columnas."""
+async def _contenido_metricas(leads: list[dict], mostrar_derivados: bool = True, mostrar_exportar: bool = True) -> str:
+    """Embudo + tabla completa de leads + exportar — página separada de Métricas.
+    Reutilizada también para la vista personal del Asesor (Bloque Analítica —
+    vista personal de Asesor): mismo render, con `leads` ya pre-filtrados a su
+    propia cartera y los flags en False (derivados/exportar no aplican a la
+    vista de un único asesor sobre sí mismo)."""
     embudo = _calcular_embudo(leads)
     tarjetas = "".join(
         f"""<div class="col">
@@ -1924,32 +1927,38 @@ async def _contenido_metricas(leads: list[dict]) -> str:
         for etiqueta, cantidad, pct in embudo
     )
 
-    conteos_derivado = {estado: 0 for estado in ESTADOS_DERIVADO}
-    for lead in leads:
-        estado = _estado_conversacion(lead)
-        if estado in conteos_derivado:
-            conteos_derivado[estado] += 1
-    total_derivados = sum(conteos_derivado.values())
+    derivados_html = ""
+    if mostrar_derivados:
+        conteos_derivado = {estado: 0 for estado in ESTADOS_DERIVADO}
+        for lead in leads:
+            estado = _estado_conversacion(lead)
+            if estado in conteos_derivado:
+                conteos_derivado[estado] += 1
+        total_derivados = sum(conteos_derivado.values())
 
-    tarjetas_derivado = "".join(
-        f"""<div class="col">
-            <div class="card funnel-card shadow-sm h-100">
-                <div class="card-body py-2 text-center">
-                    <div class="icono mx-auto mb-1" style="background:{ICONO_ESTADO[estado][1]}">
-                        <i class="bi {ICONO_ESTADO[estado][0]}"></i>
+        tarjetas_derivado = "".join(
+            f"""<div class="col">
+                <div class="card funnel-card shadow-sm h-100">
+                    <div class="card-body py-2 text-center">
+                        <div class="icono mx-auto mb-1" style="background:{ICONO_ESTADO[estado][1]}">
+                            <i class="bi {ICONO_ESTADO[estado][0]}"></i>
+                        </div>
+                        <div class="d-flex align-items-baseline justify-content-center gap-2">
+                            <span class="fs-5 fw-bold" style="color:var(--gaso-azul)">{conteos_derivado[estado]}</span>
+                            <span class="badge-suave" style="background-color:#f1f5f9;color:#475569">
+                                {round(conteos_derivado[estado] / total_derivados * 100) if total_derivados else 0}%
+                            </span>
+                        </div>
+                        <div class="text-muted mt-1" style="font-size:.76rem">{html.escape(ETIQUETAS_ESTADO[estado])}</div>
                     </div>
-                    <div class="d-flex align-items-baseline justify-content-center gap-2">
-                        <span class="fs-5 fw-bold" style="color:var(--gaso-azul)">{conteos_derivado[estado]}</span>
-                        <span class="badge-suave" style="background-color:#f1f5f9;color:#475569">
-                            {round(conteos_derivado[estado] / total_derivados * 100) if total_derivados else 0}%
-                        </span>
-                    </div>
-                    <div class="text-muted mt-1" style="font-size:.76rem">{html.escape(ETIQUETAS_ESTADO[estado])}</div>
                 </div>
-            </div>
-        </div>"""
-        for estado in ESTADOS_DERIVADO
-    )
+            </div>"""
+            for estado in ESTADOS_DERIVADO
+        )
+        derivados_html = f"""
+    {_titulo_seccion('bi-person-check-fill', 'Estado con asesor humano (derivados)')}
+    <div class="row row-cols-2 row-cols-md-4 g-2 mb-3">{tarjetas_derivado}</div>
+    """
 
     filas = "".join(
         f"""<tr data-buscar="{html.escape((lead.get('nombre') or '') + ' ' + lead['telefono'] + ' ' + (lead.get('interes') or '') + ' ' + (lead.get('producto_tipo') or '') + ' ' + (lead.get('producto_marca') or '') + ' ' + (lead.get('asesor_asignado') or '') + ' ' + (lead.get('campana_origen') or '') + ' ' + (lead.get('_busqueda_venta') or ''), quote=True).lower()}">
@@ -1990,20 +1999,24 @@ async def _contenido_metricas(leads: list[dict]) -> str:
         for i, col in enumerate(columnas_metricas)
     )
 
+    exportar_html = (
+        """<div class="d-flex gap-2">
+            <a href="/dashboard/metricas/exportar.csv" class="btn btn-sm btn-outline-primary"><i class="bi bi-download"></i> CSV</a>
+            <a href="/dashboard/metricas/exportar.xlsx" class="btn btn-sm btn-outline-primary"><i class="bi bi-file-earmark-excel"></i> Excel</a>
+        </div>"""
+        if mostrar_exportar else ""
+    )
+
     return f"""
     <div class="d-flex justify-content-between align-items-center mb-3">
         {_titulo_seccion('bi-graph-up-arrow', 'Métricas')}
-        <div class="d-flex gap-2">
-            <a href="/dashboard/metricas/exportar.csv" class="btn btn-sm btn-outline-primary"><i class="bi bi-download"></i> CSV</a>
-            <a href="/dashboard/metricas/exportar.xlsx" class="btn btn-sm btn-outline-primary"><i class="bi bi-file-earmark-excel"></i> Excel</a>
-        </div>
+        {exportar_html}
     </div>
 
     {_titulo_seccion('bi-funnel-fill', 'Embudo de ventas (con Gabi)')}
     <div class="row row-cols-2 row-cols-md-3 row-cols-lg-5 g-2 mb-3">{tarjetas}</div>
 
-    {_titulo_seccion('bi-person-check-fill', 'Estado con asesor humano (derivados)')}
-    <div class="row row-cols-2 row-cols-md-4 g-2 mb-3">{tarjetas_derivado}</div>
+    {derivados_html}
 
     {_titulo_seccion('bi-people-fill', f'Leads ({len(leads)})')}
     <div class="d-flex justify-content-between align-items-center mb-3 gap-2">
@@ -2034,13 +2047,20 @@ async def _contenido_metricas(leads: list[dict]) -> str:
 
 
 @router.get("/metricas", response_class=HTMLResponse)
-async def metricas(request: Request, usuario: dict = Depends(servicio_identidad.requiere_rol(*ROLES_CON_VISION_TOTAL))):
+async def metricas(request: Request, usuario: dict = Depends(servicio_identidad.requiere_rol("admin", "supervisor", "asesor"))):
     # Sin rail de conversaciones acá a propósito (a diferencia de otras
     # páginas secundarias) — esta vista ya muestra su propio embudo
     # (Cap. 4.3), repetirlo en el rail era literalmente la misma
     # información duplicada dos veces en la misma pantalla.
-    leads = await _adjuntar_resumen_ventas(await listar_leads())
-    panel = await _contenido_metricas(leads)
+    # Bloque Analítica — vista personal de Asesor: mismo patrón de alcance
+    # por rol que ya usa CRM/Pipeline — el asesor nunca puede elegir otro
+    # asesor (no hay parámetro de query para eso), su cartera se resuelve
+    # server-side con su propio username.
+    vision_total = usuario["rol"] in ROLES_CON_VISION_TOTAL
+    leads = await _adjuntar_resumen_ventas(
+        await listar_leads(asesor_asignado=None if vision_total else usuario["username"])
+    )
+    panel = await _contenido_metricas(leads, mostrar_derivados=vision_total, mostrar_exportar=vision_total)
     cuerpo = f"""<div class="shell d-flex"><div class="main-pane flex-grow-1 p-4">{panel}</div></div>"""
     return _pagina("Métricas", usuario, cuerpo, request=request)
 
