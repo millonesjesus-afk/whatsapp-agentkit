@@ -40,7 +40,7 @@ from agent.tiempo_real import gestor_conexiones
 from agent.rate_limit import limitador_login, bloqueo_login
 from agent.memory import (
     listar_leads, obtener_lead, actualizar_lead,
-    obtener_usuario, listar_asesores,
+    obtener_usuario, listar_asesores, crear_usuario,
     asignar_asesor_a_lead, marcar_lead_visto, limpiar_revision_prioritaria, actualizar_disponibilidad, actualizar_nivel_asesor,
     listar_campanas, crear_campana, actualizar_campana, contar_leads_por_campana, eliminar_campana,
     cambiar_password, contar_leads_activos_por_asesor, RESULTADOS_CERRADOS, listar_leads_agendados,
@@ -4485,10 +4485,53 @@ async def _pagina_gestionar_asesores(usuario: dict, mensaje_html: str = "") -> s
         for a in asesores
     )
 
+    nuevo_usuario_html = ""
+    if usuario["rol"] == "admin":
+        opciones_rol = "".join(
+            f'<option value="{r}">{etiqueta}</option>'
+            for r, etiqueta in (("asesor", "Asesor"), ("supervisor", "Supervisor"), ("admin", "Admin"))
+        )
+        opciones_nivel = "".join(f'<option value="{n}">{n.capitalize()}</option>' for n in NIVELES_ASESOR)
+        nuevo_usuario_html = f"""
+        <div class="card leads-card shadow-sm mb-3" style="max-width:480px">
+            <div class="barra-acento"></div>
+            <div class="card-body p-3">
+                <h6 class="text-uppercase text-muted small fw-bold mb-1">Crear usuario</h6>
+                <p class="text-muted small mb-2">La contraseña se genera automáticamente y se muestra una sola vez al crear la cuenta.</p>
+                <form method="post" action="/dashboard/asesores/nuevo" class="row g-2">
+                    <div class="col-6">
+                        <label class="form-label small text-muted mb-0">Usuario</label>
+                        <input type="text" name="username" class="form-control form-control-sm" required autocomplete="off">
+                    </div>
+                    <div class="col-6">
+                        <label class="form-label small text-muted mb-0">Nombre</label>
+                        <input type="text" name="nombre" class="form-control form-control-sm" required>
+                    </div>
+                    <div class="col-6">
+                        <label class="form-label small text-muted mb-0">Rol</label>
+                        <select name="rol" id="rol-nuevo-usuario" class="form-select form-select-sm" onchange="document.getElementById('nivel-nuevo-usuario-wrap').style.display = this.value === 'asesor' ? '' : 'none'">
+                            {opciones_rol}
+                        </select>
+                    </div>
+                    <div class="col-6" id="nivel-nuevo-usuario-wrap">
+                        <label class="form-label small text-muted mb-0">Nivel</label>
+                        <select name="nivel" class="form-select form-select-sm">
+                            {opciones_nivel}
+                        </select>
+                    </div>
+                    <div class="col-12">
+                        <button type="submit" class="btn btn-sm btn-primary">Crear usuario</button>
+                    </div>
+                </form>
+            </div>
+        </div>
+        """
+
     panel = f"""
     {_titulo_seccion('bi-people-fill', 'Gestionar asesores')}
     <p class="text-muted small mb-3">El nivel se usa para la asignación automática de leads según el valor del producto de interés. La disponibilidad la controla cada asesor desde su propia sesión.</p>
     {mensaje_html}
+    {nuevo_usuario_html}
     <div class="card leads-card shadow-sm mb-3" style="max-width:480px">
         <div class="barra-acento"></div>
         <div class="card-body p-3">
@@ -4546,6 +4589,48 @@ async def resetear_password_asesor(username: str, usuario: dict = Depends(servic
         '<div class="alert alert-success py-2 small">'
         f'Nueva contraseña para <strong>{html.escape(objetivo["nombre"])}</strong> ({html.escape(username)}): '
         f'<code>{html.escape(nueva_password)}</code> — pásasela por tu canal habitual, no se volverá a mostrar.'
+        '</div>'
+    )
+    cuerpo = await _pagina_gestionar_asesores(usuario, mensaje_html)
+    return _pagina("Gestionar asesores", usuario, cuerpo)
+
+
+@router.post("/asesores/nuevo", response_class=HTMLResponse)
+async def crear_usuario_nuevo(
+    username: str = Form(...),
+    nombre: str = Form(...),
+    rol: str = Form(...),
+    nivel: str = Form(""),
+    usuario: dict = Depends(servicio_identidad.requiere_rol("admin")),
+):
+    """Alta de cuentas del panel — exclusivamente Admin. Rechaza si el
+    username ya existe en vez de dejar que crear_usuario() lo sobreescriba
+    silenciosamente (Security Current State Assessment, hallazgo ya
+    registrado)."""
+    username = username.strip()
+    if not username:
+        raise HTTPException(status_code=400, detail="El usuario no puede estar vacío")
+    if rol not in ("admin", "supervisor", "asesor"):
+        raise HTTPException(status_code=400, detail="Rol inválido")
+    if rol == "asesor" and nivel not in NIVELES_ASESOR:
+        raise HTTPException(status_code=400, detail="Nivel inválido")
+
+    if await obtener_usuario(username) is not None:
+        mensaje_html = (
+            '<div class="alert alert-danger py-2 small">'
+            f'Ya existe una cuenta con el usuario <strong>{html.escape(username)}</strong> — elige otro.'
+            '</div>'
+        )
+        cuerpo = await _pagina_gestionar_asesores(usuario, mensaje_html)
+        return _pagina("Gestionar asesores", usuario, cuerpo)
+
+    nueva_password = secrets.token_urlsafe(9)
+    await crear_usuario(username, nueva_password, nombre, rol, nivel if rol == "asesor" else None)
+
+    mensaje_html = (
+        '<div class="alert alert-success py-2 small">'
+        f'Cuenta creada para <strong>{html.escape(nombre)}</strong> ({html.escape(username)}, rol {html.escape(rol)}). '
+        f'Contraseña: <code>{html.escape(nueva_password)}</code> — pásasela por tu canal habitual, no se volverá a mostrar.'
         '</div>'
     )
     cuerpo = await _pagina_gestionar_asesores(usuario, mensaje_html)
