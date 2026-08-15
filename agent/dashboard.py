@@ -5094,12 +5094,17 @@ async def gestionar_canales_whatsapp(request: Request, usuario: dict = Depends(s
                     </button>
                 </form>
             </td>
-            <td class="pe-3">
+            <td>
                 <form method="post" action="/dashboard/canales-whatsapp/{c['id']}/toggle">
                     <button type="submit" class="btn btn-sm {'btn-success' if c['activo'] else 'btn-outline-secondary'}">
                         {'Activo' if c['activo'] else 'Inactivo'}
                     </button>
                 </form>
+            </td>
+            <td class="pe-3">
+                <a href="/dashboard/canales-whatsapp?editar={c['id']}" class="btn btn-sm btn-outline-secondary" title="Editar nombre o credenciales">
+                    <i class="bi bi-pencil"></i>
+                </a>
             </td>
         </tr>""")
 
@@ -5230,6 +5235,55 @@ async def gestionar_canales_whatsapp(request: Request, usuario: dict = Depends(s
         '<div class="alert alert-success py-2 px-3 mb-3"><i class="bi bi-check-circle-fill"></i> '
         'Canal conectado.</div>'
     ) if request.query_params.get("conectado") else ""
+    editado_ok = (
+        '<div class="alert alert-success py-2 px-3 mb-3"><i class="bi bi-check-circle-fill"></i> '
+        'Canal actualizado.</div>'
+    ) if request.query_params.get("editado") else ""
+
+    # Edición de un canal existente — solo nombre/credenciales (Alcance A,
+    # aprobado 2026-08-14): phone_number_id queda fuera a propósito, porque es
+    # la clave que usa resolver_canal() para enrutar mensajes entrantes — un
+    # error de tipeo ahí desconectaría el canal, a diferencia de un token mal
+    # puesto, que solo falla al enviar (más fácil de notar y corregir).
+    editar_id = request.query_params.get("editar")
+    editar_html = ""
+    if editar_id:
+        canal_editar = next((c for c in canales if str(c["id"]) == editar_id), None)
+        if canal_editar:
+            editar_html = f"""
+            {_titulo_seccion('bi-pencil-fill', f"Editar canal — {html.escape(canal_editar['nombre'])}")}
+            <p class="text-muted small mb-2">
+                Deja en blanco cualquier credencial que no quieras cambiar — no se borra la que ya
+                está guardada. El Phone Number ID no se puede editar acá (identifica al canal).
+            </p>
+            <div class="card leads-card shadow-sm mb-4">
+                <div class="barra-acento"></div>
+                <div class="card-body">
+                    <form method="post" action="/dashboard/canales-whatsapp/{canal_editar['id']}/editar" class="row g-2">
+                        <div class="col-md-4">
+                            <label class="form-label small text-muted mb-0">Nombre</label>
+                            <input type="text" name="nombre" class="form-control form-control-sm" value="{html.escape(canal_editar['nombre'])}" required>
+                        </div>
+                        <div class="col-md-4">
+                            <label class="form-label small text-muted mb-0">Access Token <span class="text-muted">(actual: {html.escape(_enmascarar_token(canal_editar.get('access_token')))})</span></label>
+                            <input type="text" name="access_token" class="form-control form-control-sm" placeholder="Dejar en blanco para no cambiar">
+                        </div>
+                        <div class="col-md-4">
+                            <label class="form-label small text-muted mb-0">App Secret <span class="text-muted">(actual: {html.escape(_enmascarar_token(canal_editar.get('app_secret')))})</span></label>
+                            <input type="text" name="app_secret" class="form-control form-control-sm" placeholder="Dejar en blanco para no cambiar">
+                        </div>
+                        <div class="col-md-4">
+                            <label class="form-label small text-muted mb-0">Page Access Token <span class="text-muted">(actual: {html.escape(_enmascarar_token(canal_editar.get('page_access_token')))})</span></label>
+                            <input type="text" name="page_access_token" class="form-control form-control-sm" placeholder="Dejar en blanco para no cambiar">
+                        </div>
+                        <div class="col-12 d-flex gap-2">
+                            <button type="submit" class="btn btn-sm btn-primary">Guardar cambios</button>
+                            <a href="/dashboard/canales-whatsapp" class="btn btn-sm btn-outline-secondary">Cancelar</a>
+                        </div>
+                    </form>
+                </div>
+            </div>
+            """
 
     panel = f"""
     {_titulo_seccion('bi-whatsapp', 'Canales de WhatsApp')}
@@ -5240,18 +5294,21 @@ async def gestionar_canales_whatsapp(request: Request, usuario: dict = Depends(s
         Los tokens se guardan cifrados en la base de datos.
     </p>
     {conectado_ok}
+    {editado_ok}
 
     <div class="card leads-card shadow-sm mb-4">
         <div class="barra-acento"></div>
         <div class="table-responsive">
             <table class="table table-hover align-middle mb-0 tabla-ejecutiva">
                 <thead>
-                    <tr><th class="ps-3">Canal</th><th>Credenciales</th><th>Modo</th><th class="pe-3">Estado</th></tr>
+                    <tr><th class="ps-3">Canal</th><th>Credenciales</th><th>Modo</th><th>Estado</th><th class="pe-3"></th></tr>
                 </thead>
-                <tbody>{''.join(filas) or '<tr><td colspan="4" class="text-center text-muted py-4">Aún no hay canales configurados.</td></tr>'}</tbody>
+                <tbody>{''.join(filas) or '<tr><td colspan="5" class="text-center text-muted py-4">Aún no hay canales configurados.</td></tr>'}</tbody>
             </table>
         </div>
     </div>
+
+    {editar_html}
 
     {_titulo_seccion('bi-plug-fill', 'Conectar WhatsApp')}
     <div class="card leads-card shadow-sm mb-4">
@@ -5402,6 +5459,29 @@ async def conectar_whatsapp_embedded_signup(
         access_token=access_token, app_secret=app_secret, waba_id=waba_id,
     )
     return JSONResponse({"ok": True})
+
+
+@router.post("/canales-whatsapp/{canal_id}/editar")
+async def editar_canal_whatsapp_ruta(
+    canal_id: int,
+    nombre: str = Form(...),
+    access_token: str = Form(""),
+    app_secret: str = Form(""),
+    page_access_token: str = Form(""),
+    usuario: dict = Depends(servicio_identidad.requiere_rol("admin")),
+):
+    """Edita nombre/credenciales de un canal ya existente — Alcance A
+    (aprobado 2026-08-14): sin phone_number_id ni waba_id, sin alertas de
+    caducidad. Resuelve el caso real de hoy: renovar el Access Token de
+    Coexistencia antes de que caduque a los 60 días."""
+    canales = await listar_canales_whatsapp()
+    if not any(c["id"] == canal_id for c in canales):
+        raise HTTPException(status_code=404, detail="Canal no encontrado")
+    await actualizar_canal_whatsapp(
+        canal_id, nombre=nombre.strip(), access_token=access_token.strip(),
+        app_secret=app_secret.strip(), page_access_token=page_access_token.strip(),
+    )
+    return RedirectResponse(url="/dashboard/canales-whatsapp?editado=1", status_code=303)
 
 
 @router.post("/canales-whatsapp/{canal_id}/toggle")
