@@ -253,6 +253,49 @@ def _calcular_embudo(leads: list[dict]) -> list[tuple[str, int, int]]:
 _usuario_actual = servicio_identidad.usuario_actual
 
 
+# ── CSRF explícito (Security Architecture, Decisión local ya "Objetivo") ──
+#
+# El token se genera una sola vez por sesión, lazy, en
+# ServicioIdentidad.usuario_actual() — acá solo se consume: se inyecta en
+# los formularios clásicos (_csrf_campo) y se valida en cada POST protegido
+# (Depends(verificar_csrf)). /login y /recuperar quedan fuera a propósito:
+# son pre-sesión, todavía no existe ningún token que comparar (ya mitigados
+# por rate limiting + bloqueo por intentos). /webhook (agent/main.py) ni
+# siquiera pasa por este router — se autentica por firma HMAC de Meta, no
+# por sesión, y no debe llevar CSRF.
+
+def _csrf_campo(request: Request | None) -> str:
+    """Campo oculto con el token CSRF de la sesión actual, para insertar
+    dentro de cualquier <form method="post"> clásico del panel. Tolera
+    request=None (páginas pre-sesión como login/recuperar, que no llevan
+    este campo en sus propios forms) sin romper — devuelve un campo vacío
+    en vez de lanzar, para no crashear un render por un dato que esas
+    páginas no necesitan."""
+    token = request.session.get("csrf_token", "") if request is not None else ""
+    return f'<input type="hidden" name="csrf_token" value="{html.escape(token)}">'
+
+
+async def verificar_csrf(request: Request) -> None:
+    """Dependency reutilizable — mismo patrón que requiere_rol(), agregada
+    a cada ruta POST protegida. Acepta el token por header (fetch/JS, los 6
+    call sites que no usan un <form>) o por campo de formulario (form
+    clásico, urlencoded/multipart). No consume el body si el header ya trajo
+    el token, y solo intenta leer el form cuando el Content-Type es
+    compatible — evita interferir con bodies JSON (Embedded Signup) y
+    reutiliza el cache de Starlette del body en vez de consumir el stream
+    dos veces, así que no rompe el parseo de archivos que hace la propia
+    ruta después (UploadFile/Form)."""
+    token_sesion = request.session.get("csrf_token")
+    token_enviado = request.headers.get("x-csrf-token")
+    if not token_enviado:
+        content_type = request.headers.get("content-type", "")
+        if "form" in content_type:
+            formulario = await request.form()
+            token_enviado = formulario.get("csrf_token")
+    if not token_sesion or not token_enviado or not secrets.compare_digest(str(token_sesion), str(token_enviado)):
+        raise HTTPException(status_code=403, detail="Token CSRF inválido o ausente — recarga la página e intenta de nuevo")
+
+
 def _verificar_acceso_lead(usuario: dict, lead: dict):
     """Un asesor solo puede ver/editar sus propios leads asignados."""
     if usuario["rol"] in ROLES_CON_VISION_TOTAL:
@@ -1053,6 +1096,7 @@ def _pagina(
             en_linea = usuario.get("disponible", True)
             disp_html = (
                 '<form method="post" action="/dashboard/disponibilidad" class="d-inline m-0">'
+                f'{_csrf_campo(request)}'
                 f'<button type="submit" class="link-btn badge '
                 f'{"text-bg-success" if en_linea else "text-bg-secondary"}">'
                 f'{"🟢 Disponible" if en_linea else "⚪ No disponible"}</button></form>'
@@ -1076,6 +1120,7 @@ def _pagina(
                 </a>
                 {disp_html}
                 <form method="post" action="/dashboard/logout" class="d-inline m-0">
+                    {_csrf_campo(request)}
                     <button type="submit" class="btn btn-sm btn-outline-light rounded-pill"><i class="bi bi-box-arrow-right"></i> Salir</button>
                 </form>
             </div>
@@ -1091,11 +1136,14 @@ def _pagina(
         '<i class="bi bi-funnel-fill"></i></button>'
         if usuario and not es_chat else ''
     )
+    csrf_token = request.session.get("csrf_token", "") if (request is not None and usuario) else ""
+    meta_csrf = f'<meta name="csrf-token" content="{html.escape(csrf_token)}">' if csrf_token else ""
     return f"""<!DOCTYPE html>
 <html lang="es">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+{meta_csrf}
 <title>{html.escape(titulo)} — Gaso+ Panel</title>
 {BOOTSTRAP_CSS}
 {BOOTSTRAP_ICONS}
@@ -1112,6 +1160,18 @@ def _pagina(
 <div id="contenido-app">{cuerpo}</div>
 </div>
 {BOOTSTRAP_JS}
+<script>
+    // Token CSRF de la sesión — leído una sola vez del <meta> de esta misma
+    // carga de página (el shell/head no se vuelve a renderizar en las
+    // navegaciones data-ajax, así que este valor sigue siendo válido para
+    // cualquier fetch() posterior mientras dure la sesión). Los 6 POST por
+    // fetch del panel lo usan como header X-CSRF-Token en vez de duplicar
+    // este querySelector en cada uno.
+    window.__csrfToken = function() {{
+        var meta = document.querySelector('meta[name="csrf-token"]');
+        return meta ? meta.content : '';
+    }};
+</script>
 <script>
 (function() {{
     // Barra de carga fina arriba de la página: como no hay framework de JS,
@@ -1895,7 +1955,7 @@ async def login_submit(request: Request, username: str = Form(...), password: st
 
 
 @router.post("/logout")
-async def logout(request: Request):
+async def logout(request: Request, _csrf: None = Depends(verificar_csrf)):
     request.session.clear()
     return RedirectResponse(url="/dashboard/login", status_code=303)
 
@@ -2935,6 +2995,7 @@ def _script_chat_en_vivo(telefono: str, tiene_asesor: bool) -> str:
             estadoAdjunto.textContent = 'Procesando y enviando nota de voz...';
             fetch('/dashboard/lead/' + encodeURIComponent(telefono) + '/enviar-audio', {
                 method: 'POST',
+                headers: {'X-CSRF-Token': window.__csrfToken()},
                 body: datos
             }).then(function(r) {
                 if (!r.ok) throw new Error('fallo el envio');
@@ -2965,6 +3026,7 @@ def _script_chat_en_vivo(telefono: str, tiene_asesor: bool) -> str:
             estadoAdjunto.textContent = 'Enviando ' + archivo.name + '...';
             fetch('/dashboard/lead/' + encodeURIComponent(telefono) + '/enviar-archivo', {
                 method: 'POST',
+                headers: {'X-CSRF-Token': window.__csrfToken()},
                 body: datos
             }).then(function(r) {
                 if (!r.ok) throw new Error('fallo el envio');
@@ -3005,7 +3067,7 @@ def _script_chat_en_vivo(telefono: str, tiene_asesor: bool) -> str:
 
                 fetch(form.action, {
                     method: 'POST',
-                    headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+                    headers: {'Content-Type': 'application/x-www-form-urlencoded', 'X-CSRF-Token': window.__csrfToken()},
                     body: 'mensaje=' + encodeURIComponent(texto)
                 }).then(actualizar);
             });
@@ -3140,7 +3202,8 @@ def _script_chat_en_vivo(telefono: str, tiene_asesor: bool) -> str:
                 estadoAdjunto.style.display = 'block';
                 estadoAdjunto.textContent = 'Enviando catálogo...';
                 fetch('/dashboard/lead/' + encodeURIComponent(telefono) + '/enviar-catalogo/' + archivoId, {
-                    method: 'POST'
+                    method: 'POST',
+                    headers: {'X-CSRF-Token': window.__csrfToken()}
                 }).then(function(r) {
                     if (!r.ok) throw new Error('fallo el envio');
                     estadoAdjunto.style.display = 'none';
@@ -3177,7 +3240,8 @@ def _banner_conflicto_edicion(evento: dict | None) -> str:
 
 
 async def _bloque_gestion_lead(
-    telefono: str, lead: dict, usuario: dict, hay_conflicto: bool = False, evento_conflicto: dict | None = None,
+    telefono: str, lead: dict, usuario: dict, request: Request | None = None,
+    hay_conflicto: bool = False, evento_conflicto: dict | None = None,
 ) -> str:
     """Formularios de Asignación / Resultado / Cierre de venta — se muestran
     siempre junto al resumen del cliente (columna del lead), así que el POST
@@ -3202,6 +3266,7 @@ async def _bloque_gestion_lead(
             <div class="card-body p-3">
                 <h6 class="text-uppercase text-muted small fw-bold mb-2">Asignación</h6>
                 <form method="post" action="/dashboard/lead/{html.escape(telefono)}/asignar" class="d-flex gap-2">
+                    {_csrf_campo(request)}
                     <input type="hidden" name="version" value="{lead.get('version', 0)}">
                     <select name="asesor_asignado" class="form-select form-select-sm">{opciones_asesor}</select>
                     <button type="submit" class="btn btn-sm btn-primary">Asignar</button>
@@ -3246,6 +3311,7 @@ async def _bloque_gestion_lead(
         <div class="card-body p-3">
             <h6 class="text-uppercase text-muted small fw-bold mb-2">Resultado tras derivación a asesor</h6>
             <form method="post" action="/dashboard/lead/{html.escape(telefono)}/resultado" id="form-resultado">
+                {_csrf_campo(request)}
                 <input type="hidden" name="version" value="{lead.get('version', 0)}">
                 <div class="d-flex gap-2">
                     <select name="resultado" id="resultado-select" class="form-select form-select-sm">{opciones_resultado}</select>
@@ -3278,6 +3344,7 @@ async def _bloque_gestion_lead(
         <div class="card-body p-3">
             <h6 class="text-uppercase text-muted small fw-bold mb-2">Cierre de venta (si corresponde)</h6>
             <form method="post" action="/dashboard/lead/{html.escape(telefono)}/venta" id="form-venta">
+                {_csrf_campo(request)}
                 <input type="hidden" name="version" value="{lead.get('version', 0)}">
                 <div class="mb-2">
                     <label class="form-label small text-muted mb-0">Productos vendidos</label>
@@ -3620,7 +3687,7 @@ def _script_copiloto_ia(telefono: str) -> str:
 
         function generar() {{
             pintarCargando();
-            fetch('/dashboard/lead/' + encodeURIComponent(telefono) + '/resumen-ia', {{ method: 'POST' }})
+            fetch('/dashboard/lead/' + encodeURIComponent(telefono) + '/resumen-ia', {{ method: 'POST', headers: {{ 'X-CSRF-Token': window.__csrfToken() }} }})
                 .then(function(r) {{ return r.json(); }})
                 .then(function(datos) {{ pintarResumen(datos.resumen); }})
                 .catch(function() {{ pintarResumen('No se pudo generar el resumen — intentá de nuevo.'); }});
@@ -3707,7 +3774,8 @@ async def _render_timeline_lead(telefono: str) -> str:
 
 
 async def _bloque_resumen_cliente(
-    telefono: str, lead: dict, usuario: dict, hay_conflicto: bool = False, evento_conflicto: dict | None = None,
+    telefono: str, lead: dict, usuario: dict, request: Request | None = None,
+    hay_conflicto: bool = False, evento_conflicto: dict | None = None,
 ) -> str:
     """Resumen del cliente con el mismo lenguaje visual 'ejecutivo' de la
     tabla de leads (card con barra de acento, badge suave, tipografía
@@ -3770,7 +3838,7 @@ async def _bloque_resumen_cliente(
         </div>
     </div>
     {await _render_timeline_lead(telefono)}
-    {await _bloque_gestion_lead(telefono, lead, usuario, hay_conflicto=hay_conflicto, evento_conflicto=evento_conflicto)}
+    {await _bloque_gestion_lead(telefono, lead, usuario, request=request, hay_conflicto=hay_conflicto, evento_conflicto=evento_conflicto)}
     """
 
 
@@ -3815,7 +3883,7 @@ async def _renderizar_detalle_lead(
 
     nombre_mostrado = lead.get("nombre") or "(sin nombre)"
     resumen_cliente_html = await _bloque_resumen_cliente(
-        telefono, lead, usuario, hay_conflicto=hay_conflicto, evento_conflicto=evento_conflicto,
+        telefono, lead, usuario, request=request, hay_conflicto=hay_conflicto, evento_conflicto=evento_conflicto,
     )
     bloque_respuesta_html = await _bloque_respuesta(telefono, lead)
 
@@ -3935,7 +4003,7 @@ async def mensajes_json(telefono: str, usuario: dict = Depends(_usuario_actual))
 
 
 @router.post("/lead/{telefono}/resumen-ia")
-async def generar_resumen_ia(telefono: str, usuario: dict = Depends(_usuario_actual)):
+async def generar_resumen_ia(telefono: str, usuario: dict = Depends(_usuario_actual), _csrf: None = Depends(verificar_csrf)):
     """Resumen IA bajo demanda (Copiloto — Cap. 5, primera capacidad activa)
     — sin persistir nada: se genera cada vez que se pide, no hay "el" resumen
     guardado del lead. Mismo control de acceso que el resto de endpoints del
@@ -3989,6 +4057,7 @@ async def responder_cliente(
     telefono: str,
     mensaje: str = Form(...),
     usuario: dict = Depends(_usuario_actual),
+    _csrf: None = Depends(verificar_csrf),
 ):
     """El asesor humano responde al cliente por el mismo número de WhatsApp
     (Gabi ya está pausada para este lead porque tiene asesor_asignado)."""
@@ -4084,6 +4153,7 @@ async def enviar_archivo_chat(
     archivo: UploadFile = File(...),
     caption: str = Form(""),
     usuario: dict = Depends(_usuario_actual),
+    _csrf: None = Depends(verificar_csrf),
 ):
     """El asesor sube una proforma/imagen puntual y se la manda al cliente
     de una — se guarda en ARCHIVOS_DIR (persistente) para poder reabrirla
@@ -4122,6 +4192,7 @@ async def enviar_audio_chat(
     telefono: str,
     audio: UploadFile = File(...),
     usuario: dict = Depends(_usuario_actual),
+    _csrf: None = Depends(verificar_csrf),
 ):
     """El asesor graba una nota de voz en el navegador (WebM/Opus) — se
     convierte a OGG/Opus (único formato de audio que acepta WhatsApp) antes
@@ -4160,7 +4231,7 @@ async def enviar_audio_chat(
 
 
 @router.post("/lead/{telefono}/enviar-catalogo/{archivo_id}")
-async def enviar_catalogo_chat(telefono: str, archivo_id: int, usuario: dict = Depends(_usuario_actual)):
+async def enviar_catalogo_chat(telefono: str, archivo_id: int, usuario: dict = Depends(_usuario_actual), _csrf: None = Depends(verificar_csrf)):
     """Reenvía un archivo de la librería de catálogos reutilizables — se
     vuelve a subir a WhatsApp desde nuestra copia en disco (el media_id de
     Meta es de un solo uso/temporal, no se reutiliza entre conversaciones)."""
@@ -4233,6 +4304,7 @@ async def gestionar_catalogos(request: Request, usuario: dict = Depends(_usuario
             <td><a href="/dashboard/archivo/{a['id']}" target="_blank" class="btn btn-sm btn-outline-secondary"><i class="bi bi-download"></i> Ver</a></td>
             {f'''<td class="pe-3">
                 <form method="post" action="/dashboard/catalogos/{a['id']}/eliminar" onsubmit="return confirm('¿Quitar este catálogo de la librería? Ya no se podrá elegir para enviar en nuevas conversaciones.')">
+                    {_csrf_campo(request)}
                     <button type="submit" class="btn btn-sm btn-outline-danger"><i class="bi bi-trash"></i></button>
                 </form>
             </td>''' if es_admin else ''}
@@ -4246,6 +4318,7 @@ async def gestionar_catalogos(request: Request, usuario: dict = Depends(_usuario
         <div class="barra-acento"></div>
         <div class="card-body">
             <form method="post" action="/dashboard/catalogos/nuevo" enctype="multipart/form-data" class="row g-2">
+                {_csrf_campo(request)}
                 <div class="col-md-4">
                     <label class="form-label small text-muted mb-0">Nombre para identificarlo</label>
                     <input type="text" name="etiqueta" class="form-control form-control-sm" required placeholder="Ej: Catálogo general 2026">
@@ -4290,6 +4363,7 @@ async def subir_catalogo(
     etiqueta: str = Form(...),
     archivo: UploadFile = File(...),
     usuario: dict = Depends(servicio_identidad.requiere_rol("admin")),
+    _csrf: None = Depends(verificar_csrf),
 ):
     extension = os.path.splitext(archivo.filename or "")[1].lower()
     if extension not in EXTENSIONES_ARCHIVO_PERMITIDAS:
@@ -4310,7 +4384,7 @@ async def subir_catalogo(
 
 
 @router.post("/catalogos/{archivo_id}/eliminar")
-async def quitar_catalogo(archivo_id: int, usuario: dict = Depends(servicio_identidad.requiere_rol("admin"))):
+async def quitar_catalogo(archivo_id: int, usuario: dict = Depends(servicio_identidad.requiere_rol("admin")), _csrf: None = Depends(verificar_csrf)):
     await servicio_conversacion.eliminar_archivo_reutilizable(archivo_id)
     return RedirectResponse(url="/dashboard/catalogos", status_code=303)
 
@@ -4323,6 +4397,7 @@ async def actualizar_resultado(
     fecha_agendada: str = Form(""),
     version: int = Form(...),
     usuario: dict = Depends(_usuario_actual),
+    _csrf: None = Depends(verificar_csrf),
 ):
     lead = await obtener_lead(telefono)
     if lead is None:
@@ -4388,6 +4463,7 @@ async def registrar_venta(
     medio_pago: str = Form(""),
     version: int = Form(...),
     usuario: dict = Depends(_usuario_actual),
+    _csrf: None = Depends(verificar_csrf),
 ):
     lead = await obtener_lead(telefono)
     if lead is None:
@@ -4431,6 +4507,7 @@ async def asignar_lead(
     asesor_asignado: str = Form(""),
     version: int = Form(...),
     usuario: dict = Depends(servicio_identidad.requiere_rol(*ROLES_CON_VISION_TOTAL)),
+    _csrf: None = Depends(verificar_csrf),
 ):
     lead = await obtener_lead(telefono)
     if lead is None:
@@ -4451,7 +4528,7 @@ async def asignar_lead(
 
 
 @router.post("/disponibilidad")
-async def toggle_disponibilidad(usuario: dict = Depends(servicio_identidad.requiere_rol("asesor"))):
+async def toggle_disponibilidad(usuario: dict = Depends(servicio_identidad.requiere_rol("asesor")), _csrf: None = Depends(verificar_csrf)):
     """El asesor togglea si está disponible para recibir leads nuevos automáticamente."""
     ahora_disponible = not usuario.get("disponible", True)
     await actualizar_disponibilidad(usuario["username"], ahora_disponible)
@@ -4473,7 +4550,7 @@ async def toggle_disponibilidad(usuario: dict = Depends(servicio_identidad.requi
     return RedirectResponse(url="/dashboard", status_code=303)
 
 
-async def _pagina_gestionar_asesores(usuario: dict, mensaje_html: str = "") -> str:
+async def _pagina_gestionar_asesores(usuario: dict, request: Request | None = None, mensaje_html: str = "") -> str:
     sidebar = await _renderizar_sidebar(usuario, telefono_activo=None)
     asesores = await listar_asesores()
     umbral_senior = await obtener_configuracion("umbral_senior", str(UMBRAL_SENIOR_DEFAULT))
@@ -4490,6 +4567,7 @@ async def _pagina_gestionar_asesores(usuario: dict, mensaje_html: str = "") -> s
             <td>{'<span class="badge rounded-pill text-bg-success">Disponible</span>' if a.get('disponible') else '<span class="badge rounded-pill text-bg-secondary">No disponible</span>'}</td>
             <td>
                 <form method="post" action="/dashboard/asesores/{html.escape(a['username'])}/nivel" class="d-flex gap-2">
+                    {_csrf_campo(request)}
                     <select name="nivel" class="form-select form-select-sm" style="width:auto">
                         {''.join(f'<option value="{n}" {"selected" if a.get("nivel") == n else ""}>{n.capitalize()}</option>' for n in NIVELES_ASESOR)}
                     </select>
@@ -4498,6 +4576,7 @@ async def _pagina_gestionar_asesores(usuario: dict, mensaje_html: str = "") -> s
             </td>
             <td class="pe-3">
                 <form method="post" action="/dashboard/asesores/{html.escape(a['username'])}/resetear" onsubmit="return confirm('¿Generar una contraseña nueva para {html.escape(a['nombre'])}? La contraseña actual dejará de funcionar.')">
+                    {_csrf_campo(request)}
                     <button type="submit" class="btn btn-sm btn-outline-secondary">Resetear contraseña</button>
                 </form>
             </td>
@@ -4519,6 +4598,7 @@ async def _pagina_gestionar_asesores(usuario: dict, mensaje_html: str = "") -> s
                 <h6 class="text-uppercase text-muted small fw-bold mb-1">Crear usuario</h6>
                 <p class="text-muted small mb-2">La contraseña se genera automáticamente y se muestra una sola vez al crear la cuenta.</p>
                 <form method="post" action="/dashboard/asesores/nuevo" class="row g-2">
+                    {_csrf_campo(request)}
                     <div class="col-6">
                         <label class="form-label small text-muted mb-0">Usuario</label>
                         <input type="text" name="username" class="form-control form-control-sm" required autocomplete="off">
@@ -4558,6 +4638,7 @@ async def _pagina_gestionar_asesores(usuario: dict, mensaje_html: str = "") -> s
             <h6 class="text-uppercase text-muted small fw-bold mb-1">Umbrales de asignación automática</h6>
             <p class="text-muted small mb-2">Monto mínimo del producto de interés para requerir cada nivel de asesor.</p>
             <form method="post" action="/dashboard/asesores/umbrales" class="d-flex align-items-end gap-2">
+                {_csrf_campo(request)}
                 <div>
                     <label class="form-label small text-muted mb-0">Nivel Intermedio (S/)</label>
                     <input type="number" name="umbral_intermedio" min="0" step="1" class="form-control form-control-sm" value="{html.escape(umbral_intermedio)}">
@@ -4589,12 +4670,17 @@ async def _pagina_gestionar_asesores(usuario: dict, mensaje_html: str = "") -> s
 
 @router.get("/asesores", response_class=HTMLResponse)
 async def gestionar_asesores(request: Request, usuario: dict = Depends(servicio_identidad.requiere_rol(*ROLES_CON_VISION_TOTAL))):
-    cuerpo = await _pagina_gestionar_asesores(usuario)
+    cuerpo = await _pagina_gestionar_asesores(usuario, request=request)
     return _pagina("Gestionar asesores", usuario, cuerpo, request=request)
 
 
 @router.post("/asesores/{username}/resetear", response_class=HTMLResponse)
-async def resetear_password_asesor(username: str, usuario: dict = Depends(servicio_identidad.requiere_rol(*ROLES_CON_VISION_TOTAL))):
+async def resetear_password_asesor(
+    username: str,
+    request: Request,
+    usuario: dict = Depends(servicio_identidad.requiere_rol(*ROLES_CON_VISION_TOTAL)),
+    _csrf: None = Depends(verificar_csrf),
+):
     """Genera una contraseña temporal nueva para un asesor — para cuando pide
     recuperar acceso. Se muestra una sola vez aquí; el admin debe pasársela
     por su canal habitual, y el asesor puede cambiarla luego desde su perfil."""
@@ -4611,17 +4697,19 @@ async def resetear_password_asesor(username: str, usuario: dict = Depends(servic
         f'<code>{html.escape(nueva_password)}</code> — pásasela por tu canal habitual, no se volverá a mostrar.'
         '</div>'
     )
-    cuerpo = await _pagina_gestionar_asesores(usuario, mensaje_html)
-    return _pagina("Gestionar asesores", usuario, cuerpo)
+    cuerpo = await _pagina_gestionar_asesores(usuario, request=request, mensaje_html=mensaje_html)
+    return _pagina("Gestionar asesores", usuario, cuerpo, request=request)
 
 
 @router.post("/asesores/nuevo", response_class=HTMLResponse)
 async def crear_usuario_nuevo(
+    request: Request,
     username: str = Form(...),
     nombre: str = Form(...),
     rol: str = Form(...),
     nivel: str = Form(""),
     usuario: dict = Depends(servicio_identidad.requiere_rol("admin")),
+    _csrf: None = Depends(verificar_csrf),
 ):
     """Alta de cuentas del panel — exclusivamente Admin. Rechaza si el
     username ya existe en vez de dejar que crear_usuario() lo sobreescriba
@@ -4641,8 +4729,8 @@ async def crear_usuario_nuevo(
             f'Ya existe una cuenta con el usuario <strong>{html.escape(username)}</strong> — elige otro.'
             '</div>'
         )
-        cuerpo = await _pagina_gestionar_asesores(usuario, mensaje_html)
-        return _pagina("Gestionar asesores", usuario, cuerpo)
+        cuerpo = await _pagina_gestionar_asesores(usuario, request=request, mensaje_html=mensaje_html)
+        return _pagina("Gestionar asesores", usuario, cuerpo, request=request)
 
     nueva_password = secrets.token_urlsafe(9)
     await crear_usuario(username, nueva_password, nombre, rol, nivel if rol == "asesor" else None)
@@ -4653,8 +4741,8 @@ async def crear_usuario_nuevo(
         f'Contraseña: <code>{html.escape(nueva_password)}</code> — pásasela por tu canal habitual, no se volverá a mostrar.'
         '</div>'
     )
-    cuerpo = await _pagina_gestionar_asesores(usuario, mensaje_html)
-    return _pagina("Gestionar asesores", usuario, cuerpo)
+    cuerpo = await _pagina_gestionar_asesores(usuario, request=request, mensaje_html=mensaje_html)
+    return _pagina("Gestionar asesores", usuario, cuerpo, request=request)
 
 
 @router.post("/asesores/{username}/nivel")
@@ -4662,6 +4750,7 @@ async def actualizar_nivel(
     username: str,
     nivel: str = Form(...),
     usuario: dict = Depends(servicio_identidad.requiere_rol(*ROLES_CON_VISION_TOTAL)),
+    _csrf: None = Depends(verificar_csrf),
 ):
     if nivel not in NIVELES_ASESOR:
         raise HTTPException(status_code=400, detail="Nivel inválido")
@@ -4674,6 +4763,7 @@ async def actualizar_umbrales_asignacion(
     umbral_intermedio: str = Form(...),
     umbral_senior: str = Form(...),
     usuario: dict = Depends(servicio_identidad.requiere_rol(*ROLES_CON_VISION_TOTAL)),
+    _csrf: None = Depends(verificar_csrf),
 ):
     try:
         valor_intermedio = float(umbral_intermedio)
@@ -4778,6 +4868,7 @@ async def gestionar_campanas(request: Request, usuario: dict = Depends(servicio_
             boton_eliminar_campana = (
                 f'<form method="post" action="/dashboard/campanas/{c["id"]}/eliminar" '
                 f"onsubmit=\"return confirm('¿Eliminar la campaña {nombre_js}? Esta acción no se puede deshacer.');\">"
+                f'{_csrf_campo(request)}'
                 f'<button type="submit" class="btn btn-sm btn-outline-danger" title="Eliminar (sin leads asociados)">'
                 f'<i class="bi bi-trash"></i></button></form>'
             )
@@ -4792,6 +4883,7 @@ async def gestionar_campanas(request: Request, usuario: dict = Depends(servicio_
         if puede_escribir:
             promo_celda = f"""{promo_html}
                 <form method="post" action="/dashboard/campanas/{c['id']}/editar" class="d-flex flex-column gap-1 mt-2" style="min-width:240px">
+                    {_csrf_campo(request)}
                     <div id="campana-producto-catalogo-{rowid}" style="{'display:none' if manual_activo else ''}">
                         <div class="position-relative">
                             <input type="text" id="campana-buscar-producto-{rowid}" class="form-control form-control-sm campana-buscar-producto" placeholder="Busca por marca, tipo o modelo..." autocomplete="off">
@@ -4810,6 +4902,7 @@ async def gestionar_campanas(request: Request, usuario: dict = Depends(servicio_
                 </form>"""
             estado_celda = f"""<div class="d-flex gap-1">
                     <form method="post" action="/dashboard/campanas/{c['id']}/toggle">
+                        {_csrf_campo(request)}
                         <button type="submit" class="btn btn-sm {'btn-success' if c['activa'] else 'btn-outline-secondary'}">
                             {'Activa' if c['activa'] else 'Inactiva'}
                         </button>
@@ -4852,6 +4945,7 @@ async def gestionar_campanas(request: Request, usuario: dict = Depends(servicio_
         <div class="barra-acento"></div>
         <div class="card-body">
             <form method="post" action="/dashboard/campanas/nueva" class="row g-2">
+                {_csrf_campo(request)}
                 <div class="col-md-3">
                     <label class="form-label small text-muted mb-0">Nombre</label>
                     <input type="text" name="nombre" class="form-control form-control-sm" required placeholder="Ej: Meta Terma Marzo">
@@ -5067,6 +5161,7 @@ async def crear_campana_nueva(
     producto_promocional: str = Form(""),
     precio_promocional: str = Form(""),
     usuario: dict = Depends(servicio_identidad.requiere_rol("admin")),
+    _csrf: None = Depends(verificar_csrf),
 ):
     if tipo_deteccion not in TIPOS_DETECCION:
         raise HTTPException(status_code=400, detail="Tipo de detección inválido")
@@ -5098,6 +5193,7 @@ async def editar_promo_campana(
     producto_promocional: str = Form(""),
     precio_promocional: str = Form(""),
     usuario: dict = Depends(servicio_identidad.requiere_rol("admin")),
+    _csrf: None = Depends(verificar_csrf),
 ):
     codigo_material = codigo_material.strip()
     if codigo_material and obtener_producto_por_codigo(codigo_material) is None:
@@ -5112,7 +5208,7 @@ async def editar_promo_campana(
 
 
 @router.post("/campanas/{campana_id}/toggle")
-async def toggle_campana(campana_id: int, usuario: dict = Depends(servicio_identidad.requiere_rol("admin"))):
+async def toggle_campana(campana_id: int, usuario: dict = Depends(servicio_identidad.requiere_rol("admin")), _csrf: None = Depends(verificar_csrf)):
     campanas = await listar_campanas()
     actual = next((c for c in campanas if c["id"] == campana_id), None)
     if actual is None:
@@ -5122,7 +5218,7 @@ async def toggle_campana(campana_id: int, usuario: dict = Depends(servicio_ident
 
 
 @router.post("/campanas/{campana_id}/eliminar")
-async def eliminar_campana_ruta(campana_id: int, usuario: dict = Depends(servicio_identidad.requiere_rol("admin"))):
+async def eliminar_campana_ruta(campana_id: int, usuario: dict = Depends(servicio_identidad.requiere_rol("admin")), _csrf: None = Depends(verificar_csrf)):
     borrada = await eliminar_campana(campana_id)
     if not borrada:
         raise HTTPException(
@@ -5144,7 +5240,7 @@ def _enmascarar_token(token: str | None) -> str:
     return "••••" + token[-6:]
 
 
-async def _bloque_promover_prompt() -> str:
+async def _bloque_promover_prompt(request: Request | None = None) -> str:
     """Compara el prompt del archivo (config/prompts.yaml, lo que ya corre en
     los canales de prueba) contra el promovido a producción, y ofrece el
     botón para igualarlos — así no hace falta un deploy para que producción
@@ -5184,6 +5280,7 @@ async def _bloque_promover_prompt() -> str:
                 </div>
             </div>
             <form method="post" action="/dashboard/canales-whatsapp/promover-prompt" class="mt-3">
+                {_csrf_campo(request)}
                 <button type="submit" class="btn btn-sm btn-warning">
                     <i class="bi bi-rocket-takeoff-fill"></i> Promover a producción
                 </button>
@@ -5212,6 +5309,7 @@ async def gestionar_canales_whatsapp(request: Request, usuario: dict = Depends(s
             </td>
             <td>
                 <form method="post" action="/dashboard/canales-whatsapp/{c['id']}/modo">
+                    {_csrf_campo(request)}
                     <button type="submit" class="btn btn-sm {'btn-outline-primary' if es_produccion else 'btn-outline-warning'}"
                         title="Click para cambiar a {'pruebas' if es_produccion else 'producción'}">
                         {'🟢 Producción' if es_produccion else '🧪 Pruebas'}
@@ -5220,6 +5318,7 @@ async def gestionar_canales_whatsapp(request: Request, usuario: dict = Depends(s
             </td>
             <td>
                 <form method="post" action="/dashboard/canales-whatsapp/{c['id']}/toggle">
+                    {_csrf_campo(request)}
                     <button type="submit" class="btn btn-sm {'btn-success' if c['activo'] else 'btn-outline-secondary'}">
                         {'Activo' if c['activo'] else 'Inactivo'}
                     </button>
@@ -5318,7 +5417,7 @@ async def gestionar_canales_whatsapp(request: Request, usuario: dict = Depends(s
                         mostrarEstado('Conectando...', 'muted');
                         fetch('/dashboard/canales-whatsapp/embedded-signup/callback', {{
                             method: 'POST',
-                            headers: {{ 'Content-Type': 'application/json' }},
+                            headers: {{ 'Content-Type': 'application/json', 'X-CSRF-Token': window.__csrfToken() }},
                             body: JSON.stringify({{
                                 code: response.authResponse.code,
                                 waba_id: datosSignup.waba_id || '',
@@ -5384,6 +5483,7 @@ async def gestionar_canales_whatsapp(request: Request, usuario: dict = Depends(s
                 <div class="barra-acento"></div>
                 <div class="card-body">
                     <form method="post" action="/dashboard/canales-whatsapp/{canal_editar['id']}/editar" class="row g-2">
+                        {_csrf_campo(request)}
                         <div class="col-md-4">
                             <label class="form-label small text-muted mb-0">Nombre</label>
                             <input type="text" name="nombre" class="form-control form-control-sm" value="{html.escape(canal_editar['nombre'])}" required>
@@ -5450,6 +5550,7 @@ async def gestionar_canales_whatsapp(request: Request, usuario: dict = Depends(s
         <div class="barra-acento"></div>
         <div class="card-body">
             <form method="post" action="/dashboard/canales-whatsapp/nuevo" class="row g-2">
+                {_csrf_campo(request)}
                 <div class="col-md-4">
                     <label class="form-label small text-muted mb-0">Nombre (para identificarlo en el panel)</label>
                     <input type="text" name="nombre" class="form-control form-control-sm" required placeholder="Ej: Cálidda - Producción">
@@ -5489,7 +5590,7 @@ async def gestionar_canales_whatsapp(request: Request, usuario: dict = Depends(s
         El prompt recién desplegado corre de inmediato en los canales marcados "Pruebas". Los
         canales en "Producción" usan la última versión promovida acá — no cambia sola con un deploy.
     </p>
-    {await _bloque_promover_prompt()}
+    {await _bloque_promover_prompt(request)}
     """
     cuerpo = f"""<div class="shell d-flex">{sidebar}<div class="main-pane flex-grow-1 p-4">{panel}</div></div>"""
     return _pagina("Canales de WhatsApp", usuario, cuerpo, request=request)
@@ -5504,6 +5605,7 @@ async def crear_canal_whatsapp_nuevo(
     page_access_token: str = Form(""),
     modo: str = Form("produccion"),
     usuario: dict = Depends(servicio_identidad.requiere_rol("admin")),
+    _csrf: None = Depends(verificar_csrf),
 ):
     await crear_canal_whatsapp(
         nombre=nombre.strip(), phone_number_id=phone_number_id.strip(),
@@ -5517,6 +5619,7 @@ async def crear_canal_whatsapp_nuevo(
 async def conectar_whatsapp_embedded_signup(
     request: Request,
     usuario: dict = Depends(servicio_identidad.requiere_rol("admin")),
+    _csrf: None = Depends(verificar_csrf),
 ):
     """Recibe el `code` que entrega el SDK de Facebook Login for Business al
     completar Embedded Signup ("Conectar WhatsApp") y termina de registrar
@@ -5593,6 +5696,7 @@ async def editar_canal_whatsapp_ruta(
     app_secret: str = Form(""),
     page_access_token: str = Form(""),
     usuario: dict = Depends(servicio_identidad.requiere_rol("admin")),
+    _csrf: None = Depends(verificar_csrf),
 ):
     """Edita nombre/credenciales de un canal ya existente — Alcance A
     (aprobado 2026-08-14): sin phone_number_id ni waba_id, sin alertas de
@@ -5609,7 +5713,7 @@ async def editar_canal_whatsapp_ruta(
 
 
 @router.post("/canales-whatsapp/{canal_id}/toggle")
-async def toggle_canal_whatsapp(canal_id: int, usuario: dict = Depends(servicio_identidad.requiere_rol("admin"))):
+async def toggle_canal_whatsapp(canal_id: int, usuario: dict = Depends(servicio_identidad.requiere_rol("admin")), _csrf: None = Depends(verificar_csrf)):
     canales = await listar_canales_whatsapp()
     actual = next((c for c in canales if c["id"] == canal_id), None)
     if actual is None:
@@ -5619,7 +5723,7 @@ async def toggle_canal_whatsapp(canal_id: int, usuario: dict = Depends(servicio_
 
 
 @router.post("/canales-whatsapp/{canal_id}/modo")
-async def toggle_modo_canal_whatsapp(canal_id: int, usuario: dict = Depends(servicio_identidad.requiere_rol("admin"))):
+async def toggle_modo_canal_whatsapp(canal_id: int, usuario: dict = Depends(servicio_identidad.requiere_rol("admin")), _csrf: None = Depends(verificar_csrf)):
     canales = await listar_canales_whatsapp()
     actual = next((c for c in canales if c["id"] == canal_id), None)
     if actual is None:
@@ -5630,7 +5734,7 @@ async def toggle_modo_canal_whatsapp(canal_id: int, usuario: dict = Depends(serv
 
 
 @router.post("/canales-whatsapp/promover-prompt")
-async def promover_prompt_produccion_route(usuario: dict = Depends(servicio_identidad.requiere_rol("admin"))):
+async def promover_prompt_produccion_route(usuario: dict = Depends(servicio_identidad.requiere_rol("admin")), _csrf: None = Depends(verificar_csrf)):
     """Copia el prompt recién desplegado (config/prompts.yaml) hacia la
     versión que usan los canales de producción — sin necesitar un deploy
     para que el cambio ya probado en el número de pruebas llegue allá."""
@@ -5665,6 +5769,7 @@ async def mi_perfil(request: Request, usuario: dict = Depends(_usuario_actual), 
             <h6 class="text-uppercase text-muted small fw-bold mb-2">Cambiar contraseña</h6>
             {mensaje}
             <form method="post" action="/dashboard/perfil/password">
+                {_csrf_campo(request)}
                 <div class="mb-2">
                     <label class="form-label small text-muted mb-0">Contraseña actual</label>
                     <input type="password" name="password_actual" class="form-control form-control-sm" required>
@@ -5692,6 +5797,7 @@ async def cambiar_password_propia(
     password_nueva: str = Form(...),
     password_nueva_repetir: str = Form(...),
     usuario: dict = Depends(_usuario_actual),
+    _csrf: None = Depends(verificar_csrf),
 ):
     if not bcrypt.checkpw(password_actual.encode(), usuario["password_hash"].encode()):
         return RedirectResponse(url="/dashboard/perfil?error=La+contraseña+actual+no+es+correcta", status_code=303)

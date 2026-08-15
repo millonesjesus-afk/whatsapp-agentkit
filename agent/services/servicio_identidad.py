@@ -24,6 +24,8 @@ alias del método de esta clase, así que ningún otro call site existente
 cambia.
 """
 
+import secrets
+
 from fastapi import Depends, HTTPException, Request
 
 from agent.memory import obtener_usuario
@@ -46,6 +48,12 @@ class ServicioIdentidad:
         usuario = await obtener_usuario(username)
         if usuario is None:
             raise NoAutenticado()
+        # Token CSRF por sesión (Bloque CSRF explícito) — generado una sola
+        # vez, lazy: cubre tanto logins nuevos como sesiones que ya estaban
+        # abiertas antes de este deploy, sin forzar un logout global. No
+        # rota mientras la sesión siga activa (dashboard.py lo inyecta como
+        # <meta> una sola vez en la carga completa de página).
+        request.session.setdefault("csrf_token", secrets.token_urlsafe(32))
         return usuario
 
     def requiere_rol(self, *roles: str):
