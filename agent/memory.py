@@ -428,7 +428,11 @@ class Producto(Base):
     sub_tipo: Mapped[str | None] = mapped_column(String(100), nullable=True)
     codigo_hana: Mapped[str | None] = mapped_column(String(50), nullable=True, index=True)
     descripcion: Mapped[str | None] = mapped_column(String(300), nullable=True)
-    combo: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    # Text, no String(100): un combo real del CSV mide 101 caracteres —
+    # descubierto recién al importar contra Postgres real (2026-08-16),
+    # SQLite no aplica el límite de VARCHAR y no lo había detectado antes.
+    # Es contenido descriptivo, sin razón funcional para un tope artificial.
+    combo: Mapped[str | None] = mapped_column(Text, nullable=True)
     comentarios: Mapped[str | None] = mapped_column(Text, nullable=True)
     fee_prv: Mapped[str | None] = mapped_column(String(30), nullable=True)
     fee_clda: Mapped[str | None] = mapped_column(String(30), nullable=True)
