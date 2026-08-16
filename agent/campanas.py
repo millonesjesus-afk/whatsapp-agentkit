@@ -43,7 +43,7 @@ def _normalizar(texto: str) -> str:
     return (texto or "").strip().lower()
 
 
-def resolver_promo(campana: dict) -> dict | None:
+async def resolver_promo(campana: dict) -> dict | None:
     """
     Resuelve el producto/precio efectivo de una campaña:
     - Si tiene codigo_material, lo busca EN VIVO en la lista de precios
@@ -53,7 +53,7 @@ def resolver_promo(campana: dict) -> dict | None:
     Retorna None si la campaña no tiene ninguna promo asociada.
     """
     if campana.get("codigo_material"):
-        producto = obtener_producto_por_codigo(campana["codigo_material"])
+        producto = await obtener_producto_por_codigo(campana["codigo_material"])
         if producto:
             return {
                 "producto": f"{producto.get('MARCA', '')} — {producto.get('DESCRIPCIÓN', '')}".strip(" —"),
@@ -96,13 +96,13 @@ async def obtener_codigos_promocionales_activos() -> set[str]:
         if not c.get("codigo_material"):
             continue
         codigos.add(c["codigo_material"])
-        familia = obtener_familia_producto(c["codigo_material"])
+        familia = await obtener_familia_producto(c["codigo_material"])
         codigos.update(p.get("CODIGO HANA", "") for p in familia)
     codigos.discard("")
     return codigos
 
 
-def resolver_familia_promo(campana: dict) -> list[dict]:
+async def resolver_familia_promo(campana: dict) -> list[dict]:
     """
     Retorna todas las variantes de combo/instalación del producto de una
     campaña (ej. Secadora Rinnai 10Kg: sin combo, +conexión, +combo,
@@ -112,7 +112,7 @@ def resolver_familia_promo(campana: dict) -> list[dict]:
     """
     if not campana.get("codigo_material"):
         return []
-    return obtener_familia_producto(campana["codigo_material"])
+    return await obtener_familia_producto(campana["codigo_material"])
 
 
 def generar_link_whatsapp(texto_saludo: str) -> str:

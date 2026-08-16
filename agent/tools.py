@@ -9,11 +9,12 @@ conocimiento del programa, para dar contexto real a las respuestas de Gabi.
 
 import os
 import re
-import csv
 import glob
 import logging
 from datetime import datetime, time
 from zoneinfo import ZoneInfo
+
+from agent.memory import listar_productos_activos, obtener_producto_por_codigo_hana
 
 logger = logging.getLogger("agentkit")
 
@@ -21,47 +22,15 @@ TZ_LIMA = ZoneInfo("America/Lima")
 DIAS_ES = ["lunes", "martes", "miércoles", "jueves", "viernes", "sábado", "domingo"]
 
 KNOWLEDGE_DIR = "knowledge"
-# Este proyecto usa únicamente el canal propio (no nuevos suministros)
-ARCHIVOS_CATALOGO = [
-    "lista_precios_canales_propios.csv",
-]
 PLAZOS_A_MOSTRAR = ("12", "24", "36")
 
-_catalogo_cache: list[dict] | None = None
-
-# Duplicado real confirmado entre proveedores distintos (revisado con Jesús
-# el 10/07/2026): mismo modelo LG WT16OBVTB 16KG, pero listado dos veces con
-# precio distinto. La fila de GRUPO MERPES (S/2569, sin CODIGO HANA asignado
-# aún — "EN CREACIÓN") se excluye a favor de la de PERU SMART SAC (S/1871,
-# código 4501885). No se usa CODIGO HANA como clave porque "EN CREACIÓN" se
-# repite en otras 17 filas no relacionadas — se identifica por proveedor +
-# descripción exacta, que sí es única para esta fila.
-FILAS_DUPLICADAS_EXCLUIDAS = {
-    ("GRUPO MERPES PERU S.A.C.", "LAVADORA LG WT16OBVTB 16KG NEGRO"),
-}
-
-
-def _cargar_catalogo() -> list[dict]:
-    """Carga y cachea en memoria el catálogo de productos desde los CSV de /knowledge."""
-    global _catalogo_cache
-    if _catalogo_cache is not None:
-        return _catalogo_cache
-
-    productos = []
-    for nombre_archivo in ARCHIVOS_CATALOGO:
-        ruta = os.path.join(KNOWLEDGE_DIR, nombre_archivo)
-        if not os.path.exists(ruta):
-            continue
-        with open(ruta, "r", encoding="utf-8") as f:
-            productos.extend(csv.DictReader(f))
-
-    productos = [
-        p for p in productos
-        if (p.get("PROVEEDOR", "").strip(), p.get("DESCRIPCIÓN", "").strip()) not in FILAS_DUPLICADAS_EXCLUIDAS
-    ]
-
-    _catalogo_cache = productos
-    return productos
+# El catálogo de productos vive en Postgres (tabla `productos`, ver
+# agent/memory.py) desde el bloque "Catálogo editable — sub-bloque a"
+# (2026-08-16) — antes se cargaba una sola vez a una variable de módulo
+# desde knowledge/lista_precios_canales_propios.csv, sin invalidación. El
+# CSV se conserva en el repo como respaldo y como mecanismo de
+# reimportación masiva (memory.importar_catalogo_desde_csv), no se vuelve
+# a leer en tiempo de ejecución.
 
 
 def _precio_float(producto: dict) -> float:
@@ -73,7 +42,7 @@ def _precio_float(producto: dict) -> float:
         return float("inf")
 
 
-def buscar_productos(mensaje: str, limite: int = 8, excluir_codigos: set[str] | None = None) -> list[dict]:
+async def buscar_productos(mensaje: str, limite: int = 8, excluir_codigos: set[str] | None = None) -> list[dict]:
     """
     Busca productos del catálogo cuyo tipo, sub tipo o marca aparezcan
     mencionados en el mensaje del cliente. Prioriza coincidencias de marca
@@ -101,7 +70,7 @@ def buscar_productos(mensaje: str, limite: int = 8, excluir_codigos: set[str] | 
     mensaje = mensaje.lower()
     excluir_codigos = excluir_codigos or set()
     candidatos = []
-    for producto in _cargar_catalogo():
+    for producto in await listar_productos_activos():
         if producto.get("CODIGO HANA", "") in excluir_codigos:
             continue
 
@@ -124,7 +93,7 @@ def buscar_productos(mensaje: str, limite: int = 8, excluir_codigos: set[str] | 
     return [producto for _, producto in candidatos[:limite]]
 
 
-def obtener_producto_por_codigo(codigo: str) -> dict | None:
+async def obtener_producto_por_codigo(codigo: str) -> dict | None:
     """
     Busca un producto del catálogo por su código único de material (CODIGO
     HANA), la lista de precios oficial. Se usa para que las campañas
@@ -135,10 +104,7 @@ def obtener_producto_por_codigo(codigo: str) -> dict | None:
     codigo = (codigo or "").strip()
     if not codigo:
         return None
-    for producto in _cargar_catalogo():
-        if producto.get("CODIGO HANA", "").strip() == codigo:
-            return producto
-    return None
+    return await obtener_producto_por_codigo_hana(codigo)
 
 
 _PATRON_SUFIJOS_COMBO = re.compile(
@@ -155,7 +121,7 @@ def _modelo_base(descripcion: str) -> str:
     return re.sub(r"\s+", " ", sin_sufijos).strip()
 
 
-def obtener_familia_producto(codigo_material: str) -> list[dict]:
+async def obtener_familia_producto(codigo_material: str) -> list[dict]:
     """
     Dado el código de un producto, retorna todas las variantes de combo/
     instalación del MISMO modelo base (misma marca, mismo proveedor, misma
@@ -179,7 +145,7 @@ def obtener_familia_producto(codigo_material: str) -> list[dict]:
     distinta — sin tocar la línea de precio regular, que queda visible para
     el resto de clientes.
     """
-    ancla = obtener_producto_por_codigo(codigo_material)
+    ancla = await obtener_producto_por_codigo(codigo_material)
     if ancla is None:
         return []
 
@@ -190,7 +156,7 @@ def obtener_familia_producto(codigo_material: str) -> list[dict]:
     fee_clda = ancla.get("FEE CLDA", "").strip()
 
     familia = [
-        p for p in _cargar_catalogo()
+        p for p in await listar_productos_activos()
         if p.get("MARCA", "").strip().upper() == marca
         and p.get("PROVEEDOR", "").strip().upper() == proveedor
         and _modelo_base(p.get("DESCRIPCIÓN", "")) == base
@@ -280,14 +246,14 @@ def obtener_estado_horario_atencion() -> dict:
     }
 
 
-def obtener_contexto_relevante(mensaje: str, excluir_codigos: set[str] | None = None) -> str:
+async def obtener_contexto_relevante(mensaje: str, excluir_codigos: set[str] | None = None) -> str:
     """
     Punto de entrada usado por brain.py: combina resultados del catálogo de
     productos y de la base de conocimiento relacionados al mensaje del cliente.
     """
     secciones = []
 
-    productos = buscar_productos(mensaje, excluir_codigos=excluir_codigos)
+    productos = await buscar_productos(mensaje, excluir_codigos=excluir_codigos)
     if productos:
         productos_texto = "\n\n".join(
             f"{i}. {formatear_producto(p)}" for i, p in enumerate(productos, 1)

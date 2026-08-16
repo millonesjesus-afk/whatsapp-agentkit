@@ -4440,7 +4440,7 @@ async def buscar_producto_venta(telefono: str, q: str = "", usuario: dict = Depe
     de precios vigente en vez de que el asesor los tipee a mano."""
     if len(q.strip()) < 2:
         return JSONResponse([])
-    productos = buscar_productos(q, limite=8)
+    productos = await buscar_productos(q, limite=8)
     return JSONResponse([
         {
             "codigo": p.get("CODIGO HANA", ""),
@@ -4829,7 +4829,7 @@ async def gestionar_campanas(request: Request, usuario: dict = Depends(servicio_
 
     filas = []
     for c in campanas:
-        promo = servicio_canales.resolver_promo(c)
+        promo = await servicio_canales.resolver_promo(c)
         if promo and promo["fuente"] == "catalogo":
             promo_html = (
                 f'<div><span class="badge text-bg-success-subtle text-success-emphasis">Catálogo</span> '
@@ -5138,7 +5138,7 @@ async def buscar_producto_campana(q: str = "", usuario: dict = Depends(servicio_
     siempre salga de la lista de precios vigente en vez de tipearla a mano."""
     if len(q.strip()) < 2:
         return JSONResponse([])
-    productos = buscar_productos(q, limite=8)
+    productos = await buscar_productos(q, limite=8)
     return JSONResponse([
         {
             "codigo": p.get("CODIGO HANA", ""),
@@ -5166,7 +5166,7 @@ async def crear_campana_nueva(
     if tipo_deteccion not in TIPOS_DETECCION:
         raise HTTPException(status_code=400, detail="Tipo de detección inválido")
     codigo_material = codigo_material.strip()
-    if codigo_material and obtener_producto_por_codigo(codigo_material) is None:
+    if codigo_material and await obtener_producto_por_codigo(codigo_material) is None:
         raise HTTPException(status_code=400, detail=f"El código de material '{codigo_material}' no existe en la lista de precios vigente")
     # El patrón se compara contra el mensaje real que manda el cliente (que
     # es texto_saludo, tal cual) — si no aparece ahí, la campaña nunca se va
@@ -5196,7 +5196,7 @@ async def editar_promo_campana(
     _csrf: None = Depends(verificar_csrf),
 ):
     codigo_material = codigo_material.strip()
-    if codigo_material and obtener_producto_por_codigo(codigo_material) is None:
+    if codigo_material and await obtener_producto_por_codigo(codigo_material) is None:
         raise HTTPException(status_code=400, detail=f"El código de material '{codigo_material}' no existe en la lista de precios vigente")
     await actualizar_campana(
         campana_id,

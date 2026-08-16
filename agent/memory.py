@@ -7,6 +7,7 @@ por número de teléfono usando SQLite (local) o PostgreSQL (producción).
 """
 
 import os
+import csv
 import logging
 from datetime import datetime
 from cryptography.fernet import Fernet
@@ -403,6 +404,66 @@ class MensajeProcesado(Base):
 
     mensaje_id: Mapped[str] = mapped_column(String(100), primary_key=True)
     procesado_en: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class Producto(Base):
+    """Catálogo de productos / lista de precios — fuente de verdad para
+    Gabi (cotización en vivo), campañas, autocompletar de "Cierre de venta"
+    y asignación automática por nivel. Antes vivía en
+    knowledge/lista_precios_canales_propios.csv, cargado una sola vez a una
+    variable de módulo sin invalidación (agent/tools.py). El CSV se
+    conserva en el repo como respaldo y como mecanismo de importación
+    masiva — ver importar_catalogo_desde_csv().
+
+    `id` autoincremental es la clave primaria, NO `codigo_hana` — el
+    catálogo real tiene productos "EN CREACIÓN" sin código HANA asignado
+    todavía, así que ese campo no es único (confirmado en el CSV vigente)."""
+    __tablename__ = "productos"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    canal: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    proveedor: Mapped[str | None] = mapped_column(String(150), nullable=True)
+    marca: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    tipo: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    sub_tipo: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    codigo_hana: Mapped[str | None] = mapped_column(String(50), nullable=True, index=True)
+    descripcion: Mapped[str | None] = mapped_column(String(300), nullable=True)
+    combo: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    comentarios: Mapped[str | None] = mapped_column(Text, nullable=True)
+    fee_prv: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    fee_clda: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    precio: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    # Cuotas por plazo (3/6/9/12/18/24/36/48/60 meses) — un solo campo JSON
+    # en vez de 9 columnas sueltas, mismo patrón ya usado en
+    # EventoLead.payload. Reconstruido como claves top-level ("12", "24"...)
+    # al armar el dict con forma de fila CSV, para no tocar la lógica de
+    # negocio existente que ya lee producto["12"] etc.
+    cuotas: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    # Fila excluida por ser un duplicado real confirmado (antes vivía como
+    # FILAS_DUPLICADAS_EXCLUIDAS hardcodeado en tools.py) — ahora es un dato,
+    # no código. Nunca se borra una fila, solo se desactiva.
+    activo: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    creado: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    actualizado: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class HistorialPrecioProducto(Base):
+    """Auditoría de cambios de precio de un producto — append-only, mismo
+    patrón que EventoLead (Conversation Timeline). Todavía sin ningún punto
+    de escritura real: la pantalla de edición de precios es un bloque
+    futuro (sub-bloque UI del Gap Analysis de Catálogo editable) — la tabla
+    y el helper de escritura existen desde ya para no requerir otra
+    migración cuando esa UI se construya, igual que ya pasó con
+    EventoLead/registrar_evento_lead en el Sprint 2."""
+    __tablename__ = "historial_precio_producto"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    producto_id: Mapped[int] = mapped_column(Integer, index=True)
+    campo: Mapped[str] = mapped_column(String(30))
+    valor_anterior: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    valor_nuevo: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    autor: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    creado: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
 
 
 async def obtener_configuracion(clave: str, valor_default: str) -> str:
@@ -1298,3 +1359,133 @@ async def obtener_telefono_de_archivo(archivo_id: int) -> str | None:
         query = select(Mensaje.telefono).where(Mensaje.archivo_id == archivo_id).limit(1)
         result = await session.execute(query)
         return result.scalar_one_or_none()
+
+
+# ── Catálogo de productos / lista de precios (Catálogo editable — sub-bloque a) ──
+#
+# CODIGO HANA no es único (filas "EN CREACIÓN" repetidas) — nunca usar como
+# clave de búsqueda exacta con expectativa de una sola fila, ver Producto.
+
+PLAZOS_CUOTAS_CATALOGO = ("3", "6", "9", "12", "18", "24", "36", "48", "60")
+
+# Duplicado real confirmado entre proveedores distintos (revisado con Jesús
+# el 10/07/2026, antes vivía como FILAS_DUPLICADAS_EXCLUIDAS en tools.py):
+# mismo modelo LG WT16OBVTB 16KG, listado dos veces con precio distinto. La
+# fila de GRUPO MERPES (S/2569, sin CODIGO HANA real todavía) se excluye a
+# favor de la de PERU SMART SAC (S/1871, código 4501885).
+FILAS_CATALOGO_EXCLUIDAS = {
+    ("GRUPO MERPES PERU S.A.C.", "LAVADORA LG WT16OBVTB 16KG NEGRO"),
+}
+
+
+def _producto_a_dict(p: Producto) -> dict:
+    """Reconstruye la fila con la MISMA forma que ya devolvía el CSV
+    (mismas claves, incluidas las de cuotas como "12"/"24"/"36" a nivel
+    top-level) — para que agent/tools.py no tenga que cambiar su lógica de
+    negocio (scoring, formateo, familia de combos), solo la fuente de datos."""
+    fila = {
+        "CANAL": p.canal or "",
+        "PROVEEDOR": p.proveedor or "",
+        "MARCA": p.marca or "",
+        "TIPO": p.tipo or "",
+        "SUB TIPO": p.sub_tipo or "",
+        "CODIGO HANA": p.codigo_hana or "",
+        "DESCRIPCIÓN": p.descripcion or "",
+        "COMBO": p.combo or "",
+        "COMENTARIOS": p.comentarios or "",
+        "FEE PRV": p.fee_prv or "",
+        "FEE CLDA": p.fee_clda or "",
+        "PRECIO": p.precio or "",
+    }
+    fila.update(p.cuotas or {})
+    return fila
+
+
+async def listar_productos_activos() -> list[dict]:
+    """Catálogo completo (solo filas activas) para búsqueda/scoring en
+    Python — ~360 filas es trivial de traer entero en cada consulta, igual
+    que ya se hacía con el CSV cacheado en memoria de proceso (sin la
+    desventaja de esa variable global: acá cada request ve el dato real)."""
+    async with async_session() as session:
+        query = select(Producto).where(Producto.activo.is_(True)).order_by(Producto.id.asc())
+        result = await session.execute(query)
+        return [_producto_a_dict(p) for p in result.scalars().all()]
+
+
+async def obtener_producto_por_codigo_hana(codigo: str) -> dict | None:
+    """Primer producto activo con este CODIGO HANA, ordenado por id (mismo
+    criterio de "primera fila que matchea" que ya usaba el CSV — CODIGO
+    HANA no es único, ver Producto)."""
+    async with async_session() as session:
+        query = (
+            select(Producto)
+            .where(Producto.codigo_hana == codigo, Producto.activo.is_(True))
+            .order_by(Producto.id.asc())
+            .limit(1)
+        )
+        result = await session.execute(query)
+        p = result.scalar_one_or_none()
+        return _producto_a_dict(p) if p else None
+
+
+async def importar_catalogo_desde_csv(ruta_csv: str) -> dict:
+    """Reemplaza por completo el catálogo de productos desde un CSV con el
+    mismo formato de knowledge/lista_precios_canales_propios.csv.
+
+    Reemplazo total (borra todo, vuelve a insertar), no upsert por
+    CODIGO HANA — porque ese campo no es una clave confiable (se repite
+    "EN CREACIÓN" en filas sin código real asignado). Esto es seguro
+    mientras no exista edición manual de precios desde el panel (esa UI es
+    un bloque futuro).
+
+    DECISIÓN TEMPORAL del sub-bloque (a) del Catálogo editable
+    (2026-08-16), no definitiva: cuando se implemente el sub-bloque (b)
+    (UI administrativa), esta estrategia de importación DEBE revisarse
+    para no sobrescribir cambios manuales hechos desde el panel — hoy es
+    segura precisamente porque nada escribe todavía sobre `productos` fuera
+    de esta función."""
+    with open(ruta_csv, "r", encoding="utf-8") as f:
+        filas = list(csv.DictReader(f))
+
+    importados = 0
+    excluidos = 0
+    async with async_session() as session:
+        await session.execute(delete(Producto))
+        for fila in filas:
+            proveedor = (fila.get("PROVEEDOR") or "").strip()
+            descripcion = (fila.get("DESCRIPCIÓN") or "").strip()
+            activo = (proveedor, descripcion) not in FILAS_CATALOGO_EXCLUIDAS
+            if not activo:
+                excluidos += 1
+            cuotas = {plazo: fila[plazo] for plazo in PLAZOS_CUOTAS_CATALOGO if fila.get(plazo)}
+            session.add(Producto(
+                canal=(fila.get("CANAL") or "").strip() or None,
+                proveedor=proveedor or None,
+                marca=(fila.get("MARCA") or "").strip() or None,
+                tipo=(fila.get("TIPO") or "").strip() or None,
+                sub_tipo=(fila.get("SUB TIPO") or "").strip() or None,
+                codigo_hana=(fila.get("CODIGO HANA") or "").strip() or None,
+                descripcion=descripcion or None,
+                combo=(fila.get("COMBO") or "").strip() or None,
+                comentarios=(fila.get("COMENTARIOS") or "").strip() or None,
+                fee_prv=(fila.get("FEE PRV") or "").strip() or None,
+                fee_clda=(fila.get("FEE CLDA") or "").strip() or None,
+                precio=(fila.get("PRECIO") or "").strip() or None,
+                cuotas=cuotas,
+                activo=activo,
+            ))
+            importados += 1
+        await session.commit()
+    return {"importados": importados, "excluidos": excluidos}
+
+
+async def registrar_cambio_precio_producto(producto_id: int, campo: str, valor_anterior: str | None, valor_nuevo: str | None, autor: str | None):
+    """Auditoría append-only de un cambio de precio/campo de un producto —
+    sin ningún call site todavía (la UI de edición es un bloque futuro),
+    existe para no requerir otra migración cuando esa UI se construya."""
+    async with async_session() as session:
+        session.add(HistorialPrecioProducto(
+            producto_id=producto_id, campo=campo,
+            valor_anterior=valor_anterior, valor_nuevo=valor_nuevo, autor=autor,
+        ))
+        await session.commit()

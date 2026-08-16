@@ -40,7 +40,7 @@ async def _nivel_requerido(interes: str) -> str:
     """Estima el nivel de experiencia necesario según el precio del producto de interés."""
     if not interes:
         return "intermedio"
-    productos = buscar_productos(interes, limite=1)
+    productos = await buscar_productos(interes, limite=1)
     if not productos:
         return "intermedio"
     try:

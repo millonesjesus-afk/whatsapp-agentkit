@@ -197,7 +197,7 @@ async def _armar_bloques_contexto(mensaje: str, historial: list[dict], lead: dic
         # cliente vio en el anuncio/SMS antes de escribir.
         if lead.get("campana_origen"):
             campana = await obtener_campana_por_nombre(lead["campana_origen"])
-            promo = resolver_promo(campana) if campana else None
+            promo = await resolver_promo(campana) if campana else None
             if promo:
                 detalle = f"Producto: {promo['producto']}"
                 if promo.get("precio"):
@@ -212,7 +212,7 @@ async def _armar_bloques_contexto(mensaje: str, historial: list[dict], lead: dic
                 # promocionado (ej. sin combo, +conexión, +conexión+combo) —
                 # también son parte de la promo de esta campaña, por si el
                 # cliente pide una combinación distinta a la del SMS/anuncio.
-                familia = resolver_familia_promo(campana)
+                familia = await resolver_familia_promo(campana)
                 codigos_propios = {p.get("CODIGO HANA", "") for p in familia}
                 otras_variantes = [p for p in familia if p.get("CODIGO HANA") != campana.get("codigo_material")]
                 if otras_variantes:
@@ -242,7 +242,7 @@ async def _armar_bloques_contexto(mensaje: str, historial: list[dict], lead: dic
     # recientes — lead.interes persiste el tema durante toda la conversación.
     mensajes_previos = [m["content"] for m in historial if m["role"] == "user"][-2:]
     interes_lead = [lead["interes"]] if lead and lead.get("interes") else []
-    contexto = obtener_contexto_relevante(
+    contexto = await obtener_contexto_relevante(
         " ".join(interes_lead + mensajes_previos + [mensaje]), excluir_codigos=codigos_a_excluir
     )
     if contexto:
