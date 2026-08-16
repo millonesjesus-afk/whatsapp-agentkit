@@ -5290,6 +5290,50 @@ async def _bloque_promover_prompt(request: Request | None = None) -> str:
     """
 
 
+TOKEN_COEXISTENCIA_DIAS = 60
+UMBRAL_AVISO_TOKEN_DIAS = 10
+UMBRAL_CRITICO_TOKEN_DIAS = 3
+
+
+def _estado_token_canal(canal: dict) -> str:
+    """Aviso de vencimiento del token, solo para canales de Coexistencia
+    (Embedded Signup — únicos con `waba_id` y con el token de 60 días
+    confirmado por Meta sin excepción; ver project_coexistencia_embedded_signup_requerido
+    en memoria). Un canal creado a mano puede tener un token permanente sin
+    ninguna caducidad conocida, así que nunca muestra nada acá. Puramente
+    informativo — no bloquea ninguna acción ni afecta el funcionamiento del
+    canal."""
+    if not canal.get("waba_id"):
+        return ""
+    renovado_en = canal.get("token_renovado_en")
+    if renovado_en is None:
+        return (
+            '<div class="small text-muted mt-1"><i class="bi bi-info-circle"></i> '
+            'Sin fecha de renovación registrada — vuelve a guardar el token en '
+            '"Editar canal" para empezar a trackear el vencimiento.</div>'
+        )
+    dias_restantes = (renovado_en + timedelta(days=TOKEN_COEXISTENCIA_DIAS) - datetime.utcnow()).days
+    if dias_restantes > UMBRAL_AVISO_TOKEN_DIAS:
+        return ""
+    if dias_restantes < 0:
+        return (
+            f'<div class="alert alert-danger py-1 px-2 small mt-1 mb-0">'
+            f'<i class="bi bi-exclamation-octagon-fill"></i> Token vencido hace {abs(dias_restantes)} día(s) '
+            f'— Coexistencia probablemente dejó de enviar mensajes. Renueva desde "Editar canal".</div>'
+        )
+    if dias_restantes <= UMBRAL_CRITICO_TOKEN_DIAS:
+        return (
+            f'<div class="alert alert-danger py-1 px-2 small mt-1 mb-0">'
+            f'<i class="bi bi-exclamation-octagon-fill"></i> El token vence en {dias_restantes} día(s) '
+            f'— renueva desde "Editar canal" cuanto antes.</div>'
+        )
+    return (
+        f'<div class="alert alert-warning py-1 px-2 small mt-1 mb-0">'
+        f'<i class="bi bi-exclamation-triangle-fill"></i> El token vence en {dias_restantes} día(s) '
+        f'— renueva desde "Editar canal".</div>'
+    )
+
+
 @router.get("/canales-whatsapp", response_class=HTMLResponse)
 async def gestionar_canales_whatsapp(request: Request, usuario: dict = Depends(servicio_identidad.requiere_rol("admin"))):
     sidebar = await _renderizar_sidebar(usuario, telefono_activo=None)
@@ -5306,6 +5350,7 @@ async def gestionar_canales_whatsapp(request: Request, usuario: dict = Depends(s
             <td class="text-muted small">
                 Token: {html.escape(_enmascarar_token(c.get('access_token')))}<br>
                 App Secret: {html.escape(_enmascarar_token(c.get('app_secret')))}
+                {_estado_token_canal(c)}
             </td>
             <td>
                 <form method="post" action="/dashboard/canales-whatsapp/{c['id']}/modo">

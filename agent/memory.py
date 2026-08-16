@@ -346,6 +346,14 @@ class CanalWhatsApp(Base):
     # esto, por eso es nullable. Necesario para suscribir la app a los webhooks
     # de esa WABA específica.
     waba_id: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    # Cuándo se guardó por última vez un access_token real (creación o
+    # renovación vía "Editar canal") — nullable porque los canales creados
+    # antes de este campo no tienen este dato hasta que se re-guarde el
+    # token una vez. Solo tiene sentido calcular el vencimiento de 60 días
+    # de Coexistencia cuando además hay waba_id (ver dashboard.py,
+    # _estado_token_canal) — un canal manual puede tener un token
+    # permanente sin ninguna caducidad conocida.
+    token_renovado_en: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     activo: Mapped[bool] = mapped_column(Boolean, default=True)
     # "produccion" (usa el prompt promovido, guardado en Configuracion — no
     # cambia solo con un deploy) o "pruebas" (usa siempre config/prompts.yaml
@@ -446,6 +454,7 @@ def _canal_a_dict(c: CanalWhatsApp) -> dict:
         "app_secret": _descifrar(c.app_secret_cifrado),
         "page_access_token": _descifrar(c.page_access_token_cifrado),
         "waba_id": c.waba_id,
+        "token_renovado_en": c.token_renovado_en,
         "activo": c.activo,
         "modo": c.modo,
         "creado": c.creado,
@@ -467,6 +476,7 @@ async def crear_canal_whatsapp(
             app_secret_cifrado=_cifrar(app_secret),
             page_access_token_cifrado=_cifrar(page_access_token),
             waba_id=waba_id or None,
+            token_renovado_en=datetime.utcnow() if access_token else None,
             modo=modo if modo in ("produccion", "pruebas") else "produccion",
         )
         session.add(canal)
@@ -502,6 +512,11 @@ async def actualizar_canal_whatsapp(canal_id: int, **campos):
             canal.phone_number_id = campos["phone_number_id"]
         if campos.get("access_token"):
             canal.access_token_cifrado = _cifrar(campos["access_token"])
+            # Solo se toca cuando de verdad llega un access_token nuevo — no
+            # con cualquier edición (nombre, toggle activo/modo, etc.), para
+            # que el contador de vencimiento refleje la última renovación
+            # real, no la última vez que se tocó el registro.
+            canal.token_renovado_en = datetime.utcnow()
         if campos.get("app_secret"):
             canal.app_secret_cifrado = _cifrar(campos["app_secret"])
         if campos.get("page_access_token"):
