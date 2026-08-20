@@ -10,7 +10,7 @@ import os
 import logging
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, HTTPException
-from fastapi.responses import PlainTextResponse, RedirectResponse
+from fastapi.responses import JSONResponse, PlainTextResponse, RedirectResponse
 from starlette.middleware.sessions import SessionMiddleware
 from dotenv import load_dotenv
 
@@ -29,7 +29,7 @@ from agent.notificaciones import notificar_lead_derivado
 from agent.services.servicio_comercial import servicio_comercial
 from agent.services.servicio_canales import servicio_canales
 from agent.services.servicio_conversacion import servicio_conversacion
-from agent.rate_limit import limitador_webhook
+from agent.rate_limit import limitador_webhook, ip_cliente
 from agent.http_utils import cerrar_cliente_http
 from agent.api_contrato import registrar_contrato_interno, FiltroRequestId
 
@@ -80,9 +80,11 @@ proveedor = obtener_proveedor()
 PORT = int(os.getenv("PORT", 8000))
 
 # Rate limiting del webhook — Security Architecture, Decisión local P1.
-# Por IP de origen (request.client.host); si Railway antepone un proxy que
-# oculta la IP real, esto limita por la IP que el proxy expone, no por
-# cliente final — suficiente hoy, sin evidencia de que haga falta más.
+# Por IP de origen, resuelta con agent.rate_limit.ip_cliente() según la
+# variable PROXIES_CONFIABLES. Con el valor por defecto (0) la clave es la IP
+# del socket: detrás del proxy de Railway eso es la IP del borde, no la del
+# cliente final, así que el límite es de hecho GLOBAL y no por cliente. Ver
+# la nota de PROXIES_CONFIABLES en agent/rate_limit.py antes de cambiarlo.
 MAX_WEBHOOK_POR_IP_POR_MINUTO = 60
 
 
@@ -122,9 +124,41 @@ registrar_contrato_interno(app)
 app.include_router(dashboard_router)
 
 
+def _pide_json_explicitamente(request: Request) -> bool:
+    """True solo si el cliente NOMBRA `application/json` en su Accept.
+
+    El comodín `*/*` NO cuenta, y esa es toda la razón por la que este
+    criterio es seguro: `fetch()` manda `Accept: */*` cuando no se le
+    especifica otra cosa, que es exactamente lo que hace la navegación AJAX
+    del panel (`X-Panel-Fragment`) y cada llamada JS de dashboard.py — esos
+    clientes siguen recibiendo el redirect al login igual que antes. Un
+    navegador navegando manda `text/html,...` y tampoco nombra JSON. Solo un
+    consumidor de la API JSON (el frontend externo, curl, un test) pide
+    `application/json` de forma explícita."""
+    return "application/json" in request.headers.get("accept", "").lower()
+
+
 @app.exception_handler(NoAutenticado)
 async def no_autenticado_handler(request: Request, exc: NoAutenticado):
-    """Sin sesión válida en el panel: redirige al login en vez de romper con un error."""
+    """Sin sesión válida en el panel: redirige al login en vez de romper con un error.
+
+    Excepción: a un cliente que pidió JSON explícitamente se le responde 401
+    con el mismo envelope de error del contrato interno (agent/api_contrato.py).
+    Un 307 al HTML del login no es una respuesta que un consumidor de API pueda
+    interpretar — ve un 200 con una página de login donde esperaba datos, y no
+    tiene forma de distinguir "no estás autenticado" de "esto respondió raro"."""
+    if _pide_json_explicitamente(request):
+        request_id = getattr(request.state, "request_id", "-")
+        return JSONResponse(
+            status_code=401,
+            content={
+                "codigo": "HTTP_401",
+                "mensaje": "No hay una sesión activa. Inicia sesión para continuar.",
+                "detalle": None,
+                "request_id": request_id,
+            },
+            headers={"X-Request-Id": request_id},
+        )
     return RedirectResponse(url="/dashboard/login")
 
 
@@ -149,7 +183,7 @@ async def webhook_handler(request: Request):
     Recibe mensajes de WhatsApp via el proveedor configurado.
     Procesa el mensaje, genera respuesta con Claude y la envía de vuelta.
     """
-    ip = request.client.host if request.client else "desconocida"
+    ip = ip_cliente(request)
     if not limitador_webhook.permitir(ip, MAX_WEBHOOK_POR_IP_POR_MINUTO, 60):
         logger.warning(f"Rate limit excedido en /webhook desde {ip}")
         raise HTTPException(status_code=429, detail="Demasiadas solicitudes")

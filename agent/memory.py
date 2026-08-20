@@ -13,7 +13,7 @@ from datetime import datetime
 from cryptography.fernet import Fernet
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, aliased
-from sqlalchemy import String, Text, DateTime, select, Integer, Boolean, func, case, delete, JSON
+from sqlalchemy import String, Text, DateTime, select, Integer, Boolean, func, case, delete, update, JSON
 from sqlalchemy.exc import IntegrityError
 from dotenv import load_dotenv
 
@@ -449,6 +449,15 @@ class Producto(Base):
     activo: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
     creado: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     actualizado: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    # Concurrencia optimista, mismo mecanismo y mismo criterio que Lead.version
+    # (ver intentar_avanzar_version): se incrementa en cada escritura que
+    # CAMBIA algo del producto — editar_producto, toggle_producto, y también
+    # la importación masiva, pero SOLO sobre las filas que esa importación
+    # modificó de verdad. Las filas que la importación deja idénticas no
+    # avanzan versión, para no invalidar en bloque formularios abiertos sobre
+    # productos que nadie tocó (mismo motivo por el que Lead no avanza versión
+    # con los mensajes automáticos de Gabi: evitar conflictos falsos).
+    version: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
 
 
 class HistorialPrecioProducto(Base):
@@ -464,8 +473,15 @@ class HistorialPrecioProducto(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     producto_id: Mapped[int] = mapped_column(Integer, index=True)
     campo: Mapped[str] = mapped_column(String(30))
-    valor_anterior: Mapped[str | None] = mapped_column(String(50), nullable=True)
-    valor_nuevo: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    # Text, no String(50): la tabla nació pensando solo en precios y cuotas
+    # (números cortos), pero la bitácora audita también descripcion/combo/
+    # comentarios, que llegan a 300 caracteres. Se truncaba el valor guardado
+    # para no romper el límite de Postgres; ahora se guarda completo — una
+    # bitácora que muestra medio dato obliga a ir a buscar el otro medio a
+    # otro lado, y el valor anterior ya no existe en ninguna parte. Mismo
+    # motivo y mismo patrón que Producto.combo (ver fe7af0de58f1).
+    valor_anterior: Mapped[str | None] = mapped_column(Text, nullable=True)
+    valor_nuevo: Mapped[str | None] = mapped_column(Text, nullable=True)
     autor: Mapped[str | None] = mapped_column(String(100), nullable=True)
     creado: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
 
@@ -1372,6 +1388,33 @@ async def obtener_telefono_de_archivo(archivo_id: int) -> str | None:
 
 PLAZOS_CUOTAS_CATALOGO = ("3", "6", "9", "12", "18", "24", "36", "48", "60")
 
+# Campos de negocio de un producto — los que definen QUÉ es el producto y a
+# qué precio se vende. Excluye id/activo/creado/actualizado/version, que son
+# metadatos del registro, no del producto. Se usan para: (a) el diff de la
+# importación, (b) la comparación de igualdad exacta de las filas
+# "EN CREACIÓN", (c) la auditoría campo por campo de una edición manual.
+CAMPOS_NEGOCIO_PRODUCTO = (
+    "canal", "proveedor", "marca", "tipo", "sub_tipo", "codigo_hana",
+    "descripcion", "combo", "comentarios", "fee_prv", "fee_clda", "precio",
+)
+
+# Campos que un admin puede editar desde el panel — los de negocio más las
+# cuotas. `activo` NO está acá: se cambia por su propia ruta (toggle), para
+# que activar/desactivar sea una decisión explícita y no un efecto colateral
+# de guardar un formulario.
+CAMPOS_EDITABLES_PRODUCTO = CAMPOS_NEGOCIO_PRODUCTO + ("cuotas",)
+
+# Valores de `HistorialPrecioProducto.campo` que NO son un campo del producto
+# sino un hecho sobre el registro. Se usan valores sentinel con guiones bajos
+# para que nunca colisionen con un nombre de campo real. Verificado antes de
+# escribir esta lógica: la tabla existente (campo/valor_anterior/valor_nuevo/
+# autor/creado) alcanza para representar "creación" y "activo→inactivo" sin
+# cambiar el esquema — una creación es (campo=__creado__, anterior=None,
+# nuevo=descripción) y un cambio de estado es (campo=activo, anterior/nuevo
+# en "true"/"false").
+CAMPO_AUDITORIA_CREADO = "__creado__"
+CAMPO_AUDITORIA_ACTIVO = "activo"
+
 # Duplicado real confirmado entre proveedores distintos (revisado con Jesús
 # el 10/07/2026, antes vivía como FILAS_DUPLICADAS_EXCLUIDAS en tools.py):
 # mismo modelo LG WT16OBVTB 16KG, listado dos veces con precio distinto. La
@@ -1432,64 +1475,559 @@ async def obtener_producto_por_codigo_hana(codigo: str) -> dict | None:
         return _producto_a_dict(p) if p else None
 
 
-async def importar_catalogo_desde_csv(ruta_csv: str) -> dict:
-    """Reemplaza por completo el catálogo de productos desde un CSV con el
-    mismo formato de knowledge/lista_precios_canales_propios.csv.
+def _producto_a_dict_panel(p: Producto) -> dict:
+    """Forma del producto para el PANEL / la API JSON — distinta a propósito de
+    _producto_a_dict(), que reconstruye la fila con las claves del CSV
+    ("CODIGO HANA", "DESCRIPCIÓN"...) para no tocar la lógica de negocio de
+    agent/tools.py. Acá se exponen los nombres reales de los campos más los
+    metadatos del registro (id, activo, version) que la UI administrativa sí
+    necesita. Las fechas van en ISO porque el consumidor es JSON
+    (JSONResponse no sabe serializar datetime)."""
+    return {
+        "id": p.id,
+        "canal": p.canal,
+        "proveedor": p.proveedor,
+        "marca": p.marca,
+        "tipo": p.tipo,
+        "sub_tipo": p.sub_tipo,
+        "codigo_hana": p.codigo_hana,
+        "descripcion": p.descripcion,
+        "combo": p.combo,
+        "comentarios": p.comentarios,
+        "fee_prv": p.fee_prv,
+        "fee_clda": p.fee_clda,
+        "precio": p.precio,
+        "cuotas": p.cuotas or {},
+        "activo": p.activo,
+        "version": p.version,
+        "creado": p.creado.isoformat() if p.creado else None,
+        "actualizado": p.actualizado.isoformat() if p.actualizado else None,
+    }
 
-    Reemplazo total (borra todo, vuelve a insertar), no upsert por
-    CODIGO HANA — porque ese campo no es una clave confiable (se repite
-    "EN CREACIÓN" en filas sin código real asignado). Esto es seguro
-    mientras no exista edición manual de precios desde el panel (esa UI es
-    un bloque futuro).
 
-    DECISIÓN TEMPORAL del sub-bloque (a) del Catálogo editable
-    (2026-08-16), no definitiva: cuando se implemente el sub-bloque (b)
-    (UI administrativa), esta estrategia de importación DEBE revisarse
-    para no sobrescribir cambios manuales hechos desde el panel — hoy es
-    segura precisamente porque nada escribe todavía sobre `productos` fuera
-    de esta función."""
-    with open(ruta_csv, "r", encoding="utf-8") as f:
-        filas = list(csv.DictReader(f))
+def _normalizar_texto_producto(valor) -> str | None:
+    """Vacío y None son el mismo dato para un campo de catálogo — unificarlos
+    evita auditar cambios falsos ("" -> None) en cada importación."""
+    if valor is None:
+        return None
+    texto = str(valor).strip()
+    return texto or None
 
-    importados = 0
-    excluidos = 0
+
+def _valor_auditoria(valor) -> str | None:
+    """Normaliza a texto el valor que va a la bitácora, SIN recortarlo: las
+    columnas valor_anterior/valor_nuevo son Text desde la migración
+    9b2c4d7e1a35, así que una descripción de 300 caracteres se guarda entera.
+    Sigue existiendo como función (y no como str() suelto en cada punto de
+    escritura) para que None no se convierta en la cadena "None" y para tener
+    un solo lugar donde cambiar el formato del dato auditado."""
+    if valor is None:
+        return None
+    return str(valor)
+
+
+def _es_codigo_en_creacion(codigo: str | None) -> bool:
+    """True si el CODIGO HANA es el placeholder de "producto todavía sin
+    código asignado" en vez de un código real. Se acepta con y sin tilde
+    porque el dato lo escribe una persona en un Excel."""
+    if not codigo:
+        return True
+    return codigo.strip().upper().replace("Ó", "O").startswith("EN CREACION")
+
+
+def _fila_csv_a_datos(fila: dict) -> dict:
+    """Normaliza una fila cruda del CSV a los campos del modelo Producto."""
+    return {
+        "canal": _normalizar_texto_producto(fila.get("CANAL")),
+        "proveedor": _normalizar_texto_producto(fila.get("PROVEEDOR")),
+        "marca": _normalizar_texto_producto(fila.get("MARCA")),
+        "tipo": _normalizar_texto_producto(fila.get("TIPO")),
+        "sub_tipo": _normalizar_texto_producto(fila.get("SUB TIPO")),
+        "codigo_hana": _normalizar_texto_producto(fila.get("CODIGO HANA")),
+        "descripcion": _normalizar_texto_producto(fila.get("DESCRIPCIÓN")),
+        "combo": _normalizar_texto_producto(fila.get("COMBO")),
+        "comentarios": _normalizar_texto_producto(fila.get("COMENTARIOS")),
+        "fee_prv": _normalizar_texto_producto(fila.get("FEE PRV")),
+        "fee_clda": _normalizar_texto_producto(fila.get("FEE CLDA")),
+        "precio": _normalizar_texto_producto(fila.get("PRECIO")),
+        "cuotas": {
+            plazo: fila[plazo].strip()
+            for plazo in PLAZOS_CUOTAS_CATALOGO
+            if (fila.get(plazo) or "").strip()
+        },
+    }
+
+
+def _clave_igualdad_producto(datos: dict) -> tuple:
+    """Huella de TODOS los campos de negocio (incluidas las cuotas) de un
+    producto. Dos filas con la misma huella son literalmente indistinguibles
+    en los datos: no hay ninguna forma de decidir cuál es cuál."""
+    cuotas = datos.get("cuotas") or {}
+    return (
+        tuple(_normalizar_texto_producto(datos.get(campo)) for campo in CAMPOS_NEGOCIO_PRODUCTO),
+        tuple((plazo, _normalizar_texto_producto(cuotas.get(plazo))) for plazo in PLAZOS_CUOTAS_CATALOGO),
+    )
+
+
+def _producto_a_datos(p: Producto) -> dict:
+    """El producto de la BD con la misma forma que devuelve _fila_csv_a_datos,
+    para poder compararlos campo por campo."""
+    datos = {campo: getattr(p, campo) for campo in CAMPOS_NEGOCIO_PRODUCTO}
+    datos["cuotas"] = p.cuotas or {}
+    return datos
+
+
+def _emparejar_por_igualdad_exacta(filas_bd: list, filas_csv: list) -> tuple[list, list, list]:
+    """Empareja dos conjuntos de filas que NO tienen identificador confiable,
+    usando la igualdad exacta de todos sus campos de negocio como única
+    evidencia de que son "la misma fila".
+
+    LIMITACIÓN CONOCIDA Y DELIBERADA (no es un bug): cuando varias filas son
+    idénticas entre sí, la comparación es por CANTIDAD (multiset), no
+    fila-por-fila — se empareja "3 filas idénticas de un lado con 3 del otro"
+    sin decidir cuál instancia concreta corresponde a cuál, porque en los
+    datos son intercambiables y esa decisión sería inventada. La consecuencia
+    práctica: si una fila sin código cambia CUALQUIER campo (por ejemplo, le
+    suben el precio), la vieja y la nueva ya no son iguales, así que esto NO
+    lo registra como una modificación — lo registra como una baja + un alta.
+    Es a propósito: preferimos un alta/baja honesta antes que una auditoría de
+    "cambio de precio" atribuida a un producto que quizá no es ese (regla:
+    nunca registrar una auditoría que no pueda atribuirse con certeza).
+
+    Devuelve (emparejadas, solo_csv, solo_bd):
+      - emparejadas: [(Producto, datos_csv)] con igualdad total de negocio
+      - solo_csv:    [datos_csv] sin correspondencia -> se crean
+      - solo_bd:     [Producto] sin correspondencia  -> se desactivan
+    """
+    # Entre filas INDISTINGUIBLES, cuál se empareja y cuál sobra es una
+    # elección arbitraria en los datos — pero no en sus consecuencias: la que
+    # sobra se DESACTIVA. Por eso se emparejan primero las activas y se deja
+    # sobrar a las que ya estaban dadas de baja. Si en la BD hay 1 inactiva +
+    # 2 activas idénticas y el CSV trae 2 filas, el catálogo debe quedar con 2
+    # vigentes (lo que dice el CSV): emparejar la inactiva y dar de baja una
+    # activa dejaría 1 sola vigente y escribiría una auditoría de baja que no
+    # corresponde a ningún hecho nuevo de la fuente comercial. sorted() es
+    # estable, así que dentro de cada grupo se conserva el orden original.
+    pendientes: dict[tuple, list] = {}
+    for p in sorted(filas_bd, key=lambda p: not p.activo):
+        pendientes.setdefault(_clave_igualdad_producto(_producto_a_datos(p)), []).append(p)
+
+    emparejadas: list = []
+    solo_csv: list = []
+    for datos in filas_csv:
+        cola = pendientes.get(_clave_igualdad_producto(datos))
+        if cola:
+            emparejadas.append((cola.pop(0), datos))
+        else:
+            solo_csv.append(datos)
+
+    solo_bd = [p for cola in pendientes.values() for p in cola]
+    return emparejadas, solo_csv, solo_bd
+
+
+def _diferencias_producto(p: Producto, datos: dict) -> list[tuple[str, str | None, str | None]]:
+    """Campos que REALMENTE cambian entre el producto guardado y los datos
+    nuevos. Devuelve [(campo, valor_anterior, valor_nuevo)] — las cuotas se
+    reportan una por plazo ("cuota_12"), no como un JSON entero, para que la
+    bitácora diga exactamente qué plazo se movió."""
+    cambios: list[tuple[str, str | None, str | None]] = []
+    for campo in CAMPOS_NEGOCIO_PRODUCTO:
+        if campo not in datos:
+            continue
+        anterior = _normalizar_texto_producto(getattr(p, campo))
+        nuevo = _normalizar_texto_producto(datos.get(campo))
+        if anterior != nuevo:
+            cambios.append((campo, anterior, nuevo))
+    if "cuotas" in datos:
+        cuotas_anteriores = p.cuotas or {}
+        cuotas_nuevas = datos.get("cuotas") or {}
+        for plazo in PLAZOS_CUOTAS_CATALOGO:
+            anterior = _normalizar_texto_producto(cuotas_anteriores.get(plazo))
+            nuevo = _normalizar_texto_producto(cuotas_nuevas.get(plazo))
+            if anterior != nuevo:
+                cambios.append((f"cuota_{plazo}", anterior, nuevo))
+    return cambios
+
+
+def _aplicar_datos_producto(p: Producto, datos: dict):
+    """Escribe los campos de negocio (y cuotas) sobre el producto."""
+    for campo in CAMPOS_NEGOCIO_PRODUCTO:
+        if campo in datos:
+            setattr(p, campo, _normalizar_texto_producto(datos.get(campo)))
+    if "cuotas" in datos:
+        p.cuotas = datos.get("cuotas") or {}
+
+
+def _columnas_a_escribir(datos: dict) -> dict:
+    """Los mismos campos que escribiría _aplicar_datos_producto(), pero como
+    diccionario de columnas para un UPDATE de Core — solo las claves realmente
+    presentes en `datos`, para que una edición parcial no borre lo que el
+    formulario no envió."""
+    valores = {
+        campo: _normalizar_texto_producto(datos.get(campo))
+        for campo in CAMPOS_NEGOCIO_PRODUCTO
+        if campo in datos
+    }
+    if "cuotas" in datos:
+        valores["cuotas"] = datos.get("cuotas") or {}
+    return valores
+
+
+def _auditar(session, producto_id: int, campo: str, anterior, nuevo, autor: str | None):
+    """Agrega una fila de bitácora a la sesión EN CURSO (no hace commit) —
+    a diferencia de registrar_cambio_precio_producto(), que abre su propia
+    sesión. La importación necesita esta variante para que el catálogo y su
+    auditoría se guarden en una sola transacción: si la importación falla a
+    mitad de camino no queda una bitácora de cambios que nunca se aplicaron."""
+    session.add(HistorialPrecioProducto(
+        producto_id=producto_id, campo=campo,
+        valor_anterior=_valor_auditoria(anterior), valor_nuevo=_valor_auditoria(nuevo),
+        autor=autor,
+    ))
+
+
+def _activo_segun_csv(datos: dict) -> bool:
+    """Un producto que viene en el CSV está vigente, salvo que esté en la
+    lista de duplicados reales confirmados (FILAS_CATALOGO_EXCLUIDAS).
+
+    Solo se usa al CREAR un producto nuevo. Sobre un producto que ya existe la
+    importación no vuelve a decidir su `activo` (ver regla 4 de
+    importar_catalogo_desde_csv): si un admin lo desactivó a mano, sigue
+    desactivado por más que el CSV lo siga trayendo."""
+    clave = (datos.get("proveedor") or "", datos.get("descripcion") or "")
+    return clave not in FILAS_CATALOGO_EXCLUIDAS
+
+
+async def importar_catalogo_desde_csv(ruta_csv: str, autor: str | None = None) -> dict:
+    """Sincroniza el catálogo con un CSV del mismo formato de
+    knowledge/lista_precios_canales_propios.csv, por DIFERENCIAS.
+
+    Reemplaza a la estrategia anterior (borrar todo y reinsertar), que dejó de
+    ser válida al existir edición manual desde el panel: un DELETE total
+    destruye los ids de los productos y con eso la trazabilidad de
+    HistorialPrecioProducto, que apunta a producto_id.
+
+    Reglas de identidad, en orden:
+
+    1. CODIGO HANA real -> es el identificador. Fila nueva se crea; fila
+       existente que cambió se actualiza y se audita CAMPO POR CAMPO; fila
+       idéntica no se toca ni se audita; fila que estaba en la BD y ya no
+       viene en el CSV se DESACTIVA (nunca se borra físicamente).
+
+    2. CODIGO HANA "EN CREACIÓN" -> ese texto es un placeholder, no una
+       identidad, y tampoco se usa una clave compuesta como identidad
+       oficial: se empareja solo por igualdad EXACTA de todos los campos de
+       negocio, y lo que no empareja de forma inequívoca se resuelve como
+       alta (fila nueva) + baja (fila vieja desactivada). Ver la limitación
+       documentada en _emparejar_por_igualdad_exacta().
+
+    3. Un CODIGO HANA real que aparezca REPETIDO (en la BD o en el CSV) cae
+       también en el camino (2), porque deja de identificar una sola fila.
+       Hoy no ocurre — los 342 códigos reales del CSV vigente son únicos —
+       pero si ocurriera, es preferible degradar a alta/baja antes que
+       atribuir un cambio de precio a la fila equivocada.
+
+    4. `activo` NO se reconcilia contra el CSV en las filas que ya existen: un
+       producto que ya estaba en la BD y sigue viniendo en el CSV conserva su
+       `activo` tal cual, sin importar qué traiga el CSV. Activar o desactivar
+       es una decisión humana explícita (el toggle del panel, auditado por su
+       propia ruta) y una reimportación masiva no puede revertirla en silencio.
+       La importación solo toca `activo` por dos caminos:
+         - ALTA: un producto NUEVO nace con el `activo` que dicta el CSV
+           (activo, salvo que esté en FILAS_CATALOGO_EXCLUIDAS);
+         - BAJA: un producto existente que DESAPARECE por completo del CSV pasa
+           a `activo=false` — dejó de existir en la fuente comercial, que es un
+           hecho del catálogo y no una preferencia de un admin.
+       Los demás campos (precio, cuotas, descripción, fees...) sí se
+       sobrescriben desde el CSV, y la bitácora deja constancia de cada campo
+       pisado.
+
+    `version` avanza SOLO en las filas que esta importación cambió de verdad
+    (ver Producto.version): así un formulario abierto sobre un producto que la
+    importación acaba de pisar responde 409 en vez de sobrescribir el dato
+    nuevo en silencio, y los formularios sobre productos intactos siguen
+    siendo válidos.
+
+    Devuelve {procesados, nuevos, modificados, sin_cambios, desactivados,
+    en_creacion_ambiguas}, donde en_creacion_ambiguas cuenta las filas sin
+    código (de ambos lados) que NO tuvieron correspondencia exacta y por eso
+    se resolvieron por el camino conservador de alta/baja — es el número que
+    una persona debería revisar a mano después de importar.
+    """
+    with open(ruta_csv, "r", encoding="utf-8-sig") as f:
+        filas_csv = [_fila_csv_a_datos(fila) for fila in csv.DictReader(f)]
+
+    resumen = {
+        "procesados": len(filas_csv), "nuevos": 0, "modificados": 0,
+        "sin_cambios": 0, "desactivados": 0, "en_creacion_ambiguas": 0,
+    }
+
     async with async_session() as session:
-        await session.execute(delete(Producto))
-        for fila in filas:
-            proveedor = (fila.get("PROVEEDOR") or "").strip()
-            descripcion = (fila.get("DESCRIPCIÓN") or "").strip()
-            activo = (proveedor, descripcion) not in FILAS_CATALOGO_EXCLUIDAS
-            if not activo:
-                excluidos += 1
-            cuotas = {plazo: fila[plazo] for plazo in PLAZOS_CUOTAS_CATALOGO if fila.get(plazo)}
-            session.add(Producto(
-                canal=(fila.get("CANAL") or "").strip() or None,
-                proveedor=proveedor or None,
-                marca=(fila.get("MARCA") or "").strip() or None,
-                tipo=(fila.get("TIPO") or "").strip() or None,
-                sub_tipo=(fila.get("SUB TIPO") or "").strip() or None,
-                codigo_hana=(fila.get("CODIGO HANA") or "").strip() or None,
-                descripcion=descripcion or None,
-                combo=(fila.get("COMBO") or "").strip() or None,
-                comentarios=(fila.get("COMENTARIOS") or "").strip() or None,
-                fee_prv=(fila.get("FEE PRV") or "").strip() or None,
-                fee_clda=(fila.get("FEE CLDA") or "").strip() or None,
-                precio=(fila.get("PRECIO") or "").strip() or None,
-                cuotas=cuotas,
-                activo=activo,
-            ))
-            importados += 1
+        result = await session.execute(select(Producto))
+        productos_bd = list(result.scalars().all())
+
+        # Partición por identidad: código real de un lado, placeholder del otro.
+        por_codigo_bd: dict[str, list] = {}
+        sin_codigo_bd: list = []
+        for p in productos_bd:
+            if _es_codigo_en_creacion(p.codigo_hana):
+                sin_codigo_bd.append(p)
+            else:
+                por_codigo_bd.setdefault(p.codigo_hana.strip().upper(), []).append(p)
+
+        por_codigo_csv: dict[str, list] = {}
+        sin_codigo_csv: list = []
+        for datos in filas_csv:
+            if _es_codigo_en_creacion(datos.get("codigo_hana")):
+                sin_codigo_csv.append(datos)
+            else:
+                por_codigo_csv.setdefault(datos["codigo_hana"].strip().upper(), []).append(datos)
+
+        emparejadas: list = []   # [(Producto, datos_csv)] — identidad cierta
+        a_crear: list = []       # [datos_csv]
+        a_desactivar: list = []  # [Producto]
+
+        # (1) y (3) — códigos HANA reales
+        for codigo in set(por_codigo_bd) | set(por_codigo_csv):
+            lista_bd = por_codigo_bd.get(codigo, [])
+            lista_csv = por_codigo_csv.get(codigo, [])
+            if len(lista_bd) <= 1 and len(lista_csv) <= 1:
+                if lista_bd and lista_csv:
+                    emparejadas.append((lista_bd[0], lista_csv[0]))
+                elif lista_csv:
+                    a_crear.extend(lista_csv)
+                else:
+                    a_desactivar.extend(lista_bd)
+                continue
+            # Código repetido: ya no identifica una sola fila (regla 3).
+            logger.warning(
+                "Importación de catálogo: CODIGO HANA %s aparece %d vez(ces) en la BD "
+                "y %d en el CSV — se resuelve por igualdad exacta, no por código.",
+                codigo, len(lista_bd), len(lista_csv),
+            )
+            pares, nuevas, viejas = _emparejar_por_igualdad_exacta(lista_bd, lista_csv)
+            emparejadas.extend(pares)
+            a_crear.extend(nuevas)
+            a_desactivar.extend(viejas)
+
+        # (2) — filas "EN CREACIÓN"
+        pares, nuevas, viejas = _emparejar_por_igualdad_exacta(sin_codigo_bd, sin_codigo_csv)
+        emparejadas.extend(pares)
+        a_crear.extend(nuevas)
+        a_desactivar.extend(viejas)
+        # Solo cuentan las filas que ESTA importación deja sin resolver: las que
+        # ya estaban dadas de baja en importaciones anteriores no se vuelven a
+        # reportar, o el número crecería para siempre y dejaría de ser accionable.
+        resumen["en_creacion_ambiguas"] = len(nuevas) + len([p for p in viejas if p.activo])
+
+        for p, datos in emparejadas:
+            # `activo` NO se toca acá a propósito (regla 4): el producto ya
+            # existe y sigue en el CSV, así que su vigencia la decide la
+            # persona que lo activó/desactivó desde el panel, no la
+            # reimportación. Se auditan y aplican solo los cambios de datos.
+            cambios = _diferencias_producto(p, datos)
+            if not cambios:
+                resumen["sin_cambios"] += 1
+                continue
+            _aplicar_datos_producto(p, datos)
+            p.version += 1
+            for campo, anterior, nuevo in cambios:
+                _auditar(session, p.id, campo, anterior, nuevo, autor)
+            resumen["modificados"] += 1
+
+        for datos in a_crear:
+            producto = Producto(
+                **{campo: _normalizar_texto_producto(datos.get(campo)) for campo in CAMPOS_NEGOCIO_PRODUCTO},
+                cuotas=datos.get("cuotas") or {},
+                activo=_activo_segun_csv(datos),
+            )
+            session.add(producto)
+            # flush para tener el id real: la auditoría nunca se escribe sin
+            # poder atribuirse a un producto concreto.
+            await session.flush()
+            _auditar(session, producto.id, CAMPO_AUDITORIA_CREADO, None, producto.descripcion, autor)
+            resumen["nuevos"] += 1
+
+        for p in a_desactivar:
+            if not p.activo:
+                continue  # ya estaba dado de baja: no hay cambio que auditar
+            p.activo = False
+            p.version += 1
+            _auditar(session, p.id, CAMPO_AUDITORIA_ACTIVO, "true", "false", autor)
+            resumen["desactivados"] += 1
+
         await session.commit()
-    return {"importados": importados, "excluidos": excluidos}
+
+    return resumen
+
+
+async def listar_productos(filtros: dict, pagina: int, por_pagina: int = 20) -> tuple[list[dict], int]:
+    """Página de productos + total de coincidencias (para la paginación de la
+    pantalla de catálogo). Filtros soportados: `q` (texto libre sobre marca y
+    descripción), `canal`, `marca`, `tipo` (coincidencia exacta) y `activo`
+    (bool; si no viene, devuelve activos e inactivos)."""
+    filtros = filtros or {}
+    condiciones = []
+
+    texto = (filtros.get("q") or "").strip()
+    if texto:
+        patron = f"%{texto}%"
+        condiciones.append(Producto.marca.ilike(patron) | Producto.descripcion.ilike(patron))
+    for campo in ("canal", "marca", "tipo"):
+        valor = (filtros.get(campo) or "").strip()
+        if valor:
+            condiciones.append(getattr(Producto, campo) == valor)
+    if filtros.get("activo") is not None:
+        condiciones.append(Producto.activo.is_(bool(filtros["activo"])))
+
+    pagina = max(1, int(pagina or 1))
+    por_pagina = max(1, int(por_pagina or 20))
+
+    async with async_session() as session:
+        total = await session.scalar(select(func.count()).select_from(Producto).where(*condiciones))
+        query = (
+            select(Producto).where(*condiciones)
+            .order_by(Producto.id.asc())
+            .offset((pagina - 1) * por_pagina).limit(por_pagina)
+        )
+        result = await session.execute(query)
+        return [_producto_a_dict_panel(p) for p in result.scalars().all()], int(total or 0)
+
+
+async def obtener_producto(id: int) -> dict | None:
+    async with async_session() as session:
+        p = await session.get(Producto, id)
+        return _producto_a_dict_panel(p) if p else None
+
+
+async def crear_producto(datos: dict, autor: str) -> dict:
+    """Alta manual desde el panel. Arranca en version=0 (igual que los leads)
+    y deja constancia de la creación en la bitácora."""
+    async with async_session() as session:
+        producto = Producto(
+            **{campo: _normalizar_texto_producto(datos.get(campo)) for campo in CAMPOS_NEGOCIO_PRODUCTO},
+            cuotas=datos.get("cuotas") or {},
+            activo=bool(datos.get("activo", True)),
+            version=0,
+        )
+        session.add(producto)
+        await session.flush()
+        _auditar(session, producto.id, CAMPO_AUDITORIA_CREADO, None, producto.descripcion, autor)
+        await session.commit()
+        return _producto_a_dict_panel(producto)
+
+
+async def editar_producto(id: int, cambios: dict, version_esperada: int, autor: str) -> dict | None:
+    """Edición manual con concurrencia optimista — MISMO criterio que
+    intentar_avanzar_version() para leads: solo se aplica si el producto sigue
+    en la versión que tenía cuando se abrió el formulario; si alguien más
+    escribió antes, no se aplica NADA y se devuelve None para que quien llama
+    muestre el conflicto (Human Decision Gate) en vez de sobrescribir en
+    silencio. La diferencia con los leads es solo mecánica: acá el chequeo y
+    la escritura viven en la misma sesión/transacción, porque hay campos que
+    escribir en el mismo acto.
+
+    Devuelve el producto actualizado, o None si la versión no coincide (o si
+    el producto no existe — quien llama distingue los dos casos consultando
+    obtener_producto()).
+
+    El chequeo de versión NO alcanza con comparar en Python y después
+    escribir: entre esa comparación y el COMMIT hay una ventana en la que
+    otra solicitud puede leer la misma versión, y las dos se dan por
+    ganadoras (comprobado con dos ediciones simultáneas reales: ambas
+    respondían 200 y el segundo commit pisaba al primero sin dejar 409 ni
+    bitácora del conflicto — exactamente la sobrescritura silenciosa que este
+    mecanismo existe para impedir). La condición de versión viaja por eso
+    dentro del propio UPDATE (`WHERE id = ... AND version = ...`), que la base
+    evalúa de forma atómica: si otra escritura ganó, el UPDATE afecta 0 filas
+    y esto devuelve None igual que un conflicto normal.
+    """
+    async with async_session() as session:
+        producto = await session.get(Producto, id)
+        if producto is None or producto.version != version_esperada:
+            return None
+        cambios_reales = _diferencias_producto(producto, cambios)
+        if not cambios_reales:
+            # Guardar sin cambiar nada no es un conflicto ni un error: no se
+            # avanza la versión ni se ensucia la bitácora.
+            return _producto_a_dict_panel(producto)
+        valores = _columnas_a_escribir(cambios)
+
+    # Sesión nueva para que el UPDATE sea la primera sentencia de su
+    # transacción — así la condición de versión se evalúa contra el estado
+    # comprometido en ese instante, no contra la lectura de arriba.
+    async with async_session() as session:
+        resultado = await session.execute(
+            update(Producto)
+            .where(Producto.id == id, Producto.version == version_esperada)
+            .values(**valores, version=version_esperada + 1)
+        )
+        if resultado.rowcount == 0:
+            await session.rollback()
+            return None
+        await session.commit()
+
+    for campo, anterior, nuevo in cambios_reales:
+        await registrar_cambio_precio_producto(id, campo, anterior, nuevo, autor)
+    return await obtener_producto(id)
+
+
+async def toggle_producto(id: int, version_esperada: int, autor: str) -> dict | None:
+    """Activa/desactiva un producto — nunca se borra físicamente. Mismo manejo
+    de concurrencia que editar_producto(), incluida la condición de versión
+    dentro del UPDATE (dos toggles simultáneos con la misma versión daban 200
+    los dos y dejaban una sola bitácora, ver editar_producto)."""
+    async with async_session() as session:
+        producto = await session.get(Producto, id)
+        if producto is None or producto.version != version_esperada:
+            return None
+        anterior = producto.activo
+
+    async with async_session() as session:
+        resultado = await session.execute(
+            update(Producto)
+            .where(Producto.id == id, Producto.version == version_esperada)
+            .values(activo=not anterior, version=version_esperada + 1)
+        )
+        if resultado.rowcount == 0:
+            await session.rollback()
+            return None
+        await session.commit()
+
+    await registrar_cambio_precio_producto(
+        id, CAMPO_AUDITORIA_ACTIVO, str(anterior).lower(), str(not anterior).lower(), autor,
+    )
+    return await obtener_producto(id)
+
+
+async def listar_historial_producto(producto_id: int) -> list[dict]:
+    """Bitácora de un producto, del cambio más reciente al más antiguo — mismo
+    criterio de orden que listar_eventos_lead()."""
+    async with async_session() as session:
+        query = (
+            select(HistorialPrecioProducto)
+            .where(HistorialPrecioProducto.producto_id == producto_id)
+            .order_by(HistorialPrecioProducto.creado.desc(), HistorialPrecioProducto.id.desc())
+        )
+        result = await session.execute(query)
+        return [
+            {
+                "id": h.id, "campo": h.campo,
+                "valor_anterior": h.valor_anterior, "valor_nuevo": h.valor_nuevo,
+                "autor": h.autor, "creado": h.creado.isoformat() if h.creado else None,
+            }
+            for h in result.scalars().all()
+        ]
 
 
 async def registrar_cambio_precio_producto(producto_id: int, campo: str, valor_anterior: str | None, valor_nuevo: str | None, autor: str | None):
-    """Auditoría append-only de un cambio de precio/campo de un producto —
-    sin ningún call site todavía (la UI de edición es un bloque futuro),
-    existe para no requerir otra migración cuando esa UI se construya."""
+    """Auditoría append-only de un cambio de precio/campo de un producto. Abre
+    su propia sesión (la variante interna que escribe dentro de una
+    transacción en curso es _auditar())."""
     async with async_session() as session:
         session.add(HistorialPrecioProducto(
             producto_id=producto_id, campo=campo,
-            valor_anterior=valor_anterior, valor_nuevo=valor_nuevo, autor=autor,
+            valor_anterior=_valor_auditoria(valor_anterior), valor_nuevo=_valor_auditoria(valor_nuevo),
+            autor=autor,
         ))
         await session.commit()

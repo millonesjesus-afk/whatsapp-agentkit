@@ -37,7 +37,7 @@ from fastapi import APIRouter, Depends, HTTPException, Form, Request, UploadFile
 from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse, Response, FileResponse
 
 from agent.tiempo_real import gestor_conexiones
-from agent.rate_limit import limitador_login, bloqueo_login
+from agent.rate_limit import limitador_login, bloqueo_login, ip_cliente
 from agent.memory import (
     listar_leads, obtener_lead, actualizar_lead,
     obtener_usuario, listar_asesores, crear_usuario,
@@ -49,6 +49,9 @@ from agent.memory import (
     obtener_configuracion, guardar_configuracion,
     listar_lineas_venta, listar_lineas_venta_de_muchos,
     listar_canales_whatsapp, crear_canal_whatsapp, actualizar_canal_whatsapp,
+    listar_productos, obtener_producto, crear_producto, editar_producto,
+    toggle_producto, listar_historial_producto, importar_catalogo_desde_csv,
+    CAMPOS_NEGOCIO_PRODUCTO, PLAZOS_CUOTAS_CATALOGO,
 )
 from agent.services.servicio_conversacion import servicio_conversacion
 from agent.http_utils import get_con_reintentos, post_con_reintentos
@@ -1924,7 +1927,7 @@ MAX_LOGIN_POR_IP_POR_MINUTO = 10
 async def login_submit(request: Request, username: str = Form(...), password: str = Form(...)):
     # Rate limiting por IP — mitiga fuerza bruta distribuida entre varios
     # usuarios probados desde el mismo origen (Security Architecture, P1).
-    ip = request.client.host if request.client else "desconocida"
+    ip = ip_cliente(request)
     if not limitador_login.permitir(ip, MAX_LOGIN_POR_IP_POR_MINUTO, 60):
         return RedirectResponse(
             url="/dashboard/login?error=Demasiados+intentos+—+espera+un+minuto+y+vuelve+a+intentar",
@@ -5853,3 +5856,249 @@ async def cambiar_password_propia(
 
     await cambiar_password(usuario["username"], password_nueva)
     return RedirectResponse(url="/dashboard/perfil?ok=Contraseña+actualizada+correctamente", status_code=303)
+
+
+# ── Catálogo de productos (API JSON del panel — sub-bloque b) ──────────────
+#
+# Todas las escrituras son POST (ni PUT/PATCH/DELETE), igual que el resto del
+# panel: la sesión se valida por cookie y el CSRF por token de formulario, y
+# ese esquema solo cubre POST. Las lecturas son GET y las puede hacer
+# cualquier rol autenticado — el catálogo es información de trabajo diaria de
+# los asesores; escribirlo es administración, y queda en "admin".
+
+
+def _capacidades_de(rol: str) -> list[str]:
+    """Qué puede hacer este rol, en el vocabulario del producto — derivado de
+    los roles que las rutas de este mismo archivo ya exigen hoy, no de una
+    tabla de permisos nueva. Sirve para que un frontend externo (Next.js)
+    pinte u oculte acciones sin tener que replicar la lógica de roles, pero
+    NO es el control de acceso: el que manda sigue siendo `requiere_rol` en
+    cada ruta. Un cliente que mienta sobre sus capacidades igual recibe 403."""
+    vision_total = rol in ROLES_CON_VISION_TOTAL
+    es_admin = rol == "admin"
+    # "catalogo.*" es la librería de archivos/PDF (/dashboard/catalogos), ya
+    # existente — "productos:*" es el catálogo de precios (Producto), nuevo
+    # con este vertical. Nombres a propósito distintos para no repetir la
+    # colisión que ya se resolvió en el naming de las pantallas.
+    capacidades = ["leads.ver_asignados", "catalogo.ver", "metricas.ver", "productos:ver"]
+    if vision_total:
+        capacidades += ["leads.ver_todos", "leads.asignar", "asesores.gestionar", "metricas.exportar", "campanas.ver"]
+    if es_admin:
+        capacidades += [
+            "usuarios.crear", "campanas.gestionar", "canales.gestionar", "catalogo.gestionar", "prompt.promover",
+            "productos:crear", "productos:editar", "productos:activar", "productos:importar",
+        ]
+    if rol == "asesor":
+        capacidades.append("disponibilidad.toggle")
+    return sorted(capacidades)
+
+
+@router.get("/sesion")
+async def sesion_actual(request: Request, usuario: dict = Depends(_usuario_actual)):
+    """Quién soy, qué puedo hacer y con qué token escribo — el primer llamado
+    que hace un frontend externo al montar. No genera nada nuevo: reutiliza la
+    resolución de sesión de ServicioIdentidad (que además siembra el
+    csrf_token de la sesión de forma lazy) y el mismo token que ya viaja como
+    <meta name="csrf-token"> en el panel HTML."""
+    return JSONResponse({
+        "usuario": {"username": usuario["username"], "rol": usuario["rol"]},
+        "capacidades": _capacidades_de(usuario["rol"]),
+        "csrf_token": request.session.get("csrf_token", ""),
+    })
+
+
+def _parsear_cuotas(cuotas) -> dict:
+    """Las cuotas llegan como dict ({"12": "160.01", ...}) en el body JSON de
+    Productos — se acepta también como string JSON por compatibilidad con el
+    mismo patrón que usa `lineas_venta` en el cierre de venta."""
+    if cuotas is None or cuotas == "":
+        return {}
+    if isinstance(cuotas, str):
+        if not cuotas.strip():
+            return {}
+        try:
+            cuotas = json.loads(cuotas)
+        except (json.JSONDecodeError, TypeError, ValueError):
+            raise HTTPException(status_code=400, detail="El campo cuotas no es un JSON válido")
+    if not isinstance(cuotas, dict):
+        raise HTTPException(status_code=400, detail="El campo cuotas debe ser un objeto {plazo: valor}")
+    plazos_invalidos = [p for p in cuotas if str(p) not in PLAZOS_CUOTAS_CATALOGO]
+    if plazos_invalidos:
+        raise HTTPException(status_code=400, detail=f"Plazos de cuota no válidos: {', '.join(map(str, plazos_invalidos))}")
+    return {str(p): str(v).strip() for p, v in cuotas.items() if str(v).strip()}
+
+
+def _datos_producto_del_form(form: dict) -> dict:
+    """Solo los campos realmente enviados llegan a memory.py — así una edición
+    parcial no borra en silencio los campos que el formulario no incluyó
+    (_diferencias_producto ignora las claves ausentes)."""
+    datos = {campo: form[campo] for campo in CAMPOS_NEGOCIO_PRODUCTO if form.get(campo) is not None}
+    if form.get("cuotas") is not None:
+        datos["cuotas"] = _parsear_cuotas(form["cuotas"])
+    return datos
+
+
+@router.get("/productos")
+async def listar_productos_ruta(
+    q: str = "", canal: str = "", marca: str = "", tipo: str = "", activo: str = "",
+    pagina: int = 1, por_pagina: int = 20,
+    usuario: dict = Depends(_usuario_actual),
+):
+    """Catálogo paginado. `activo` acepta "1"/"0" (o vacío = todos) porque un
+    query param nunca es un bool real; se traduce a True/False/None antes de
+    bajar a memory.py."""
+    activo_filtro = None
+    if activo not in ("", None):
+        activo_filtro = activo.lower() in ("1", "true", "si", "sí")
+    por_pagina = min(max(1, por_pagina), 200)  # tope para que un cliente no pida el catálogo entero por accidente
+    productos, total = await listar_productos(
+        {"q": q, "canal": canal, "marca": marca, "tipo": tipo, "activo": activo_filtro},
+        pagina=pagina, por_pagina=por_pagina,
+    )
+    return JSONResponse({
+        "productos": productos, "total": total,
+        "pagina": max(1, pagina), "por_pagina": por_pagina,
+    })
+
+
+@router.get("/productos/{id}")
+async def obtener_producto_ruta(id: int, usuario: dict = Depends(_usuario_actual)):
+    producto = await obtener_producto(id)
+    if producto is None:
+        raise HTTPException(status_code=404, detail="Producto no encontrado")
+    return JSONResponse(producto)
+
+
+@router.get("/productos/{id}/historial")
+async def historial_producto_ruta(id: int, usuario: dict = Depends(_usuario_actual)):
+    """Bitácora del producto — quién cambió qué y cuándo. Visible para todos
+    los roles a propósito: un asesor que ve un precio distinto al de ayer
+    necesita poder confirmar que cambió de verdad y no es un error suyo
+    (Explainability First)."""
+    if await obtener_producto(id) is None:
+        raise HTTPException(status_code=404, detail="Producto no encontrado")
+    return JSONResponse({"historial": await listar_historial_producto(id)})
+
+
+def _version_del_body(body: dict) -> int:
+    """Mismo 422 que daba la validación automática de FastAPI sobre
+    `Form(...)`, ahora a mano porque el body es JSON, no form-encoded."""
+    if "version" not in body:
+        raise HTTPException(status_code=422, detail="Falta 'version' en el cuerpo de la petición")
+    try:
+        return int(body["version"])
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=422, detail="'version' debe ser un entero")
+
+
+@router.post("/productos")
+async def crear_producto_ruta(
+    request: Request,
+    usuario: dict = Depends(servicio_identidad.requiere_rol("admin")),
+    _csrf: None = Depends(verificar_csrf),
+):
+    """Body JSON (no form-encoded): Productos es la API pensada para el BFF
+    de Next.js, a diferencia del resto de este archivo que sirve HTML."""
+    body = await request.json()
+    descripcion = (body.get("descripcion") or "").strip()
+    if not descripcion:
+        raise HTTPException(status_code=400, detail="La descripción es obligatoria")
+    datos = _datos_producto_del_form(body)
+    producto = await crear_producto(datos, autor=usuario["nombre"])
+    return JSONResponse({"ok": True, "producto": producto}, status_code=201)
+
+
+@router.post("/productos/{id}/editar")
+async def editar_producto_ruta(
+    id: int,
+    request: Request,
+    usuario: dict = Depends(servicio_identidad.requiere_rol("admin")),
+    _csrf: None = Depends(verificar_csrf),
+):
+    """Concurrencia optimista, mismo criterio que la edición de un lead: si
+    alguien más guardó desde que se abrió el formulario, no se aplica nada y
+    se responde 409 con la versión vigente, para que el cliente muestre el
+    conflicto en vez de pisar el cambio ajeno (Human Decision Gate)."""
+    body = await request.json()
+    version = _version_del_body(body)
+    datos = _datos_producto_del_form({k: v for k, v in body.items() if k != "version"})
+    producto = await editar_producto(id, datos, version_esperada=version, autor=usuario["nombre"])
+    if producto is None:
+        # None cubre dos casos distintos (no existe / conflicto de versión);
+        # se separan acá para no devolver un 409 por un producto inexistente.
+        actual = await obtener_producto(id)
+        if actual is None:
+            raise HTTPException(status_code=404, detail="Producto no encontrado")
+        return JSONResponse(
+            {
+                "ok": False,
+                "detail": "Alguien más modificó este producto mientras lo editabas. Revisa los datos actuales antes de volver a guardar.",
+                "version_actual": actual["version"],
+            },
+            status_code=409,
+        )
+    return JSONResponse({"ok": True, "producto": producto})
+
+
+@router.post("/productos/{id}/toggle")
+async def toggle_producto_ruta(
+    id: int,
+    request: Request,
+    usuario: dict = Depends(servicio_identidad.requiere_rol("admin")),
+    _csrf: None = Depends(verificar_csrf),
+):
+    """Activa/desactiva — nunca borra. Mismo manejo de versión/409 que editar."""
+    body = await request.json()
+    version = _version_del_body(body)
+    producto = await toggle_producto(id, version_esperada=version, autor=usuario["nombre"])
+    if producto is None:
+        actual = await obtener_producto(id)
+        if actual is None:
+            raise HTTPException(status_code=404, detail="Producto no encontrado")
+        return JSONResponse(
+            {
+                "ok": False,
+                "detail": "Alguien más modificó este producto mientras lo editabas. Revisa los datos actuales antes de volver a guardar.",
+                "version_actual": actual["version"],
+            },
+            status_code=409,
+        )
+    return JSONResponse({"ok": True, "producto": producto})
+
+
+@router.post("/productos/importar")
+async def importar_productos_ruta(
+    archivo: UploadFile = File(...),
+    usuario: dict = Depends(servicio_identidad.requiere_rol("admin")),
+    _csrf: None = Depends(verificar_csrf),
+):
+    """Importación masiva desde la lista de precios en CSV. Sincroniza por
+    diferencias (ver importar_catalogo_desde_csv): no borra el catálogo, no
+    rompe los ids y deja bitácora de cada campo que cambió."""
+    if not (archivo.filename or "").lower().endswith(".csv"):
+        raise HTTPException(status_code=400, detail="Solo se acepta un archivo .csv")
+
+    contenido = await archivo.read()
+    if len(contenido) > TAMANO_MAXIMO_ARCHIVO_MB * 1024 * 1024:
+        raise HTTPException(status_code=400, detail=f"El archivo supera los {TAMANO_MAXIMO_ARCHIVO_MB}MB permitidos")
+    try:
+        contenido.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        raise HTTPException(
+            status_code=400,
+            detail="El CSV no está en UTF-8. Vuelve a exportarlo desde Excel como «CSV UTF-8 (delimitado por comas)».",
+        )
+
+    # A disco temporal: importar_catalogo_desde_csv recibe una ruta (el mismo
+    # contrato que usa el arranque del proceso con el CSV del repo), y el
+    # archivo se borra apenas termina — no es un adjunto que haya que guardar.
+    with tempfile.NamedTemporaryFile("wb", suffix=".csv", delete=False) as tmp:
+        tmp.write(contenido)
+        ruta_tmp = tmp.name
+    try:
+        resumen = await importar_catalogo_desde_csv(ruta_tmp, autor=usuario["nombre"])
+    finally:
+        os.unlink(ruta_tmp)
+
+    logger.info("Importación de catálogo por %s: %s", usuario["username"], resumen)
+    return JSONResponse({"ok": True, "resumen": resumen})
