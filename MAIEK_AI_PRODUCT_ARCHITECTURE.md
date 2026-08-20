@@ -10,7 +10,7 @@
 | Estado | **Approved** |
 | Fecha de creación | 2026-07-26 |
 | Autor | Claude, a pedido de Jesús Millones |
-| Última actualización | 2026-07-26 |
+| Última actualización | 2026-08-08 (sección 4 y 12 — relación Campañas → Agentes IA, ver Control de versiones) |
 
 ## Dependencias
 
@@ -46,6 +46,7 @@
 | Versión | Fecha | Autor | Descripción |
 |---|---|---|---|
 | 1.0 | 2026-07-26 | Claude | Primera versión — visión, mapa de 9 módulos funcionales, responsabilidades, relaciones, flujo de información, capacidades (incluida IA exclusiva), roles y permisos de alto nivel, navegación principal, arquitectura funcional, dependencias, escalabilidad futura, reglas para nuevos módulos, roadmap y diagrama conceptual. Congelado como referencia oficial. |
+| 1.0 | 2026-08-08 | Claude | **Nueva relación (sección 4 y 12): Campañas → Agentes IA.** El contexto de una campaña puede aportar información al contexto conversacional que los Agentes IA usan para responder — capacidad disponible y configurable, sujeta a las reglas de negocio aplicables, nunca una obligación universal. Formaliza una decisión de producto tomada durante el Gap Analysis del recorrido #5 de Product Design (Campaña → Lead atribuido → Pipeline), que identificó esta relación ya implementada en código (`agent/brain.py`, `agent/campanas.py`) sin respaldo canónico previo en ningún documento del corpus. No define reglas detalladas de cuándo o cómo se usa ese contexto — eso queda para Product Patterns, MPX y AI Architecture cuando corresponda. |
 
 Cualquier módulo nuevo o cambio de fondo en las relaciones descritas acá suma una fila nueva a
 esta tabla — mismo criterio de gobierno que el MDL y el CDS.
@@ -127,6 +128,10 @@ producto hoy, y potencialmente por otros medios (correo, push) en el futuro.
   convierte (o actualiza) un lead.
 - **Campañas → CRM / Pipeline**: los leads originados en una campaña llegan con su atribución
   ya adjunta.
+- **Campañas → Agentes IA**: el contexto de una campaña puede aportar información al contexto
+  conversacional que los Agentes IA usan para responder — una **capacidad disponible y
+  configurable**, sujeta a las reglas de negocio aplicables, nunca una obligación universal de
+  que la IA deba usarla o mencionarla en cada conversación.
 - **CRM / Pipeline ↔ Catálogo & Comercial**: el pipeline consulta el catálogo para cotizar; una
   venta cerrada en el pipeline actualiza qué se vendió realmente.
 - **CRM / Pipeline ↔ Equipo & Organización**: el pipeline pregunta "quién está disponible" para
@@ -278,9 +283,9 @@ conversación que fluya).
 | Módulo | Depende de | Es consumido por |
 |---|---|---|
 | Conversaciones | Canales & Configuración | CRM/Pipeline, Agentes IA, Analítica |
-| Agentes IA | Conversaciones (para tener contexto) | Conversaciones, CRM/Pipeline, Catálogo, Analítica |
+| Agentes IA | Conversaciones (para tener contexto), Campañas (contexto de atribución, cuando esté habilitado) | Conversaciones, CRM/Pipeline, Catálogo, Analítica |
 | CRM / Pipeline | Conversaciones, Equipo & Organización | Analítica, Notificaciones |
-| Campañas | Canales & Configuración | CRM/Pipeline, Analítica |
+| Campañas | Canales & Configuración | CRM/Pipeline, Agentes IA (cuando esté habilitado), Analítica |
 | Catálogo & Comercial | — (módulo independiente) | Conversaciones (vía IA o asesor), CRM/Pipeline |
 | Equipo & Organización | — (módulo independiente) | CRM/Pipeline, Notificaciones, Analítica |
 | Analítica | Todos los demás (solo lectura) | — (es un consumidor final) |

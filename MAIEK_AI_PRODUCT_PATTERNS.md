@@ -11,7 +11,7 @@
 | Fecha de creación | 2026-07-30 |
 | Autor | Claude, a pedido de Jesús Millones |
 | Fecha de aprobación | 2026-07-30 |
-| Última actualización | 2026-07-30 |
+| Última actualización | 2026-08-08 (Capítulo 6 — herencia de atribución de campaña, ver Control de versiones) |
 
 ## Dependencias
 
@@ -51,6 +51,8 @@ introduce módulos funcionales (MPA), no prescribe framework, librería ni códi
 | 0.1 (borrador, inicio) | 2026-07-30 | Claude | Primera versión — Capítulo 0 (Propósito) y Capítulo 1 (Patrón: Shell de Navegación). Redacción incremental, capítulo por capítulo, a pedido explícito del usuario. |
 | 0.1 (borrador, completo) | 2026-07-30 | Claude | Redacción incremental completada, capítulo por capítulo, cada uno revisado y ajustado por el usuario antes de continuar con el siguiente: Capítulo 2 (Bandeja de Conversaciones), Capítulo 3 (Inicio), Capítulo 4 (Analítica), Capítulo 5 (Copiloto IA), Capítulo 6 (CRM/Pipeline), Capítulo 7 (Catálogo, Campañas, Equipo) y Capítulo 8 (Principios Transversales de Producto, consolidando Plataforma primero, Capacidad vs. alcance, Acción antes que observación, Human Decision Gate, Única fuente de verdad, y La IA asiste-nunca reemplaza). |
 | 1.0 (Approved) | 2026-07-30 | Claude | Precisión final incorporada a Plataforma primero (especializar un patrón vía configuración/permisos/parametrización es válido; modificar el patrón canónico no lo es). Auditoría documental completa de calidad y consistencia: referencias cruzadas, numeración, trazabilidad, terminología y citas a MPA/MDL/MPX verificadas contra el contenido real de esos documentos. 5 inconsistencias editoriales menores corregidas (3 referencias residuales a "zona de foco" tras el renombre a "Zona de acción" en Capítulo 3; 1 referencia obsoleta a "futuro patrón de Catálogo"; 1 cita mal atribuida — "la IA se ve, no se anuncia" corresponde al MDL Capítulo 1, no al Capítulo 6). Sin observaciones de fondo. Aprobado por el usuario — congelado como v1.0. |
+| 1.0 | 2026-08-08 | Claude | **Capítulo 6 (CRM/Pipeline) — herencia de la atribución de campaña, 3 ediciones mínimas.** Resuelve la Brecha A identificada durante el Gap Analysis del recorrido #5 de Product Design (Campaña → Lead atribuido → Pipeline): MPA §4 y §6 ya declaraban la relación Campañas → CRM/Pipeline con atribución persistente, pero este capítulo no la reflejaba. (1) §2 Trazabilidad — se agrega la relación con Campañas (MPA §4) a la lista ya existente de relaciones declaradas (Conversaciones, Catálogo, Equipo). (2) §8 Relación con otros patrones — se declara a Campañas como fuente entrante de atribución, corrigiendo la asimetría con el Capítulo 7.B §8 (que ya declaraba alimentar a este patrón, sin que este lo recibiera de vuelta). (3) §3 Composición, Vista de detalle — se agrega la atribución de origen como dato presente, no opcional: MPA §3 exige que permanezca "visible en todo el ciclo de vida posterior del lead", por lo que este capítulo declara únicamente que el dato debe estar presente y visible — dónde se ubica, cómo se presenta y su comportamiento sin atribución quedan explícitamente diferidos a Product Design (Screen Contract en adelante). No se modificó ningún otro capítulo, ni MPX, ni MPA, ni AI Architecture, ni SCR-03 ni ningún artefacto de Product Design. Con esto, la Brecha A queda **RESUELTA** — junto con la Brecha B (resuelta el mismo día en MPA y AI Architecture), el bloqueo de corpus del recorrido #5 queda levantado. |
+| 1.0 | 2026-08-10 | Claude | **Capítulo 8 (Notificaciones) agregado — patrón nuevo.** Redactado tras un ciclo de Gate 1 (recuperación de evidencia: MPA §3/4/6/9, MPX Capítulo 7, Capítulo 1 de este documento, código real de `agent/dashboard.py` y `agent/notificaciones.py`) y Gate 2 (reconciliación de contradicciones/vacíos entre esas fuentes) previos a la redacción, seguidos de cuatro decisiones de producto aprobadas explícitamente por el usuario (DEC-01 canal, DEC-02 eventos del Badge, DEC-03 estados, DEC-04 clasificación de `agent/notificaciones.py`) — detalle completo del proceso en `MAIEK_AI_EXPERIENCE_FLOWS.md`. Cambio de numeración documental asociado, no de producto: el antiguo Capítulo 8 ("Principios Transversales de Producto") pasa a ser Capítulo 9 sin alteración de su contenido conceptual — solo se actualizaron sus referencias internas a "Capítulos 1 a 7" → "Capítulos 1 a 8" y dos referencias cruzadas residuales en Capítulo 6 y Capítulo 7 que apuntaban al antiguo número, más el bloque de cierre del documento. Sin observaciones de fondo. |
 
 ---
 
@@ -813,7 +815,7 @@ trabajo comercial se organiza más allá del flujo conversacional del día a dí
 Administrador y Supervisor intervienen directamente sobre el trabajo del equipo.
 
 **El Lead tiene una única fuente de verdad** (instancia de un principio ya generalizado a toda
-entidad de negocio del producto en el Capítulo 8). Independientemente del canal desde el que se
+entidad de negocio del producto en el Capítulo 9). Independientemente del canal desde el que se
 origine una acción sobre un Lead — este patrón (CRM/Pipeline), una conversación (Capítulo 2), una
 acción asistida por el Copiloto (Capítulo 5), o una futura automatización o integración — el
 estado converge siempre sobre el mismo modelo de dominio. Ningún canal mantiene su propia copia
@@ -827,8 +829,9 @@ demás módulos como consumidores de este, nunca titulares de su propia copia.
   ciclo de vida completo: creación, estado, asignación, resultado"). Relación declarada con
   **Conversaciones** (MPA §4: una conversación con intención real crea o actualiza un lead), con
   **Catálogo & Comercial** (MPA §4: "el pipeline consulta el catálogo para cotizar; una venta
-  cerrada actualiza qué se vendió realmente") y con **Equipo & Organización** (MPA §4: "el
-  pipeline pregunta quién está disponible para asignar").
+  cerrada actualiza qué se vendió realmente"), con **Equipo & Organización** (MPA §4: "el
+  pipeline pregunta quién está disponible para asignar") y con **Campañas** (MPA §4: "los leads
+  originados en una campaña llegan con su atribución ya adjunta").
 - **CDS**: `Tabla / Data Grid` (con `Filtros`, `Ordenamiento`, `Paginación`), `Card`, `Badge`,
   `Avatar`, `Modal` (panel lateral de edición/detalle), `Select`, `Empty State`, `Skeleton`,
   `Conversation Timeline`.
@@ -855,8 +858,12 @@ el componente `Ordenamiento` del CDS.
 
 **Vista de detalle** — al seleccionar un lead: panel lateral o vista de detalle con `Conversation
 Timeline` (historial de eventos de negocio, no la conversación palabra por palabra — eso vive en
-Bandeja de Conversaciones, Capítulo 2), datos de contacto, estado actual, asesor asignado, y
-acciones disponibles según rol (sección 4).
+Bandeja de Conversaciones, Capítulo 2), datos de contacto, estado actual, asesor asignado,
+atribución de origen cuando el lead proviene de una campaña (MPA §3: debe permanecer **visible
+en todo el ciclo de vida posterior del lead**, no es un dato opcional — Capítulo 7.B), y acciones
+disponibles según rol (sección 4). Este capítulo declara únicamente que el dato debe estar
+presente y visible; dónde se ubica, cómo se presenta y su comportamiento cuando el lead no tiene
+atribución quedan definidos en la capa de Product Design (Screen Contract en adelante), no acá.
 
 ## 4. Roles y variaciones
 
@@ -909,10 +916,12 @@ Vive dentro del punto de montaje del Shell (Capítulo 1). Recibe nuevos leads o 
 desde la Bandeja de Conversaciones (Capítulo 2, sección 8) y desde acciones ejecutadas vía el
 Copiloto IA (Capítulo 5, tras pasar por el Human Decision Gate cuando la acción es irreversible)
 cuando alguno de esos canales revela intención real o resuelve una acción — ambos escriben contra
-el mismo modelo de Lead que este patrón posee, nunca sobre una copia propia (sección 1). Alimenta
-la Zona de acción de Inicio (Capítulo 3) y la zona de detalle comparativo de Analítica (Capítulo
-4) con el mismo dato de embudo, sin duplicar su cálculo. Consulta al patrón de Catálogo
-(Capítulo 7.A) para cotizar dentro de la vista de detalle.
+el mismo modelo de Lead que este patrón posee, nunca sobre una copia propia (sección 1). Recibe
+también, ya adjunta desde el origen (MPA §4; evidencia complementaria en Capítulo 7.B, sección 8),
+la atribución de campaña de los leads que se originaron en una campaña activa. Alimenta la Zona
+de acción de Inicio (Capítulo 3) y la zona de detalle comparativo de Analítica (Capítulo 4) con el
+mismo dato de embudo, sin duplicar su cálculo. Consulta al patrón de Catálogo (Capítulo 7.A) para
+cotizar dentro de la vista de detalle.
 
 ## 9. Errores comunes
 
@@ -965,7 +974,7 @@ condiciones. **Vista de ficha** — `Card` de detalle de un producto, el mismo c
 adjunta como `Attachment` dentro de una conversación (Capítulo 2) cuando se envía un catálogo o
 ficha — mismo dato, dos superficies de presentación, nunca copias que puedan divergir (misma
 única fuente de verdad ya establecida para Lead en el Capítulo 6, generalizada a toda entidad de
-negocio en el Capítulo 8, aplicada acá al producto).
+negocio en el Capítulo 9, aplicada acá al producto).
 
 ### 4. Roles y variaciones
 
@@ -1126,10 +1135,145 @@ Alimenta un futuro patrón de Notificaciones con el estado de carga del equipo.
 
 ---
 
-# Capítulo 8 — Principios Transversales de Producto
+# Capítulo 8 — Patrón: Notificaciones
+
+## 1. Objetivo
+
+Cómo se entera cada persona de lo que necesita saber sin tener que ir a buscarlo. MPA §3 ya lo
+declara como "capacidad transversal que decide qué, a quién y cuándo avisar". A diferencia de
+Conversaciones o CRM/Pipeline, Notificaciones no es una superficie de producto autónoma: es un
+servicio transversal que otros módulos consumen cuando ocurre un evento que requiere la atención
+de una persona específica.
+
+## 2. Trazabilidad
+
+- **MPA**: capacidad transversal (§3); relación declarada — "CRM/Pipeline y Equipo & Organización
+  → Notificaciones: cualquier evento que requiere la atención de una persona (nueva asignación,
+  mensaje sin responder) dispara una notificación" (§4); tres capacidades — alertas en producto,
+  badges de conteo, notificaciones de escritorio (§6); permisos — Admin=todas, Supervisor=equipo,
+  Asesor=propias (§9).
+- **CDS**: `Icon Button`, `Badge` — ya citados y reservados por Cap. 1 §3.
+- **MPX**: Capítulo 7 completo — tres canales (in-app silenciosa, banner in-app, Push/externo),
+  agrupación y batching, jerarquía visual sistema vs. sugerencia de IA, degradación por fatiga,
+  cross-channel experience.
+- **Este documento**: Cap. 1 §3 (Badge+Icon Button ya reservado en la Top Navigation); Cap. 1 §6
+  (la jerarquía sistema-vs-IA ya se declaró ahí como "principio a cumplir cuando corresponda, no
+  implementado hoy" — este capítulo hereda el mismo tratamiento); Cap. 7.C (Equipo &
+  Organización) — "Alimenta un futuro patrón de Notificaciones con el estado de carga del
+  equipo", relación entrante declarada, no consumida todavía por este capítulo (ver §8).
+- **Decisiones de producto**: DEC-01 (canal), DEC-02 (Badge), DEC-03 (estados), DEC-04
+  (clasificación de `agent/notificaciones.py`) — aprobadas por el usuario tras un ciclo de Gate 1
+  (recuperación de evidencia) y Gate 2 (reconciliación) previos a esta redacción.
+
+## 3. Composición
+
+- Entrada declarada: `Icon Button`+`Badge` de la Top Navigation (Cap. 1 §3).
+- Canales: in-app silenciosa (contador) y banner in-app — declarados, sin implementación
+  evidenciada; Push/externo, con dos realizaciones actuales (Browser Notification API y correo
+  vía Resend) y una posibilidad futura ya nombrada documentalmente (WhatsApp), sin evidencia de
+  implementación (DEC-01).
+- Eventos-fuente reconocidos por el patrón: nueva asignación, mensaje sin responder (MPA §4).
+  "Cita próxima" existe en la implementación de escritorio actual, pero no tiene respaldo
+  documental como evento-fuente del patrón — no se incorpora a esta lista (DEC-02).
+- Relación evento → canal → estado → contador: un mismo evento puede tener más de una realización
+  simultánea sin que eso sea una duplicación de diseño — ver §8, caso "nueva asignación".
+- No se define acá layout del panel, drawer, página, posición, animaciones ni ningún componente
+  visual nuevo — corresponde a Wireframe/Mockup de un futuro recorrido de Product Design.
+
+## 4. Roles y variaciones
+
+Tabla heredada de MPA §9: Administrador ve todas las notificaciones; Supervisor, las de su
+equipo; Vendedor/Asesor, únicamente las propias. Esta tabla se declara como comportamiento
+objetivo del patrón. Su cobertura real en la implementación actual queda marcada aparte: la
+superficie de escritorio hoy construida filtra por `asesor_asignado=username`, verificada
+únicamente para el rol Asesor — no hay evidencia de que Admin/Supervisor tengan hoy un
+comportamiento equivalente implementado.
+
+## 5. Estados
+
+*(Habilitado por DEC-03.)*
+
+- **Pendiente/no leída** — existe una notificación que la persona no atendió todavía.
+- **Leída** — la persona la vio, en cualquier canal.
+- **Atendida** — la persona actuó sobre el evento que la originó.
+- **Sin notificaciones pendientes** — estado vacío del contador/Badge.
+
+Estos cuatro estados son comportamiento objetivo del patrón por decisión de producto (DEC-03), no
+una descripción de una estructura ya existente. La aproximación más cercana hoy es el flag
+`visto_asesor` sobre el Lead, junto con la deduplicación vía `localStorage` en el navegador —
+ninguno de los dos constituye un modelo formal de "Notificación" con estos cuatro estados
+propios; se documentan como el punto de partida real, no como la estructura definitiva. Modelo de
+datos, persistencia server-side y superficie de consulta de pendientes/anteriores quedan
+explícitamente diferidos a una capa posterior (DEC-03).
+
+## 6. Comportamiento aplicado del MPX
+
+Ciclo: **evento relevante → evaluación del destinatario → elección de canal → entrega → estado →
+posible atención/acción.**
+
+- El Badge se alimenta de los eventos aprobados en DEC-02 (nueva asignación, mensaje sin
+  responder).
+- Push/externo, con las realizaciones ya reconocidas en §3.
+- **[EO]** La implementación actual permite que, al hacer clic sobre una notificación relacionada
+  con un Lead, se llegue directamente al contexto de ese Lead — comportamiento observado en
+  `agent/dashboard.py`, no una regla ya declarada en MPA/MPX. **[PEND]** Generalizar esto a una
+  regla normativa del patrón no tiene respaldo documental explícito en el corpus consultado (el
+  candidato más cercano, "Acción antes que observación", trata orden de presentación dentro de
+  una pantalla, no navegación desde una notificación); queda como comportamiento observado, no
+  como requisito, hasta que exista evidencia o una decisión de producto adicional.
+- Agrupación y batching (MPX Cap. 7): declarados como principio a cumplir cuando corresponda,
+  mismo tratamiento ya usado en Cap. 1 §6 para la jerarquía sistema-vs-IA — ninguna regla de
+  umbral, ventana temporal o algoritmo se define acá porque ninguna fuente la define.
+- Degradación por fatiga (MPX Cap. 7): mismo tratamiento — principio declarado, sin mecanismo
+  técnico definido. MPX es explícito en que nunca debe resolverse como un apagado silencioso sin
+  acción explícita de la persona.
+- Jerarquía visual sistema-vs-IA (MPX Cap. 7, ya citada en Cap. 1 §6): aplica igual acá — hoy
+  ninguna notificación tiene contenido generado por IA; la regla queda declarada para cuando
+  exista, mismo criterio ya usado en Cap. 1.
+
+## 7. Responsive
+
+Mismo criterio ya fijado en Cap. 1 §7 para la Top Navigation: por debajo del breakpoint `sm`, el
+acceso a notificaciones se mantiene dentro del colapso general ya declarado (wordmark + perfil +
+menú). No se define una experiencia móvil específica de Notificaciones porque no hay evidencia de
+que deba diferir del comportamiento ya declarado del Shell.
+
+## 8. Relación con otros patrones
+
+- **Shell de Navegación (Cap. 1)**: aloja la entrada visual del patrón (Badge+Icon Button).
+- **CRM/Pipeline (Cap. 6)** y **Equipo & Organización (Cap. 7.C)**: fuentes de eventos; Equipo &
+  Organización ya declaraba esta relación de forma prospectiva en su propio capítulo.
+- El evento "nueva asignación" tiene **dos realizaciones reconocidas, no una duplicación
+  accidental**: (a) notificación al Asesor asignado, vía Badge/notificación de escritorio; y (b)
+  `notificar_lead_derivado`, correo a la lista de distribución del equipo comercial — un mecanismo
+  operativo paralelo relacionado con el mismo evento, con audiencia y canal distintos (DEC-04).
+  Ambas realizaciones conviven; ninguna reemplaza a la otra.
+- `notificar_solicitud_reseteo` queda **fuera de este patrón** — pertenece al territorio de
+  Autenticación/operaciones administrativas (DEC-04).
+
+## 9. Errores comunes
+
+- Enviar una notificación por cada evento individual sin agrupar cuando la fuente lo amerita —
+  contradice la agrupación/batching de MPX Cap. 7 (sin mecanismo definido todavía, ver §6).
+- Degradar silenciosamente la frecuencia de notificaciones sin una acción explícita de la persona
+  — MPX Cap. 7 lo prohíbe de forma literal.
+- Mezclar una alerta operativa del sistema con una sugerencia de IA sin distinción visual, si en
+  el futuro ambas conviven — mismo riesgo ya señalado en Cap. 1 §6.
+- Alimentar el Badge del Shell con cualquier evento que hoy dispare una notificación de
+  escritorio, sin verificar que tenga respaldo documental como evento-fuente — es exactamente el
+  error que DEC-02 evita al excluir "cita próxima" por ahora.
+- Tratar `agent/notificaciones.py` como parte de la experiencia principal del patrón solo por su
+  ubicación en el código — DEC-04 ya estableció que la clasificación depende del destinatario y la
+  relación con el usuario individual, no del archivo en el que vive.
+- Convertir el comportamiento de navegación observado (§6) en un requisito normativo sin evidencia
+  documental que lo respalde.
+
+---
+
+# Capítulo 9 — Principios Transversales de Producto
 
 Este capítulo no define ningún patrón nuevo — consolida, en un solo lugar, la filosofía de
-producto que ya quedó establecida a lo largo de los Capítulos 1 a 7. Nada acá es una decisión
+producto que ya quedó establecida a lo largo de los Capítulos 1 a 8. Nada acá es una decisión
 nueva; cada principio cita el capítulo donde se estableció por primera vez y los capítulos donde
 ya se aplica.
 
@@ -1145,7 +1289,7 @@ Ante una diferencia entre una necesidad específica de una implementación y un 
 el patrón se diseña primero desde la perspectiva de Maiek AI como producto SaaS — la necesidad
 específica se resuelve por configuración, permisos, parametrización o especialización, nunca
 creando un patrón distinto ni modificando el patrón base. Establecido como Principio 3 del
-Capítulo 0; aplicado de forma verificable en que ningún patrón de este documento (Capítulos 1 a 7)
+Capítulo 0; aplicado de forma verificable en que ningún patrón de este documento (Capítulos 1 a 8)
 nombra una implementación específica en su definición.
 
 **Precisión de gobernanza**: configuración, permisos, parametrización o reglas de negocio pueden
@@ -1219,12 +1363,13 @@ v1.1: una nueva fila en el Control de versiones, con la razón explícita del ca
 
 ---
 
-*Fin de `MAIEK_AI_PRODUCT_PATTERNS.md` — **Versión 1.0, Approved el 2026-07-30**. Capítulos 0 a 8,
+*Fin de `MAIEK_AI_PRODUCT_PATTERNS.md` — **Versión 1.0, Approved el 2026-07-30**; **Capítulo 8
+(Notificaciones) agregado el 2026-08-10, ver Control de versiones**. Capítulos 0 a 9,
 todos aprobados, cada uno revisado y ajustado por el usuario de forma incremental antes de
 continuar con el siguiente. Auditoría documental final de calidad y consistencia realizada sin
-observaciones de fondo. Alcance de v1.0: Shell (Cap. 1), Bandeja de Conversaciones (Cap. 2),
+observaciones de fondo. Alcance: Shell (Cap. 1), Bandeja de Conversaciones (Cap. 2),
 Inicio (Cap. 3), Analítica (Cap. 4), Copiloto IA (Cap. 5), CRM/Pipeline (Cap. 6), Catálogo/
-Campañas/Equipo (Cap. 7), Principios Transversales (Cap. 8). Diferido a v1.1, sin fecha fija:
+Campañas/Equipo (Cap. 7), Notificaciones (Cap. 8), Principios Transversales (Cap. 9). Diferido a v1.1, sin fecha fija:
 Formularios/Modales dedicados, un capítulo de Estados transversales consolidado (hoy repetido
 patrón por patrón) y Responsive por patrón consolidado — mismo criterio ya usado en todo el
 corpus: solo se agregan ante necesidad real de uso, nunca de forma especulativa.*

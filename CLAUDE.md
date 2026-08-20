@@ -55,6 +55,14 @@
 > infraestructura actual del proyecto, una sola decisión operativa (ver `MAIEK_AI_DEVOPS_ARCHITECTURE.md`,
 > Control de versiones): nunca hacer `git push` sobre la rama de despliegue sin autorización
 > explícita y separada del usuario para desplegar.
+>
+> **La fase de Product Design (recorridos de Journey/User Flow/Screen Contract) tiene su propio
+> repositorio de estado en [`MAIEK_AI_EXPERIENCE_FLOWS.md`](MAIEK_AI_EXPERIENCE_FLOWS.md)** —
+> Inventario Maestro histórico, Journey Maestro vigente, y las tablas EXP/UF/SCR recuperadas de
+> cada recorrido, con IDs permanentes y trazables. No es un documento de gobernanza ni reemplaza
+> a `MAIEK_AI_PRODUCT_PATTERNS.md` ni a `MAIEK_AI_PRODUCT_EXPERIENCE.md` — antes de iniciar o
+> retomar cualquier recorrido de Product Design, leerlo primero para no reconstruir por inferencia
+> algo que ya está persistido ahí.
 
 ---
 

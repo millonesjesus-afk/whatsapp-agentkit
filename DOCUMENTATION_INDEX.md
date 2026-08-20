@@ -11,7 +11,7 @@
 | Fecha de creación | 2026-07-26 |
 | Autor | Claude, a pedido de Jesús Millones |
 | Fecha de aprobación | 2026-07-28 |
-| Última actualización | 2026-07-30 (ciclo de trabajo por incremento institucionalizado en `MAIEK_AI_IMPLEMENTATION_ROADMAP.md` §2.1 y en `CLAUDE.md`; Sprints 1-3 y preparación del Sprint de Validación cerrados, sin pushear, ver "Fase de Implementación" abajo) |
+| Última actualización | 2026-08-09 (registrado `MAIEK_AI_EXPERIENCE_FLOWS.md` — repositorio de Product Design con el Inventario Maestro histórico, Journey Maestro y las tablas EXP/UF/SCR recuperadas; Draft, no sigue el ciclo In Review/Approved por ser un artefacto funcional de trabajo, no de gobernanza — ver sección 7) |
 
 ## Dependencias
 
@@ -472,6 +472,7 @@ ciclos — cada flecha va de lo más fundacional hacia lo más específico, nunc
 | `MAIEK_AI_OPERATIONS_RUNBOOK.md` | Operations Runbook | Engineering | Operations | Managed | 1.1 | **Approved** | Jesús Millones | 2026-07-29 | — | Operations Architecture, Data Architecture | Quien despliegue el proyecto |
 | `MAIEK_AI_CONVERSATIONAL_VALIDATION_PLAN.md` | Conversational Validation Plan | Engineering | AI | Managed | 1.2 | **Approved** | Jesús Millones | 2026-07-30 (v1.2) | — | AI Architecture, MPX (Cap. 2, 3, 10), Phase 1 Execution Plan, Product Patterns (Cap. 5, desde v1.1) | Decisión de promover un canal de modo="pruebas" a modo="producción"; decisión de avanzar el Copiloto IA hacia Sugerencias/Indicador de confianza/Acciones (desde v1.1) |
 | `MAIEK_AI_PRODUCT_PATTERNS.md` | Product Patterns | Design | UX | Managed | 1.0 | **Approved** | Jesús Millones | 2026-07-30 | — | Framework, MPA, MDL, CDS, MPX, Frontend Architecture | Próxima revisión de Frontend Architecture (primer patrón visual concreto del que partir); toda implementación futura del frontend |
+| `MAIEK_AI_EXPERIENCE_FLOWS.md` | Experience Flows | Product | Product | Managed | 1.2 | **Draft** | Jesús Millones | N/A — artefacto funcional de Product Design, no pasa por el ciclo In Review/Approved de este índice | — | Product Patterns, MPA, UX Blueprint, Implementation Roadmap §2.2 | Todo recorrido de Product Design futuro que necesite citar EXP/UF/SCR ya existentes |
 | `CHANGELOG.md` | Changelog | Documentación | Engineering | Managed | — (vive en actualización continua, sin número de versión propio) | **Approved** | Jesús Millones | 2026-07-30 | — | Implementation Roadmap, `RELEASE_NOTES_v0.2.0.md` | Cualquier persona que necesite saber qué cambió recientemente sin leer commits uno por uno |
 
 ## 8. Reglas de Gobernanza Documental

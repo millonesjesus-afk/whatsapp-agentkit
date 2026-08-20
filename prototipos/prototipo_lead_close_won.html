@@ -1,0 +1,1079 @@
+<title>Maiek AI — Prototipo Product Design (Inicio + Lead → Close Won)</title>
+<style>
+:root {
+  --primary: #1677FF;
+  --primary-600: #1677FF;
+  --primary-400: #4D96FF;
+  --celeste: #38BDF8;
+  --gold: #C6A66B;
+  --navy-900: #0B1D3A;
+  --navy-800: #0F2647;
+  --navy-600: #16345C;
+  --navy-400: #375D93;
+  --neutral-0: #FFFFFF;
+  --neutral-50: #F2F4F7;
+  --neutral-100: #E7EAEF;
+  --neutral-200: #D2D7E0;
+  --neutral-400: #9AA3B2;
+  --neutral-600: #626C7E;
+  --neutral-700: #4A5266;
+  --neutral-800: #384152;
+
+  --surface-0: var(--neutral-50);
+  --surface-1: var(--neutral-0);
+  --border: var(--neutral-100);
+  --border-strong: var(--neutral-200);
+  --text-primary: var(--navy-900);
+  --text-secondary: var(--neutral-800);
+  --text-muted: var(--neutral-600);
+  --accent: var(--primary-600);
+  --info-bg: #E9F1FF;
+  --info-text: #0F56BF;
+  --success-bg: #E3F5EA;
+  --success-solid: #00A34B;
+  --success-text: #0F6E3B;
+  --error-bg: #FCEAEA;
+  --error-solid: #EF4444;
+  --error-text: #9E1F1F;
+  --shadow-1: 0 1px 2px rgba(11,29,58,0.06);
+  --shadow-2: 0 4px 12px rgba(11,29,58,0.08), 0 1px 3px rgba(11,29,58,0.06);
+  --shadow-3: 0 12px 32px rgba(11,29,58,0.12), 0 2px 6px rgba(11,29,58,0.08);
+  --scrim: rgba(11,29,58,0.45);
+
+  --t-instant: 100ms;
+  --t-fast: 150ms;
+  --t-base: 220ms;
+  --t-slow: 350ms;
+  --ease-out: cubic-bezier(0.16,1,0.3,1);
+  --ease-soft: cubic-bezier(0.65,0,0.35,1);
+  --ease-spring: cubic-bezier(0.34,1.56,0.64,1);
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --surface-0: var(--navy-900);
+    --surface-1: var(--navy-800);
+    --border: rgba(55,93,147,0.3);
+    --border-strong: var(--navy-400);
+    --text-primary: #F2F4F7;
+    --text-secondary: #D2D7E0;
+    --text-muted: #9AA3B2;
+    --accent: var(--primary-400);
+    --info-bg: #12233F;
+    --info-text: #7FB2FF;
+    --success-bg: #123322;
+    --success-text: #6FDA9C;
+    --error-bg: #3A1414;
+    --error-text: #F29B9B;
+    --scrim: rgba(0,0,0,0.6);
+  }
+}
+:root[data-theme="dark"] {
+  --surface-0: var(--navy-900);
+  --surface-1: var(--navy-800);
+  --border: rgba(55,93,147,0.3);
+  --border-strong: var(--navy-400);
+  --text-primary: #F2F4F7;
+  --text-secondary: #D2D7E0;
+  --text-muted: #9AA3B2;
+  --accent: var(--primary-400);
+  --info-bg: #12233F;
+  --info-text: #7FB2FF;
+  --success-bg: #123322;
+  --success-text: #6FDA9C;
+  --error-bg: #3A1414;
+  --error-text: #F29B9B;
+  --scrim: rgba(0,0,0,0.6);
+}
+:root[data-theme="light"] {
+  --surface-0: var(--neutral-50);
+  --surface-1: var(--neutral-0);
+  --border: var(--neutral-100);
+  --border-strong: var(--neutral-200);
+  --text-primary: var(--navy-900);
+  --text-secondary: var(--neutral-800);
+  --text-muted: var(--neutral-600);
+  --accent: var(--primary-600);
+  --info-bg: #E9F1FF;
+  --info-text: #0F56BF;
+  --success-bg: #E3F5EA;
+  --success-text: #0F6E3B;
+  --error-bg: #FCEAEA;
+  --error-text: #9E1F1F;
+  --scrim: rgba(11,29,58,0.45);
+}
+
+* { box-sizing: border-box; }
+body { margin: 0; }
+.app {
+  font-family: -apple-system, "Segoe UI", Inter, Arial, sans-serif;
+  color: var(--text-primary);
+  background: var(--surface-0);
+  max-width: 900px;
+  margin: 0 auto;
+  padding: 1rem 0;
+}
+.proto-controls {
+  border: 1px dashed var(--border-strong);
+  border-radius: 10px;
+  padding: 10px 14px;
+  margin-bottom: 16px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.proto-controls .label {
+  font-size: 11px;
+  color: var(--text-muted);
+  letter-spacing: .03em;
+}
+.proto-btn {
+  font-size: 12px;
+  border: 1px solid var(--border-strong);
+  background: var(--surface-1);
+  color: var(--text-secondary);
+  border-radius: 999px;
+  padding: 5px 12px;
+  cursor: pointer;
+  transition: background var(--t-instant) var(--ease-soft), border-color var(--t-instant) var(--ease-soft);
+}
+.proto-btn:hover { background: var(--surface-0); }
+.proto-btn.active { border-color: var(--accent); color: var(--accent); background: var(--info-bg); }
+.proto-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.proto-btn:disabled { opacity: .4; cursor: not-allowed; }
+.proto-btn:disabled:hover { background: var(--surface-1); }
+
+.stage {
+  position: relative;
+  border-radius: 16px;
+  overflow: hidden;
+  box-shadow: var(--shadow-2);
+  background: var(--surface-1);
+  min-height: 520px;
+}
+.screen {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  transform: translateY(6px);
+  pointer-events: none;
+  transition: opacity var(--t-slow) var(--ease-out), transform var(--t-slow) var(--ease-out);
+}
+.screen.is-active { opacity: 1; transform: translateY(0); pointer-events: auto; }
+
+.rail {
+  background: var(--navy-900);
+  padding: 16px 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+}
+.rail .mark { width: 32px; height: 32px; border-radius: 10px; background: var(--primary-600); display: flex; align-items: center; justify-content: center; margin-bottom: 16px; }
+.rail .item { width: 40px; height: 40px; border-radius: 10px; display: flex; align-items: center; justify-content: center; color: #9AA3B2; cursor: pointer; transition: background var(--t-instant) var(--ease-soft), color var(--t-instant) var(--ease-soft); }
+.rail .item:hover { background: rgba(255,255,255,0.06); }
+.rail .item.active { background: rgba(22,119,255,0.16); color: #4D96FF; }
+.rail .item:focus-visible { outline: 2px solid var(--primary-400); outline-offset: 2px; }
+.rail i { font-size: 18px; }
+
+.list-col { border-right: 1px solid var(--border); display: flex; flex-direction: column; background: var(--surface-1); }
+.list-head { padding: 16px 16px 12px; }
+.list-head h3 { font-size: 16px; font-weight: 600; margin: 0 0 20px; }
+.search { height: 36px; background: var(--surface-0); border-radius: 10px; display: flex; align-items: center; padding: 0 10px; gap: 8px; }
+.search span { font-size: 13px; color: var(--text-muted); }
+.search i { font-size: 15px; color: var(--text-muted); }
+.list-body { overflow: auto; flex: 1; }
+.conv-row { padding: 12px 16px; display: flex; gap: 10px; cursor: pointer; border-left: 2px solid transparent; transition: background var(--t-instant) var(--ease-soft); }
+.conv-row:hover { background: var(--surface-0); }
+.conv-row.active { background: var(--info-bg); border-left-color: var(--accent); }
+.conv-row:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.avatar { border-radius: 999px; color: #fff; font-weight: 600; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
+.conv-row .avatar { width: 36px; height: 36px; font-size: 13px; background: var(--navy-900); }
+.conv-meta { flex: 1; min-width: 0; }
+.conv-meta .top { display: flex; justify-content: space-between; align-items: baseline; }
+.conv-meta .name { font-size: 13px; font-weight: 500; color: var(--text-primary); }
+.conv-row.active .name { font-weight: 600; }
+.conv-meta .time { font-size: 11px; color: var(--text-muted); }
+.conv-meta p { font-size: 12px; color: var(--text-muted); margin: 2px 0 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+.chat-col { display: flex; flex-direction: column; background: var(--surface-0); position: relative; overflow: hidden; }
+.chat-head { background: var(--surface-1); border-bottom: 1px solid var(--border); padding: 12px 20px; display: flex; align-items: center; gap: 12px; }
+.chat-head .avatar { width: 38px; height: 38px; font-size: 14px; background: var(--navy-900); }
+.chat-head .who { flex: 1; }
+.chat-head .who .name { font-size: 14px; font-weight: 600; }
+.chat-head .who .sub { font-size: 12px; color: var(--text-muted); }
+.pill-info { display: flex; align-items: center; gap: 6px; background: var(--info-bg); border-radius: 999px; padding: 5px 12px 5px 10px; font-size: 12px; font-weight: 500; color: var(--info-text); cursor: pointer; border: none; }
+.copilot-toggle { width: 38px; height: 38px; border-radius: 999px; border: 1px solid var(--border-strong); display: flex; align-items: center; justify-content: center; cursor: pointer; background: var(--surface-1); color: var(--accent); transition: background var(--t-instant) var(--ease-soft), border-color var(--t-instant) var(--ease-soft), transform var(--t-fast) var(--ease-spring); position: relative; }
+.copilot-toggle.open { background: var(--info-bg); border-color: var(--accent); }
+.copilot-toggle:active { transform: scale(0.94); }
+.copilot-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.copilot-toggle .dot { position: absolute; top: -1px; right: -1px; width: 9px; height: 9px; border-radius: 999px; background: var(--primary-600); border: 2px solid var(--surface-1); animation: pulse 2.4s var(--ease-soft) infinite; }
+@keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .45; } }
+
+.messages { flex: 1; padding: 20px; display: flex; flex-direction: column; gap: 16px; overflow: auto; }
+.msg { max-width: 66%; }
+.msg.in { align-self: flex-start; }
+.msg.out { align-self: flex-end; }
+.msg .tag { display: flex; align-items: center; gap: 5px; margin-bottom: 3px; padding-left: 2px; font-size: 10px; color: var(--text-muted); font-weight: 500; }
+.msg .tag i { font-size: 11px; }
+.bubble { border-radius: 14px; padding: 10px 14px; font-size: 13px; line-height: 1.5; }
+.msg.in .bubble { background: var(--surface-1); border-radius: 14px 14px 14px 4px; box-shadow: var(--shadow-1); color: var(--text-primary); }
+.msg.out .bubble { background: var(--primary-600); border-radius: 14px 14px 4px 14px; color: #fff; }
+.msg.error .bubble { background: var(--error-bg); color: var(--error-text); border: 1px solid var(--error-solid); border-radius: 14px 14px 4px 14px; }
+.msg .retry { font-size: 11px; color: var(--error-text); margin-top: 4px; text-align: right; cursor: pointer; text-decoration: underline; }
+
+.empty-state { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; padding: 32px; color: var(--text-muted); gap: 6px; }
+.empty-state i { font-size: 28px; color: var(--border-strong); margin-bottom: 6px; }
+.empty-state .h { font-size: 14px; font-weight: 500; color: var(--text-secondary); }
+.empty-state .b { font-size: 12px; max-width: 240px; }
+
+.composer { background: var(--surface-1); border-top: 1px solid var(--border); padding: 12px 20px; display: flex; flex-direction: column; gap: 8px; }
+.quick-actions { display: flex; gap: 6px; }
+.qa { border: 1px solid var(--border-strong); border-radius: 999px; padding: 4px 12px; font-size: 12px; color: var(--text-secondary); cursor: pointer; background: var(--surface-1); transition: background var(--t-instant) var(--ease-soft); }
+.qa:hover { background: var(--surface-0); }
+.qa:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.compose-row { display: flex; gap: 10px; align-items: center; }
+.icon-btn { width: 36px; height: 36px; border-radius: 10px; border: 1px solid var(--border); display: flex; align-items: center; justify-content: center; color: var(--text-secondary); cursor: pointer; background: var(--surface-1); flex-shrink: 0; }
+.icon-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.text-field { flex: 1; height: 40px; border: 1px solid var(--border-strong); border-radius: 10px; display: flex; align-items: center; padding: 0 14px; font-size: 13px; color: var(--text-muted); background: var(--surface-1); }
+.send-btn { width: 40px; height: 40px; border-radius: 999px; background: var(--primary-600); display: flex; align-items: center; justify-content: center; cursor: pointer; color: #fff; border: none; box-shadow: var(--shadow-2); transition: transform var(--t-fast) var(--ease-spring); flex-shrink: 0; }
+.send-btn:active { transform: scale(0.92); }
+.send-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+.copilot-panel {
+  position: absolute; top: 0; right: 0; bottom: 0; width: 264px;
+  background: var(--surface-1); border-left: 1px solid var(--border);
+  padding: 16px; display: flex; flex-direction: column; gap: 16px;
+  transform: translateX(100%); transition: transform var(--t-slow) var(--ease-out);
+  box-shadow: -4px 0 24px rgba(11,29,58,0.06);
+}
+.copilot-panel.open { transform: translateX(0); }
+.cp-title { display: flex; align-items: center; gap: 6px; font-size: 13px; font-weight: 600; }
+.cp-title i { font-size: 14px; color: var(--accent); }
+.suggestion-card { background: var(--info-bg); border-radius: 14px; padding: 14px; }
+.eyebrow { font-size: 10px; font-weight: 600; color: var(--info-text); letter-spacing: .03em; margin-bottom: 8px; }
+.eyebrow.muted { color: var(--text-muted); }
+.suggestion-card .h { font-size: 13px; font-weight: 600; margin: 0 0 6px; line-height: 1.4; }
+.suggestion-card .b { font-size: 12px; color: var(--text-secondary); margin: 0 0 12px; line-height: 1.5; }
+.btn-row { display: flex; gap: 8px; }
+.btn-primary { background: var(--primary-600); color: #fff; font-size: 12px; font-weight: 500; border-radius: 8px; padding: 7px 14px; cursor: pointer; border: none; transition: filter var(--t-instant) var(--ease-soft); }
+.btn-primary:hover { filter: brightness(1.08); }
+.btn-primary:focus-visible { outline: 2px solid var(--text-primary); outline-offset: 2px; }
+.btn-ghost { border: 1px solid var(--border-strong); color: var(--text-secondary); font-size: 12px; border-radius: 8px; padding: 7px 14px; cursor: pointer; background: transparent; }
+.btn-ghost:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.context-block p { font-size: 12px; color: var(--text-secondary); margin: 0; line-height: 1.6; }
+.stat-block { border-top: 1px solid var(--border); padding-top: 12px; }
+.stat-block .val { display: flex; align-items: baseline; gap: 6px; }
+.stat-block .num { font-size: 20px; font-weight: 600; }
+.stat-block .unit { font-size: 11px; color: var(--text-muted); }
+
+.pipeline-card { background: var(--surface-1); border-radius: 16px; box-shadow: var(--shadow-2); margin: 20px; }
+.pipeline-head { padding: 20px; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 14px; }
+.pipeline-head .avatar { width: 44px; height: 44px; font-size: 15px; background: var(--navy-900); }
+.pipeline-head .who { flex: 1; }
+.pipeline-head .name { font-size: 15px; font-weight: 600; }
+.pipeline-head .sub { font-size: 12px; color: var(--text-muted); }
+.status-pill { border-radius: 999px; padding: 6px 14px; font-size: 12px; font-weight: 500; }
+.status-pill.progress { background: var(--info-bg); color: var(--info-text); }
+.status-pill.won { background: var(--success-bg); color: var(--success-text); }
+.pipeline-body { display: grid; grid-template-columns: 1fr 220px; }
+.timeline-col { padding: 20px; border-right: 1px solid var(--border); }
+.timeline-item { display: flex; gap: 10px; margin-bottom: 14px; }
+.timeline-item:last-child { margin-bottom: 0; }
+.dot-tl { width: 8px; height: 8px; border-radius: 999px; margin-top: 5px; flex-shrink: 0; background: var(--border-strong); }
+.timeline-item.highlight .dot-tl { background: var(--accent); }
+.timeline-item .t { font-size: 13px; color: var(--text-primary); }
+.timeline-item.highlight .t { font-weight: 500; }
+.timeline-item .d { font-size: 11px; color: var(--text-muted); }
+.actions-col { padding: 20px; display: flex; flex-direction: column; gap: 8px; }
+.actions-col .eyebrow { margin-bottom: 6px; }
+.action-primary { background: var(--primary-600); color: #fff; font-size: 13px; font-weight: 500; border-radius: 10px; padding: 10px; text-align: center; cursor: pointer; border: none; }
+.action-primary:focus-visible { outline: 2px solid var(--text-primary); outline-offset: 2px; }
+.action-secondary { border: 1px solid var(--border); color: var(--text-secondary); font-size: 12px; border-radius: 10px; padding: 9px; text-align: center; cursor: pointer; background: var(--surface-1); }
+.action-secondary:hover { background: var(--surface-0); }
+.action-secondary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+.overlay { position: absolute; inset: 0; background: var(--scrim); opacity: 0; pointer-events: none; transition: opacity var(--t-base) var(--ease-soft); z-index: 5; }
+.overlay.open { opacity: 1; pointer-events: auto; }
+.drawer { position: absolute; top: 0; right: 0; bottom: 0; width: 320px; background: var(--surface-1); box-shadow: var(--shadow-3); padding: 18px; display: flex; flex-direction: column; transform: translateX(100%); transition: transform var(--t-slow) var(--ease-out); z-index: 6; }
+.drawer.open { transform: translateX(0); }
+.drawer-head { display: flex; align-items: center; gap: 8px; padding-bottom: 10px; margin-bottom: 14px; border-bottom: 1px solid var(--border); }
+.drawer-head .avatar { width: 22px; height: 22px; font-size: 9px; background: var(--navy-900); }
+.drawer-head span { font-size: 11px; color: var(--text-muted); flex: 1; }
+.drawer-close { background: none; border: none; color: var(--text-muted); cursor: pointer; padding: 4px; border-radius: 6px; }
+.drawer-close:hover { background: var(--surface-0); }
+.drawer-close:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.drawer .eyebrow { margin-bottom: 10px; }
+.catalog-item { border: 1px solid var(--border); border-radius: 10px; padding: 10px; display: flex; gap: 10px; align-items: center; margin-bottom: 12px; }
+.catalog-thumb { width: 32px; height: 32px; border-radius: 8px; background: var(--surface-0); flex-shrink: 0; }
+.catalog-item .p { font-size: 12px; font-weight: 500; }
+.catalog-item .s { font-size: 11px; color: var(--text-muted); }
+.catalog-pick { cursor: pointer; }
+.catalog-pick.selected { border-color: var(--accent); background: var(--info-bg); }
+.statistic-card.resaltada, .kpi-card.resaltada { border-color: var(--accent); background: var(--info-bg); }
+.team-row { display: flex; justify-content: space-between; align-items: center; border: 1px solid var(--border); border-radius: 10px; padding: 9px 12px; margin-bottom: 10px; }
+.team-row .n { font-size: 12px; }
+.team-row .a { font-size: 11px; color: var(--success-text); }
+.result-row { display: flex; gap: 8px; margin-bottom: 10px; }
+.result-btn { flex: 1; font-size: 12px; border-radius: 8px; padding: 9px; text-align: center; cursor: pointer; border: 1px solid var(--border); background: var(--surface-1); color: var(--text-secondary); transition: transform var(--t-fast) var(--ease-spring); }
+.result-btn.won { background: var(--success-bg); color: var(--success-text); border: none; }
+.result-btn:active { transform: scale(0.96); }
+.result-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.hint { font-size: 10px; color: var(--text-muted); border-top: 1px solid var(--border); padding-top: 8px; margin-top: auto; }
+
+.confirm-backdrop { position: fixed; inset: 0; background: var(--scrim); opacity: 0; pointer-events: none; transition: opacity var(--t-base) var(--ease-soft); z-index: 20; display: flex; align-items: center; justify-content: center; }
+.confirm-backdrop.open { opacity: 1; pointer-events: auto; }
+.confirm-card { background: var(--surface-1); border-radius: 16px; padding: 22px; width: 300px; box-shadow: var(--shadow-3); transform: scale(0.9); opacity: 0; transition: transform var(--t-fast) var(--ease-spring), opacity var(--t-fast) var(--ease-soft); }
+.confirm-backdrop.open .confirm-card { transform: scale(1); opacity: 1; }
+.confirm-card h4 { font-size: 15px; margin: 0 0 8px; }
+.confirm-card p { font-size: 13px; color: var(--text-secondary); margin: 0 0 18px; line-height: 1.5; }
+.confirm-row { display: flex; gap: 8px; justify-content: flex-end; }
+
+.toast { position: fixed; bottom: 24px; right: 24px; background: var(--navy-900); color: #fff; font-size: 13px; border-radius: 10px; padding: 12px 16px; display: flex; align-items: center; gap: 10px; box-shadow: var(--shadow-3); transform: translateY(12px); opacity: 0; transition: transform var(--t-base) var(--ease-out), opacity var(--t-base) var(--ease-out); z-index: 30; }
+.toast.open { transform: translateY(0); opacity: 1; }
+.toast i { color: var(--success-solid); font-size: 16px; }
+
+.skeleton-wrap { padding: 20px; display: flex; flex-direction: column; gap: 14px; }
+.sk { background: var(--neutral-100); border-radius: 8px; animation: shimmer 1.5s var(--ease-soft) infinite; }
+@media (prefers-color-scheme: dark) { .sk { background: var(--navy-600); } }
+:root[data-theme="dark"] .sk { background: var(--navy-600); }
+@keyframes shimmer { 0%,100% { opacity: 1; } 50% { opacity: .55; } }
+
+.inicio-wrap { padding: 24px; display: flex; flex-direction: column; gap: 24px; height: 520px; overflow: auto; }
+.inicio-wrap h3 { font-size: 16px; font-weight: 600; margin: 0 0 14px; }
+.priority-item { border: 1px solid var(--border); border-radius: 14px; padding: 14px; margin-bottom: 10px; display: flex; gap: 12px; align-items: center; cursor: default; background: var(--surface-1); transition: border-color var(--t-instant) var(--ease-soft), background var(--t-instant) var(--ease-soft); }
+.priority-item.top { cursor: pointer; }
+.priority-item.top:hover { border-color: var(--accent); }
+.priority-item.top:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.priority-item.top { border-color: var(--accent); background: var(--info-bg); }
+.priority-item:not(.top) i { visibility: hidden; }
+.priority-item .who { flex: 1; }
+.priority-item .n { font-size: 13px; font-weight: 500; color: var(--text-primary); }
+.priority-item.top .n { font-weight: 600; color: var(--text-primary); }
+.priority-item .m { font-size: 12px; color: var(--text-muted); }
+.priority-item.top .m { color: var(--info-text); }
+.priority-item i { font-size: 16px; color: var(--border-strong); }
+.priority-item.top i { color: var(--accent); }
+.eyebrow-lg { font-size: 11px; font-weight: 600; color: var(--text-muted); letter-spacing: .03em; margin-bottom: 10px; }
+.kpi-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+.kpi-card { background: var(--surface-0); border-radius: 10px; padding: 14px; }
+.kpi-card .l { font-size: 11px; color: var(--text-secondary); margin-bottom: 4px; }
+.kpi-card .v { font-size: 22px; font-weight: 600; color: var(--text-primary); }
+.kpi-card .v.success { color: var(--success-text); }
+
+.analitica-wrap { padding: 24px; display: flex; flex-direction: column; gap: 24px; height: 520px; overflow: auto; }
+.kpi-grid-analitica { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
+.statistic-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+.statistic-card { background: var(--surface-0); border-radius: 10px; padding: 14px; }
+.statistic-card .v { font-size: 22px; font-weight: 600; color: var(--text-primary); margin: 4px 0; }
+.statistic-card .delta { display: flex; align-items: center; gap: 4px; font-size: 12px; font-weight: 500; }
+.statistic-card .delta.up { color: var(--success-text); }
+.statistic-card .delta.down { color: var(--error-text); }
+
+@media (max-width: 767px) {
+  .kpi-grid-analitica { grid-template-columns: repeat(2, 1fr); }
+  .statistic-grid { grid-template-columns: 1fr; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * { animation-duration: 0.001ms !important; transition-duration: 0.001ms !important; }
+}
+</style>
+
+<div class="app">
+  <div class="proto-controls">
+    <span class="label">CONTROLES DEL PROTOTIPO — no forman parte del producto real</span>
+    <button class="proto-btn active" data-demo="normal">Normal</button>
+    <button class="proto-btn" data-demo="vacio">Bandeja vacía</button>
+    <button class="proto-btn" data-demo="error">Error de envío</button>
+  </div>
+
+  <div class="stage" id="stage">
+
+    <div class="screen is-active" id="screen-inicio">
+      <div style="display:grid;grid-template-columns:72px 1fr;height:520px">
+        <div class="rail">
+          <div class="mark"><i class="ti ti-sparkles" style="color:#fff;font-size:16px"></i></div>
+          <div class="item active" tabindex="0" id="rail-home"><i class="ti ti-home"></i></div>
+          <div class="item" tabindex="0" id="rail-conversaciones"><i class="ti ti-message-circle-2"></i></div>
+          <div class="item nav-pipeline" tabindex="0"><i class="ti ti-list-details"></i></div>
+          <div class="item" tabindex="0"><i class="ti ti-users"></i></div>
+          <div class="item" tabindex="0" id="rail-analitica"><i class="ti ti-chart-bar"></i></div>
+        </div>
+        <div class="inicio-wrap">
+          <div>
+            <h3>Hoy</h3>
+            <div class="priority-item top" tabindex="0" data-open-lead>
+              <div class="avatar" style="width:38px;height:38px;font-size:13px;background:#0B1D3A">MR</div>
+              <div class="who"><div class="n">Marcela Rojas</div><div class="m">Preguntó precio con financiamiento — sin respuesta hace 2h</div></div>
+              <i class="ti ti-chevron-right"></i>
+            </div>
+            <div class="priority-item">
+              <div class="avatar" style="width:38px;height:38px;font-size:13px;background:#375D93">DT</div>
+              <div class="who"><div class="n">Diego Torres</div><div class="m">Cotización enviada, sin confirmar hace 1 día</div></div>
+              <i class="ti ti-chevron-right"></i>
+            </div>
+            <div class="priority-item">
+              <div class="avatar" style="width:38px;height:38px;font-size:13px;background:#626C7E">LP</div>
+              <div class="who"><div class="n">Luis Paredes</div><div class="m">Instalación pendiente de agendar</div></div>
+              <i class="ti ti-chevron-right"></i>
+            </div>
+          </div>
+          <div>
+            <div class="eyebrow-lg">TU DÍA EN NÚMEROS</div>
+            <div class="kpi-grid">
+              <div class="kpi-card"><div class="l">Conversaciones activas</div><div class="v">12</div></div>
+              <div class="kpi-card"><div class="l">Leads asignados</div><div class="v">5</div></div>
+              <div class="kpi-card"><div class="l">Ganados esta semana</div><div class="v success">2</div></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="screen" id="screen-bandeja">
+      <div style="display:grid;grid-template-columns:72px 220px 1fr;height:520px">
+        <div class="rail">
+          <div class="mark"><i class="ti ti-sparkles" style="color:#fff;font-size:16px"></i></div>
+          <div class="item" tabindex="0"><i class="ti ti-home"></i></div>
+          <div class="item active" tabindex="0"><i class="ti ti-message-circle-2"></i></div>
+          <div class="item" tabindex="0"><i class="ti ti-users"></i></div>
+          <div class="item" tabindex="0"><i class="ti ti-chart-bar"></i></div>
+        </div>
+        <div class="list-col">
+          <div class="list-head">
+            <h3>Conversaciones</h3>
+            <div class="search"><i class="ti ti-search"></i><span>Buscar en tus conversaciones</span></div>
+          </div>
+          <div class="list-body" id="list-body">
+            <div class="conv-row active" tabindex="0">
+              <div class="avatar">MR</div>
+              <div class="conv-meta"><div class="top"><span class="name">Marcela Rojas</span><span class="time">09:41</span></div><p>Sí, me interesa saber el precio con financiamiento</p></div>
+            </div>
+            <div class="conv-row" tabindex="0">
+              <div class="avatar" style="background:#375D93">DT</div>
+              <div class="conv-meta"><div class="top"><span class="name">Diego Torres</span><span class="time">ayer</span></div><p>Perfecto, muchas gracias</p></div>
+            </div>
+            <div class="conv-row" tabindex="0">
+              <div class="avatar" style="background:#626C7E">LP</div>
+              <div class="conv-meta"><div class="top"><span class="name">Luis Paredes</span><span class="time">lun</span></div><p>¿Tienen instalación incluida?</p></div>
+            </div>
+          </div>
+        </div>
+        <div class="chat-col">
+          <div class="chat-head">
+            <div class="avatar">MR</div>
+            <div class="who"><div class="name">Marcela Rojas</div><div class="sub">+51 987 654 321 · 4ª conversación</div></div>
+            <button class="pill-info"><i class="ti ti-sparkles"></i>Resumen disponible</button>
+            <button class="copilot-toggle" id="copilot-toggle" title="Copiloto IA" aria-expanded="false"><i class="ti ti-sparkles"></i><span class="dot"></span></button>
+          </div>
+
+          <div class="messages" id="messages">
+            <div class="msg in"><div class="bubble">Sí, me interesa saber el precio con financiamiento</div></div>
+            <div class="msg out" id="last-msg"><div class="tag" style="justify-content:flex-end"><i class="ti ti-sparkles"></i>Gabi</div><div class="bubble">Hola Marcela, con gusto. Tenemos dos opciones de financiamiento a 12 y 24 meses. ¿Te comparto el detalle?</div></div>
+          </div>
+
+          <div class="composer">
+            <div class="quick-actions">
+              <div class="qa" tabindex="0">Enviar cotización</div>
+              <div class="qa" tabindex="0">Agendar llamada</div>
+            </div>
+            <div class="compose-row">
+              <div class="icon-btn" tabindex="0" id="clip-catalogo"><i class="ti ti-paperclip"></i></div>
+              <div class="text-field">Escribe una respuesta</div>
+              <button class="send-btn" id="send-btn" aria-label="Enviar"><i class="ti ti-arrow-right"></i></button>
+            </div>
+          </div>
+
+          <div class="copilot-panel" id="copilot-panel">
+            <div class="cp-title"><i class="ti ti-sparkles"></i>Copiloto</div>
+            <div class="suggestion-card">
+              <div class="eyebrow">SUGERENCIA</div>
+              <p class="h">Convertir en oportunidad</p>
+              <p class="b">Preguntó precio y financiamiento — señal de intención alta. Es su 4ª conversación: ya conoce el producto.</p>
+              <div class="btn-row">
+                <button class="btn-primary" id="btn-convertir">Convertir</button>
+                <button class="btn-ghost" id="btn-descartar">Descartar</button>
+              </div>
+            </div>
+            <div class="context-block">
+              <div class="eyebrow muted">CONTEXTO</div>
+              <p>Consultó por primera vez hace 12 días. Interés constante en el mismo producto, sin objeciones previas.</p>
+            </div>
+            <div class="stat-block">
+              <div class="eyebrow muted">SEÑAL DE APOYO</div>
+              <div class="val"><span class="num">Alta</span><span class="unit">intención de compra</span></div>
+            </div>
+          </div>
+
+          <div class="overlay" id="overlay-catalogo"></div>
+          <div class="drawer" id="drawer-catalogo">
+            <div class="drawer-head"><div class="avatar">MR</div><span>Marcela Rojas</span><button class="drawer-close" data-close-catalogo><i class="ti ti-x"></i></button></div>
+            <div class="eyebrow muted">CATÁLOGO</div>
+            <div class="catalog-item catalog-pick" data-pick><div class="catalog-thumb"></div><div><div class="p">Calefón 24L</div><div class="s">Financiado 12–24m</div></div></div>
+            <div class="catalog-item catalog-pick" data-pick><div class="catalog-thumb"></div><div><div class="p">Calefón 18L</div><div class="s">Financiado 12–24m</div></div></div>
+            <button class="btn-primary" id="btn-compartir-catalogo" style="width:100%">Compartir en la conversación</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="screen" id="screen-loading">
+      <div style="padding:20px 20px 0"><div class="eyebrow muted">Abriendo la oportunidad de Marcela Rojas…</div></div>
+      <div class="skeleton-wrap">
+        <div class="sk" style="height:64px;border-radius:14px"></div>
+        <div style="display:grid;grid-template-columns:1fr 220px;gap:20px">
+          <div style="display:flex;flex-direction:column;gap:10px">
+            <div class="sk" style="height:14px;width:60%"></div>
+            <div class="sk" style="height:14px;width:40%"></div>
+          </div>
+          <div style="display:flex;flex-direction:column;gap:10px">
+            <div class="sk" style="height:38px;border-radius:10px"></div>
+            <div class="sk" style="height:38px;border-radius:10px"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="screen" id="screen-pipeline-lista">
+      <div style="display:grid;grid-template-columns:72px 1fr;height:520px">
+        <div class="rail">
+          <div class="mark"><i class="ti ti-sparkles" style="color:#fff;font-size:16px"></i></div>
+          <div class="item" tabindex="0"><i class="ti ti-home"></i></div>
+          <div class="item" tabindex="0"><i class="ti ti-message-circle-2"></i></div>
+          <div class="item active nav-pipeline" tabindex="0"><i class="ti ti-list-details"></i></div>
+          <div class="item" tabindex="0"><i class="ti ti-users"></i></div>
+          <div class="item" tabindex="0"><i class="ti ti-chart-bar"></i></div>
+        </div>
+        <div class="inicio-wrap">
+          <div>
+            <div class="eyebrow-lg">PIPELINE — TODOS LOS LEADS</div>
+            <div class="eyebrow-lg" style="margin-top:0;margin-bottom:6px;font-weight:500">ORDENAR POR</div>
+            <div class="proto-controls" style="margin:0 0 12px">
+              <button class="proto-btn active" id="orden-prioridad" data-orden="prioridad">Mayor prioridad</button>
+              <button class="proto-btn" id="orden-reciente" data-orden="reciente">Más reciente</button>
+            </div>
+            <div id="pipeline-lista-items"></div>
+            <div class="proto-controls" style="margin:8px 0 0;justify-content:space-between">
+              <button class="proto-btn" id="pipeline-pag-prev">← Anterior</button>
+              <span class="eyebrow muted" id="pipeline-pag-info" style="margin:0"></span>
+              <button class="proto-btn" id="pipeline-pag-next">Siguiente →</button>
+            </div>
+          </div>
+          <div>
+            <div class="eyebrow-lg">FILTRO</div>
+            <div class="proto-controls" style="margin:0">
+              <button class="proto-btn" id="filtro-atencion" data-filtro="atencion">Requiere atención</button>
+              <button class="proto-btn" id="filtro-canal" data-filtro="canal">Canal: Campañas</button>
+            </div>
+            <div id="pipeline-activador" style="display:none;margin-top:10px">
+              <button class="proto-btn" id="btn-consulta-contextual"><i class="ti ti-chart-bar"></i> Analizar en Analítica</button>
+            </div>
+            <div class="eyebrow-lg" style="margin-top:16px">NOTIFICACIÓN (demo)</div>
+            <div class="proto-controls" style="margin:0">
+              <button class="proto-btn" data-motivo="asignacion">Asignación nueva</button>
+              <button class="proto-btn" data-motivo="mensaje">Mensaje sin responder</button>
+              <button class="proto-btn" data-motivo="mensaje_alto_valor">Mensaje sin responder · Alto valor</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="screen" id="screen-pipeline">
+      <div class="pipeline-card">
+        <div class="pipeline-head">
+          <div class="avatar">MR</div>
+          <div class="who"><div class="name">Marcela Rojas</div><div class="sub">+51 987 654 321</div><div class="sub">Campaña: Promo Calefón Verano</div><div class="sub" id="pipeline-motivo" style="display:none"></div></div>
+          <div class="status-pill progress" id="status-pill">En curso</div>
+        </div>
+        <div class="pipeline-body">
+          <div class="timeline-col">
+            <div class="eyebrow muted">HISTORIAL DE LA OPORTUNIDAD</div>
+            <div class="timeline-item"><div class="dot-tl"></div><div><div class="t">Primer contacto por WhatsApp</div><div class="d">hace 12 días</div></div></div>
+            <div class="timeline-item highlight"><div class="dot-tl"></div><div><div class="t">Convertida en oportunidad — intención alta</div><div class="d">hoy, 09:44</div></div></div>
+          </div>
+          <div class="actions-col">
+            <div class="eyebrow muted">ACCIONES</div>
+            <button class="action-primary" data-open="cotizar">Cotizar</button>
+            <button class="action-secondary" data-open="reasignar">Reasignar</button>
+            <button class="action-secondary" data-open="cerrar">Cambiar estado</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="overlay" id="overlay"></div>
+
+      <div class="drawer" id="drawer-cotizar">
+        <div class="drawer-head"><div class="avatar">MR</div><span>Marcela Rojas</span><button class="drawer-close" data-close><i class="ti ti-x"></i></button></div>
+        <div class="eyebrow muted">COTIZAR</div>
+        <div class="catalog-item"><div class="catalog-thumb"></div><div><div class="p">Calefón 24L</div><div class="s">Financiado 12–24m</div></div></div>
+        <button class="btn-primary" id="btn-adjuntar" style="width:100%">Adjuntar a conversación</button>
+      </div>
+
+      <div class="drawer" id="drawer-reasignar">
+        <div class="drawer-head"><div class="avatar">MR</div><span>Marcela Rojas</span><button class="drawer-close" data-close><i class="ti ti-x"></i></button></div>
+        <div class="eyebrow muted">REASIGNAR — solo Supervisor/Admin</div>
+        <div class="team-row"><span class="n">Jorge Salas</span><span class="a">disponible</span></div>
+        <button class="btn-primary" id="btn-asignar" style="width:100%">Asignar</button>
+      </div>
+
+      <div class="drawer" id="drawer-cerrar">
+        <div class="drawer-head"><div class="avatar">MR</div><span>Marcela Rojas</span><button class="drawer-close" data-close><i class="ti ti-x"></i></button></div>
+        <div class="eyebrow muted">CERRAR OPORTUNIDAD</div>
+        <div class="result-row">
+          <button class="result-btn won" id="btn-ganado">Ganado</button>
+          <button class="result-btn" id="btn-perdido">Perdido</button>
+        </div>
+        <div class="hint">Confirmación requerida — decisión de impacto significativo (Human Decision Gate, pendiente de definir a nivel transversal en Product Patterns)</div>
+      </div>
+    </div>
+
+    <div class="screen" id="screen-analitica">
+      <div style="display:grid;grid-template-columns:72px 1fr;height:520px">
+        <div class="rail">
+          <div class="mark"><i class="ti ti-sparkles" style="color:#fff;font-size:16px"></i></div>
+          <div class="item" tabindex="0"><i class="ti ti-home"></i></div>
+          <div class="item" tabindex="0"><i class="ti ti-message-circle-2"></i></div>
+          <div class="item nav-pipeline" tabindex="0"><i class="ti ti-list-details"></i></div>
+          <div class="item" tabindex="0"><i class="ti ti-users"></i></div>
+          <div class="item active" tabindex="0"><i class="ti ti-chart-bar"></i></div>
+        </div>
+        <div class="analitica-wrap">
+          <div>
+            <div class="eyebrow-lg" id="analitica-eyebrow">RESUMEN — EQUIPO</div>
+            <div class="sub" id="analitica-criterio" style="display:none;margin-bottom:8px"></div>
+            <div class="kpi-grid-analitica">
+              <div class="kpi-card"><div class="l">Leads activos</div><div class="v">34</div></div>
+              <div class="kpi-card" id="kpi-estancados"><div class="l">Estancados +5 días</div><div class="v">6</div></div>
+              <div class="kpi-card"><div class="l">Ganados este mes</div><div class="v success">9</div></div>
+              <div class="kpi-card"><div class="l">Tiempo prom. de respuesta</div><div class="v">18m</div></div>
+            </div>
+          </div>
+          <div class="proto-controls" style="margin:0">
+            <span class="label">DEMOSTRACIÓN — condición de la sugerencia (Cap. 4 §6)</span>
+            <button class="proto-btn active" data-demo-suggestion="on">Con sugerencia</button>
+            <button class="proto-btn" data-demo-suggestion="off">Sin sugerencia (bajo el umbral)</button>
+          </div>
+          <div class="suggestion-card" id="analitica-suggestion">
+            <div class="eyebrow">SUGERENCIA</div>
+            <p style="font-size:13px;font-weight:600;margin:0 0 6px">Revisar los Leads del canal Campañas</p>
+            <p style="font-size:12px;color:var(--text-secondary);margin:0;line-height:1.5">6 Leads estancados hace más de 5 días — 4 de ellos llegaron por Campañas, el doble que el resto del equipo. Podría valer la pena revisar el seguimiento de ese canal.</p>
+          </div>
+          <div>
+            <div class="eyebrow-lg">DETALLE COMPARATIVO — POR CANAL</div>
+            <div class="statistic-grid">
+              <div class="statistic-card" id="stat-campanas">
+                <div class="eyebrow-lg">CAMPAÑAS</div>
+                <div class="v">4 de 6</div>
+                <div class="delta up">↑ +2 vs. semana pasada</div>
+              </div>
+              <div class="statistic-card">
+                <div class="eyebrow-lg">DIRECTO</div>
+                <div class="v">2 de 6</div>
+                <div class="delta down">↓ -1 vs. semana pasada</div>
+              </div>
+              <div class="statistic-card">
+                <div class="eyebrow-lg">EQUIPO</div>
+                <div class="v">Jorge Salas</div>
+                <div class="delta up">↑ 3 de los 6 estancados</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<div class="confirm-backdrop" id="confirm-backdrop">
+  <div class="confirm-card">
+    <h4>Cerrar como ganada</h4>
+    <p>Marcela Rojas pasa a "ganada". Esta acción queda registrada en el historial de la oportunidad.</p>
+    <div class="confirm-row">
+      <button class="btn-ghost" id="confirm-cancel">Cancelar</button>
+      <button class="btn-primary" id="confirm-ok">Confirmar</button>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast"><i class="ti ti-circle-check"></i><span>Oportunidad cerrada como ganada</span></div>
+
+<script>
+(function () {
+  var stage = document.getElementById('stage');
+  var screens = { inicio: document.getElementById('screen-inicio'), bandeja: document.getElementById('screen-bandeja'), loading: document.getElementById('screen-loading'), pipeline: document.getElementById('screen-pipeline'), analitica: document.getElementById('screen-analitica'), pipelineLista: document.getElementById('screen-pipeline-lista') };
+  var pendingScrollBandeja = false;
+  function showScreen(name) {
+    Object.keys(screens).forEach(function (k) { screens[k].classList.toggle('is-active', k === name); });
+    if (name === 'bandeja' && pendingScrollBandeja) {
+      var messagesEl = document.getElementById('messages');
+      messagesEl.scrollTop = messagesEl.scrollHeight;
+      pendingScrollBandeja = false;
+    }
+  }
+
+  document.querySelectorAll('[data-open-lead]').forEach(function (item) {
+    item.addEventListener('click', function () { showScreen('bandeja'); });
+    item.addEventListener('keydown', function (e) { if (e.key === 'Enter') showScreen('bandeja'); });
+  });
+  var railHome = document.getElementById('rail-home');
+  var railConv = document.getElementById('rail-conversaciones');
+  var railAnalitica = document.getElementById('rail-analitica');
+  if (railHome) railHome.addEventListener('click', function () { showScreen('inicio'); });
+  if (railConv) railConv.addEventListener('click', function () { showScreen('bandeja'); });
+  if (railAnalitica) railAnalitica.addEventListener('click', function () { setAnaliticaContexto(null); showScreen('analitica'); });
+  document.querySelectorAll('.nav-pipeline').forEach(function (item) {
+    item.addEventListener('click', function () { showScreen('pipelineLista'); });
+  });
+
+  var filtroActivo = null;
+  var pipelineActivador = document.getElementById('pipeline-activador');
+  var pipelineMotivo = document.getElementById('pipeline-motivo');
+  var analiticaEyebrow = document.getElementById('analitica-eyebrow');
+  var analiticaCriterio = document.getElementById('analitica-criterio');
+  var statCampanas = document.getElementById('stat-campanas');
+  var kpiEstancados = document.getElementById('kpi-estancados');
+
+  function setPipelineMotivo(tipo) {
+    if (tipo === 'asignacion') {
+      pipelineMotivo.textContent = 'Asignación nueva';
+      pipelineMotivo.style.display = '';
+    } else if (tipo === 'mensaje') {
+      pipelineMotivo.textContent = 'Mensaje sin responder';
+      pipelineMotivo.style.display = '';
+    } else if (tipo === 'mensaje_alto_valor') {
+      pipelineMotivo.textContent = 'Mensaje sin responder · Alto valor';
+      pipelineMotivo.style.display = '';
+    } else {
+      pipelineMotivo.textContent = '';
+      pipelineMotivo.style.display = 'none';
+    }
+  }
+
+  document.querySelectorAll('[data-motivo]').forEach(function (item) {
+    item.addEventListener('click', function () {
+      setPipelineMotivo(item.getAttribute('data-motivo'));
+      showScreen('pipeline');
+    });
+  });
+
+  // Pipeline Data Grid — dataset de demostración (Cap. 6 §3: Filtros, Ordenamiento, Paginación).
+  // Solo Marcela Rojas tiene Vista de detalle (SCR-03) construida en este Prototipo; el resto
+  // no es clicable — no se fabrica un detalle que no existe.
+  var pipelineLeads = [
+    { nombre: 'Marcela Rojas', atencion: true, canal: 'campana', estado: 'Requiere atención — sin avance hace 6 días', dias: 6, clickable: true },
+    { nombre: 'Diego Torres', atencion: true, canal: 'directo', estado: 'Requiere atención — cotización sin confirmar', dias: 3 },
+    { nombre: 'Luis Paredes', atencion: false, canal: 'directo', estado: 'En curso', dias: 1 },
+    { nombre: 'Carla Núñez', atencion: true, canal: 'campana', estado: 'Requiere atención — sin avance hace 5 días', dias: 5 },
+    { nombre: 'Andrés Vega', atencion: false, canal: 'campana', estado: 'En curso', dias: 2 },
+    { nombre: 'Patricia Ibáñez', atencion: false, canal: 'directo', estado: 'Cotización enviada', dias: 0 },
+    { nombre: 'Renzo Chávez', atencion: true, canal: 'directo', estado: 'Requiere atención — sin respuesta hace 4 días', dias: 4 },
+    { nombre: 'Milagros Soto', atencion: false, canal: 'campana', estado: 'En curso', dias: 1 },
+    { nombre: 'Renato Díaz', atencion: false, canal: 'directo', estado: 'Instalación agendada', dias: 0 },
+    { nombre: 'Fiorella Ramos', atencion: true, canal: 'campana', estado: 'Requiere atención — cotización sin confirmar', dias: 7 },
+    { nombre: 'Gustavo Peña', atencion: false, canal: 'directo', estado: 'En curso', dias: 2 },
+    { nombre: 'Valentina Cruz', atencion: false, canal: 'campana', estado: 'Ganado esta semana', dias: 0 }
+  ];
+  var PIPELINE_PAGE_SIZE = 5;
+  var pipelinePagina = 1;
+  var pipelineOrden = 'prioridad';
+  var pipelineListaItems = document.getElementById('pipeline-lista-items');
+  var pipelinePagInfo = document.getElementById('pipeline-pag-info');
+  var pipelinePagPrev = document.getElementById('pipeline-pag-prev');
+  var pipelinePagNext = document.getElementById('pipeline-pag-next');
+
+  function pipelineListaFiltradaOrdenada() {
+    var lista = pipelineLeads.slice();
+    if (filtroActivo === 'atencion') lista = lista.filter(function (l) { return l.atencion; });
+    if (filtroActivo === 'canal') lista = lista.filter(function (l) { return l.canal === 'campana'; });
+    if (pipelineOrden === 'reciente') {
+      lista.sort(function (a, b) { return a.dias - b.dias; });
+    } else {
+      lista.sort(function (a, b) { return (b.atencion - a.atencion) || (b.dias - a.dias); });
+    }
+    return lista;
+  }
+
+  function renderPipelineLista() {
+    var lista = pipelineListaFiltradaOrdenada();
+    var total = lista.length;
+    var totalPaginas = Math.max(1, Math.ceil(total / PIPELINE_PAGE_SIZE));
+    if (pipelinePagina > totalPaginas) pipelinePagina = totalPaginas;
+    var inicio = (pipelinePagina - 1) * PIPELINE_PAGE_SIZE;
+    var pageItems = lista.slice(inicio, inicio + PIPELINE_PAGE_SIZE);
+
+    pipelineListaItems.innerHTML = '';
+    if (pageItems.length === 0) {
+      var vacio = document.createElement('div');
+      vacio.className = 'eyebrow muted';
+      vacio.style.padding = '4px 0 14px';
+      var nombreFiltro = filtroActivo === 'atencion' ? 'Requiere atención' : 'Canal: Campañas';
+      vacio.textContent = 'Sin resultados para el filtro "' + nombreFiltro + '" — probá quitarlo.';
+      pipelineListaItems.appendChild(vacio);
+    } else {
+      pageItems.forEach(function (lead) {
+        var item = document.createElement('div');
+        item.className = 'priority-item' + (lead.clickable ? ' top' : '');
+        if (lead.clickable) {
+          item.tabIndex = 0;
+          item.setAttribute('data-open-lead-pipeline', '');
+        }
+        item.innerHTML = '<div class="who"><div class="n">' + lead.nombre + '</div><div class="m">' + lead.estado + '</div></div>' + (lead.clickable ? '<i class="ti ti-chevron-right"></i>' : '');
+        pipelineListaItems.appendChild(item);
+      });
+      document.querySelectorAll('[data-open-lead-pipeline]').forEach(function (item) {
+        item.addEventListener('click', function () {
+          setPipelineMotivo(null);
+          showScreen('loading');
+          setTimeout(function () { showScreen('pipeline'); }, 480);
+        });
+        item.addEventListener('keydown', function (e) { if (e.key === 'Enter') item.click(); });
+      });
+    }
+    pipelinePagInfo.textContent = 'Página ' + pipelinePagina + ' de ' + totalPaginas + ' · ' + total + (total === 1 ? ' resultado' : ' resultados');
+    pipelinePagPrev.disabled = pipelinePagina <= 1;
+    pipelinePagNext.disabled = pipelinePagina >= totalPaginas;
+  }
+
+  document.querySelectorAll('[data-orden]').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      pipelineOrden = btn.getAttribute('data-orden');
+      document.querySelectorAll('[data-orden]').forEach(function (b) { b.classList.toggle('active', b === btn); });
+      pipelinePagina = 1;
+      renderPipelineLista();
+    });
+  });
+  pipelinePagPrev.addEventListener('click', function () {
+    if (pipelinePagina > 1) { pipelinePagina -= 1; renderPipelineLista(); }
+  });
+  pipelinePagNext.addEventListener('click', function () {
+    pipelinePagina += 1;
+    renderPipelineLista();
+  });
+
+  renderPipelineLista();
+
+  function setAnaliticaContexto(tipo) {
+    if (tipo === 'atencion') {
+      analiticaEyebrow.textContent = 'ANÁLISIS CONTEXTUAL';
+      analiticaCriterio.textContent = 'Criterio: Requiere atención';
+      analiticaCriterio.style.display = '';
+      statCampanas.classList.remove('resaltada');
+      kpiEstancados.classList.add('resaltada');
+    } else if (tipo === 'canal') {
+      analiticaEyebrow.textContent = 'ANÁLISIS CONTEXTUAL';
+      analiticaCriterio.textContent = 'Criterio: Canal — Campañas';
+      analiticaCriterio.style.display = '';
+      statCampanas.classList.add('resaltada');
+      kpiEstancados.classList.remove('resaltada');
+    } else {
+      analiticaEyebrow.textContent = 'RESUMEN — EQUIPO';
+      analiticaCriterio.style.display = 'none';
+      statCampanas.classList.remove('resaltada');
+      kpiEstancados.classList.remove('resaltada');
+    }
+  }
+
+  document.querySelectorAll('[data-filtro]').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      var val = btn.getAttribute('data-filtro');
+      filtroActivo = filtroActivo === val ? null : val;
+      document.querySelectorAll('[data-filtro]').forEach(function (b) { b.classList.toggle('active', b.getAttribute('data-filtro') === filtroActivo); });
+      pipelineActivador.style.display = filtroActivo ? '' : 'none';
+      pipelinePagina = 1;
+      renderPipelineLista();
+    });
+  });
+
+  document.getElementById('btn-consulta-contextual').addEventListener('click', function () {
+    if (!filtroActivo) return;
+    var texto = filtroActivo === 'atencion' ? 'Requiere atención' : 'Canal: Campañas';
+    toastText.textContent = 'Analizando en Analítica: ' + texto;
+    toast.classList.add('open');
+    setTimeout(function () { toast.classList.remove('open'); }, 3200);
+    var tipo = filtroActivo;
+    showScreen('loading');
+    setTimeout(function () {
+      setAnaliticaContexto(tipo);
+      showScreen('analitica');
+    }, 480);
+  });
+
+  document.querySelectorAll('[data-demo-suggestion]').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      document.querySelectorAll('[data-demo-suggestion]').forEach(function (b) { b.classList.remove('active'); });
+      btn.classList.add('active');
+      var card = document.getElementById('analitica-suggestion');
+      card.style.display = btn.getAttribute('data-demo-suggestion') === 'on' ? '' : 'none';
+    });
+  });
+
+  var copilotToggle = document.getElementById('copilot-toggle');
+  var copilotPanel = document.getElementById('copilot-panel');
+  function toggleCopilot(open) {
+    copilotPanel.classList.toggle('open', open);
+    copilotToggle.classList.toggle('open', open);
+    copilotToggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+  }
+  copilotToggle.addEventListener('click', function () {
+    toggleCopilot(!copilotPanel.classList.contains('open'));
+  });
+  document.getElementById('btn-descartar').addEventListener('click', function () { toggleCopilot(false); });
+
+  document.getElementById('btn-convertir').addEventListener('click', function () {
+    toggleCopilot(false);
+    setPipelineMotivo(null);
+    setTimeout(function () {
+      showScreen('loading');
+      setTimeout(function () { showScreen('pipeline'); }, 480);
+    }, 260);
+  });
+
+  var overlay = document.getElementById('overlay');
+  var drawers = { cotizar: document.getElementById('drawer-cotizar'), reasignar: document.getElementById('drawer-reasignar'), cerrar: document.getElementById('drawer-cerrar') };
+  function openDrawer(name) {
+    Object.keys(drawers).forEach(function (k) { drawers[k].classList.toggle('open', k === name); });
+    overlay.classList.add('open');
+  }
+  function closeDrawers() {
+    Object.keys(drawers).forEach(function (k) { drawers[k].classList.remove('open'); });
+    overlay.classList.remove('open');
+  }
+  document.querySelectorAll('[data-open]').forEach(function (btn) {
+    btn.addEventListener('click', function () { openDrawer(btn.getAttribute('data-open')); });
+  });
+  document.querySelectorAll('[data-close]').forEach(function (btn) {
+    btn.addEventListener('click', closeDrawers);
+  });
+  overlay.addEventListener('click', closeDrawers);
+
+  var confirmBackdrop = document.getElementById('confirm-backdrop');
+  var confirmTitle = document.querySelector('#confirm-backdrop h4');
+  var confirmBody = document.querySelector('#confirm-backdrop p');
+  var toast = document.getElementById('toast');
+  var toastText = toast.querySelector('span');
+  var pendingResult = 'ganado';
+
+  function askConfirm(result) {
+    pendingResult = result;
+    if (result === 'ganado') {
+      confirmTitle.textContent = 'Cerrar como ganada';
+      confirmBody.textContent = 'Marcela Rojas pasa a "ganada". Esta acción queda registrada en el historial de la oportunidad.';
+    } else {
+      confirmTitle.textContent = 'Cerrar como perdida';
+      confirmBody.textContent = 'Marcela Rojas pasa a "perdida". Esta acción queda registrada en el historial de la oportunidad.';
+    }
+    confirmBackdrop.classList.add('open');
+  }
+  document.getElementById('btn-ganado').addEventListener('click', function () { askConfirm('ganado'); });
+  document.getElementById('btn-perdido').addEventListener('click', function () { askConfirm('perdido'); });
+  document.getElementById('confirm-cancel').addEventListener('click', function () {
+    confirmBackdrop.classList.remove('open');
+  });
+  document.getElementById('confirm-ok').addEventListener('click', function () {
+    confirmBackdrop.classList.remove('open');
+    closeDrawers();
+    var pill = document.getElementById('status-pill');
+    pill.classList.remove('progress', 'won');
+    if (pendingResult === 'ganado') {
+      pill.textContent = 'Ganado';
+      pill.classList.add('won');
+      toastText.textContent = 'Oportunidad cerrada como ganada';
+    } else {
+      pill.textContent = 'Perdido';
+      pill.style.background = 'var(--error-bg)';
+      pill.style.color = 'var(--error-text)';
+      toastText.textContent = 'Oportunidad cerrada como perdida';
+    }
+    toast.classList.add('open');
+    setTimeout(function () { toast.classList.remove('open'); }, 3200);
+  });
+
+  document.getElementById('btn-adjuntar').addEventListener('click', function () {
+    var item = document.querySelector('#drawer-cotizar .catalog-item');
+    var p = item.querySelector('.p').textContent;
+    var s = item.querySelector('.s').textContent;
+    var wrap = document.createElement('div');
+    wrap.className = 'msg out';
+    wrap.innerHTML = '<div class="catalog-item" style="margin:0"><div class="catalog-thumb"></div><div><div class="p">' + p + '</div><div class="s">' + s + '</div></div></div>';
+    document.getElementById('messages').appendChild(wrap);
+    pendingScrollBandeja = true;
+    toastText.textContent = 'Cotización adjuntada a la conversación';
+    toast.classList.add('open');
+    setTimeout(function () { toast.classList.remove('open'); }, 3200);
+    closeDrawers();
+  });
+  document.getElementById('btn-asignar').addEventListener('click', closeDrawers);
+
+  var clipCatalogo = document.getElementById('clip-catalogo');
+  var overlayCatalogo = document.getElementById('overlay-catalogo');
+  var drawerCatalogo = document.getElementById('drawer-catalogo');
+  var selectedCatalogItem = null;
+  function openCatalogo() { toggleCopilot(false); drawerCatalogo.classList.add('open'); overlayCatalogo.classList.add('open'); }
+  function closeCatalogo() { drawerCatalogo.classList.remove('open'); overlayCatalogo.classList.remove('open'); }
+  if (clipCatalogo) clipCatalogo.addEventListener('click', openCatalogo);
+  overlayCatalogo.addEventListener('click', closeCatalogo);
+  document.querySelectorAll('[data-close-catalogo]').forEach(function (btn) { btn.addEventListener('click', closeCatalogo); });
+  document.querySelectorAll('.catalog-pick').forEach(function (item) {
+    item.addEventListener('click', function () {
+      document.querySelectorAll('.catalog-pick').forEach(function (i) { i.classList.remove('selected'); });
+      item.classList.add('selected');
+      selectedCatalogItem = item;
+    });
+  });
+  document.getElementById('btn-compartir-catalogo').addEventListener('click', function () {
+    if (!selectedCatalogItem) return;
+    var p = selectedCatalogItem.querySelector('.p').textContent;
+    var s = selectedCatalogItem.querySelector('.s').textContent;
+    var wrap = document.createElement('div');
+    wrap.className = 'msg out';
+    wrap.innerHTML = '<div class="catalog-item" style="margin:0"><div class="catalog-thumb"></div><div><div class="p">' + p + '</div><div class="s">' + s + '</div></div></div>';
+    document.getElementById('messages').appendChild(wrap);
+    wrap.scrollIntoView({ block: 'end' });
+    closeCatalogo();
+    selectedCatalogItem.classList.remove('selected');
+    selectedCatalogItem = null;
+  });
+
+  document.getElementById('send-btn').addEventListener('click', function () {
+    var wrap = document.createElement('div');
+    wrap.className = 'msg out sending';
+    wrap.innerHTML = '<div class="tag" style="justify-content:flex-end"><span>Enviando…</span></div><div class="bubble" style="opacity:.6">Perfecto, te la envío ahora</div>';
+    document.getElementById('messages').appendChild(wrap);
+    wrap.scrollIntoView({ block: 'end' });
+    setTimeout(function () {
+      wrap.querySelector('.tag').style.display = 'none';
+      wrap.querySelector('.bubble').style.opacity = '1';
+    }, 700);
+  });
+
+  var listBody = document.getElementById('list-body');
+  var messages = document.getElementById('messages');
+  var listBodyOriginal = listBody.innerHTML;
+  var lastMsgOriginal = document.getElementById('last-msg').outerHTML;
+
+  document.querySelectorAll('.proto-btn').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      document.querySelectorAll('.proto-btn').forEach(function (b) { b.classList.remove('active'); });
+      btn.classList.add('active');
+      var demo = btn.getAttribute('data-demo');
+      if (demo === 'normal') {
+        listBody.innerHTML = listBodyOriginal;
+        var lm = document.getElementById('last-msg');
+        if (lm) lm.outerHTML = lastMsgOriginal;
+      } else if (demo === 'vacio') {
+        listBody.innerHTML = '<div class="empty-state"><i class="ti ti-message-circle-2"></i><div class="h">Todavía no tienes conversaciones</div><div class="b">Cuando un cliente te escriba, aparecerá acá.</div></div>';
+      } else if (demo === 'error') {
+        listBody.innerHTML = listBodyOriginal;
+        var lm2 = document.getElementById('last-msg');
+        if (lm2) {
+          lm2.className = 'msg out error';
+          lm2.innerHTML = '<div class="tag" style="justify-content:flex-end"><i class="ti ti-sparkles"></i>Gabi</div><div class="bubble">Hola Marcela, con gusto. Tenemos dos opciones de financiamiento a 12 y 24 meses. ¿Te comparto el detalle?</div><div class="retry">No se pudo enviar · Reintentar</div>';
+        }
+      }
+    });
+  });
+})();
+</script>

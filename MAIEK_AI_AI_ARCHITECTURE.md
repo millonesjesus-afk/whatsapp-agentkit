@@ -11,7 +11,7 @@
 | Fecha de creación | 2026-07-28 |
 | Autor | Claude, a pedido de Jesús Millones |
 | Fecha de aprobación | 2026-07-28 |
-| Última actualización | 2026-07-28 |
+| Última actualización | 2026-08-08 (sección 2 — contexto de campaña como extensión de Conocimiento transaccional, ver Control de versiones) |
 
 ## Dependencias
 
@@ -33,6 +33,7 @@ Frontend Architecture, Security Architecture, DevOps/Operations Architecture (fu
 |---|---|---|---|
 | 1.0 (borrador) | 2026-07-28 | Claude | Primera versión — arquitectura objetivo de AI, construida sobre el CSA-AI aprobado. Incorpora las 4 observaciones del usuario sobre clasificación de fuentes de conocimiento, caracterización de inferencia única, trazabilidad de prompts vs. decisiones, y terminología independiente de la implementación. Pendiente de revisión y aprobación. |
 | 1.0 | 2026-07-28 | Claude | Aprobado. Se incorporaron 2 mejoras conceptuales antes de la aprobación: (1) el **AI Orchestrator**, modelado explícitamente como componente responsable de recuperación de contexto, construcción del prompt, invocación del modelo, emisión de confianza y registro de inferencias — el AI Engine deja de leerse como sinónimo de "el modelo" (sección 1); (2) el principio **Explainability First** (MPX Cap. 3), incorporado como sección propia dentro de Gestión de incertidumbre (sección 6), con su propio Architecture Success Criterion (#6). Se corrigieron además varias referencias cruzadas a secciones no numeradas del documento. El usuario registró 3 recomendaciones menores para futuras versiones, sin incorporar ahora: (a) expresar el constraint de prompt caching de forma independiente del proveedor, señalando a Anthropic como implementación concreta; (b) agregar como criterio verificable que `razon` nunca sea vacío cuando se emite confianza; (c) reforzar el principio de independencia de proveedor de modelos, documentando que el AI Engine no depende de capacidades exclusivas de un LLM salvo cuando se indique explícitamente. |
+| 1.0 | 2026-08-08 | Claude | **Sección 2 — el contexto de campaña se declara extensión de Conocimiento transaccional, no una fuente nueva.** Formaliza, en la capa de AI Architecture, la decisión de producto que resolvió la Brecha B del recorrido #5 de Product Design: el contexto promocional de una campaña de origen (`resolver_promo`/`agent/campanas.py`) puede incorporarse al turno conversacional, condicionado a que la capacidad esté habilitada y a las reglas de negocio aplicables (MPA §4, relación Campañas → Agentes IA, agregada en la misma fecha) — nunca automático u obligatorio. No se definen todavía las reglas de cuándo/cómo se usa ese contexto, ni si el Copiloto IA lo comparte — quedan pendientes de Product Patterns y MPX. |
 
 ## Alcance y regla de no-duplicación
 
@@ -70,12 +71,14 @@ El AI Engine consume seis fuentes de conocimiento distintas, hoy mezcladas sin d
 |---|---|---|---|
 | **Conocimiento estático** | No cambia entre turnos ni conversaciones; propio del negocio | System prompt, base de conocimiento (`knowledge/*.md`) | Candidato a *prompt caching*; debe parametrizarse por `negocio_id` |
 | **Conocimiento operacional** | Cambia con baja frecuencia, gobierna reglas de atención | Horario de atención, políticas comerciales | Se recalcula por turno, pero es determinístico y barato |
-| **Conocimiento transaccional** | Cambia con frecuencia media, específico del catálogo/oferta vigente | Catálogo de precios, promociones activas | Requiere invalidación de caché al cambiar (brecha ya señalada en el CSA) |
+| **Conocimiento transaccional** | Cambia con frecuencia media, específico del catálogo/oferta vigente | Catálogo de precios, promociones activas (incluida la promoción de la campaña de origen del lead, cuando esa capacidad está habilitada — MPA §4) | Requiere invalidación de caché al cambiar (brecha ya señalada en el CSA) |
 | **Memoria conversacional** | Específica de la conversación en curso | Historial de mensajes | Ya implementada (`Mensaje`); límite de 20 mensajes ya fijado en Data Architecture |
 | **Contexto temporal** | Se construye y se descarta en cada turno | Bloques armados por `_armar_bloques_contexto` | No persiste — por diseño |
 | **Configuración del negocio** | Específica del tenant, gobierna cómo se comporta el AI Engine | Modo (pruebas/producción), tono, restricciones | Debe resolverse por `negocio_id`, no solo por canal (brecha Multi-Tenant, CSA-AI §10) |
 
 Esta clasificación no introduce una nueva entidad de datos — es un criterio de diseño que Data Architecture y Security Architecture deben poder referenciar al decidir aislamiento y caching por tenant.
+
+El contexto de campaña (MPA §4, relación Campañas → Agentes IA) no constituye una séptima fuente de conocimiento — es una extensión de **Conocimiento transaccional**, ya existente, sujeta a la misma implicación arquitectónica de esa fila (invalidación de caché al cambiar). Su incorporación al turno conversacional queda condicionada a que la capacidad esté habilitada y a las reglas de negocio aplicables — nunca un comportamiento automático obligatorio. Este documento no define esas reglas (cuándo, con qué prioridad, ni si el Copiloto IA las comparte) — quedan pendientes de Product Patterns y MPX cuando corresponda.
 
 ## 3. Construcción de prompts objetivo
 
