@@ -39,11 +39,18 @@ class ServicioComercial:
     async def asignar_lead_pendiente_a_asesor(self, username: str, nivel_asesor: str | None) -> str | None:
         return await asignacion.asignar_lead_pendiente_a_asesor(username, nivel_asesor)
 
-    async def registrar_venta(
-        self, telefono: str, lineas_venta_json: str, modalidad_pago: str, cuotas: str, medio_pago: str,
-    ) -> None:
-        """Valida y persiste las líneas de venta de un lead — misma lógica
-        que antes vivía en el handler de ruta, trasladada tal cual."""
+    def validar_venta(
+        self, lineas_venta_json: str, modalidad_pago: str, cuotas: str, medio_pago: str,
+    ) -> dict:
+        """Valida y normaliza los datos de entrada de un cierre de venta SIN
+        escribir nada. Retorna la venta ya normalizada
+        (`lineas`/`modalidad_pago`/`cuotas`/`medio_pago`) o lanza `ValueError`.
+
+        Está separada de la persistencia a propósito: quien llama tiene que
+        poder rechazar una entrada inválida ANTES de tocar el estado del lead
+        —en particular antes de consumir la versión de concurrencia optimista—,
+        para que un 400 de validación nunca provoque un conflicto de edición
+        falso contra otra sesión que tenía el mismo lead abierto."""
         if modalidad_pago and modalidad_pago not in MODALIDADES_PAGO:
             raise ValueError("Modalidad de pago inválida")
         # Cuotas solo aplica a financiado — el campo queda oculto/deshabilitado
@@ -84,14 +91,46 @@ class ServicioComercial:
             if modalidad_pago == "contado" and not medio_pago:
                 raise ValueError("Selecciona el medio de pago")
 
+        return {
+            "lineas": lineas,
+            "modalidad_pago": modalidad_pago,
+            "cuotas": cuotas,
+            "medio_pago": medio_pago,
+        }
+
+    async def persistir_venta(self, telefono: str, venta: dict) -> None:
+        """Escribe una venta YA validada por `validar_venta`. No valida nada:
+        recibir datos crudos acá es un error de programación, no una entrada
+        de usuario."""
+        lineas = venta["lineas"]
         await guardar_lineas_venta(telefono, lineas)
 
-        campos = {"modalidad_pago": modalidad_pago, "cuotas": cuotas, "medio_pago": medio_pago}
+        campos = {
+            "modalidad_pago": venta["modalidad_pago"],
+            "cuotas": venta["cuotas"],
+            "medio_pago": venta["medio_pago"],
+        }
         # Si se registró al menos un producto, el resultado pasa a "vendido" automáticamente
         if lineas:
             campos["resultado"] = "vendido"
 
-        await actualizar_lead(telefono, **campos)
+        # `cuotas` va como campo explícito: al pasar de financiado a contado,
+        # validar_venta() lo normaliza a "" ("las cuotas ya no aplican"), y sin
+        # esto el filtro de valores vacíos de actualizar_lead lo descartaría —
+        # dejando en la fila las cuotas viejas de una venta financiada que ya
+        # no existe. Es exactamente la misma decisión que fecha_agendada cuando
+        # el resultado deja de ser "agendado" (ver dashboard.py, actualizar_resultado):
+        # el vacío viene de una regla de negocio, no de "no sé".
+        await actualizar_lead(telefono, campos_explicitos=("cuotas",), **campos)
+
+    async def registrar_venta(
+        self, telefono: str, lineas_venta_json: str, modalidad_pago: str, cuotas: str, medio_pago: str,
+    ) -> None:
+        """Valida y persiste las líneas de venta de un lead, en un solo paso.
+        Conveniencia para quien no necesita separar las dos fases; el handler
+        de ruta sí las separa (ver validar_venta)."""
+        venta = self.validar_venta(lineas_venta_json, modalidad_pago, cuotas, medio_pago)
+        await self.persistir_venta(telefono, venta)
 
 
 # Instancia compartida por todo el proceso — mismo patrón que

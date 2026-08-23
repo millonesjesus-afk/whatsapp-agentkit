@@ -1,10 +1,38 @@
 # Secretos — NUNCA subir a GitHub
 .env
+# Cualquier variante de .env (.env.local, .env.production, .env.bak…) queda excluida;
+# la única excepción es la plantilla sin secretos, que sí se versiona.
+.env.*
+!.env.example
 
 # Base de datos local
+# Ojo: `*.db` NO cubre nombres como `agentkit.db.bak_pre_inicio_test` (el nombre
+# no termina en .db). Estas bases contienen usuarios reales, hashes de contraseña
+# y datos de leads: cualquier derivado o copia debe quedar fuera del repo.
 *.db
 *.sqlite
 *.sqlite3
+*.db.*
+*.sqlite.*
+*.sqlite3.*
+# Archivos auxiliares que SQLite crea junto a la base
+*.db-journal
+*.db-wal
+*.db-shm
+
+# Respaldos y snapshots locales — patrones ya usados en este proyecto para
+# nombrar copias antes de una migración, un gate de QA o una reversión
+# (agentkit.db.bak, .bak_gate4, .sucia_antes_de_revertir, .antes_limpieza_qa_final…)
+*.bak
+*.bak_*
+*.backup
+*.sucia_*
+*.antes_*
+*.old
+*.orig
+*.rej
+*_backup.json
+backup_puntual_*.json
 
 # Archivos adjuntos subidos por asesores (proformas/catálogos) — en Railway
 # viven en un Volume persistente aparte, no en el repo

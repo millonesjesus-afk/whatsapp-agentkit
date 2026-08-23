@@ -53,6 +53,26 @@ def _descifrar(texto_cifrado: str | None) -> str | None:
         return None
     return _obtener_fernet().decrypt(texto_cifrado.encode()).decode()
 
+
+def iso_utc(valor):
+    """Serializa a ISO 8601 DECLARANDO la zona (sufijo `Z`) un instante real
+    guardado con `datetime.utcnow()` (naive, ya en UTC). Sin el sufijo,
+    `new Date()` en el navegador interpreta la cadena como hora LOCAL y un
+    usuario en Lima ve todo ~5 h adelantado.
+
+    Vive acá, en la capa que importan tanto dashboard.py como los
+    serializadores de Productos de este mismo archivo, por el mismo motivo que
+    RESULTADOS_CERRADOS: para no duplicar la regla ni arriesgar que se
+    desincronicen (antes estaba copiada dentro de _dto_lead_pipeline y
+    _dto_lead_detalle).
+
+    OJO: aplicar SOLO a instantes reales. Un campo como `fecha_agendada` —la
+    hora de una cita tal como la tipeó un humano en su propia zona, vía
+    `<input type=datetime-local>`— NO es un instante en UTC y envolverlo en `Z`
+    lo corrompería; ese caso usa `.isoformat()` pelado."""
+    return valor.isoformat() + "Z" if isinstance(valor, datetime) else valor
+
+
 # Configuración de base de datos
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite+aiosqlite:///./agentkit.db")
 
@@ -817,6 +837,7 @@ async def listar_leads_pipeline(
     asesor_asignado: str | None = None,
     resultado: str | None = None,
     busqueda: str = "",
+    interes: str | None = None,
     orden: str = "actualizado",
     direccion: str = "desc",
     pagina: int = 1,
@@ -828,7 +849,14 @@ async def listar_leads_pipeline(
     como parámetros de la URL. Función independiente a propósito — duplica
     parte de listar_leads en vez de generalizarla, mismo criterio del Sprint 2
     de aceptar duplicación temporal antes que abstraer un Data Grid que
-    todavía está evolucionando. Retorna (leads de la página, total sin paginar)."""
+    todavía está evolucionando. Retorna (leads de la página, total sin paginar).
+
+    `interes` es un filtro aparte de `busqueda`: `busqueda` es la búsqueda
+    global (nombre OR teléfono OR interés) y `interes` acota SOLO por esa
+    columna, para que la API JSON pueda combinar ambas cosas (buscar "Ana"
+    dentro de los leads interesados en "cocina"). Es ILIKE por contiene y no
+    igualdad porque `Lead.interes` es texto libre que escribe la IA, no una
+    lista cerrada de valores como `resultado`."""
     columna = COLUMNAS_ORDEN_PIPELINE.get(orden, Lead.actualizado)
     async with async_session() as session:
         query = select(Lead)
@@ -836,6 +864,8 @@ async def listar_leads_pipeline(
             query = query.where(Lead.asesor_asignado == asesor_asignado)
         if resultado:
             query = query.where(Lead.resultado == resultado)
+        if interes:
+            query = query.where(Lead.interes.ilike(f"%{interes}%"))
         if busqueda:
             patron = f"%{busqueda}%"
             query = query.where(
@@ -888,10 +918,23 @@ async def listar_leads_esperando_asesor() -> list[dict]:
         return [_lead_a_dict(l) for l in leads if l.resultado not in RESULTADOS_CERRADOS]
 
 
-async def actualizar_lead(telefono: str, **campos):
-    """Actualiza (o crea) los datos estructurados del cliente. Solo sobreescribe
-    los campos con un valor no vacío, para no perder datos ya conocidos."""
-    campos = {k: v for k, v in campos.items() if v}
+async def actualizar_lead(telefono: str, campos_explicitos: tuple[str, ...] = (), **campos):
+    """Actualiza (o crea) los datos estructurados del cliente. Por defecto solo
+    sobreescribe los campos con un valor no vacío, para no perder datos ya
+    conocidos — eso es lo correcto para las escrituras de Gabi, que manda lo que
+    logró extraer de la conversación y nada más.
+
+    `campos_explicitos` nombra los campos que vienen de una decisión HUMANA en
+    el panel, donde "vacío" no significa "no sé", sino "bórralo" (Human Decision
+    Gate: si una persona limpió el campo, el sistema no puede decidir por su
+    cuenta conservar el valor viejo). Esos campos se escriben tal cual llegan,
+    normalizando "" a NULL. Quien llama decide cuáles son: la misma función
+    sirve para los dos casos sin que el llamador automático cambie."""
+    campos = {
+        k: (v if v not in ("",) else None) if k in campos_explicitos else v
+        for k, v in campos.items()
+        if v or k in campos_explicitos
+    }
     if not campos:
         return
     async with async_session() as session:
@@ -905,14 +948,22 @@ async def actualizar_lead(telefono: str, **campos):
         await session.commit()
 
 
-async def listar_lineas_venta(telefono: str) -> list[dict]:
+async def listar_lineas_venta(telefono: str, con_metadatos: bool = False) -> list[dict]:
     """Líneas de venta de un lead (un artefacto, varios, o un mix con
-    servicio), en el orden en que se agregaron."""
+    servicio), en el orden en que se agregaron.
+
+    `con_metadatos` agrega `id` y `creado` — los pide el DTO JSON del detalle
+    de Lead, y NO viajan por defecto a propósito: el panel legacy serializa
+    esta misma lista con json.dumps() para precargar el carrito del cierre de
+    venta, y un datetime crudo ahí revienta la serialización."""
     async with async_session() as session:
         query = select(LineaVenta).where(LineaVenta.telefono == telefono).order_by(LineaVenta.id.asc())
         result = await session.execute(query)
         return [
-            {"producto": l.producto, "precio": l.precio, "marca": l.marca, "proveedor": l.proveedor}
+            {
+                "producto": l.producto, "precio": l.precio, "marca": l.marca, "proveedor": l.proveedor,
+                **({"id": l.id, "creado": l.creado} if con_metadatos else {}),
+            }
             for l in result.scalars().all()
         ]
 
@@ -955,17 +1006,24 @@ async def guardar_lineas_venta(telefono: str, lineas: list[dict]):
         await session.commit()
 
 
-async def asignar_asesor_a_lead(telefono: str, asesor: str):
+async def asignar_asesor_a_lead(telefono: str, asesor: str | None):
     """Asigna (o reasigna) un lead a un asesor y lo marca como no visto por él.
     Función aparte de actualizar_lead porque ésta descarta valores 'falsy'
-    (y visto_asesor=False necesita poder guardarse explícitamente)."""
+    (y visto_asesor=False necesita poder guardarse explícitamente).
+
+    `asesor=None` DESASIGNA: el lead vuelve a quedar sin dueño. En ese caso
+    visto_asesor vuelve a True —igual que en liberar_asignacion, la otra vía
+    por la que un lead se queda sin asesor—: el indicador de "Nuevo" es para
+    el asesor asignado, y sin asignado no tiene a quién avisarle. No se toca
+    pausado_manual acá (sí lo hace liberar_asignacion): eso responde a que el
+    caso anterior se cerró, no a que un supervisor quitó la asignación."""
     async with async_session() as session:
         lead = await session.get(Lead, telefono)
         if lead is None:
             lead = Lead(telefono=telefono)
             session.add(lead)
         lead.asesor_asignado = asesor
-        lead.visto_asesor = False
+        lead.visto_asesor = asesor is None
         lead.actualizado = datetime.utcnow()
         await session.commit()
 
@@ -1482,7 +1540,9 @@ def _producto_a_dict_panel(p: Producto) -> dict:
     agent/tools.py. Acá se exponen los nombres reales de los campos más los
     metadatos del registro (id, activo, version) que la UI administrativa sí
     necesita. Las fechas van en ISO porque el consumidor es JSON
-    (JSONResponse no sabe serializar datetime)."""
+    (JSONResponse no sabe serializar datetime), y con sufijo `Z` porque son
+    instantes reales guardados en UTC — mismo criterio y misma función que ya
+    usaban los DTO de Lead/Pipeline (ver iso_utc)."""
     return {
         "id": p.id,
         "canal": p.canal,
@@ -1500,8 +1560,8 @@ def _producto_a_dict_panel(p: Producto) -> dict:
         "cuotas": p.cuotas or {},
         "activo": p.activo,
         "version": p.version,
-        "creado": p.creado.isoformat() if p.creado else None,
-        "actualizado": p.actualizado.isoformat() if p.actualizado else None,
+        "creado": iso_utc(p.creado),
+        "actualizado": iso_utc(p.actualizado),
     }
 
 
@@ -2014,7 +2074,7 @@ async def listar_historial_producto(producto_id: int) -> list[dict]:
             {
                 "id": h.id, "campo": h.campo,
                 "valor_anterior": h.valor_anterior, "valor_nuevo": h.valor_nuevo,
-                "autor": h.autor, "creado": h.creado.isoformat() if h.creado else None,
+                "autor": h.autor, "creado": iso_utc(h.creado),
             }
             for h in result.scalars().all()
         ]

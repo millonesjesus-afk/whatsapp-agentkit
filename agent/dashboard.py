@@ -52,6 +52,7 @@ from agent.memory import (
     listar_productos, obtener_producto, crear_producto, editar_producto,
     toggle_producto, listar_historial_producto, importar_catalogo_desde_csv,
     CAMPOS_NEGOCIO_PRODUCTO, PLAZOS_CUOTAS_CATALOGO,
+    iso_utc,
 )
 from agent.services.servicio_conversacion import servicio_conversacion
 from agent.http_utils import get_con_reintentos, post_con_reintentos
@@ -2145,6 +2146,18 @@ _COLUMNAS_PIPELINE = [
     ("asesor", "Asesor"), ("actualizado", "Actividad"),
 ]
 
+# Tamaño de página del Pipeline en el panel HTML. Fijo a propósito: los links
+# de paginación (_url_pipeline) no arrastran `por_pagina`, así que dejarlo
+# configurable desde la URL se perdería al pasar de página. La API JSON sí lo
+# acepta como parámetro, porque ahí el cliente arma cada request completo.
+POR_PAGINA_PIPELINE = 20
+POR_PAGINA_PIPELINE_MAXIMO = 200
+
+# Alcance de la cartera pedido por el cliente. Es una PREFERENCIA, no un
+# permiso: quien no tiene visión total termina en "mi_pipeline" mande lo que
+# mande (ver _alcance_pipeline).
+ALCANCES_PIPELINE = ("mi_pipeline", "todos")
+
 
 def _badge_resultado(lead: dict) -> str:
     resultado = lead.get("resultado")
@@ -2265,6 +2278,105 @@ def _contenido_pipeline(
     """
 
 
+# ── Contrato JSON del Pipeline (vertical Pipeline → Lead → Close-Won) ──────
+#
+# La MISMA ruta /dashboard/pipeline sirve el panel HTML y el DTO JSON, por
+# negociación de contenido (`Accept: application/json`). Se eligió eso en vez
+# de una ruta paralela (/dashboard/pipeline.json, /api/pipeline) porque el
+# recurso es idéntico —mismos filtros, mismo orden server-side y, sobre todo,
+# el mismo forzado de alcance por rol—: separar las rutas obligaría a duplicar
+# ese forzado, que es justo la pieza que no puede desincronizarse. Productos
+# (sub-bloque b) sí es una ruta JSON pura, pero ahí no existía una vista HTML
+# previa con la que compartir el recurso.
+#
+# No colisiona con el panel: la navegación del navegador manda
+# `Accept: text/html,...` y el fetch de la navegación AJAX (X-Panel-Fragment)
+# manda `*/*`; ninguno de los dos contiene "application/json".
+
+
+def _pide_json_explicitamente(request: Request) -> bool:
+    """Negociación de contenido explícita: solo un Accept que NOMBRE
+    application/json pide el DTO; el comodín `*/*` no cuenta. Cualquier otra
+    cosa —incluido un cliente sin Accept— sigue recibiendo el panel HTML.
+
+    Mismo criterio (y mismo nombre) que el de agent/main.py, que ya lo usa
+    para decidir si un no-autenticado recibe 401 JSON o el redirect al login.
+    Está duplicado a propósito: dashboard.py no puede importar de main.py sin
+    ciclo (main importa este router). Si aparece un tercer uso, el lugar
+    natural es agent/http_utils.py."""
+    return "application/json" in (request.headers.get("accept") or "").lower()
+
+
+def _alcance_pipeline(usuario: dict, alcance: str, asesor: str) -> tuple[str | None, str]:
+    """Resuelve a qué cartera mira este usuario. Retorna (asesor a filtrar,
+    alcance realmente aplicado).
+
+    El alcance pedido por el cliente es una preferencia; el rol es la regla
+    (MPA §9: el asesor ve 'Solo sus leads'). Un asesor que mande
+    `alcance=todos` o `asesor=otra_persona` recibe igual su propia cartera —
+    no un 403, porque no está pidiendo un recurso prohibido sino uno más
+    amplio del que le corresponde, y el panel HTML ya se comportaba así."""
+    if usuario["rol"] not in ROLES_CON_VISION_TOTAL:
+        return usuario["username"], "mi_pipeline"
+    if alcance == "mi_pipeline":
+        return usuario["username"], "mi_pipeline"
+    return (asesor or None), "todos"
+
+
+def _dto_lead_pipeline(lead: dict) -> dict:
+    """Fila del Pipeline tal como la consume la Nueva Experiencia (Next.js).
+
+    Incluye a propósito más que las 5 columnas visibles: Pipeline es la
+    pantalla que navega hacia el detalle del Lead, así que los 6 campos del
+    contrato de Lead viajan desde ya —`id`, `telefono`, `version`,
+    `revision_prioritaria`, `pausado_manual`, `asesor_asignado`— para que el
+    destino no tenga que volver a pedirlos ni inferirlos.
+
+    `id` y `telefono` se exponen SEPARADOS aunque hoy valgan lo mismo: `id` es
+    la identidad del recurso (la que arma la URL /leads/[id]) y `telefono` es
+    un dato de negocio que se muestra y con el que se escribe por WhatsApp.
+    Cuando la identidad migre a UUID (MAIEK_AI_DATA_ARCHITECTURE.md), cambia
+    `id` y `telefono` se queda donde está, sin tocar el cliente.
+
+    `actualizado`/`creado` llevan sufijo `Z`: son instantes reales, guardados
+    en UTC (`datetime.utcnow()`), y sin declarar la zona `new Date()` del
+    navegador los interpreta como hora LOCAL — 5 h adelantados para un
+    usuario en Lima. `fecha_agendada` NO lleva `Z` a propósito: no es un
+    instante, es la hora de una cita tal como la tipeó un humano en su propia
+    zona horaria (`<input type=datetime-local>`); envolverla en UTC la
+    corrompería, por eso usa `_iso()` sin sufijo, igual que siempre.
+
+    `iso_utc()` es la misma función que usan los DTO de Productos; vive a nivel
+    de módulo en agent/memory.py para no volver a copiarla por cada consumidor."""
+    def _iso(valor):
+        return valor.isoformat() if isinstance(valor, datetime) else valor
+
+    return {
+        # Identidad + contrato de Lead
+        "id": lead["telefono"],
+        "telefono": lead["telefono"],
+        "version": lead.get("version"),
+        "revision_prioritaria": lead.get("revision_prioritaria"),
+        "pausado_manual": lead.get("pausado_manual"),
+        "asesor_asignado": lead.get("asesor_asignado"),
+        # Columnas visibles del Pipeline
+        "nombre": lead.get("nombre"),
+        "interes": lead.get("interes"),
+        "resultado": lead.get("resultado"),
+        "actualizado": iso_utc(lead.get("actualizado")),
+        # Contexto mínimo de la fila (badges/estado), en ISO como el resto de
+        # las APIs JSON del panel
+        "creado": iso_utc(lead.get("creado")),
+        "fecha_agendada": _iso(lead.get("fecha_agendada")),
+        "visto_asesor": lead.get("visto_asesor"),
+    }
+
+
+# response_class=HTMLResponse sigue siendo obligatorio aunque esta ruta ahora
+# también responda JSON: _pagina() devuelve un str crudo, no un Response, así
+# que sin esto FastAPI lo serializaría como JSON y el panel entero llegaría
+# escapado dentro de comillas (probado). El JSONResponse que se devuelve más
+# abajo es un Response explícito y pasa de largo por esta clase por defecto.
 @router.get("/pipeline", response_class=HTMLResponse)
 async def crm_pipeline(
     request: Request,
@@ -2272,28 +2384,49 @@ async def crm_pipeline(
     q: str = "",
     resultado: str = "",
     asesor: str = "",
+    interes: str = "",
+    alcance: str = "",
     orden: str = "actualizado",
     dir: str = "desc",
     pagina: int = 1,
+    por_pagina: int = POR_PAGINA_PIPELINE,
 ):
     """CRM / Pipeline — alcance por rol: admin/supervisor ven toda la
     cartera (con filtro opcional por asesor); asesor ve solo sus propios
-    leads (MPA §9: 'Solo sus leads'), sin poder elegir otro asesor."""
+    leads (MPA §9: 'Solo sus leads'), sin poder elegir otro asesor.
+
+    Devuelve HTML (panel) o JSON (Nueva Experiencia) según el Accept — ver
+    _pide_json_explicitamente más arriba. `orden`, `dir`, `pagina` y
+    `por_pagina` se NORMALIZAN en vez de rechazarse con 400: mismo criterio
+    que Productos, un parámetro de presentación fuera de rango no es motivo
+    para no mostrarle su cartera a nadie."""
     vision_total = usuario["rol"] in ROLES_CON_VISION_TOTAL
-    asesor_filtro = (asesor or None) if vision_total else usuario["username"]
+    asesor_filtro, alcance_aplicado = _alcance_pipeline(usuario, alcance, asesor)
     if orden not in COLUMNAS_ORDEN_PIPELINE:
         orden = "actualizado"
     if dir not in ("asc", "desc"):
         dir = "desc"
     pagina = max(1, pagina)
-    por_pagina = 20
+    quiere_json = _pide_json_explicitamente(request)
+    # El panel HTML pagina siempre de a 20 (ver POR_PAGINA_PIPELINE); solo la
+    # API deja elegir, con tope para que nadie pida la cartera entera.
+    por_pagina = min(max(1, por_pagina), POR_PAGINA_PIPELINE_MAXIMO) if quiere_json else POR_PAGINA_PIPELINE
     leads, total = await listar_leads_pipeline(
         asesor_asignado=asesor_filtro, resultado=resultado or None, busqueda=q.strip(),
+        interes=interes.strip() or None,
         orden=orden, direccion=dir, pagina=pagina, por_pagina=por_pagina,
     )
+    if quiere_json:
+        return JSONResponse({
+            "leads": [_dto_lead_pipeline(lead) for lead in leads],
+            "total": total, "pagina": pagina, "por_pagina": por_pagina,
+        })
+
     asesores = await listar_asesores() if vision_total else []
     panel = _contenido_pipeline(
-        leads, total, q, resultado, asesor if vision_total else "", orden, dir, pagina, por_pagina, asesores, vision_total,
+        leads, total, q, resultado,
+        asesor if (vision_total and alcance_aplicado == "todos") else "",
+        orden, dir, pagina, por_pagina, asesores, vision_total,
     )
     cuerpo = f"""<div class="shell d-flex"><div class="main-pane flex-grow-1 p-4">{panel}</div></div>"""
     return _pagina("CRM / Pipeline", usuario, cuerpo, request=request)
@@ -3745,6 +3878,7 @@ def _copiloto_ia(telefono: str) -> str:
 _ICONOS_EVENTO_LEAD = {
     "resultado_cambiado": "bi-flag-fill",
     "asignado": "bi-person-check-fill",
+    "desasignado": "bi-person-dash-fill",
     "venta_registrada": "bi-cash-coin",
 }
 
@@ -3987,10 +4121,147 @@ async def _renderizar_detalle_lead(
     return _pagina(nombre_mostrado, usuario, cuerpo, es_chat=True, request=request)
 
 
+def _dto_lead_detalle(lead: dict, lineas: list[dict], eventos: list[dict]) -> dict:
+    """Detalle de un Lead tal como lo consume la Nueva Experiencia (Next.js).
+
+    Superconjunto del DTO de la fila de Pipeline (_dto_lead_pipeline): mismos
+    nombres para los mismos campos —incluida la separación `id`/`telefono`—
+    más lo que solo tiene sentido en el detalle: la venta y el Conversation
+    Timeline. Los campos internos del panel (paso_flujo, visto_asesor,
+    fallos_tecnicos, numero_whatsapp_id, los producto_*/…_venta superados por
+    LineaVenta) NO viajan: esto es el contrato de la pantalla de detalle, no
+    un volcado de la fila.
+
+    `venta` es un objeto propio (no campos sueltos del lead) porque la venta
+    es una sola unidad: líneas + una forma de pago para todas. Es null cuando
+    no hay ninguna línea — así el cliente distingue "no hay venta" de "hay una
+    venta sin forma de pago cargada" sin inspeccionar campo por campo.
+
+    `creado`/`actualizado`/`eventos[].creado`/`venta.lineas[].creado` llevan
+    sufijo `Z`: son instantes reales en UTC, y `new Date()` en el navegador
+    los interpreta como hora LOCAL si no declaran la zona (5 h adelantado
+    para Lima). `fecha_agendada` NO lleva `Z`: es la hora de una cita tal
+    como la tipeó un humano en su propia zona, no un instante — mismo
+    criterio que _dto_lead_pipeline. `iso_utc()` vive en agent/memory.py, la
+    capa que comparten este DTO y los de Productos."""
+    def _iso(valor):
+        return valor.isoformat() if isinstance(valor, datetime) else valor
+
+    venta = None
+    if lineas:
+        venta = {
+            "lineas": [
+                {
+                    "id": l.get("id"), "producto": l.get("producto"), "precio": l.get("precio"),
+                    "marca": l.get("marca"), "proveedor": l.get("proveedor"), "creado": iso_utc(l.get("creado")),
+                }
+                for l in lineas
+            ],
+            "modalidad_pago": lead.get("modalidad_pago"),
+            "cuotas": lead.get("cuotas"),
+            "medio_pago": lead.get("medio_pago"),
+        }
+
+    return {
+        "id": lead["telefono"],
+        "telefono": lead["telefono"],
+        "nombre": lead.get("nombre"),
+        "interes": lead.get("interes"),
+        "resultado": lead.get("resultado"),
+        "fecha_agendada": _iso(lead.get("fecha_agendada")),
+        "asesor_asignado": lead.get("asesor_asignado"),
+        "pausado_manual": bool(lead.get("pausado_manual")),
+        "revision_prioritaria": bool(lead.get("revision_prioritaria")),
+        "version": lead.get("version"),
+        "creado": iso_utc(lead.get("creado")),
+        "actualizado": iso_utc(lead.get("actualizado")),
+        "venta": venta,
+        "eventos": [
+            {
+                "tipo": e.get("tipo"), "descripcion": e.get("descripcion"), "payload": e.get("payload"),
+                "autor": e.get("autor"), "creado": iso_utc(e.get("creado")),
+            }
+            for e in eventos
+        ],
+    }
+
+
+# ── Rama JSON de las 3 escrituras del CRM (resultado / venta / asignar) ────
+#
+# Misma negociación de contenido que el GET (_pide_json_explicitamente): el
+# panel legacy sigue recibiendo 303/HTML sin enterarse, y solo quien NOMBRA
+# application/json recibe el contrato de abajo. Se extiende la ruta existente
+# en vez de abrir rutas paralelas por el mismo motivo que en el GET: mismo
+# recurso, mismo control de acceso, mismo forzado por rol — duplicarlas
+# obligaría a duplicar esas tres piezas, que son las que no pueden
+# desincronizarse.
+#
+# El contrato es el de Productos, adaptado a lead: {"ok": true, "lead": DTO}
+# en éxito, 409 {"ok": false, "detail": ..., "version_actual": N} en conflicto.
+# Los errores reales (404 / 403 / 400 / 422) NO se tocan: siguen saliendo por
+# HTTPException con su status real y el envelope de agent/api_contrato.py. Un
+# conflicto de versión es "tu copia quedó vieja, recargá"; un error real es
+# otra cosa, y confundirlos le haría mostrar al frontend un mensaje falso.
+
+
+async def _json_lead_actualizado(telefono: str) -> JSONResponse:
+    """Éxito de una escritura: relee el lead YA actualizado y devuelve el
+    mismo DTO que sirve GET /dashboard/lead/{telefono} en JSON.
+
+    Se relee a propósito (en vez de parchear en memoria el dict que se leyó al
+    entrar a la ruta): la escritura tocó la versión, el `actualizado`, y en el
+    caso de venta también LineaVenta y el Timeline. Devolver el estado real
+    posterior le ahorra al cliente un GET de vuelta y, sobre todo, le da la
+    `version` nueva —sin ella su próximo guardado chocaría siempre."""
+    lead = await obtener_lead(telefono)
+    if lead is None:
+        # Solo si alguien borró el lead entre la escritura y esta relectura.
+        raise HTTPException(status_code=404, detail="Lead no encontrado")
+    lineas = await listar_lineas_venta(telefono, con_metadatos=True)
+    eventos = await listar_eventos_lead(telefono)
+    return JSONResponse({"ok": True, "lead": _dto_lead_detalle(lead, lineas, eventos)})
+
+
+async def _json_conflicto_lead(telefono: str) -> JSONResponse:
+    """409 de conflicto de edición con la versión vigente, para que el cliente
+    pueda recargar y comparar sin adivinar (Human Decision Gate). Mismo texto
+    que Productos, adaptado a lead."""
+    actual = await obtener_lead(telefono)
+    if actual is None:
+        # intentar_avanzar_version() también da False si el lead ya no existe:
+        # eso es un 404, no un conflicto.
+        raise HTTPException(status_code=404, detail="Lead no encontrado")
+    return JSONResponse(
+        {
+            "ok": False,
+            "detail": "Alguien más modificó este lead mientras lo editabas. Revisa los datos actuales antes de volver a guardar.",
+            "version_actual": actual["version"],
+        },
+        status_code=409,
+    )
+
+
 @router.get("/lead/{telefono}", response_class=HTMLResponse)
 async def detalle_lead(
     telefono: str, request: Request, usuario: dict = Depends(_usuario_actual), estado: str = "todos", asesor: str = "",
 ):
+    """Detalle de un Lead — HTML (panel) o JSON (Nueva Experiencia) según el
+    Accept, misma negociación de contenido que /dashboard/pipeline (ver
+    _pide_json_explicitamente): mismo recurso, mismo control de acceso, una
+    sola ruta que forzar.
+
+    La rama JSON NO tiene los efectos de lectura del panel (marcar visto,
+    limpiar revisión prioritaria): esos los dispara una persona abriendo la
+    conversación, y el frontend nuevo tendrá su propio momento para hacerlo.
+    Un GET de API no debería escribir de paso."""
+    if _pide_json_explicitamente(request):
+        lead = await obtener_lead(telefono)
+        if lead is None:
+            raise HTTPException(status_code=404, detail="Lead no encontrado")
+        _verificar_acceso_lead(usuario, lead)
+        lineas = await listar_lineas_venta(telefono, con_metadatos=True)
+        eventos = await listar_eventos_lead(telefono)
+        return JSONResponse(_dto_lead_detalle(lead, lineas, eventos))
     return await _renderizar_detalle_lead(telefono, request, usuario, estado, asesor)
 
 
@@ -4392,11 +4663,24 @@ async def quitar_catalogo(archivo_id: int, usuario: dict = Depends(servicio_iden
     return RedirectResponse(url="/dashboard/catalogos", status_code=303)
 
 
-@router.post("/lead/{telefono}/resultado")
+# response_class=HTMLResponse en las 3 escrituras del CRM: cuando detectan un
+# conflicto de edición devuelven _renderizar_detalle_lead(), que es un str de
+# HTML (no un Response). Sin esta clase por defecto, FastAPI lo serializaba
+# como JSON y el navegador mostraba la página entera escapada entre comillas
+# en vez del banner de conflicto (mismo motivo que en /pipeline). El camino
+# feliz devuelve un RedirectResponse, que pasa de largo por esta clase.
+@router.post("/lead/{telefono}/resultado", response_class=HTMLResponse)
 async def actualizar_resultado(
     telefono: str,
     request: Request,
-    resultado: str = Form(...),
+    # Form("") y no Form(...): con FastAPI 0.139 un campo de formulario que
+    # llega VACÍO (`resultado=`) se valida como "missing", así que un
+    # Form(...) obligatorio respondía 422 a la opción "Selecciona..." del
+    # panel (value="") — el usuario no podía quitar un resultado ya puesto.
+    # El contrato no se relaja para nadie más: cualquier valor no vacío se
+    # comporta igual que antes, y "no me lo mandaron" vs "me lo mandaron
+    # vacío" se distingue por la presencia de la clave en request.form().
+    resultado: str = Form(""),
     fecha_agendada: str = Form(""),
     version: int = Form(...),
     usuario: dict = Depends(_usuario_actual),
@@ -4409,21 +4693,44 @@ async def actualizar_resultado(
     if resultado and resultado not in RESULTADOS:
         raise HTTPException(status_code=400, detail="Resultado inválido")
 
-    fecha_agendada_dt = None
-    if resultado == "agendado" and fecha_agendada:
-        try:
-            fecha_agendada_dt = datetime.fromisoformat(fecha_agendada)
-        except ValueError:
-            raise HTTPException(status_code=400, detail="Fecha de la cita inválida")
+    # Presencia de la clave en el formulario, no su valor: "resultado" vacío
+    # es una decisión ("quítalo") y "resultado" ausente es "no lo toques" —
+    # una distinción que el parámetro tipado no puede hacer, porque FastAPI
+    # colapsa las dos cosas en el mismo default (ver el comentario de la
+    # firma). El tipo del parámetro no cambia, así que el panel legacy le
+    # sigue posteando igual. request.form() ya viene parseado y cacheado por
+    # FastAPI, no relee el body.
+    formulario = await request.form()
+    resultado_enviado = "resultado" in formulario
+
+    campos: dict = {}
+    campos_explicitos: list[str] = []
+    if resultado_enviado:
+        campos["resultado"] = resultado
+        campos_explicitos.append("resultado")
+        # fecha_agendada solo tiene sentido con resultado == "agendado" (ver
+        # el modelo Lead). Si el resultado deja de ser "agendado", la fecha se
+        # borra explícitamente en vez de quedar como dato huérfano; si sigue
+        # siendo "agendado" y no se mandó fecha nueva, se conserva la que había.
+        if resultado != "agendado":
+            campos["fecha_agendada"] = None
+            campos_explicitos.append("fecha_agendada")
+        elif fecha_agendada:
+            try:
+                campos["fecha_agendada"] = datetime.fromisoformat(fecha_agendada)
+            except ValueError:
+                raise HTTPException(status_code=400, detail="Fecha de la cita inválida")
 
     # Concurrencia optimista (MAIEK_AI_PRODUCT_PATTERNS.md, Cap. 6): si alguien
     # más ya escribió sobre este lead desde que se abrió el formulario, no se
     # aplica nada — se muestra el conflicto (Human Decision Gate) en vez de
     # sobrescribir en silencio.
     if not await intentar_avanzar_version(telefono, version):
+        if _pide_json_explicitamente(request):
+            return await _json_conflicto_lead(telefono)
         return await _renderizar_detalle_lead(telefono, request, usuario, hay_conflicto=True)
 
-    await actualizar_lead(telefono, resultado=resultado, fecha_agendada=fecha_agendada_dt)
+    await actualizar_lead(telefono, campos_explicitos=tuple(campos_explicitos), **campos)
     descripcion = (
         f"Cambió el resultado a «{ETIQUETAS_RESULTADO.get(resultado, resultado)}»"
         if resultado else "Quitó el resultado"
@@ -4432,6 +4739,8 @@ async def actualizar_resultado(
         telefono, tipo="resultado_cambiado", descripcion=descripcion, autor=usuario["nombre"],
         payload={"campo": "resultado", "anterior": lead.get("resultado"), "nuevo": resultado or None},
     )
+    if _pide_json_explicitamente(request):
+        return await _json_lead_actualizado(telefono)
     return RedirectResponse(url=f"/dashboard/lead/{telefono}", status_code=303)
 
 
@@ -4456,7 +4765,7 @@ async def buscar_producto_venta(telefono: str, q: str = "", usuario: dict = Depe
     ])
 
 
-@router.post("/lead/{telefono}/venta")
+@router.post("/lead/{telefono}/venta", response_class=HTMLResponse)
 async def registrar_venta(
     telefono: str,
     request: Request,
@@ -4473,6 +4782,18 @@ async def registrar_venta(
         raise HTTPException(status_code=404, detail="Lead no encontrado")
     _verificar_acceso_lead(usuario, lead)
 
+    # Validación ANTES de tocar la versión: `intentar_avanzar_version` es una
+    # escritura (avanza el contador aunque después no se aplique nada), así que
+    # ejecutarla primero hacía que un simple 400 por datos inválidos consumiera
+    # la versión del lead — y con eso, otra sesión que tenía el mismo lead
+    # abierto legítimamente recibía un 409 de conflicto provocado por un intento
+    # que nunca llegó a guardar nada. Rechazar la entrada acá deja el lead
+    # exactamente como estaba.
+    try:
+        venta = servicio_comercial.validar_venta(lineas_venta, modalidad_pago, cuotas, medio_pago)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
     if not await intentar_avanzar_version(telefono, version):
         # Simplificación deliberada (Sprint 2): a diferencia de resultado/
         # asignación, acá no se reintenta precargando el carrito que el
@@ -4481,32 +4802,37 @@ async def registrar_venta(
         # (JSON del catálogo) de ida y vuelta solo para este caso, poco
         # frecuente en la práctica (dos cierres de venta simultáneos sobre
         # el mismo lead).
+        if _pide_json_explicitamente(request):
+            return await _json_conflicto_lead(telefono)
         return await _renderizar_detalle_lead(telefono, request, usuario, hay_conflicto=True)
 
-    try:
-        cantidad_lineas = len(json.loads(lineas_venta))
-    except (json.JSONDecodeError, TypeError, ValueError):
-        cantidad_lineas = 0
-    try:
-        await servicio_comercial.registrar_venta(telefono, lineas_venta, modalidad_pago, cuotas, medio_pago)
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+    await servicio_comercial.persistir_venta(telefono, venta)
+    # El Timeline registra lo que REALMENTE se guardó (las líneas ya validadas y
+    # recortadas, la forma de pago ya normalizada), no el crudo del formulario:
+    # antes anotaba `medio_pago: ""` en una venta financiada que en la fila
+    # quedó como "Recibo de gas".
     await registrar_evento_lead(
         telefono, tipo="venta_registrada",
-        descripcion=f"Registró una venta ({cantidad_lineas} producto(s), {modalidad_pago or 'sin modalidad'})",
+        descripcion=f"Registró una venta ({len(venta['lineas'])} producto(s), {venta['modalidad_pago'] or 'sin modalidad'})",
         autor=usuario["nombre"],
         payload={
-            "lineas_venta": json.loads(lineas_venta) if cantidad_lineas else [],
-            "modalidad_pago": modalidad_pago, "cuotas": cuotas, "medio_pago": medio_pago,
+            "lineas_venta": venta["lineas"],
+            "modalidad_pago": venta["modalidad_pago"],
+            "cuotas": venta["cuotas"],
+            "medio_pago": venta["medio_pago"],
         },
     )
+    if _pide_json_explicitamente(request):
+        return await _json_lead_actualizado(telefono)
     return RedirectResponse(url=f"/dashboard/lead/{telefono}", status_code=303)
 
 
-@router.post("/lead/{telefono}/asignar")
+@router.post("/lead/{telefono}/asignar", response_class=HTMLResponse)
 async def asignar_lead(
     telefono: str,
     request: Request,
+    # "" = "Sin asignar" (la opción vacía del select del panel) — ver más
+    # abajo: ahora desasigna de verdad en vez de no hacer nada.
     asesor_asignado: str = Form(""),
     version: int = Form(...),
     usuario: dict = Depends(servicio_identidad.requiere_rol(*ROLES_CON_VISION_TOTAL)),
@@ -4517,6 +4843,8 @@ async def asignar_lead(
         raise HTTPException(status_code=404, detail="Lead no encontrado")
 
     if not await intentar_avanzar_version(telefono, version):
+        if _pide_json_explicitamente(request):
+            return await _json_conflicto_lead(telefono)
         return await _renderizar_detalle_lead(telefono, request, usuario, hay_conflicto=True)
 
     if asesor_asignado:
@@ -4527,6 +4855,22 @@ async def asignar_lead(
             telefono, tipo="asignado", descripcion=f"Asignó el lead a {nombre_asesor}", autor=usuario["nombre"],
             payload={"campo": "asesor_asignado", "anterior": lead.get("asesor_asignado"), "nuevo": asesor_asignado},
         )
+    elif lead.get("asesor_asignado"):
+        # "Sin asignar" (value="") es una decisión explícita del supervisor, no
+        # un formulario incompleto: hay que desasignar. Solo si había alguien
+        # asignado — desasignar un lead que ya está libre no cambia nada y no
+        # merece una línea en el Timeline.
+        anterior = lead["asesor_asignado"]
+        await asignar_asesor_a_lead(telefono, None)
+        asesor_info = await obtener_usuario(anterior)
+        nombre_anterior = asesor_info["nombre"] if asesor_info else anterior
+        await registrar_evento_lead(
+            telefono, tipo="desasignado", descripcion=f"Quitó la asignación de {nombre_anterior}",
+            autor=usuario["nombre"],
+            payload={"campo": "asesor_asignado", "anterior": anterior, "nuevo": None},
+        )
+    if _pide_json_explicitamente(request):
+        return await _json_lead_actualizado(telefono)
     return RedirectResponse(url=f"/dashboard/lead/{telefono}", status_code=303)
 
 
@@ -5880,9 +6224,29 @@ def _capacidades_de(rol: str) -> list[str]:
     # existente — "productos:*" es el catálogo de precios (Producto), nuevo
     # con este vertical. Nombres a propósito distintos para no repetir la
     # colisión que ya se resolvió en el naming de las pantallas.
-    capacidades = ["leads.ver_asignados", "catalogo.ver", "metricas.ver", "productos:ver"]
+    #
+    # Convención nueva "namespace:accion" (dos puntos), la que estrenó
+    # "productos:*" y que usa la Nueva Experiencia (Next.js). Las capacidades
+    # legacy con punto NO se migran: conviven, porque el panel HTML y sus
+    # consumidores actuales ya las leen. Mapping legacy -> nuevo, para cuando
+    # se unifiquen en un solo vocabulario:
+    #     leads.ver_asignados  ->  pipeline:ver + leads:ver   (alcance propio)
+    #     leads.ver_todos      ->  pipeline:ver + leads:ver   (alcance total)
+    #     leads.asignar        ->  leads:reasignar
+    #     (sin legacy)         ->  leads:editar   (POST /lead/{tel}/resultado)
+    #     (sin legacy)         ->  closewon:ver / closewon:crear (POST /lead/{tel}/venta)
+    # El alcance (propio vs. total) no se codifica en el nombre de la
+    # capacidad nueva: lo resuelve el servidor en cada consulta (ver
+    # _alcance_pipeline), y el cliente lo pide con `alcance=`.
+    capacidades = [
+        "leads.ver_asignados", "catalogo.ver", "metricas.ver", "productos:ver",
+        "pipeline:ver", "leads:ver", "leads:editar", "closewon:ver", "closewon:crear",
+    ]
     if vision_total:
-        capacidades += ["leads.ver_todos", "leads.asignar", "asesores.gestionar", "metricas.exportar", "campanas.ver"]
+        capacidades += [
+            "leads.ver_todos", "leads.asignar", "asesores.gestionar", "metricas.exportar", "campanas.ver",
+            "leads:reasignar",
+        ]
     if es_admin:
         capacidades += [
             "usuarios.crear", "campanas.gestionar", "canales.gestionar", "catalogo.gestionar", "prompt.promover",
