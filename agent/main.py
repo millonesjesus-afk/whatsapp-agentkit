@@ -281,7 +281,15 @@ async def webhook_handler(request: Request):
             # Gabi se pausa: solo se guarda el mensaje para que un humano lo
             # vea y responda — así no chocan las respuestas del bot y el humano.
             if lead and (lead.get("asesor_asignado") or lead.get("pausado_manual")):
-                if lead.get("resultado") in RESULTADOS_CERRADOS:
+                # "vendido" queda excluido a propósito: es un cierre de
+                # negocio real (Close-Won), no solo un estado más de la
+                # cola. Los otros 7 resultados cerrados siguen liberando la
+                # asignación como siempre — ahí sí es razonable asumir que
+                # el cliente escribe por algo nuevo. Acá no: si ya compró,
+                # que Gabi vuelva a venderle solo (o a "atenderlo" sin que
+                # nadie se entere) es exactamente lo que pausado_manual
+                # existe para evitar.
+                if lead.get("resultado") in RESULTADOS_CERRADOS and lead.get("resultado") != "vendido":
                     # El caso anterior ya se cerró — si el cliente vuelve a
                     # escribir, probablemente sea por algo nuevo. Se libera
                     # la asignación y Gabi retoma la atención (el supervisor
@@ -362,7 +370,7 @@ async def webhook_handler(request: Request):
             if escalado_por_falla:
                 asesor = await servicio_comercial.elegir_asesor_automatico((lead or {}).get("interes") or "")
                 if asesor:
-                    await asignar_asesor_a_lead(msg.telefono, asesor)
+                    await asignar_asesor_a_lead(msg.telefono, asesor, automatico=True)
                 lead_actualizado = await obtener_lead(msg.telefono)
                 await notificar_lead_derivado(
                     msg.telefono, lead_actualizado or {},
@@ -377,7 +385,7 @@ async def webhook_handler(request: Request):
                 # pero disparado por la señal de confianza real del modelo.
                 asesor = await servicio_comercial.elegir_asesor_automatico((lead or {}).get("interes") or "")
                 if asesor:
-                    await asignar_asesor_a_lead(msg.telefono, asesor)
+                    await asignar_asesor_a_lead(msg.telefono, asesor, automatico=True)
                 lead_actualizado = await obtener_lead(msg.telefono)
                 await notificar_lead_derivado(
                     msg.telefono, lead_actualizado or {},
@@ -407,7 +415,7 @@ async def webhook_handler(request: Request):
                 if lead_actualizado and not lead_actualizado.get("asesor_asignado"):
                     asesor = await servicio_comercial.elegir_asesor_automatico(lead_actualizado.get("interes") or "")
                     if asesor:
-                        await asignar_asesor_a_lead(msg.telefono, asesor)
+                        await asignar_asesor_a_lead(msg.telefono, asesor, automatico=True)
                         lead_actualizado = await obtener_lead(msg.telefono)
                 await notificar_lead_derivado(msg.telefono, lead_actualizado or {}, msg.texto)
 

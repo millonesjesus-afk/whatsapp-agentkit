@@ -162,6 +162,14 @@ class Lead(Base):
     resultado: Mapped[str | None] = mapped_column(String(50), nullable=True)
     # Solo aplica si resultado == "agendado" — fecha/hora de la cita con el cliente
     fecha_agendada: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # Instante REAL (UTC) en que el lead pasó a "vendido" por primera vez —
+    # se escribe una sola vez, en la transición (ver _es_transicion_a_vendido),
+    # no en cada guardado de una venta que ya estaba vendida, para que la
+    # métrica "cuándo se cerró" no se corra sola cada vez que alguien edita el
+    # carrito. A diferencia de `fecha_agendada` (hora de una cita tal como la
+    # tipeó un humano), esto SÍ es un instante y se serializa con iso_utc().
+    # Nullable: los cierres anteriores a este campo no tienen el dato.
+    fecha_cierre: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     # Asesor al que el supervisor asignó este lead (username de Usuario) —
     # indexado: listar_leads, contar_leads_activos_por_asesor y
     # listar_leads_agendados filtran por esta columna en cada carga de
@@ -275,6 +283,10 @@ async def listar_eventos_lead(telefono: str, limite: int | None = None) -> list[
         result = await session.execute(query)
         return [
             {
+                # `id` viaja para que el Timeline tenga una clave estable por
+                # evento (el frontend la usa como key de lista y para anclar
+                # un evento puntual): la PK ya existía, solo no se exponía.
+                "id": e.id,
                 "tipo": e.tipo, "descripcion": e.descripcion, "payload": e.payload,
                 "autor": e.autor, "creado": e.creado,
             }
@@ -299,6 +311,49 @@ async def intentar_avanzar_version(telefono: str, version_esperada: int) -> bool
         return True
 
 
+def _avanzar_version(lead: "Lead"):
+    """Incremento INCONDICIONAL de la versión del lead, para las escrituras
+    AUTOMÁTICAS (reasignación de Gabi, liberación de un caso cerrado).
+
+    No se puede reusar `intentar_avanzar_version` acá: esa función es
+    condicional —solo avanza si el lead sigue en la versión esperada— y su
+    valor de retorno significa "no apliques tu cambio". Un flujo automático
+    no tiene una "versión esperada" (nadie abrió un formulario) y NUNCA debe
+    quedar bloqueado por lo que esté haciendo un humano en el panel: la
+    reasignación tiene que proceder igual. Lo que cambia al avanzar el
+    contador acá es la otra mitad del problema: un cierre HUMANO que venía
+    con la versión vieja ahora choca (409) en vez de sobrescribir en silencio
+    un lead que ya cambió de dueño.
+
+    Recibe el objeto Lead ya cargado en la sesión de quien llama, para que el
+    incremento entre en el MISMO commit que el cambio que lo justifica (una
+    sola escritura, no dos)."""
+    lead.version = (lead.version or 0) + 1
+
+
+def _es_transicion_a_vendido(lead: "Lead", campos: dict) -> bool:
+    """True solo si esta escritura hace pasar el lead a "vendido" viniendo de
+    otro estado — no si ya estaba vendido y solo se está reeditando la venta.
+    Se evalúa ANTES de aplicar los campos (necesita el valor anterior)."""
+    return campos.get("resultado") == "vendido" and lead.resultado != "vendido"
+
+
+def _marcar_cierre_vendido(lead: "Lead"):
+    """Efectos de la transición real a "vendido", en un solo lugar para que
+    valgan por igual en las dos vías que la producen (guardar el carrito de
+    Cierre de venta, y elegir "Vendido" en el selector de resultado):
+
+    - `fecha_cierre`: instante real del cierre, una sola vez.
+    - `pausado_manual = True`: el caso quedó cerrado, Gabi no debe seguir
+      vendiéndole al cliente. Se reusa el campo que ya existe y que main.py
+      ya consulta para pausar al bot, en vez de agregar un flag paralelo.
+      OJO: esto aplica SOLO a "vendido", no a los otros 7 resultados
+      cerrados (no_interesado, no_califica, …) — el alcance decidido es la
+      venta cerrada, no cualquier cierre."""
+    lead.fecha_cierre = datetime.utcnow()
+    lead.pausado_manual = True
+
+
 class LineaVenta(Base):
     """Un producto o servicio dentro del cierre de venta de un lead — un
     cliente puede comprar un artefacto, varios, un servicio, o un mix de
@@ -309,6 +364,15 @@ class LineaVenta(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     telefono: Mapped[str] = mapped_column(String(50), index=True)
+    # Producto real del catálogo que se eligió al armar el carrito
+    # (Producto.id). Nullable a propósito por DOS motivos, no uno: (a) las
+    # líneas históricas, guardadas antes de este campo, no lo tienen y no hay
+    # forma segura de deducirlo (la descripción se copia como texto y CODIGO
+    # HANA no es único); (b) el cierre de venta sigue admitiendo el modo
+    # manual ("¿No está en la lista? Agregar manualmente"), donde por
+    # definición no hay producto de catálogo detrás. Sin ForeignKey estricta,
+    # mismo criterio que asesor_asignado/archivo_id.
+    producto_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     producto: Mapped[str] = mapped_column(String(300))
     precio: Mapped[str | None] = mapped_column(String(30), nullable=True)
     marca: Mapped[str | None] = mapped_column(String(100), nullable=True)
@@ -737,6 +801,13 @@ async def obtener_historial(telefono: str, limite: int = 20) -> list[dict]:
             {
                 "role": msg.role, "content": msg.content, "archivo_id": msg.archivo_id,
                 "archivo_tipo": content_types.get(msg.archivo_id), "via_app": msg.via_app,
+                # Instante real del mensaje, con sufijo `Z` (ver iso_utc): sin
+                # él, `new Date()` en el navegador lo lee como hora local y en
+                # Lima aparece ~5 h adelantado. El campo ya existía en la
+                # tabla, simplemente no se exponía — quien consume esta lista
+                # (chat del panel, /mensajes.json) no tenía forma de fechar un
+                # mensaje.
+                "timestamp": iso_utc(msg.timestamp),
             }
             for msg in mensajes
         ]
@@ -783,6 +854,7 @@ def _lead_a_dict(lead: Lead) -> dict:
         "paso_flujo": lead.paso_flujo,
         "resultado": lead.resultado,
         "fecha_agendada": lead.fecha_agendada,
+        "fecha_cierre": lead.fecha_cierre,
         "asesor_asignado": lead.asesor_asignado,
         "pausado_manual": lead.pausado_manual,
         "producto_vendido": lead.producto_vendido,
@@ -930,11 +1002,7 @@ async def actualizar_lead(telefono: str, campos_explicitos: tuple[str, ...] = ()
     cuenta conservar el valor viejo). Esos campos se escriben tal cual llegan,
     normalizando "" a NULL. Quien llama decide cuáles son: la misma función
     sirve para los dos casos sin que el llamador automático cambie."""
-    campos = {
-        k: (v if v not in ("",) else None) if k in campos_explicitos else v
-        for k, v in campos.items()
-        if v or k in campos_explicitos
-    }
+    campos = _filtrar_campos(campos, campos_explicitos)
     if not campos:
         return
     async with async_session() as session:
@@ -942,10 +1010,28 @@ async def actualizar_lead(telefono: str, campos_explicitos: tuple[str, ...] = ()
         if lead is None:
             lead = Lead(telefono=telefono)
             session.add(lead)
+        # Antes de pisar los valores: la transición se define contra el estado
+        # ANTERIOR del lead. Vive acá (y no en el router) porque ésta es la
+        # única función por la que pasan las dos vías que ponen "vendido".
+        transicion_a_vendido = _es_transicion_a_vendido(lead, campos)
         for campo, valor in campos.items():
             setattr(lead, campo, valor)
+        if transicion_a_vendido:
+            _marcar_cierre_vendido(lead)
         lead.actualizado = datetime.utcnow()
         await session.commit()
+
+
+def _filtrar_campos(campos: dict, campos_explicitos: tuple[str, ...]) -> dict:
+    """Regla de "vacío significa bórralo" de actualizar_lead, extraída para
+    que guardar_venta —que escribe los mismos campos del lead pero dentro de
+    su propia transacción— aplique exactamente el mismo criterio en vez de
+    una copia que pueda desincronizarse."""
+    return {
+        k: (v if v not in ("",) else None) if k in campos_explicitos else v
+        for k, v in campos.items()
+        if v or k in campos_explicitos
+    }
 
 
 async def listar_lineas_venta(telefono: str, con_metadatos: bool = False) -> list[dict]:
@@ -961,6 +1047,7 @@ async def listar_lineas_venta(telefono: str, con_metadatos: bool = False) -> lis
         result = await session.execute(query)
         return [
             {
+                "producto_id": l.producto_id,
                 "producto": l.producto, "precio": l.precio, "marca": l.marca, "proveedor": l.proveedor,
                 **({"id": l.id, "creado": l.creado} if con_metadatos else {}),
             }
@@ -989,24 +1076,99 @@ async def listar_lineas_venta_de_muchos(telefonos: list[str]) -> dict[str, list[
         return agrupado
 
 
-async def guardar_lineas_venta(telefono: str, lineas: list[dict]):
-    """Reemplaza TODAS las líneas de venta de un lead por la lista dada —
-    el carrito del formulario de Cierre de venta siempre manda el estado
-    completo (lo que quedó tras agregar/quitar productos), no un delta."""
+async def ids_de_productos_existentes(ids: set[int]) -> set[int]:
+    """De los `id` de Producto que le pasan, cuáles existen realmente. Se usa
+    para validar el `producto_id` que manda el carrito del cierre de venta
+    antes de persistirlo.
+
+    A propósito NO filtra por `activo`: un producto puede desactivarse del
+    catálogo después de haberse vendido, y editar esa venta vieja no debería
+    volverse imposible por eso. La pregunta acá es "¿este id es un producto
+    real?", no "¿se puede vender hoy?"."""
+    if not ids:
+        return set()
     async with async_session() as session:
+        result = await session.execute(select(Producto.id).where(Producto.id.in_(ids)))
+        return {fila[0] for fila in result.all()}
+
+
+async def guardar_venta(
+    telefono: str,
+    lineas: list[dict],
+    campos: dict,
+    campos_explicitos: tuple[str, ...] = (),
+    revertir_resultado_al_vaciar: bool = False,
+):
+    """Escribe un cierre de venta COMPLETO en UNA sola transacción: reemplaza
+    todas las líneas de venta del lead y actualiza los campos del lead (forma
+    de pago, resultado, y los efectos de la transición a "vendido").
+
+    Antes eran dos escrituras con dos commits (guardar_lineas_venta +
+    actualizar_lead): si la segunda fallaba, el lead quedaba con las líneas
+    nuevas y la forma de pago vieja, o vendido sin líneas. Acá o entra todo o
+    no entra nada.
+
+    El carrito siempre manda el estado completo (lo que quedó tras
+    agregar/quitar productos), no un delta — por eso se borran todas las
+    líneas y se reinsertan.
+
+    `revertir_resultado_al_vaciar`: si el carrito queda vacío y el lead estaba
+    en "vendido" TENIENDO líneas (es decir, estaba vendido por esta misma
+    venta), se le quita el resultado en vez de dejarlo huérfano —vaciar el
+    carrito borraba las líneas pero dejaba el lead "vendido" sin nada
+    vendido—. Vuelve a None (sin resultado), no a un valor anterior: no hay
+    ninguna fuente que sepa qué resultado tenía antes de venderse, y elegir
+    uno sería inventarlo. Junto con el resultado se limpia `fecha_cierre`,
+    que solo tiene sentido mientras el lead esté vendido. `pausado_manual` NO
+    se toca al revertir: ese campo tiene otras fuentes (un asesor respondió
+    desde la app de WhatsApp Business) y apagarlo acá podría hacer que Gabi
+    pise a un humano que está atendiendo."""
+    async with async_session() as session:
+        lead = await session.get(Lead, telefono)
+        if lead is None:
+            lead = Lead(telefono=telefono)
+            session.add(lead)
+
+        if not lineas and revertir_resultado_al_vaciar and lead.resultado == "vendido":
+            habia_lineas = await session.scalar(
+                select(func.count()).select_from(LineaVenta).where(LineaVenta.telefono == telefono)
+            )
+            if habia_lineas:
+                # Además del resultado: la forma de pago también queda
+                # huérfana sin líneas ("contado / QR" de una venta que ya no
+                # existe). Es la misma asimetría, así que se limpia junto —
+                # `cuotas` ya viaja como campo explícito desde el servicio.
+                campos = {
+                    **campos,
+                    "resultado": None, "fecha_cierre": None,
+                    "modalidad_pago": None, "medio_pago": None,
+                }
+                campos_explicitos = tuple(campos_explicitos) + (
+                    "resultado", "fecha_cierre", "modalidad_pago", "medio_pago",
+                )
+
         await session.execute(delete(LineaVenta).where(LineaVenta.telefono == telefono))
         for l in lineas:
             session.add(LineaVenta(
                 telefono=telefono,
+                producto_id=l.get("producto_id"),
                 producto=l["producto"],
                 precio=l.get("precio") or None,
                 marca=l.get("marca") or None,
                 proveedor=l.get("proveedor") or None,
             ))
+
+        campos = _filtrar_campos(campos, tuple(campos_explicitos))
+        transicion_a_vendido = _es_transicion_a_vendido(lead, campos)
+        for campo, valor in campos.items():
+            setattr(lead, campo, valor)
+        if transicion_a_vendido:
+            _marcar_cierre_vendido(lead)
+        lead.actualizado = datetime.utcnow()
         await session.commit()
 
 
-async def asignar_asesor_a_lead(telefono: str, asesor: str | None):
+async def asignar_asesor_a_lead(telefono: str, asesor: str | None, automatico: bool = False):
     """Asigna (o reasigna) un lead a un asesor y lo marca como no visto por él.
     Función aparte de actualizar_lead porque ésta descarta valores 'falsy'
     (y visto_asesor=False necesita poder guardarse explícitamente).
@@ -1016,16 +1178,48 @@ async def asignar_asesor_a_lead(telefono: str, asesor: str | None):
     por la que un lead se queda sin asesor—: el indicador de "Nuevo" es para
     el asesor asignado, y sin asignado no tiene a quién avisarle. No se toca
     pausado_manual acá (sí lo hace liberar_asignacion): eso responde a que el
-    caso anterior se cerró, no a que un supervisor quitó la asignación."""
+    caso anterior se cerró, no a que un supervisor quitó la asignación.
+
+    `automatico=True` es la vía de Gabi (escalado por falla técnica, por baja
+    confianza, o derivación a asesor; también el reparto de asignacion.py):
+    además de asignar, avanza la versión del lead y deja un evento en el
+    Timeline, porque hasta ahora una reasignación automática cambiaba el dueño
+    del lead SIN dejar rastro y sin que un humano que tuviera el formulario
+    abierto se enterara al guardar. La asignación se aplica igual, siempre —no
+    puede fallar ni bloquearse por concurrencia (ver _avanzar_version)—; lo
+    que cambia es que quien venga con la versión vieja ahora recibe un 409.
+
+    Con `automatico=False` (default) el comportamiento es el de antes: la ruta
+    del panel ya avanzó la versión con intentar_avanzar_version() y registra
+    su propio evento con el autor humano — hacerlo también acá duplicaría el
+    evento y saltearía la versión de dos en dos."""
     async with async_session() as session:
         lead = await session.get(Lead, telefono)
         if lead is None:
             lead = Lead(telefono=telefono)
             session.add(lead)
+        anterior = lead.asesor_asignado
         lead.asesor_asignado = asesor
         lead.visto_asesor = asesor is None
+        if automatico:
+            _avanzar_version(lead)
         lead.actualizado = datetime.utcnow()
         await session.commit()
+
+    if automatico and anterior != asesor:
+        # Fuera de la transacción de arriba a propósito: el Timeline es
+        # append-only y su propio commit, igual que en las 3 escrituras
+        # humanas del CRM (ver dashboard.py). `autor=None` = cambio
+        # automático, tal como documenta EventoLead. Solo se anota si el
+        # dueño realmente cambió: reasignar al mismo asesor no es un hecho.
+        if asesor:
+            tipo, descripcion = "asignado_automatico", f"Gabi asignó el lead automáticamente a {asesor}"
+        else:
+            tipo, descripcion = "desasignado_automatico", "Se quitó la asignación automáticamente"
+        await registrar_evento_lead(
+            telefono, tipo=tipo, descripcion=descripcion, autor=None,
+            payload={"campo": "asesor_asignado", "anterior": anterior, "nuevo": asesor},
+        )
 
 
 async def marcar_lead_no_visto(telefono: str):
@@ -1045,15 +1239,31 @@ async def liberar_asignacion(telefono: str):
     quedó cerrado (vendido / no interesado) y el cliente vuelve a escribir,
     probablemente por una necesidad nueva. Gabi retoma la atención. También
     limpia pausado_manual, para que un caso viejo respondido desde la app no
-    deje a Gabi pausada para siempre en un lead que ya se cerró."""
+    deje a Gabi pausada para siempre en un lead que ya se cerró.
+
+    Es una escritura automática (la dispara el webhook, no una persona): igual
+    que la reasignación automática, avanza la versión del lead y deja un
+    evento en el Timeline — cambiar el dueño de un lead sin dejar rastro es
+    justo lo que hacía invisible este flujo. La liberación se aplica siempre;
+    nunca se bloquea por concurrencia (ver _avanzar_version)."""
     async with async_session() as session:
         lead = await session.get(Lead, telefono)
-        if lead is not None:
-            lead.asesor_asignado = None
-            lead.pausado_manual = False
-            lead.visto_asesor = True
-            lead.actualizado = datetime.utcnow()
-            await session.commit()
+        if lead is None:
+            return
+        anterior = lead.asesor_asignado
+        lead.asesor_asignado = None
+        lead.pausado_manual = False
+        lead.visto_asesor = True
+        _avanzar_version(lead)
+        lead.actualizado = datetime.utcnow()
+        await session.commit()
+
+    await registrar_evento_lead(
+        telefono, tipo="desasignado_automatico",
+        descripcion="El caso anterior ya estaba cerrado — se liberó la asignación y Gabi retomó la atención",
+        autor=None,
+        payload={"campo": "asesor_asignado", "anterior": anterior, "nuevo": None, "motivo": "caso_cerrado"},
+    )
 
 
 async def pausar_gabi_manual(telefono: str):
@@ -1489,6 +1699,12 @@ def _producto_a_dict(p: Producto) -> dict:
     top-level) — para que agent/tools.py no tenga que cambiar su lógica de
     negocio (scoring, formateo, familia de combos), solo la fuente de datos."""
     fila = {
+        # Única clave que NO venía del CSV: el id real del registro. Se agrega
+        # porque el cierre de venta necesita guardar QUÉ producto del catálogo
+        # se vendió (LineaVenta.producto_id) y CODIGO HANA no sirve de clave
+        # (no es único, ver Producto). Es aditiva: la lógica de negocio de
+        # agent/tools.py lee las claves por nombre, no recorre el diccionario.
+        "ID": p.id,
         "CANAL": p.canal or "",
         "PROVEEDOR": p.proveedor or "",
         "MARCA": p.marca or "",

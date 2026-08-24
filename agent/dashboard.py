@@ -800,7 +800,11 @@ def _resumen_venta(lineas: list[dict]) -> dict:
         except ValueError:
             todos_numericos = False
     precio_texto = (
-        f"{total:.0f}" if todos_numericos
+        # 2 decimales, no 0: redondear a entero acá era lo que hacía que
+        # el ConfirmDialog (que suma a precisión completa en el cliente)
+        # mostrara un monto distinto del que quedaba persistido — el
+        # asesor aprobaba un número y el sistema guardaba otro.
+        f"{total:.2f}" if todos_numericos
         else " + ".join(l.get("precio") or "0" for l in lineas)
     )
     return {
@@ -3646,6 +3650,7 @@ async def _bloque_gestion_lead(
                                 }} else {{
                                     resultadosBox.innerHTML = productos.map(function(p) {{
                                         return '<button type="button" class="list-group-item list-group-item-action small py-2" ' +
+                                            'data-id="' + escapar(String(p.id == null ? '' : p.id)) + '" ' +
                                             'data-descripcion="' + escapar(p.descripcion) + '" data-marca="' + escapar(p.marca) + '" ' +
                                             'data-proveedor="' + escapar(p.proveedor) + '" data-precio="' + escapar(p.precio) + '">' +
                                             '<strong>' + escapar(p.marca) + '</strong> — ' + escapar(p.descripcion) +
@@ -3661,6 +3666,11 @@ async def _bloque_gestion_lead(
                     var btn = ev.target.closest('button[data-descripcion]');
                     if (!btn) return;
                     carrito.push({{
+                        // Elegido del catálogo: viaja el id real del producto.
+                        // El modo manual de más arriba no lo manda (no hay
+                        // producto de catálogo detrás) y el backend lo guarda
+                        // como null — sigue siendo opcional a propósito.
+                        producto_id: btn.getAttribute('data-id') || null,
                         producto: btn.getAttribute('data-descripcion'),
                         precio: btn.getAttribute('data-precio'),
                         marca: btn.getAttribute('data-marca'),
@@ -4152,7 +4162,8 @@ def _dto_lead_detalle(lead: dict, lineas: list[dict], eventos: list[dict]) -> di
         venta = {
             "lineas": [
                 {
-                    "id": l.get("id"), "producto": l.get("producto"), "precio": l.get("precio"),
+                    "id": l.get("id"), "producto_id": l.get("producto_id"),
+                    "producto": l.get("producto"), "precio": l.get("precio"),
                     "marca": l.get("marca"), "proveedor": l.get("proveedor"), "creado": iso_utc(l.get("creado")),
                 }
                 for l in lineas
@@ -4160,6 +4171,14 @@ def _dto_lead_detalle(lead: dict, lineas: list[dict], eventos: list[dict]) -> di
             "modalidad_pago": lead.get("modalidad_pago"),
             "cuotas": lead.get("cuotas"),
             "medio_pago": lead.get("medio_pago"),
+            # Mismo total que ya muestra la columna "Precio" de la tabla de
+            # leads y de la exportación — se reusa _resumen_venta a propósito,
+            # para que no existan dos fórmulas del total de una venta que
+            # puedan dar números distintos. Es texto, no número, porque el
+            # precio de una línea puede no ser numérico (venta manual): en ese
+            # caso _resumen_venta devuelve la suma sin resolver ("1200 + a
+            # convenir") en vez de mentir con un total.
+            "total": _resumen_venta(lineas)["precio_venta"],
         }
 
     return {
@@ -4169,6 +4188,10 @@ def _dto_lead_detalle(lead: dict, lineas: list[dict], eventos: list[dict]) -> di
         "interes": lead.get("interes"),
         "resultado": lead.get("resultado"),
         "fecha_agendada": _iso(lead.get("fecha_agendada")),
+        # `fecha_cierre` SÍ lleva `Z` (a diferencia de fecha_agendada, justo
+        # arriba): es el instante real en que se cerró la venta, no una hora
+        # que alguien tipeó.
+        "fecha_cierre": iso_utc(lead.get("fecha_cierre")),
         "asesor_asignado": lead.get("asesor_asignado"),
         "pausado_manual": bool(lead.get("pausado_manual")),
         "revision_prioritaria": bool(lead.get("revision_prioritaria")),
@@ -4178,6 +4201,11 @@ def _dto_lead_detalle(lead: dict, lineas: list[dict], eventos: list[dict]) -> di
         "venta": venta,
         "eventos": [
             {
+                # `id` estable del evento (PK de EventoLead, que es
+                # append-only): le da al cliente una clave que no cambia para
+                # cada línea del Timeline, en vez de tener que inventarse una
+                # con el índice o la fecha.
+                "id": e.get("id"),
                 "tipo": e.get("tipo"), "descripcion": e.get("descripcion"), "payload": e.get("payload"),
                 "autor": e.get("autor"), "creado": iso_utc(e.get("creado")),
             }
@@ -4755,6 +4783,11 @@ async def buscar_producto_venta(telefono: str, q: str = "", usuario: dict = Depe
     productos = await buscar_productos(q, limite=8)
     return JSONResponse([
         {
+            # `id` real del producto: es lo que el carrito devuelve como
+            # producto_id al guardar la venta, para que la línea quede ligada
+            # al registro del catálogo y no solo a una copia de su
+            # descripción. CODIGO HANA no sirve para eso (no es único).
+            "id": p.get("ID"),
             "codigo": p.get("CODIGO HANA", ""),
             "descripcion": p.get("DESCRIPCIÓN", ""),
             "marca": p.get("MARCA", ""),
@@ -4791,6 +4824,11 @@ async def registrar_venta(
     # exactamente como estaba.
     try:
         venta = servicio_comercial.validar_venta(lineas_venta, modalidad_pago, cuotas, medio_pago)
+        # Los producto_id se comprueban contra el catálogo real acá, en el
+        # mismo tramo "antes de tocar la versión" y por el mismo motivo: un id
+        # que ya no existe es un 400, y un 400 no puede consumir la versión del
+        # lead ni provocarle un conflicto falso a otra sesión.
+        await servicio_comercial.validar_productos_de_venta(venta)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 

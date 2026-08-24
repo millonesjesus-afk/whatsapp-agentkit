@@ -109,12 +109,12 @@ async def asignar_lead_pendiente_a_asesor(username: str, nivel_asesor: str | Non
     for lead in pendientes:
         nivel_req = await _nivel_requerido(lead.get("interes") or "")
         if idx_asesor >= NIVELES.index(nivel_req):
-            await asignar_asesor_a_lead(lead["telefono"], username)
+            await asignar_asesor_a_lead(lead["telefono"], username, automatico=True)
             logger.info(f"Lead {lead['telefono']} (en espera) asignado a {username} al ponerse disponible")
             return lead["telefono"]
 
     # Ninguno calzaba con su nivel — mejor atender al más antiguo que dejarlo esperando.
     lead = pendientes[0]
-    await asignar_asesor_a_lead(lead["telefono"], username)
+    await asignar_asesor_a_lead(lead["telefono"], username, automatico=True)
     logger.info(f"Lead {lead['telefono']} (en espera, sin match de nivel) asignado a {username} al ponerse disponible")
     return lead["telefono"]

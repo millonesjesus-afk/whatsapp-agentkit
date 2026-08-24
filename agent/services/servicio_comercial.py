@@ -20,12 +20,23 @@ router traduce el `ValueError` a la respuesta HTTP, igual que antes.
 import json
 
 from agent import asignacion
-from agent.memory import guardar_lineas_venta, actualizar_lead
+from agent.memory import guardar_venta, ids_de_productos_existentes
 
 MODALIDADES_PAGO = ["financiado", "contado"]
 CUOTAS_DISPONIBLES = ["12", "24", "36"]
 MEDIO_PAGO_FINANCIADO = "Recibo de gas"
 MEDIOS_PAGO_CONTADO = ["QR", "Link de pago", "Abono a cuenta corriente", "Otro"]
+
+
+def _id_producto(valor) -> int | None:
+    """Normaliza el `producto_id` que llega del formulario: entero válido, o
+    None si no vino (venta manual) o si vino basura. No decide si el producto
+    existe — eso lo hace validar_productos_de_venta contra la base."""
+    try:
+        numero = int(str(valor).strip())
+    except (TypeError, ValueError):
+        return None
+    return numero if numero > 0 else None
 
 
 class ServicioComercial:
@@ -73,6 +84,15 @@ class ServicioComercial:
         # el JSON que mandó el navegador tal cual.
         lineas = [
             {
+                # `producto_id`: el id real del producto del catálogo que se
+                # eligió al armar el carrito. Opcional a propósito — el cierre
+                # de venta sigue teniendo el modo manual ("¿No está en la
+                # lista? Agregar manualmente"), donde no hay producto de
+                # catálogo detrás y la línea se guarda con producto_id = None.
+                # Acá solo se normaliza la FORMA (entero o nada); que el id
+                # exista de verdad se comprueba en validar_productos_de_venta,
+                # que necesita consultar la base.
+                "producto_id": _id_producto(l.get("producto_id")),
                 "producto": str(l["producto"]).strip()[:300],
                 "precio": str(l.get("precio") or "").strip()[:30],
                 "marca": str(l.get("marca") or "").strip()[:100],
@@ -98,19 +118,49 @@ class ServicioComercial:
             "medio_pago": medio_pago,
         }
 
+    async def validar_productos_de_venta(self, venta: dict) -> None:
+        """Comprueba contra el catálogo real que cada `producto_id` de la venta
+        exista. Lanza `ValueError` si alguno no existe.
+
+        Está separada de `validar_venta` porque necesita consultar la base y
+        aquella es deliberadamente sincronizada y sin efectos. Quien llama debe
+        ejecutarla en el mismo tramo "antes de tocar la versión": un id
+        inválido es un 400, y un 400 no debe consumir la versión de
+        concurrencia optimista del lead (ver el comentario de validar_venta).
+
+        Las líneas sin `producto_id` (venta manual) se ignoran acá: no tienen
+        nada que validar contra el catálogo."""
+        ids = {l["producto_id"] for l in venta["lineas"] if l.get("producto_id")}
+        if not ids:
+            return
+        existentes = await ids_de_productos_existentes(ids)
+        faltantes = sorted(ids - existentes)
+        if faltantes:
+            raise ValueError(
+                f"El producto seleccionado ya no existe en el catálogo (id {faltantes[0]})"
+            )
+
     async def persistir_venta(self, telefono: str, venta: dict) -> None:
         """Escribe una venta YA validada por `validar_venta`. No valida nada:
         recibir datos crudos acá es un error de programación, no una entrada
-        de usuario."""
+        de usuario.
+
+        Líneas y campos del lead van en UNA sola transacción (guardar_venta):
+        antes eran dos escrituras con dos commits, y una falla en el medio
+        dejaba estado parcial (líneas nuevas con forma de pago vieja, o lead
+        "vendido" sin líneas)."""
         lineas = venta["lineas"]
-        await guardar_lineas_venta(telefono, lineas)
 
         campos = {
             "modalidad_pago": venta["modalidad_pago"],
             "cuotas": venta["cuotas"],
             "medio_pago": venta["medio_pago"],
         }
-        # Si se registró al menos un producto, el resultado pasa a "vendido" automáticamente
+        # Si se registró al menos un producto, el resultado pasa a "vendido"
+        # automáticamente. La simetría —vaciar el carrito le quita el
+        # "vendido"— la resuelve guardar_venta con
+        # revertir_resultado_al_vaciar, porque para decidirlo hay que leer el
+        # estado anterior del lead DENTRO de la misma transacción.
         if lineas:
             campos["resultado"] = "vendido"
 
@@ -121,7 +171,11 @@ class ServicioComercial:
         # no existe. Es exactamente la misma decisión que fecha_agendada cuando
         # el resultado deja de ser "agendado" (ver dashboard.py, actualizar_resultado):
         # el vacío viene de una regla de negocio, no de "no sé".
-        await actualizar_lead(telefono, campos_explicitos=("cuotas",), **campos)
+        await guardar_venta(
+            telefono, lineas, campos,
+            campos_explicitos=("cuotas",),
+            revertir_resultado_al_vaciar=True,
+        )
 
     async def registrar_venta(
         self, telefono: str, lineas_venta_json: str, modalidad_pago: str, cuotas: str, medio_pago: str,
@@ -130,6 +184,7 @@ class ServicioComercial:
         Conveniencia para quien no necesita separar las dos fases; el handler
         de ruta sí las separa (ver validar_venta)."""
         venta = self.validar_venta(lineas_venta_json, modalidad_pago, cuotas, medio_pago)
+        await self.validar_productos_de_venta(venta)
         await self.persistir_venta(telefono, venta)
 
 
