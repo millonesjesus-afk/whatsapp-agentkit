@@ -301,17 +301,32 @@ async def intentar_avanzar_version(telefono: str, version_esperada: int) -> bool
     True si se pudo (nadie más escribió antes) — en ese caso, quien llama
     debe aplicar su cambio a continuación. False si alguien más ya avanzó la
     versión — no se aplica nada, y quien llama debe mostrar el conflicto
-    explícitamente en vez de sobrescribir en silencio (Human Decision Gate)."""
+    explícitamente en vez de sobrescribir en silencio (Human Decision Gate).
+
+    El chequeo de versión NO alcanza con comparar en Python y después
+    escribir (`session.get()` + comparar + `lead.version += 1` + commit):
+    entre la comparación y el commit hay una ventana en la que otra escritura
+    concurrente puede leer la misma versión, y las dos se dan por ganadoras
+    — comprobado con dos escrituras realmente simultáneas (Gate 3.2): ambas
+    devolvían True y el incremento se perdía. Mismo defecto y mismo arreglo
+    que ya tenía Productos (ver editar_producto/toggle_producto): la
+    condición de versión viaja DENTRO del propio UPDATE
+    (`WHERE telefono = ... AND version = ...`), que la base evalúa de forma
+    atómica — si otra escritura ya ganó, el UPDATE afecta 0 filas."""
     async with async_session() as session:
-        lead = await session.get(Lead, telefono)
-        if lead is None or lead.version != version_esperada:
+        resultado = await session.execute(
+            update(Lead)
+            .where(Lead.telefono == telefono, Lead.version == version_esperada)
+            .values(version=version_esperada + 1)
+        )
+        if resultado.rowcount == 0:
+            await session.rollback()
             return False
-        lead.version += 1
         await session.commit()
         return True
 
 
-def _avanzar_version(lead: "Lead"):
+def _avanzar_version(lead: "Lead", es_nuevo: bool = False):
     """Incremento INCONDICIONAL de la versión del lead, para las escrituras
     AUTOMÁTICAS (reasignación de Gabi, liberación de un caso cerrado).
 
@@ -327,8 +342,21 @@ def _avanzar_version(lead: "Lead"):
 
     Recibe el objeto Lead ya cargado en la sesión de quien llama, para que el
     incremento entre en el MISMO commit que el cambio que lo justifica (una
-    sola escritura, no dos)."""
-    lead.version = (lead.version or 0) + 1
+    sola escritura, no dos).
+
+    `es_nuevo=True` es el único caso en que se lee/escribe en Python
+    (`lead.version = 1`): un Lead recién construido en esta misma
+    transacción (`Lead(telefono=...)`, todavía sin fila propia) no puede
+    tener ninguna escritura concurrente real —nadie más puede estar
+    actualizando una fila que todavía no existe—, así que no hay carrera que
+    proteger. Para un lead EXISTENTE (el caso normal), `Lead.version + 1` es
+    una expresión SQL, no un entero de Python: SQLAlchemy la evalúa en el
+    propio UPDATE (`SET version = version + 1`) contra el valor que la base
+    tiene en ese instante, no contra la copia en memoria de esta sesión —
+    mismo motivo por el que `intentar_avanzar_version` dejó de leer-y-sumar
+    en Python (Gate 3.2): dos incrementos automáticos concurrentes (o uno
+    automático y uno humano) ya no pueden pisarse y perder una cuenta."""
+    lead.version = 1 if es_nuevo else Lead.version + 1
 
 
 def _es_transicion_a_vendido(lead: "Lead", campos: dict) -> bool:
@@ -1195,14 +1223,15 @@ async def asignar_asesor_a_lead(telefono: str, asesor: str | None, automatico: b
     evento y saltearía la versión de dos en dos."""
     async with async_session() as session:
         lead = await session.get(Lead, telefono)
-        if lead is None:
+        es_nuevo = lead is None
+        if es_nuevo:
             lead = Lead(telefono=telefono)
             session.add(lead)
         anterior = lead.asesor_asignado
         lead.asesor_asignado = asesor
         lead.visto_asesor = asesor is None
         if automatico:
-            _avanzar_version(lead)
+            _avanzar_version(lead, es_nuevo=es_nuevo)
         lead.actualizado = datetime.utcnow()
         await session.commit()
 
