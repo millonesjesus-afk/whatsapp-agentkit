@@ -6,6 +6,8 @@ Servidor principal del agente de WhatsApp.
 Funciona con el proveedor Meta Cloud API a través de la capa de providers.
 """
 
+import asyncio
+import contextlib
 import os
 import logging
 from contextlib import asynccontextmanager
@@ -23,7 +25,10 @@ from agent.memory import (
     marcar_mensaje_procesado,
 )
 from agent.providers import obtener_proveedor
-from agent.dashboard import router as dashboard_router, NoAutenticado
+from agent.dashboard import (
+    router as dashboard_router, NoAutenticado,
+    ARCHIVOS_DIR, EXTENSIONES_ARCHIVO_PERMITIDAS, TAMANO_MAXIMO_ARCHIVO_MB, _guardar_archivo_en_disco,
+)
 from agent.tiempo_real import gestor_conexiones
 from agent.notificaciones import notificar_lead_derivado
 from agent.services.servicio_comercial import servicio_comercial
@@ -87,6 +92,109 @@ PORT = int(os.getenv("PORT", 8000))
 # la nota de PROXIES_CONFIABLES en agent/rate_limit.py antes de cambiarlo.
 MAX_WEBHOOK_POR_IP_POR_MINUTO = 60
 
+# Tipos de adjunto entrante que este Gate soporta guardar como archivo real
+# — los mismos que el panel ya sabe ENVIAR del lado saliente (ver
+# dashboard.py: enviar-archivo/enviar-audio). Video, sticker, ubicación,
+# etc. quedan fuera a propósito y siguen el camino de "no soportado" de
+# siempre — no hay envío saliente equivalente que los reciba en el panel.
+TIPOS_MEDIA_SOPORTADOS = ("image", "document", "audio")
+
+# Mismas restricciones de extensión que ya aplican al envío saliente de una
+# proforma (EXTENSIONES_ARCHIVO_PERMITIDAS, importado de dashboard.py) para
+# image/document. Audio queda fuera de esa lista a propósito, igual que ya
+# pasa con las notas de voz salientes (enviar-audio en dashboard.py no
+# valida extensión, solo tamaño) — las notas de voz de WhatsApp son siempre
+# OGG/Opus.
+_MIME_A_EXTENSION_IMAGEN = {"image/jpeg": ".jpg", "image/png": ".png"}
+
+
+def _extension_permitida_para_media(tipo: str, mime_type: str, filename: str) -> str | None:
+    """Resuelve y valida la extensión a usar para un adjunto ENTRANTE.
+    Retorna None si el tipo/mime no está permitido — el llamador degrada
+    entonces al placeholder de texto anterior en vez de guardar un archivo
+    con un tipo no soportado."""
+    if tipo == "audio":
+        return ".ogg"
+    if tipo == "image":
+        extension = _MIME_A_EXTENSION_IMAGEN.get(mime_type)
+    else:  # document
+        extension = ".pdf" if mime_type == "application/pdf" else (os.path.splitext(filename or "")[1].lower() or None)
+    return extension if extension in EXTENSIONES_ARCHIVO_PERMITIDAS else None
+
+
+async def _guardar_media_entrante(msg, canal: dict | None) -> int | None:
+    """Descarga un adjunto ENTRANTE (imagen/documento/nota de voz) de Meta y
+    lo guarda como ArchivoAdjunto real — mismo directorio (ARCHIVOS_DIR) y
+    mismas restricciones de tamaño (TAMANO_MAXIMO_ARCHIVO_MB) que ya aplican
+    al envío saliente de un asesor (ver dashboard.py).
+
+    Retorna el id del ArchivoAdjunto creado, o None si la descarga falló o
+    el tipo/tamaño no está permitido — en ese caso el llamador degrada al
+    placeholder de texto `f"[{tipo}]"` en vez de perder el mensaje entero."""
+    media = msg.media or {}
+    media_id = media.get("media_id")
+    if not media_id:
+        return None
+
+    resultado = await proveedor.descargar_media(media_id, canal=canal)
+    if resultado is None:
+        logger.warning(f"No se pudo descargar el media {media_id} ({msg.tipo}) de {msg.telefono}")
+        return None
+    contenido, mime_type = resultado
+
+    if len(contenido) > TAMANO_MAXIMO_ARCHIVO_MB * 1024 * 1024:
+        logger.info(f"Media entrante de {msg.telefono} descartado por tamaño ({len(contenido)} bytes)")
+        return None
+
+    extension = _extension_permitida_para_media(msg.tipo, mime_type, media.get("filename", ""))
+    if not extension:
+        logger.info(f"Media entrante de {msg.telefono} descartado por tipo no permitido ({mime_type!r}, {msg.tipo})")
+        return None
+
+    nombre_original = media.get("filename") or f"adjunto{extension}"
+    ruta_disco = _guardar_archivo_en_disco(nombre_original, contenido)
+    # subido_por="cliente": sentinel — este adjunto no lo subió ningún
+    # asesor (a diferencia de todo lo demás que crea un ArchivoAdjunto),
+    # sino que llegó del cliente por WhatsApp. El campo es obligatorio en
+    # ArchivoAdjunto y no admite NULL; no hay un username real que ponerle.
+    archivo = await servicio_conversacion.crear_archivo_adjunto(
+        nombre_original=nombre_original, ruta_disco=ruta_disco, content_type=mime_type or "application/octet-stream",
+        tamano_bytes=len(contenido), subido_por="cliente", reutilizable=False,
+    )
+    return archivo["id"]
+
+
+# Gate 4.1 — cuarta capa de hardening: barrido periódico de conexiones WS del
+# panel abandonadas (ver agent/tiempo_real.py, GestorConexiones.cerrar_inactivas
+# y tocar_actividad para la justificación completa de estos dos valores).
+#
+# UMBRAL_INACTIVIDAD_WS_SEG (120s = 2 min) tiene que quedar cómodamente por
+# ENCIMA de los 20s del polling incondicional del panel (usePollingIncondicional
+# en maiek-frontend — 6x de margen ante jitter de red o un tab en segundo plano
+# que Chrome enlentece) y cómodamente por DEBAJO de los ~270s
+# (RECONEXION_PROACTIVA_MS) del reconnect proactivo del relay del BFF
+# (app/api/conversaciones/stream/route.ts) — si no fuera así, una conexión de
+# relay huérfana se seguiría auto-renovando sola antes de que este barrido
+# llegara a cerrarla (ver el docstring de tocar_actividad: ese reconnect
+# proactivo manda "ver_lead" sin que haya navegador real detrás).
+UMBRAL_INACTIVIDAD_WS_SEG = 120.0
+INTERVALO_BARRIDO_INACTIVAS_SEG = 30.0
+
+
+async def _barrer_conexiones_ws_inactivas():
+    """Tarea de background del ciclo de vida del proceso — cierra
+    activamente conexiones WS del panel abandonadas (Gate 4.1, ver
+    agent/tiempo_real.py:GestorConexiones.cerrar_inactivas). Se cancela
+    limpio al apagar (ver lifespan); un error de un barrido puntual se
+    loguea y no tumba la tarea entera (el próximo barrido, 30s después,
+    igual corre)."""
+    while True:
+        await asyncio.sleep(INTERVALO_BARRIDO_INACTIVAS_SEG)
+        try:
+            await gestor_conexiones.cerrar_inactivas(UMBRAL_INACTIVIDAD_WS_SEG)
+        except Exception:
+            logger.exception("Error en el barrido de conexiones WS del panel inactivas")
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -98,7 +206,11 @@ async def lifespan(app: FastAPI):
     logger.info("Base de datos inicializada")
     logger.info(f"Servidor AgentKit corriendo en puerto {PORT}")
     logger.info(f"Proveedor de WhatsApp: {proveedor.__class__.__name__}")
+    tarea_barrido_ws = asyncio.create_task(_barrer_conexiones_ws_inactivas())
     yield
+    tarea_barrido_ws.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await tarea_barrido_ws
     await cerrar_cliente_http()
 
 
@@ -240,7 +352,9 @@ async def webhook_handler(request: Request):
             # respuesta, porque no es un mensaje nuevo del cliente.
             if msg.tipo_evento == "echo":
                 contenido = msg.texto if msg.texto else f"[{msg.tipo}]"
-                await servicio_conversacion.guardar_mensaje(msg.telefono, "assistant", contenido, via_app=True)
+                await servicio_conversacion.guardar_mensaje(
+                    msg.telefono, "assistant", contenido, via_app=True, mensaje_id_meta=msg.mensaje_id or None,
+                )
                 lead_actual = await obtener_lead(msg.telefono)
                 if not (lead_actual and lead_actual.get("asesor_asignado")):
                     await pausar_gabi_manual(msg.telefono)
@@ -248,14 +362,36 @@ async def webhook_handler(request: Request):
                 await gestor_conexiones.emitir_mensaje_nuevo(msg.telefono)
                 continue
 
-            # Tipos que aún no procesamos (audio, imagen, documento, etc.):
+            # Multimedia entrante soportada (imagen, documento, nota de voz)
+            # — se descarga el archivo real de Meta y se guarda como adjunto
+            # real del mensaje, en vez de descartar el contenido con el
+            # placeholder de texto f"[{tipo}]" (comportamiento anterior).
+            # Gabi sigue sin poder "leer" el contenido (no tiene visión ni
+            # transcripción — fuera de alcance de este Gate): se le sigue
+            # avisando al cliente que este tipo de mensaje no se procesa
+            # automáticamente, igual que antes.
+            if msg.tipo in TIPOS_MEDIA_SOPORTADOS:
+                logger.info(f"Media entrante ({msg.tipo}) de {msg.telefono}")
+                respuesta = servicio_inteligencia.obtener_mensaje_no_soportado()
+                archivo_id_creado = await _guardar_media_entrante(msg, canal)
+                contenido_usuario = (msg.media or {}).get("caption") or f"[{msg.tipo}]"
+                await servicio_conversacion.guardar_mensaje(
+                    msg.telefono, "user", contenido_usuario,
+                    archivo_id=archivo_id_creado, mensaje_id_meta=msg.mensaje_id or None,
+                )
+                enviado, wamid = await proveedor.enviar_mensaje(msg.telefono, respuesta, canal=canal)
+                await servicio_conversacion.guardar_mensaje(msg.telefono, "assistant", respuesta, mensaje_id_meta=wamid)
+                await gestor_conexiones.emitir_mensaje_nuevo(msg.telefono)
+                continue
+
+            # Tipos que aún no procesamos (video, sticker, ubicación, etc.):
             # avisamos al cliente en vez de dejarlo sin respuesta
             if msg.tipo != "text":
                 logger.info(f"Mensaje no soportado ({msg.tipo}) de {msg.telefono}")
                 respuesta = servicio_inteligencia.obtener_mensaje_no_soportado()
-                await servicio_conversacion.guardar_mensaje(msg.telefono, "user", f"[{msg.tipo}]")
-                await servicio_conversacion.guardar_mensaje(msg.telefono, "assistant", respuesta)
-                await proveedor.enviar_mensaje(msg.telefono, respuesta, canal=canal)
+                await servicio_conversacion.guardar_mensaje(msg.telefono, "user", f"[{msg.tipo}]", mensaje_id_meta=msg.mensaje_id or None)
+                enviado, wamid = await proveedor.enviar_mensaje(msg.telefono, respuesta, canal=canal)
+                await servicio_conversacion.guardar_mensaje(msg.telefono, "assistant", respuesta, mensaje_id_meta=wamid)
                 await gestor_conexiones.emitir_mensaje_nuevo(msg.telefono)
                 continue
 
@@ -301,7 +437,7 @@ async def webhook_handler(request: Request):
                     # Caso todavía abierto: se guarda el mensaje y se reactiva
                     # el indicador de "Nuevo" para que el asesor no se lo pierda,
                     # aunque ya hubiera visto mensajes anteriores de este lead.
-                    await servicio_conversacion.guardar_mensaje(msg.telefono, "user", msg.texto)
+                    await servicio_conversacion.guardar_mensaje(msg.telefono, "user", msg.texto, mensaje_id_meta=msg.mensaje_id or None)
                     await marcar_lead_no_visto(msg.telefono)
                     logger.info(
                         f"Mensaje de {msg.telefono} guardado sin respuesta automática "
@@ -361,9 +497,9 @@ async def webhook_handler(request: Request):
                     f"(acción: {accion_confianza}) — razón: {razon}"
                 )
 
-            await servicio_conversacion.guardar_mensaje(msg.telefono, "user", msg.texto)
-            await servicio_conversacion.guardar_mensaje(msg.telefono, "assistant", respuesta)
-            await proveedor.enviar_mensaje(msg.telefono, respuesta, canal=canal)
+            await servicio_conversacion.guardar_mensaje(msg.telefono, "user", msg.texto, mensaje_id_meta=msg.mensaje_id or None)
+            enviado, wamid = await proveedor.enviar_mensaje(msg.telefono, respuesta, canal=canal)
+            await servicio_conversacion.guardar_mensaje(msg.telefono, "assistant", respuesta, mensaje_id_meta=wamid)
             await gestor_conexiones.emitir_mensaje_nuevo(msg.telefono)
             logger.info(f"Respuesta a {msg.telefono}: {respuesta}")
 

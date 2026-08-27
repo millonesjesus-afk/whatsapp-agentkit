@@ -20,6 +20,7 @@ from agent.memory import (
     guardar_mensaje, obtener_historial, obtener_ultimos_mensajes, limpiar_historial,
     crear_archivo_adjunto, obtener_archivo_adjunto, listar_archivos_reutilizables,
     eliminar_archivo_reutilizable, obtener_telefono_de_archivo,
+    obtener_mensaje_por_id, obtener_timestamp_ultimo_mensaje_usuario,
 )
 
 
@@ -30,8 +31,20 @@ class ServicioConversacion:
 
     async def guardar_mensaje(
         self, telefono: str, role: str, content: str, archivo_id: int | None = None, via_app: bool = False,
-    ):
-        return await guardar_mensaje(telefono, role, content, archivo_id=archivo_id, via_app=via_app)
+        mensaje_id_meta: str | None = None, estado_envio: str | None = None,
+        respondido_a_id: int | None = None,
+    ) -> dict:
+        return await guardar_mensaje(
+            telefono, role, content, archivo_id=archivo_id, via_app=via_app,
+            mensaje_id_meta=mensaje_id_meta, estado_envio=estado_envio,
+            respondido_a_id=respondido_a_id,
+        )
+
+    async def obtener_mensaje_por_id(self, mensaje_id: int) -> dict | None:
+        return await obtener_mensaje_por_id(mensaje_id)
+
+    async def obtener_timestamp_ultimo_mensaje_usuario(self, telefono: str):
+        return await obtener_timestamp_ultimo_mensaje_usuario(telefono)
 
     async def obtener_historial(self, telefono: str, limite: int = 20) -> list[dict]:
         return await obtener_historial(telefono, limite=limite)

@@ -93,6 +93,28 @@ RESULTADOS_CERRADOS = (
     "servicio_postventa", "cartera_fnb",
 )
 
+# Roles con visión total del panel (ven/editan cualquier lead, no solo los
+# suyos) — vive acá, no en dashboard.py, por el mismo motivo que
+# RESULTADOS_CERRADOS: agent/tiempo_real.py (el WebSocket) necesita el
+# MISMO criterio para filtrar a quién emitirle un evento (ver
+# tiene_acceso_a_lead), y no puede importar dashboard.py sin crear un ciclo
+# (dashboard.py ya importa tiempo_real.py para el gestor de conexiones).
+# dashboard.py importa esta constante en vez de definir la suya — antes
+# eran dos copias del mismo valor, con riesgo real de desincronizarse.
+ROLES_CON_VISION_TOTAL = ("admin", "supervisor")
+
+
+def tiene_acceso_a_lead(rol: str, username: str, asesor_asignado: str | None) -> bool:
+    """Regla única de acceso a un lead: admin/supervisor ven todo, un
+    asesor solo el suyo. Es la misma regla que ya aplicaban los endpoints
+    de lectura del panel (antes inline como `_verificar_acceso_lead` en
+    dashboard.py, ahora una llamada a esta función) — se extrae acá para
+    que agent/tiempo_real.py pueda aplicarla también al decidir a qué
+    conexiones WebSocket emitirles un evento de un lead (antes se emitía a
+    TODAS las conexiones sin filtrar, exponiendo el teléfono de leads
+    ajenos a cualquier miembro del equipo conectado al panel)."""
+    return rol in ROLES_CON_VISION_TOTAL or asesor_asignado == username
+
 
 class Base(DeclarativeBase):
     pass
@@ -118,6 +140,38 @@ class Mensaje(Base):
     # informa QUÉ asesor lo escribió — solo que salió de la app — así que no
     # se puede atribuir a una persona específica, solo marcar el origen.
     via_app: Mapped[bool] = mapped_column(Boolean, default=False)
+    # wamid real de WhatsApp (el "id" que Meta asigna a cada mensaje). Para
+    # ENTRANTES se captura del webhook (MensajeEntrante.mensaje_id); para
+    # SALIENTES, del campo `messages[0].id` que Meta devuelve en la
+    # respuesta 200 del POST de envío (ver agent/providers/meta.py). Vive
+    # acá — no en una tabla aparte — porque es un atributo del mensaje
+    # mismo, con el mismo criterio que archivo_id/via_app. Nullable: el
+    # historial anterior a este campo no lo tiene, y un envío que falló
+    # tampoco genera uno. Habilita citar un mensaje (Reply/Quote, payload
+    # saliente `"context": {"message_id": ...}`) — si el mensaje que se
+    # quiere citar no tiene este campo, la cita se rechaza explícitamente
+    # (ver responder_cliente en dashboard.py) en vez de mandarle a Meta un
+    # context inválido.
+    mensaje_id_meta: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    # "fallido" cuando un envío SALIENTE no se pudo confirmar con Meta
+    # (status distinto de 200, o falla de red) — a diferencia del
+    # comportamiento anterior (no guardar nada si el envío fallaba), el
+    # mensaje se persiste igual con este estado para que el frontend lo
+    # muestre con opción de reintento en vez de perderlo en silencio.
+    # None/ausente = se envió con normalidad, o es un mensaje entrante
+    # (este campo no aplica ahí). Deliberadamente el único estado que
+    # existe hoy — este Gate no necesita distinguir más que "falló" del
+    # resto.
+    estado_envio: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    # Id INTERNO (Mensaje.id, NO el wamid) del mensaje que ESTE mensaje citó
+    # al enviarse (Reply/Quote) — se completa en responder_cliente cuando el
+    # request trae mensaje_id_citado. Mismo criterio que mensaje_id_citado:
+    # se guarda el id interno, nunca el wamid — el wamid se resuelve contra
+    # este id solo cuando hace falta mandárselo a Meta. Sin ForeignKey
+    # estricta, mismo criterio que archivo_id arriba (relación validada en
+    # la capa de aplicación, no en la base). Nullable: la mayoría de los
+    # mensajes no citan nada, y el historial anterior a este campo tampoco.
+    respondido_a_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
 
 class ArchivoAdjunto(Base):
@@ -773,11 +827,23 @@ async def inicializar_db():
     await aplicar_migraciones()
 
 
-async def guardar_mensaje(telefono: str, role: str, content: str, archivo_id: int | None = None, via_app: bool = False):
+async def guardar_mensaje(
+    telefono: str, role: str, content: str, archivo_id: int | None = None, via_app: bool = False,
+    mensaje_id_meta: str | None = None, estado_envio: str | None = None,
+    respondido_a_id: int | None = None,
+) -> dict:
     """Guarda un mensaje en el historial de conversación. archivo_id solo se
     usa cuando el mensaje fue un archivo adjunto enviado por un asesor.
     via_app=True cuando llegó por el echo de coexistencia (asesor respondió
-    desde la app de WhatsApp Business en el celular, no desde el panel)."""
+    desde la app de WhatsApp Business en el celular, no desde el panel).
+    mensaje_id_meta/estado_envio: ver Mensaje. respondido_a_id: id interno
+    (Mensaje.id) del mensaje que este mensaje citó al enviarse (Reply/Quote,
+    ver responder_cliente) — None si no citó nada.
+
+    Retorna el mensaje ya guardado (con su `id` real) — antes no retornaba
+    nada; hace falta para que quien envía un mensaje saliente pueda
+    referenciarlo después (mostrarlo con opción de reintento si
+    estado_envio=="fallido", o dejar que se lo cite desde otro mensaje)."""
     async with async_session() as session:
         mensaje = Mensaje(
             telefono=telefono,
@@ -786,9 +852,55 @@ async def guardar_mensaje(telefono: str, role: str, content: str, archivo_id: in
             timestamp=datetime.utcnow(),
             archivo_id=archivo_id,
             via_app=via_app,
+            mensaje_id_meta=mensaje_id_meta,
+            estado_envio=estado_envio,
+            respondido_a_id=respondido_a_id,
         )
         session.add(mensaje)
         await session.commit()
+        await session.refresh(mensaje)
+        return {
+            "id": mensaje.id, "telefono": mensaje.telefono, "role": mensaje.role,
+            "content": mensaje.content, "archivo_id": mensaje.archivo_id, "via_app": mensaje.via_app,
+            "mensaje_id_meta": mensaje.mensaje_id_meta, "estado_envio": mensaje.estado_envio,
+            "respondido_a_id": mensaje.respondido_a_id,
+            "timestamp": mensaje.timestamp,
+        }
+
+
+async def obtener_mensaje_por_id(mensaje_id: int) -> dict | None:
+    """Un mensaje puntual por su id interno — usado para validar una cita
+    (Reply/Quote, ver responder_cliente en dashboard.py): hay que confirmar
+    que el mensaje pertenece a la misma conversación que se le está citando
+    y que tiene mensaje_id_meta (el wamid real de Meta) antes de poder
+    armar el `context` del envío saliente."""
+    async with async_session() as session:
+        mensaje = await session.get(Mensaje, mensaje_id)
+        if mensaje is None:
+            return None
+        return {
+            "id": mensaje.id, "telefono": mensaje.telefono, "role": mensaje.role,
+            "content": mensaje.content, "mensaje_id_meta": mensaje.mensaje_id_meta,
+            "estado_envio": mensaje.estado_envio, "timestamp": mensaje.timestamp,
+        }
+
+
+async def obtener_timestamp_ultimo_mensaje_usuario(telefono: str) -> datetime | None:
+    """Instante del último mensaje con role=='user' (el cliente escribió) de
+    este lead — para calcular si la ventana de atención de 24 horas de
+    WhatsApp sigue abierta antes de intentar un envío saliente. Meta
+    rechaza cualquier mensaje libre (no-plantilla) fuera de esa ventana; sin
+    este chequeo, ese rechazo se veía como el mismo 502 genérico de
+    cualquier otra falla de la API (token vencido, etc.)."""
+    async with async_session() as session:
+        query = (
+            select(Mensaje.timestamp)
+            .where(Mensaje.telefono == telefono, Mensaje.role == "user")
+            .order_by(Mensaje.timestamp.desc())
+            .limit(1)
+        )
+        result = await session.execute(query)
+        return result.scalar_one_or_none()
 
 
 async def obtener_historial(telefono: str, limite: int = 20) -> list[dict]:
@@ -825,10 +937,42 @@ async def obtener_historial(telefono: str, limite: int = 20) -> list[dict]:
             result_archivos = await session.execute(query_archivos)
             content_types = dict(result_archivos.all())
 
+        # Tercera consulta liviana (no N+1), misma idea que archivo_ids
+        # arriba: trae de una sola vez el autor+contenido de cada mensaje
+        # citado (Reply/Quote) que aparece en esta página — el mensaje
+        # original puede estar fuera de la ventana `limite` (una cita a
+        # algo dicho hace rato), así que no alcanza con buscarlo entre
+        # `mensajes`. Si el citado ya no existe (borrado, caso raro) su id
+        # simplemente no aparece acá y el campo `mensaje_citado` sale None
+        # más abajo — no rompe nada.
+        citado_ids = {m.respondido_a_id for m in mensajes if m.respondido_a_id}
+        citados: dict[int, tuple[str, str]] = {}
+        if citado_ids:
+            query_citados = select(Mensaje.id, Mensaje.role, Mensaje.content).where(Mensaje.id.in_(citado_ids))
+            result_citados = await session.execute(query_citados)
+            citados = {fila.id: (fila.role, fila.content) for fila in result_citados}
+
         return [
             {
+                # `id` interno — clave estable para que el frontend pueda
+                # referenciar ESTE mensaje puntual (citarlo con Reply/Quote,
+                # ver obtener_mensaje_por_id, o mostrar su opción de
+                # reintento si estado_envio=="fallido"). No viajaba antes
+                # porque nada lo necesitaba.
+                "id": msg.id,
                 "role": msg.role, "content": msg.content, "archivo_id": msg.archivo_id,
                 "archivo_tipo": content_types.get(msg.archivo_id), "via_app": msg.via_app,
+                # wamid de Meta (ver Mensaje.mensaje_id_meta) — nulo si el
+                # mensaje es anterior a este campo o si un envío saliente
+                # falló. El frontend lo necesita para poder citar ESTE
+                # mensaje desde otro (Reply/Quote); si es nulo, la cita debe
+                # deshabilitarse en la UI (el backend la rechaza igual si se
+                # intenta, ver responder_cliente).
+                "mensaje_id_meta": msg.mensaje_id_meta,
+                # "fallido" si este envío saliente no se pudo confirmar con
+                # Meta — el frontend lo usa para ofrecer reintentar. None en
+                # cualquier otro caso (entrante, o saliente exitoso).
+                "estado_envio": msg.estado_envio,
                 # Instante real del mensaje, con sufijo `Z` (ver iso_utc): sin
                 # él, `new Date()` en el navegador lo lee como hora local y en
                 # Lima aparece ~5 h adelantado. El campo ya existía en la
@@ -836,9 +980,34 @@ async def obtener_historial(telefono: str, limite: int = 20) -> list[dict]:
                 # (chat del panel, /mensajes.json) no tenía forma de fechar un
                 # mensaje.
                 "timestamp": iso_utc(msg.timestamp),
+                # Vista previa del mensaje que ESTE mensaje citó al enviarse
+                # (Reply/Quote) — resuelto contra `citados` arriba. `None` si
+                # este mensaje no citó nada, o si citó algo que ya no existe.
+                # `BurbujaMensaje` (maiek-frontend) ya sabe pintar esta forma
+                # exacta ({autor, extracto}); antes de este campo siempre
+                # llegaba `undefined` y ningún mensaje mostraba la cita.
+                "mensaje_citado": (
+                    {"autor": citados[msg.respondido_a_id][0], "extracto": _extracto_cita(citados[msg.respondido_a_id][1])}
+                    if msg.respondido_a_id and msg.respondido_a_id in citados
+                    else None
+                ),
             }
             for msg in mensajes
         ]
+
+
+LARGO_EXTRACTO_CITA = 160
+
+
+def _extracto_cita(content: str) -> str:
+    """Recorta el contenido del mensaje citado antes de mandarlo al
+    frontend — la burbuja solo necesita una vista previa corta (la UI ya la
+    trunca visualmente a una línea), no el mensaje completo, que puede ser
+    un párrafo largo."""
+    content = content or ""
+    if len(content) <= LARGO_EXTRACTO_CITA:
+        return content
+    return content[:LARGO_EXTRACTO_CITA].rstrip() + "…"
 
 
 async def obtener_ultimos_mensajes(telefonos: list[str]) -> dict[str, dict]:
@@ -1263,18 +1432,27 @@ async def marcar_lead_no_visto(telefono: str):
             await session.commit()
 
 
-async def liberar_asignacion(telefono: str):
-    """Quita la asignación de un lead — se usa cuando el caso anterior ya
-    quedó cerrado (vendido / no interesado) y el cliente vuelve a escribir,
-    probablemente por una necesidad nueva. Gabi retoma la atención. También
-    limpia pausado_manual, para que un caso viejo respondido desde la app no
-    deje a Gabi pausada para siempre en un lead que ya se cerró.
+async def liberar_asignacion(telefono: str, autor: str | None = None, motivo: str = "caso_cerrado"):
+    """Quita la asignación de un lead y limpia pausado_manual — Gabi retoma
+    la atención. Dos llamadores, con la misma mecánica pero distinto origen:
 
-    Es una escritura automática (la dispara el webhook, no una persona): igual
-    que la reasignación automática, avanza la versión del lead y deja un
-    evento en el Timeline — cambiar el dueño de un lead sin dejar rastro es
-    justo lo que hacía invisible este flujo. La liberación se aplica siempre;
-    nunca se bloquea por concurrencia (ver _avanzar_version)."""
+    1. El webhook (main.py), cuando un caso YA CERRADO recibe un mensaje
+       nuevo del cliente — llamada automática, sin `autor` (default None,
+       motivo="caso_cerrado"): comportamiento IDÉNTICO al de antes de que
+       este método aceptara estos parámetros.
+    2. El endpoint manual "reactivar a Gabi" (dashboard.py), donde una
+       persona del equipo decide devolverle el control a Gabi en un caso
+       que sigue ABIERTO — pasa su propio nombre como `autor` y
+       motivo="reactivado_manual", para que el Timeline describa la acción
+       real en vez de la justificación automática ("el caso ya estaba
+       cerrado"), que sería falsa en ese escenario.
+
+    Es una escritura sin control de concurrencia optimista (a diferencia de
+    las 3 escrituras humanas del CRM que sí usan intentar_avanzar_version):
+    avanza la versión del lead incondicionalmente y deja un evento en el
+    Timeline — cambiar el dueño de un lead sin dejar rastro es justo lo que
+    hacía invisible este flujo. Se aplica siempre; nunca se bloquea por
+    concurrencia (ver _avanzar_version)."""
     async with async_session() as session:
         lead = await session.get(Lead, telefono)
         if lead is None:
@@ -1287,11 +1465,16 @@ async def liberar_asignacion(telefono: str):
         lead.actualizado = datetime.utcnow()
         await session.commit()
 
+    descripcion = (
+        "El caso anterior ya estaba cerrado — se liberó la asignación y Gabi retomó la atención"
+        if motivo == "caso_cerrado" else
+        "Devolvió el control de la conversación a Gabi"
+    )
     await registrar_evento_lead(
-        telefono, tipo="desasignado_automatico",
-        descripcion="El caso anterior ya estaba cerrado — se liberó la asignación y Gabi retomó la atención",
-        autor=None,
-        payload={"campo": "asesor_asignado", "anterior": anterior, "nuevo": None, "motivo": "caso_cerrado"},
+        telefono, tipo="desasignado_automatico" if autor is None else "desasignado",
+        descripcion=descripcion,
+        autor=autor,
+        payload={"campo": "asesor_asignado", "anterior": anterior, "nuevo": None, "motivo": motivo},
     )
 
 

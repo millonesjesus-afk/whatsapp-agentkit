@@ -30,6 +30,14 @@ class MensajeEntrante:
     # celular, no desde el panel). En "echo", telefono es el número del
     # CLIENTE (destinatario del mensaje), no del negocio.
     tipo_evento: str = "mensaje"
+    # Metadata del adjunto entrante cuando tipo es "image", "document" o
+    # "audio" — {"media_id": str, "mime_type": str, "filename": str,
+    # "caption": str}. El webhook solo trae esto (y el media_id), no el
+    # contenido real: hay que descargarlo aparte con
+    # ProveedorWhatsApp.descargar_media antes de poder guardarlo/mostrarlo.
+    # None para "text" y para cualquier tipo no soportado (video, sticker,
+    # ubicación, etc. — fuera de alcance).
+    media: dict | None = None
 
 
 class ProveedorWhatsApp(ABC):
@@ -41,10 +49,19 @@ class ProveedorWhatsApp(ABC):
         ...
 
     @abstractmethod
-    async def enviar_mensaje(self, telefono: str, mensaje: str, canal: dict | None = None) -> bool:
-        """Envía un mensaje de texto. Retorna True si fue exitoso.
+    async def enviar_mensaje(
+        self, telefono: str, mensaje: str, canal: dict | None = None, mensaje_id_citado: str | None = None,
+    ) -> tuple[bool, str | None]:
+        """Envía un mensaje de texto. Retorna (True, wamid) si fue exitoso
+        — wamid es el `id` real que Meta le asignó al mensaje (None si el
+        proveedor no lo expone), para poder persistirlo como
+        Mensaje.mensaje_id_meta y habilitar citarlo después. (False, None)
+        si falló.
         canal: el número de WhatsApp del negocio por el que enviar (ver
-        resolver_canal) — None usa el canal por defecto del proveedor."""
+        resolver_canal) — None usa el canal por defecto del proveedor.
+        mensaje_id_citado: wamid de OTRO mensaje que se está citando
+        (Reply/Quote — payload `"context": {"message_id": ...}` de Meta).
+        None (default) envía un mensaje normal, sin cita."""
         ...
 
     async def validar_webhook(self, request: Request) -> dict | int | None:
@@ -77,20 +94,32 @@ class ProveedorWhatsApp(ABC):
         proveedor que lo soporte debe sobreescribirlo."""
         return None
 
-    async def enviar_documento(self, telefono: str, media_id: str, nombre_archivo: str, caption: str = "", canal: dict | None = None) -> bool:
-        """Envía un documento (PDF, etc.) ya subido con subir_media. No-op
-        por defecto — cada proveedor que lo soporte debe sobreescribirlo."""
-        return False
+    async def enviar_documento(self, telefono: str, media_id: str, nombre_archivo: str, caption: str = "", canal: dict | None = None) -> tuple[bool, str | None]:
+        """Envía un documento (PDF, etc.) ya subido con subir_media. Retorna
+        (éxito, wamid) — ver enviar_mensaje. No-op por defecto — cada
+        proveedor que lo soporte debe sobreescribirlo."""
+        return False, None
 
-    async def enviar_imagen(self, telefono: str, media_id: str, caption: str = "", canal: dict | None = None) -> bool:
-        """Envía una imagen ya subida con subir_media. No-op por defecto —
-        cada proveedor que lo soporte debe sobreescribirlo."""
-        return False
+    async def enviar_imagen(self, telefono: str, media_id: str, caption: str = "", canal: dict | None = None) -> tuple[bool, str | None]:
+        """Envía una imagen ya subida con subir_media. Retorna (éxito,
+        wamid) — ver enviar_mensaje. No-op por defecto — cada proveedor que
+        lo soporte debe sobreescribirlo."""
+        return False, None
 
-    async def enviar_audio(self, telefono: str, media_id: str, canal: dict | None = None) -> bool:
-        """Envía una nota de voz ya subida con subir_media. No-op por
-        defecto — cada proveedor que lo soporte debe sobreescribirlo."""
-        return False
+    async def enviar_audio(self, telefono: str, media_id: str, canal: dict | None = None) -> tuple[bool, str | None]:
+        """Envía una nota de voz ya subida con subir_media. Retorna (éxito,
+        wamid) — ver enviar_mensaje. No-op por defecto — cada proveedor que
+        lo soporte debe sobreescribirlo."""
+        return False, None
+
+    async def descargar_media(self, media_id: str, canal: dict | None = None) -> tuple[bytes, str] | None:
+        """Descarga el contenido real de un adjunto ENTRANTE (imagen,
+        documento, audio) a partir de su media_id (ver MensajeEntrante.media)
+        — el webhook solo trae el id, no el archivo. Retorna (contenido,
+        mime_type), o None si el proveedor no lo soporta o la descarga
+        falló. No-op por defecto — cada proveedor que lo soporte debe
+        sobreescribirlo."""
+        return None
 
     async def obtener_datos_leadgen(self, leadgen_id: str, canal: dict | None = None) -> dict | None:
         """Trae los datos completos (nombre, teléfono, formulario/anuncio de

@@ -13,6 +13,19 @@ from agent.http_utils import post_con_reintentos, get_con_reintentos
 logger = logging.getLogger("agentkit")
 
 
+def _extraer_wamid(respuesta) -> str | None:
+    """Extrae el wamid (`id` real del mensaje en WhatsApp) que Meta devuelve
+    en el body de una respuesta 200 a un envío — se persiste como
+    Mensaje.mensaje_id_meta para poder citarlo después (Reply/Quote) o
+    correlacionar reintentos. None si la respuesta no trae el campo
+    esperado (no debería pasar con status 200, pero no se asume)."""
+    try:
+        mensajes = respuesta.json().get("messages") or []
+        return mensajes[0].get("id") or None
+    except (ValueError, IndexError, AttributeError, KeyError):
+        return None
+
+
 class ProveedorMeta(ProveedorWhatsApp):
     """Proveedor de WhatsApp usando la API oficial de Meta (Cloud API).
     Soporta uno o varios números de WhatsApp (canales) a la vez — los
@@ -86,6 +99,7 @@ class ProveedorMeta(ProveedorWhatsApp):
                 numero_whatsapp_id = value.get("metadata", {}).get("phone_number_id", "")
                 for msg in value.get("messages", []):
                     tipo = msg.get("type", "unknown")
+                    media = None
                     if tipo == "text":
                         texto = msg.get("text", {}).get("body", "")
                     elif tipo == "button":
@@ -96,6 +110,22 @@ class ProveedorMeta(ProveedorWhatsApp):
                         # vez de recibir un mensaje vacío o "no soportado".
                         texto = msg.get("button", {}).get("text", "")
                         tipo = "text"
+                    elif tipo in ("image", "document", "audio"):
+                        # Adjunto real (imagen/documento/nota de voz) — el
+                        # webhook solo trae el media_id y su metadata, no el
+                        # contenido: hay que descargarlo aparte (ver
+                        # descargar_media) antes de poder guardarlo/
+                        # mostrarlo en el panel. "filename" solo viene en
+                        # tipo "document"; "caption" puede venir en
+                        # image/document, nunca en audio.
+                        objeto_media = msg.get(tipo, {})
+                        media = {
+                            "media_id": objeto_media.get("id", ""),
+                            "mime_type": objeto_media.get("mime_type", ""),
+                            "filename": objeto_media.get("filename", ""),
+                            "caption": objeto_media.get("caption", ""),
+                        }
+                        texto = ""
                     else:
                         texto = ""
                     mensajes.append(MensajeEntrante(
@@ -108,6 +138,7 @@ class ProveedorMeta(ProveedorWhatsApp):
                         # Click-to-WhatsApp (Meta Ads) — trae source_id, headline, etc.
                         referral=msg.get("referral"),
                         numero_whatsapp_id=numero_whatsapp_id,
+                        media=media,
                     ))
                 # Coexistencia: un asesor respondió al cliente directo desde
                 # la app de WhatsApp Business en el celular (no desde Gabi ni
@@ -152,12 +183,20 @@ class ProveedorMeta(ProveedorWhatsApp):
             logger.warning(f"No se pudo marcar leído/escribiendo: {r.status_code} — {r.text}")
         return r.status_code == 200
 
-    async def enviar_mensaje(self, telefono: str, mensaje: str, canal: dict | None = None) -> bool:
-        """Envía mensaje via Meta WhatsApp Cloud API."""
+    async def enviar_mensaje(
+        self, telefono: str, mensaje: str, canal: dict | None = None, mensaje_id_citado: str | None = None,
+    ) -> tuple[bool, str | None]:
+        """Envía mensaje via Meta WhatsApp Cloud API.
+
+        mensaje_id_citado: wamid de otro mensaje que se está citando
+        (Reply/Quote) — arma el `context` del payload de Meta. Quien llama
+        (dashboard.py:responder_cliente) ya validó que ese wamid exista
+        antes de pasarlo acá; esta función no vuelve a validar nada, solo
+        lo reenvía tal cual."""
         canal = canal or await self.resolver_canal(None)
         if not canal or not canal.get("access_token"):
             logger.warning("Ningún canal de WhatsApp configurado (META_CANAL_1_* o META_ACCESS_TOKEN/META_PHONE_NUMBER_ID)")
-            return False
+            return False, None
         url = f"https://graph.facebook.com/{self.api_version}/{canal['phone_number_id']}/messages"
         headers = {
             "Authorization": f"Bearer {canal['access_token']}",
@@ -169,10 +208,13 @@ class ProveedorMeta(ProveedorWhatsApp):
             "type": "text",
             "text": {"body": mensaje},
         }
+        if mensaje_id_citado:
+            payload["context"] = {"message_id": mensaje_id_citado}
         r = await post_con_reintentos(url, json=payload, headers=headers)
         if r.status_code != 200:
             logger.error(f"Error Meta API: {r.status_code} — {r.text}")
-        return r.status_code == 200
+            return False, None
+        return True, _extraer_wamid(r)
 
     async def subir_media(self, contenido: bytes, nombre_archivo: str, content_type: str, canal: dict | None = None) -> str | None:
         """Sube un archivo a los servidores de Meta (quedan alojados ahí
@@ -193,12 +235,12 @@ class ProveedorMeta(ProveedorWhatsApp):
             return None
         return r.json().get("id")
 
-    async def enviar_documento(self, telefono: str, media_id: str, nombre_archivo: str, caption: str = "", canal: dict | None = None) -> bool:
+    async def enviar_documento(self, telefono: str, media_id: str, nombre_archivo: str, caption: str = "", canal: dict | None = None) -> tuple[bool, str | None]:
         """Envía un documento (PDF, etc.) ya subido con subir_media."""
         canal = canal or await self.resolver_canal(None)
         if not canal or not canal.get("access_token"):
             logger.warning("Ningún canal de WhatsApp configurado")
-            return False
+            return False, None
         url = f"https://graph.facebook.com/{self.api_version}/{canal['phone_number_id']}/messages"
         headers = {
             "Authorization": f"Bearer {canal['access_token']}",
@@ -216,14 +258,15 @@ class ProveedorMeta(ProveedorWhatsApp):
         r = await post_con_reintentos(url, json=payload, headers=headers)
         if r.status_code != 200:
             logger.error(f"Error Meta API (documento): {r.status_code} — {r.text}")
-        return r.status_code == 200
+            return False, None
+        return True, _extraer_wamid(r)
 
-    async def enviar_imagen(self, telefono: str, media_id: str, caption: str = "", canal: dict | None = None) -> bool:
+    async def enviar_imagen(self, telefono: str, media_id: str, caption: str = "", canal: dict | None = None) -> tuple[bool, str | None]:
         """Envía una imagen ya subida con subir_media."""
         canal = canal or await self.resolver_canal(None)
         if not canal or not canal.get("access_token"):
             logger.warning("Ningún canal de WhatsApp configurado")
-            return False
+            return False, None
         url = f"https://graph.facebook.com/{self.api_version}/{canal['phone_number_id']}/messages"
         headers = {
             "Authorization": f"Bearer {canal['access_token']}",
@@ -241,15 +284,16 @@ class ProveedorMeta(ProveedorWhatsApp):
         r = await post_con_reintentos(url, json=payload, headers=headers)
         if r.status_code != 200:
             logger.error(f"Error Meta API (imagen): {r.status_code} — {r.text}")
-        return r.status_code == 200
+            return False, None
+        return True, _extraer_wamid(r)
 
-    async def enviar_audio(self, telefono: str, media_id: str, canal: dict | None = None) -> bool:
+    async def enviar_audio(self, telefono: str, media_id: str, canal: dict | None = None) -> tuple[bool, str | None]:
         """Envía una nota de voz ya subida con subir_media (debe ser OGG/Opus
         — el mensaje tipo audio de WhatsApp no admite caption)."""
         canal = canal or await self.resolver_canal(None)
         if not canal or not canal.get("access_token"):
             logger.warning("Ningún canal de WhatsApp configurado")
-            return False
+            return False, None
         url = f"https://graph.facebook.com/{self.api_version}/{canal['phone_number_id']}/messages"
         headers = {
             "Authorization": f"Bearer {canal['access_token']}",
@@ -264,7 +308,38 @@ class ProveedorMeta(ProveedorWhatsApp):
         r = await post_con_reintentos(url, json=payload, headers=headers)
         if r.status_code != 200:
             logger.error(f"Error Meta API (audio): {r.status_code} — {r.text}")
-        return r.status_code == 200
+            return False, None
+        return True, _extraer_wamid(r)
+
+    async def descargar_media(self, media_id: str, canal: dict | None = None) -> tuple[bytes, str] | None:
+        """Descarga un adjunto ENTRANTE (imagen/documento/nota de voz) desde
+        los servidores de Meta. Dos pasos, como exige la API: primero un GET
+        a `/{media_id}` para resolver la URL temporal de descarga (expira a
+        los pocos minutos, no se puede cachear), después el GET real del
+        contenido — ambos con el mismo Bearer token del canal. Retorna
+        (contenido, mime_type), o None si el canal no está configurado o
+        cualquiera de los dos pasos falla."""
+        canal = canal or await self.resolver_canal(None)
+        if not canal or not canal.get("access_token"):
+            logger.warning("Ningún canal de WhatsApp configurado")
+            return None
+        headers = {"Authorization": f"Bearer {canal['access_token']}"}
+        url_metadata = f"https://graph.facebook.com/{self.api_version}/{media_id}"
+        r = await get_con_reintentos(url_metadata, headers=headers)
+        if r.status_code != 200:
+            logger.error(f"Error obteniendo metadata de media {media_id}: {r.status_code} — {r.text}")
+            return None
+        datos = r.json()
+        url_descarga = datos.get("url")
+        mime_type = datos.get("mime_type", "application/octet-stream")
+        if not url_descarga:
+            logger.error(f"Metadata de media {media_id} sin URL de descarga")
+            return None
+        r2 = await get_con_reintentos(url_descarga, headers=headers)
+        if r2.status_code != 200:
+            logger.error(f"Error descargando contenido de media {media_id}: {r2.status_code}")
+            return None
+        return r2.content, mime_type
 
     async def obtener_datos_leadgen(self, leadgen_id: str, canal: dict | None = None) -> dict | None:
         """Trae nombre/teléfono/formulario de origen de un lead de Meta Lead

@@ -52,7 +52,7 @@ from agent.memory import (
     listar_productos, obtener_producto, crear_producto, editar_producto,
     toggle_producto, listar_historial_producto, importar_catalogo_desde_csv,
     CAMPOS_NEGOCIO_PRODUCTO, PLAZOS_CUOTAS_CATALOGO,
-    iso_utc,
+    iso_utc, ROLES_CON_VISION_TOTAL, tiene_acceso_a_lead, liberar_asignacion,
 )
 from agent.services.servicio_conversacion import servicio_conversacion
 from agent.http_utils import get_con_reintentos, post_con_reintentos
@@ -147,7 +147,11 @@ ETIQUETAS_RESULTADO = {
     "servicio_postventa": "Servicio Postventa",
     "cartera_fnb": "Cartera FNB",
 }
-ROLES_CON_VISION_TOTAL = ("admin", "supervisor")
+# ROLES_CON_VISION_TOTAL vive en agent/memory.py (importado arriba) — no acá:
+# agent/tiempo_real.py (el WebSocket) necesita el mismo valor para filtrar a
+# quién emitirle un evento, y no puede importar este módulo sin crear un
+# ciclo (dashboard.py ya importa tiempo_real.py). Antes eran dos copias del
+# mismo valor, con riesgo real de desincronizarse.
 
 COLOR_RESULTADO = {
     "agendado": "#2563eb",
@@ -302,9 +306,7 @@ async def verificar_csrf(request: Request) -> None:
 
 def _verificar_acceso_lead(usuario: dict, lead: dict):
     """Un asesor solo puede ver/editar sus propios leads asignados."""
-    if usuario["rol"] in ROLES_CON_VISION_TOTAL:
-        return
-    if lead.get("asesor_asignado") != usuario["username"]:
+    if not tiene_acceso_a_lead(usuario["rol"], usuario["username"], lead.get("asesor_asignado")):
         raise HTTPException(status_code=403, detail="No tienes acceso a este lead")
 
 
@@ -316,8 +318,52 @@ def _verificar_acceso_lead(usuario: dict, lead: dict):
 # cada vez que se abre un chat distinto. El cliente avisa qué lead tiene
 # activo con el mensaje "ver_lead"; el servidor usa eso para saber a quién
 # mandarle el "escribiendo..." de otro miembro del equipo.
+
+# Allowlist de orígenes cross-origin autorizados a abrir este WebSocket —
+# hoy solo hace falta para la Nueva Experiencia (Next.js/Vercel), que corre
+# en un origen DISTINTO al de este backend. El panel legacy (servido por
+# este mismo FastAPI) siempre es same-origin y se detecta comparando el
+# Origin del navegador contra el Host de la propia solicitud (ver
+# _origen_websocket_permitido) — no necesita estar en esta lista, y no se
+# hardcodea acá el dominio de Railway porque Railway lo asigna, no nosotros.
+#
+# IMPORTANTE — pendiente operativo: hay que configurar FRONTEND_ORIGINS_PERMITIDOS
+# en las variables de entorno de Railway con el dominio real de producción
+# del frontend en Vercel antes de que la Nueva Experiencia pueda abrir este
+# WebSocket contra el backend en producción — no está documentado en este
+# repo cuál es ese dominio, así que no se puede hardcodear con certeza acá.
+_ORIGENES_WS_PERMITIDOS = {
+    o.strip() for o in os.getenv(
+        "FRONTEND_ORIGINS_PERMITIDOS", "http://localhost:3000,http://127.0.0.1:3000",
+    ).split(",") if o.strip()
+}
+
+
+def _origen_websocket_permitido(websocket: WebSocket) -> bool:
+    """True si el Origin del navegador es el mismo origen que este backend
+    (panel legacy, calculado a partir del propio Host de la solicitud — sin
+    hardcodear el dominio de Railway) o si está en la allowlist explícita de
+    FRONTEND_ORIGINS_PERMITIDOS (la Nueva Experiencia, en otro origen).
+    Clientes que no mandan Origin (algunos clientes no-navegador) se dejan
+    pasar — no hay nada que validar sin ese header, mismo comportamiento que
+    antes de este chequeo."""
+    origen = websocket.headers.get("origin")
+    if not origen:
+        return True
+    host = websocket.headers.get("host", "")
+    esquema_http = "https" if websocket.url.scheme == "wss" else "http"
+    if origen == f"{esquema_http}://{host}":
+        return True
+    return origen in _ORIGENES_WS_PERMITIDOS
+
+
 @router.websocket("/ws")
 async def websocket_panel(websocket: WebSocket):
+    if not _origen_websocket_permitido(websocket):
+        logger.warning(f"WebSocket del panel rechazado por Origin no permitido: {websocket.headers.get('origin')}")
+        await websocket.close(code=4403)
+        return
+
     username = websocket.session.get("username")
     if not username:
         await websocket.close(code=4401)
@@ -327,17 +373,36 @@ async def websocket_panel(websocket: WebSocket):
         await websocket.close(code=4401)
         return
 
-    await gestor_conexiones.conectar(websocket, username)
+    await gestor_conexiones.conectar(websocket, username, usuario["rol"])
     try:
         while True:
             datos = await websocket.receive_json()
             tipo = datos.get("tipo")
             if tipo == "ver_lead":
-                gestor_conexiones.set_telefono_activo(websocket, datos.get("telefono") or None)
+                telefono_pedido = datos.get("telefono") or None
+                if telefono_pedido:
+                    # Mismo criterio de acceso que _verificar_acceso_lead —
+                    # antes se aceptaba cualquier teléfono que el cliente
+                    # mandara sin validar nada, así que un asesor podía
+                    # marcarse como "viendo" un lead ajeno y recibir el
+                    # "escribiendo..." de esa conversación.
+                    lead_pedido = await obtener_lead(telefono_pedido)
+                    if lead_pedido is None or not tiene_acceso_a_lead(
+                        usuario["rol"], usuario["username"], lead_pedido.get("asesor_asignado"),
+                    ):
+                        continue
+                await gestor_conexiones.set_telefono_activo(websocket, telefono_pedido)
             elif tipo == "escribiendo":
                 telefono = datos.get("telefono")
                 if telefono:
-                    await gestor_conexiones.emitir_escribiendo(telefono, usuario["nombre"], excluir=websocket)
+                    # excluir_username (no `excluir=websocket`): la conexión
+                    # que dispara esta señal puede ser la efímera que abre el
+                    # relay del BFF para POST /api/conversaciones/escribiendo,
+                    # distinta de la conexión persistente de este mismo
+                    # usuario que recibe el relay SSE — excluir por identidad
+                    # de socket nunca las hacía coincidir (ver
+                    # agent/tiempo_real.py).
+                    await gestor_conexiones.emitir_escribiendo(telefono, usuario["nombre"], excluir_username=username)
     except WebSocketDisconnect:
         pass
     except Exception as e:
@@ -4295,11 +4360,19 @@ async def detalle_lead(
 
 @router.get("/lead/{telefono}/mensajes.json")
 async def mensajes_json(telefono: str, usuario: dict = Depends(_usuario_actual)):
-    """Endpoint liviano para que el chat se actualice solo, sin recargar la página."""
+    """Endpoint liviano para que el chat se actualice solo, sin recargar la página.
+
+    También es la señal de actividad real para el idle timeout de conexiones
+    WS del panel (Gate 4.1 — ver `GestorConexiones.tocar_actividad`): esta
+    ruta es la que golpea `usePollingIncondicional` cada 20s desde el
+    navegador SIEMPRE que la conversación sigue abierta en pantalla, sin
+    importar el estado del WS/SSE — por eso es la fuente de verdad de "el
+    navegador sigue ahí", no el tráfico del propio WS."""
     lead = await obtener_lead(telefono)
     if lead is None:
         raise HTTPException(status_code=404, detail="Lead no encontrado")
     _verificar_acceso_lead(usuario, lead)
+    gestor_conexiones.tocar_actividad(usuario["username"], telefono)
     historial = await servicio_conversacion.obtener_historial(telefono, limite=200)
     return JSONResponse(historial)
 
@@ -4354,10 +4427,42 @@ async def notificaciones_json(usuario: dict = Depends(_usuario_actual)):
     return JSONResponse({"leads_nuevos": leads_nuevos, "agendados_proximos": agendados_proximos})
 
 
+# Ventana de atención de 24 horas de WhatsApp (Meta): un negocio solo puede
+# mandar mensajes "libres" (no-plantilla) dentro de las 24h desde el ÚLTIMO
+# mensaje entrante real del cliente — pasado ese plazo, Meta rechaza el envío
+# y solo una plantilla aprobada puede reabrir la conversación (enviar_plantilla,
+# fuera de alcance de este Gate: "no actives ningún envío de plantilla real").
+VENTANA_ATENCION_HORAS = 24
+
+
+async def _verificar_ventana_atencion(telefono: str):
+    """Antes de intentar cualquier envío libre a un lead: si ya se cerró la
+    ventana de 24h, se rechaza acá con un error diferenciado (409) en vez de
+    dejar que Meta lo rechace y mostrar el mismo 502 genérico que cualquier
+    otra falla (token vencido, canal caído, etc.) — el asesor necesita saber
+    que ESTO puntualmente es la ventana cerrada, no un problema técnico."""
+    ultimo = await servicio_conversacion.obtener_timestamp_ultimo_mensaje_usuario(telefono)
+    if ultimo is None or (datetime.utcnow() - ultimo) > timedelta(hours=VENTANA_ATENCION_HORAS):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "La ventana de atención de 24 horas de WhatsApp está cerrada para este "
+                "cliente — Meta ya no permite enviarle mensajes libres hasta que él vuelva "
+                "a escribir, o mediante una plantilla aprobada (no disponible todavía)."
+            ),
+        )
+
+
 @router.post("/lead/{telefono}/responder")
 async def responder_cliente(
     telefono: str,
     mensaje: str = Form(...),
+    # Id interno (Mensaje.id, NO el wamid de Meta) del mensaje que se está
+    # citando — Reply/Quote. Se resuelve acá contra la base para sacar su
+    # mensaje_id_meta real y armar el `context` del envío; si ese mensaje no
+    # tiene wamid (histórico previo a este campo, o un envío que falló) la
+    # cita se rechaza en vez de mandarle a Meta un context inválido.
+    mensaje_id_citado: int | None = Form(None),
     usuario: dict = Depends(_usuario_actual),
     _csrf: None = Depends(verificar_csrf),
 ):
@@ -4366,23 +4471,64 @@ async def responder_cliente(
     lead = await obtener_lead(telefono)
     if lead is None:
         raise HTTPException(status_code=404, detail="Lead no encontrado")
+    # Antes había acá un guard adicional (`if not lead.get("asesor_asignado"):
+    # raise HTTPException(400, ...)`) que exigía un lead ya asignado para
+    # poder responderle. Se removió a propósito: contradecía la matriz de
+    # permisos aprobada (MPA §9 — admin ve/actúa sobre todas, supervisor sobre
+    # su equipo, asesor sobre las propias, sin condicionar a que el lead esté
+    # asignado). El control de acceso real ya lo hace `_verificar_acceso_lead`
+    # (arriba), que delega en `tiene_acceso_a_lead`; ese chequeo de asignación
+    # era redundante y además bloqueaba casos legítimos (ej. supervisor
+    # respondiendo un lead de su equipo todavía sin asesor).
     _verificar_acceso_lead(usuario, lead)
-    if not lead.get("asesor_asignado"):
-        raise HTTPException(status_code=400, detail="Este lead aún no está asignado a un asesor")
 
     mensaje = mensaje.strip()
     if not mensaje:
         raise HTTPException(status_code=400, detail="El mensaje no puede estar vacío")
 
+    await _verificar_ventana_atencion(telefono)
+
+    wamid_citado = None
+    if mensaje_id_citado is not None:
+        mensaje_original = await servicio_conversacion.obtener_mensaje_por_id(mensaje_id_citado)
+        if mensaje_original is None or mensaje_original["telefono"] != telefono:
+            raise HTTPException(status_code=404, detail="El mensaje que quieres citar no existe en esta conversación")
+        if not mensaje_original.get("mensaje_id_meta"):
+            raise HTTPException(
+                status_code=422,
+                detail="Este mensaje no se puede citar — no tiene un identificador de WhatsApp asociado (por ejemplo, es anterior a esta función, o su envío falló)",
+            )
+        wamid_citado = mensaje_original["mensaje_id_meta"]
+
     proveedor = obtener_proveedor()
     canal = await proveedor.resolver_canal(lead.get("numero_whatsapp_id"))
-    enviado = await proveedor.enviar_mensaje(telefono, mensaje, canal=canal)
-    if not enviado:
-        raise HTTPException(status_code=502, detail="No se pudo enviar el mensaje por WhatsApp")
+    enviado, wamid = await proveedor.enviar_mensaje(telefono, mensaje, canal=canal, mensaje_id_citado=wamid_citado)
 
-    await servicio_conversacion.guardar_mensaje(telefono, "asesor", mensaje)
+    # A diferencia del comportamiento anterior (no guardar nada si el envío
+    # fallaba), el mensaje se persiste igual con estado_envio="fallido" —
+    # para que el frontend lo muestre con opción de reintento en vez de
+    # perderlo en silencio. La respuesta también deja de ser un 502 sin más
+    # información: trae el id del mensaje ya guardado para que el frontend
+    # pueda ofrecer "reintentar" sobre ÉL, no solo mostrar un error genérico.
+    mensaje_guardado = await servicio_conversacion.guardar_mensaje(
+        telefono, "asesor", mensaje,
+        mensaje_id_meta=wamid, estado_envio=None if enviado else "fallido",
+        # Persiste la relación con el mensaje citado (Reply/Quote) — antes
+        # solo se resolvía el wamid para el envío a Meta y se perdía acá, así
+        # que la cita salía bien por WhatsApp pero desaparecía del panel en
+        # cuanto se recargaba la conversación (mensajes.json no tenía de
+        # dónde sacarla). mensaje_id_citado ya viene validado arriba (existe,
+        # es de esta conversación, tiene wamid) antes de llegar a este punto.
+        respondido_a_id=mensaje_id_citado,
+    )
     await gestor_conexiones.emitir_mensaje_nuevo(telefono)
-    return JSONResponse({"status": "ok"})
+
+    if not enviado:
+        return _respuesta_envio_fallido(
+            "No se pudo enviar el mensaje por WhatsApp — el mensaje quedó guardado, puedes reintentar.",
+            mensaje_guardado["id"],
+        )
+    return JSONResponse({"status": "ok", "mensaje_id": mensaje_guardado["id"]})
 
 
 def _convertir_a_ogg_opus(contenido_webm: bytes) -> bytes:
@@ -4430,23 +4576,38 @@ def _guardar_archivo_en_disco(nombre_original: str, contenido: bytes) -> str:
     return ruta_disco
 
 
-async def _subir_y_enviar_media(telefono: str, nombre_archivo: str, content_type: str, contenido: bytes, caption: str, canal: dict | None = None) -> bool:
+async def _subir_y_enviar_media(telefono: str, nombre_archivo: str, content_type: str, contenido: bytes, caption: str, canal: dict | None = None) -> tuple[bool, str | None]:
     """Sube el archivo a WhatsApp y lo envía como imagen o documento según
     su tipo — común entre el envío de una proforma nueva y el reenvío de un
-    catálogo ya guardado."""
+    catálogo ya guardado. Retorna (enviado, wamid) — a diferencia de antes,
+    YA NO lanza HTTPException si la subida o el envío fallan: el llamador
+    necesita poder guardar igual el mensaje con estado_envio="fallido" (ver
+    responder_cliente) en vez de perder el intento por completo. Una subida
+    fallida (media_id vacío) se trata como el mismo tipo de falla que un
+    envío fallido — desde la óptica del asesor, el archivo no le llegó al
+    cliente en ninguno de los dos casos."""
     proveedor = obtener_proveedor()
     media_id = await proveedor.subir_media(contenido, nombre_archivo, content_type, canal=canal)
     if not media_id:
-        raise HTTPException(status_code=502, detail="No se pudo subir el archivo a WhatsApp")
+        return False, None
     es_imagen = content_type.startswith("image/")
-    enviado = (
+    enviado, wamid = (
         await proveedor.enviar_imagen(telefono, media_id, caption, canal=canal)
         if es_imagen else
         await proveedor.enviar_documento(telefono, media_id, nombre_archivo, caption, canal=canal)
     )
-    if not enviado:
-        raise HTTPException(status_code=502, detail="No se pudo enviar el archivo por WhatsApp")
-    return True
+    return enviado, wamid
+
+
+def _respuesta_envio_fallido(detalle: str, mensaje_id: int) -> JSONResponse:
+    """Misma forma de respuesta para los 4 endpoints de envío cuando Meta no
+    confirma la entrega — el mensaje YA quedó guardado (estado_envio=
+    "fallido") antes de llegar acá, así que el frontend recibe el id real
+    para ofrecer reintentar sobre ÉL, no solo un error genérico."""
+    return JSONResponse(
+        {"status": "error", "estado_envio": "fallido", "mensaje_id": mensaje_id, "detail": detalle},
+        status_code=502,
+    )
 
 
 @router.post("/lead/{telefono}/enviar-archivo")
@@ -4463,9 +4624,12 @@ async def enviar_archivo_chat(
     lead = await obtener_lead(telefono)
     if lead is None:
         raise HTTPException(status_code=404, detail="Lead no encontrado")
+    # Mismo criterio que responder_cliente: se removió a propósito el guard
+    # `if not lead.get("asesor_asignado"): raise HTTPException(400, ...)` que
+    # exigía asignación previa — contradecía la matriz de permisos aprobada
+    # (MPA §9). El control de acceso real lo hace `_verificar_acceso_lead`.
     _verificar_acceso_lead(usuario, lead)
-    if not lead.get("asesor_asignado"):
-        raise HTTPException(status_code=400, detail="Este lead aún no está asignado a un asesor")
+    await _verificar_ventana_atencion(telefono)
 
     extension = os.path.splitext(archivo.filename or "")[1].lower()
     if extension not in EXTENSIONES_ARCHIVO_PERMITIDAS:
@@ -4477,16 +4641,29 @@ async def enviar_archivo_chat(
 
     content_type = archivo.content_type or "application/octet-stream"
     canal = await obtener_proveedor().resolver_canal(lead.get("numero_whatsapp_id"))
-    await _subir_y_enviar_media(telefono, archivo.filename, content_type, contenido, caption.strip(), canal=canal)
+    enviado, wamid = await _subir_y_enviar_media(telefono, archivo.filename, content_type, contenido, caption.strip(), canal=canal)
 
+    # El archivo se guarda en disco y el mensaje se persiste SIEMPRE, haya
+    # llegado o no a Meta — igual que responder_cliente: si el envío falla,
+    # el asesor no tiene que volver a elegir el archivo desde su equipo para
+    # reintentar, el adjunto ya quedó guardado.
     ruta_disco = _guardar_archivo_en_disco(archivo.filename, contenido)
     archivo_guardado = await servicio_conversacion.crear_archivo_adjunto(
         nombre_original=archivo.filename, ruta_disco=ruta_disco, content_type=content_type,
         tamano_bytes=len(contenido), subido_por=usuario["username"], reutilizable=False,
     )
-    await servicio_conversacion.guardar_mensaje(telefono, "asesor", caption.strip() or archivo.filename, archivo_id=archivo_guardado["id"])
+    mensaje_guardado = await servicio_conversacion.guardar_mensaje(
+        telefono, "asesor", caption.strip() or archivo.filename,
+        archivo_id=archivo_guardado["id"], mensaje_id_meta=wamid, estado_envio=None if enviado else "fallido",
+    )
     await gestor_conexiones.emitir_mensaje_nuevo(telefono)
-    return JSONResponse({"status": "ok"})
+
+    if not enviado:
+        return _respuesta_envio_fallido(
+            "No se pudo enviar el archivo por WhatsApp — el mensaje quedó guardado, puedes reintentar.",
+            mensaje_guardado["id"],
+        )
+    return JSONResponse({"status": "ok", "mensaje_id": mensaje_guardado["id"]})
 
 
 @router.post("/lead/{telefono}/enviar-audio")
@@ -4502,9 +4679,12 @@ async def enviar_audio_chat(
     lead = await obtener_lead(telefono)
     if lead is None:
         raise HTTPException(status_code=404, detail="Lead no encontrado")
+    # Mismo criterio que responder_cliente: se removió a propósito el guard
+    # `if not lead.get("asesor_asignado"): raise HTTPException(400, ...)` que
+    # exigía asignación previa — contradecía la matriz de permisos aprobada
+    # (MPA §9). El control de acceso real lo hace `_verificar_acceso_lead`.
     _verificar_acceso_lead(usuario, lead)
-    if not lead.get("asesor_asignado"):
-        raise HTTPException(status_code=400, detail="Este lead aún no está asignado a un asesor")
+    await _verificar_ventana_atencion(telefono)
 
     contenido_webm = await audio.read()
     if len(contenido_webm) > TAMANO_MAXIMO_ARCHIVO_MB * 1024 * 1024:
@@ -4512,24 +4692,42 @@ async def enviar_audio_chat(
     if not contenido_webm:
         raise HTTPException(status_code=400, detail="No se recibió audio")
 
+    # La conversión WebM→OGG es un paso de PROCESAMIENTO local, previo a
+    # cualquier intento de contacto con Meta — si ffmpeg falla, no hay un
+    # audio válido que guardar ni que reintentar con los mismos bytes
+    # (reintentar daría el mismo error), así que sigue siendo un error duro
+    # (502) en vez de un estado_envio="fallido" persistido. Distinto del
+    # resto de este endpoint, donde la falla SÍ es "se generó el archivo
+    # pero Meta no lo confirmó" — ahí sí aplica el patrón de reintento.
     contenido_ogg = _convertir_a_ogg_opus(contenido_webm)
 
     proveedor = obtener_proveedor()
     canal = await proveedor.resolver_canal(lead.get("numero_whatsapp_id"))
     media_id = await proveedor.subir_media(contenido_ogg, "nota_de_voz.ogg", "audio/ogg", canal=canal)
-    if not media_id:
-        raise HTTPException(status_code=502, detail="No se pudo subir el audio a WhatsApp")
-    if not await proveedor.enviar_audio(telefono, media_id, canal=canal):
-        raise HTTPException(status_code=502, detail="No se pudo enviar el audio por WhatsApp")
+    enviado, wamid = (False, None)
+    if media_id:
+        enviado, wamid = await proveedor.enviar_audio(telefono, media_id, canal=canal)
 
+    # Mismo criterio que enviar-archivo: la nota de voz ya convertida se
+    # guarda y el mensaje se persiste SIEMPRE, para que un envío fallido se
+    # pueda reintentar sin tener que volver a grabar/convertir el audio.
     ruta_disco = _guardar_archivo_en_disco("nota_de_voz.ogg", contenido_ogg)
     archivo_guardado = await servicio_conversacion.crear_archivo_adjunto(
         nombre_original="nota_de_voz.ogg", ruta_disco=ruta_disco, content_type="audio/ogg",
         tamano_bytes=len(contenido_ogg), subido_por=usuario["username"], reutilizable=False,
     )
-    await servicio_conversacion.guardar_mensaje(telefono, "asesor", "Nota de voz", archivo_id=archivo_guardado["id"])
+    mensaje_guardado = await servicio_conversacion.guardar_mensaje(
+        telefono, "asesor", "Nota de voz", archivo_id=archivo_guardado["id"],
+        mensaje_id_meta=wamid, estado_envio=None if enviado else "fallido",
+    )
     await gestor_conexiones.emitir_mensaje_nuevo(telefono)
-    return JSONResponse({"status": "ok"})
+
+    if not enviado:
+        return _respuesta_envio_fallido(
+            "No se pudo enviar el audio por WhatsApp — el mensaje quedó guardado, puedes reintentar.",
+            mensaje_guardado["id"],
+        )
+    return JSONResponse({"status": "ok", "mensaje_id": mensaje_guardado["id"]})
 
 
 @router.post("/lead/{telefono}/enviar-catalogo/{archivo_id}")
@@ -4540,9 +4738,12 @@ async def enviar_catalogo_chat(telefono: str, archivo_id: int, usuario: dict = D
     lead = await obtener_lead(telefono)
     if lead is None:
         raise HTTPException(status_code=404, detail="Lead no encontrado")
+    # Mismo criterio que responder_cliente: se removió a propósito el guard
+    # `if not lead.get("asesor_asignado"): raise HTTPException(400, ...)` que
+    # exigía asignación previa — contradecía la matriz de permisos aprobada
+    # (MPA §9). El control de acceso real lo hace `_verificar_acceso_lead`.
     _verificar_acceso_lead(usuario, lead)
-    if not lead.get("asesor_asignado"):
-        raise HTTPException(status_code=400, detail="Este lead aún no está asignado a un asesor")
+    await _verificar_ventana_atencion(telefono)
 
     archivo = await servicio_conversacion.obtener_archivo_adjunto(archivo_id)
     if archivo is None or not archivo["reutilizable"]:
@@ -4553,11 +4754,24 @@ async def enviar_catalogo_chat(telefono: str, archivo_id: int, usuario: dict = D
     with open(archivo["ruta_disco"], "rb") as f:
         contenido = f.read()
     canal = await obtener_proveedor().resolver_canal(lead.get("numero_whatsapp_id"))
-    await _subir_y_enviar_media(telefono, archivo["nombre_original"], archivo["content_type"], contenido, "", canal=canal)
+    enviado, wamid = await _subir_y_enviar_media(telefono, archivo["nombre_original"], archivo["content_type"], contenido, "", canal=canal)
 
-    await servicio_conversacion.guardar_mensaje(telefono, "asesor", archivo["nombre_original"], archivo_id=archivo["id"])
+    # No hay nada nuevo que guardar en disco acá (el catálogo ya vive en la
+    # librería reutilizable) — pero el mensaje se persiste igual con
+    # estado_envio="fallido" si Meta no lo confirmó, mismo patrón que los
+    # otros 3 endpoints de envío.
+    mensaje_guardado = await servicio_conversacion.guardar_mensaje(
+        telefono, "asesor", archivo["nombre_original"], archivo_id=archivo["id"],
+        mensaje_id_meta=wamid, estado_envio=None if enviado else "fallido",
+    )
     await gestor_conexiones.emitir_mensaje_nuevo(telefono)
-    return JSONResponse({"status": "ok"})
+
+    if not enviado:
+        return _respuesta_envio_fallido(
+            "No se pudo enviar el catálogo por WhatsApp — el mensaje quedó guardado, puedes reintentar.",
+            mensaje_guardado["id"],
+        )
+    return JSONResponse({"status": "ok", "mensaje_id": mensaje_guardado["id"]})
 
 
 @router.get("/archivo/{archivo_id}")
@@ -4907,6 +5121,47 @@ async def asignar_lead(
             autor=usuario["nombre"],
             payload={"campo": "asesor_asignado", "anterior": anterior, "nuevo": None},
         )
+    if _pide_json_explicitamente(request):
+        return await _json_lead_actualizado(telefono)
+    return RedirectResponse(url=f"/dashboard/lead/{telefono}", status_code=303)
+
+
+@router.post("/lead/{telefono}/reactivar-gabi", response_class=HTMLResponse)
+async def reactivar_gabi(
+    telefono: str,
+    request: Request,
+    usuario: dict = Depends(_usuario_actual),
+    _csrf: None = Depends(verificar_csrf),
+):
+    """Devuelve el control de la conversación a Gabi — limpia
+    asesor_asignado Y pausado_manual (reusa liberar_asignacion, la misma
+    función que ya usa el webhook para el caso automático de un caso cerrado
+    que vuelve a escribir). Handoff manual: hoy no existe ninguna ruta para
+    que un caso ABIERTO (asignado o pausado por coexistencia) vuelva a
+    Gabi sin esperar a que se cierre.
+
+    Permisos: el mismo criterio que _verificar_acceso_lead — el asesor
+    dueño del lead puede devolver el control él mismo (no depende de un
+    supervisor, a diferencia de "Sin asignar" en /asignar, que sí es
+    exclusivo de admin/supervisor), más admin/supervisor con visión total.
+
+    Salvaguarda de producto explícita (verificada en QA): un lead
+    "vendido" NUNCA se reactiva por acá — Gabi debe quedar pausada
+    indefinidamente en ese estado, sin ninguna ruta indirecta que la
+    reactive."""
+    lead = await obtener_lead(telefono)
+    if lead is None:
+        raise HTTPException(status_code=404, detail="Lead no encontrado")
+    _verificar_acceso_lead(usuario, lead)
+
+    if lead.get("resultado") == "vendido":
+        raise HTTPException(
+            status_code=400,
+            detail="Este lead ya está vendido — Gabi permanece pausada indefinidamente y no se puede reactivar desde acá",
+        )
+
+    await liberar_asignacion(telefono, autor=usuario["nombre"], motivo="reactivado_manual")
+
     if _pide_json_explicitamente(request):
         return await _json_lead_actualizado(telefono)
     return RedirectResponse(url=f"/dashboard/lead/{telefono}", status_code=303)
