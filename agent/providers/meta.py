@@ -2,6 +2,7 @@
 # Generado por AgentKit
 
 import os
+import json
 import hmac
 import hashlib
 import logging
@@ -37,37 +38,98 @@ class ProveedorMeta(ProveedorWhatsApp):
         self.verify_token = os.getenv("META_VERIFY_TOKEN", "agentkit-verify")
         self.api_version = "v21.0"
 
-    async def resolver_canal(self, numero_whatsapp_id: str | None) -> dict | None:
-        """Encuentra el canal por su phone_number_id. Si no se indica uno
-        (código que todavía no lo pasa, o leads creados antes de esta
-        función) usa el primero activo como canal por defecto — así una
-        instalación con un solo número no nota ninguna diferencia."""
+    async def resolver_canal(self, numero_whatsapp_id: str | None, negocio_id: str | None = None) -> dict | None:
+        """Encuentra el canal correcto — scoped por Negocio (Gate 5.2,
+        Arquitectura Contractual §6/§15: riesgo 🔴 confirmado en Gate 5.1,
+        `resolver_canal(None)` podía devolver el canal de otro Negocio).
+
+        Orden de resolución:
+        1. `numero_whatsapp_id` (phone_number_id) — ya es una clave única
+           real por canal, sin importar a qué Negocio pertenece; resolver
+           por acá SIEMPRE es seguro y no cambia de comportamiento.
+        2. `negocio_id` explícito — filtra los canales activos a ESE Negocio
+           y devuelve el primero. Nunca cruza a canales de otro Negocio.
+        3. Sin ningún contexto (ni número ni negocio_id): solo se resuelve
+           si TODOS los canales activos pertenecen al mismo Negocio (o no
+           tienen `negocio_id` asignado todavía, caso legado) — preserva el
+           comportamiento actual para una instalación de un solo Negocio
+           real (Cálidda) sin arriesgar nada. Si hay canales de MÁS de un
+           Negocio y no hay forma de saber a cuál pertenece esta llamada,
+           **falla cerrado** (retorna None) en vez de adivinar — nunca se
+           inventa un canal ni se usa "el primero" a ciegas entre Negocios
+           distintos."""
         canales = await listar_canales_whatsapp(solo_activos=True)
+
         if numero_whatsapp_id:
             for canal in canales:
                 if canal["phone_number_id"] == numero_whatsapp_id:
                     return canal
-        return canales[0] if canales else None
+            return None
+
+        if negocio_id:
+            candidatos = [c for c in canales if c.get("negocio_id") == negocio_id]
+            return candidatos[0] if candidatos else None
+
+        negocios_distintos = {c.get("negocio_id") for c in canales}
+        if len(negocios_distintos) <= 1:
+            # Cero o un solo Negocio detectado entre los canales activos —
+            # sin ambigüedad posible, se mantiene el comportamiento actual.
+            return canales[0] if canales else None
+
+        logger.error(
+            "resolver_canal(None) sin negocio_id: hay canales activos de más de "
+            "un Negocio (%s) y no hay contexto suficiente para elegir uno sin "
+            "riesgo de cruzar Negocios — se rechaza (fail-closed), no se "
+            "selecciona ningún canal por defecto.",
+            len(negocios_distintos),
+        )
+        return None
 
     async def verificar_firma(self, request: Request, body: bytes) -> bool:
         """Verifica la firma HMAC-SHA256 que Meta envía en X-Hub-Signature-256,
         para confirmar que el webhook realmente viene de Meta y no de un
-        tercero. Prueba contra el app_secret de cada canal activo (hoy
-        normalmente el mismo para todos, pero no se asume) — basta con que
-        uno coincida.
+        tercero.
 
-        Fail-closed: si ningún canal tiene app_secret configurado, se rechaza
-        la solicitud en vez de aceptarla por default (implementa la Decisión
-        local ya Objetivo de Security Architecture, sección 3 — antes esto
-        fallaba abierto)."""
+        Gate 5.2 (Arquitectura Contractual §6): antes de este cambio, la
+        firma se probaba contra el app_secret de TODOS los canales activos
+        del sistema — "basta con que uno coincida". Con más de un Negocio,
+        eso significa que conocer el app_secret de un canal de CUALQUIER
+        Negocio bastaba para que un webhook fraudulento, con un
+        phone_number_id de OTRO Negocio en el payload, pasara la
+        verificación. Ahora: si el payload trae un `phone_number_id`
+        identificable (el caso normal, `object == "whatsapp_business_account"`),
+        la firma se valida ÚNICAMENTE contra el app_secret del canal
+        correspondiente a ESE phone_number_id — nunca contra el de otro
+        canal. Si no hay un `phone_number_id` resoluble en el payload (ej.
+        webhook de Página/leadgen, `object == "page"`, que no lleva ese
+        campo), se conserva el comportamiento anterior (probar contra todos
+        los canales activos) porque hoy no hay una forma más precisa de
+        acotar ese caso sin anticipar el Gate de atribución.
+
+        Fail-closed en todos los casos: si no hay ningún secreto contra el
+        que validar, se rechaza la solicitud (Decisión ya Objetivo de
+        Security Architecture, sección 3 — antes esto fallaba abierto)."""
         canales = await listar_canales_whatsapp(solo_activos=True)
-        secretos = {c["app_secret"] for c in canales if c.get("app_secret")}
-        if not secretos:
-            logger.error(
-                "Ningún canal tiene app_secret configurado — el webhook rechaza "
-                "la solicitud (fail-closed). Configura app_secret en al menos un canal."
-            )
-            return False
+
+        phone_number_id = self._extraer_phone_number_id(body)
+        if phone_number_id:
+            canal = next((c for c in canales if c["phone_number_id"] == phone_number_id), None)
+            secretos = {canal["app_secret"]} if canal and canal.get("app_secret") else set()
+            if not secretos:
+                logger.error(
+                    "Webhook con phone_number_id=%s sin canal activo con app_secret "
+                    "configurado — se rechaza (fail-closed).", phone_number_id,
+                )
+                return False
+        else:
+            secretos = {c["app_secret"] for c in canales if c.get("app_secret")}
+            if not secretos:
+                logger.error(
+                    "Ningún canal tiene app_secret configurado — el webhook rechaza "
+                    "la solicitud (fail-closed). Configura app_secret en al menos un canal."
+                )
+                return False
+
         firma_header = request.headers.get("x-hub-signature-256", "")
         if not firma_header.startswith("sha256="):
             return False
@@ -77,6 +139,23 @@ class ProveedorMeta(ProveedorWhatsApp):
             if hmac.compare_digest(firma_esperada, firma_recibida):
                 return True
         return False
+
+    @staticmethod
+    def _extraer_phone_number_id(body: bytes) -> str | None:
+        """Lee `entry[].changes[].value.metadata.phone_number_id` del body
+        crudo sin depender de `request.json()` (que ya se consumió/cachea
+        aparte en el handler) — devuelve None si el payload no es JSON
+        válido o no trae ese campo (ej. webhook de Página/leadgen)."""
+        try:
+            datos = json.loads(body)
+        except (ValueError, TypeError):
+            return None
+        for entry in datos.get("entry", []):
+            for change in entry.get("changes", []):
+                phone_number_id = change.get("value", {}).get("metadata", {}).get("phone_number_id")
+                if phone_number_id:
+                    return phone_number_id
+        return None
 
     async def validar_webhook(self, request: Request) -> dict | int | None:
         """Meta requiere verificación GET con hub.verify_token."""

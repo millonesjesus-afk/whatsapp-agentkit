@@ -22,7 +22,7 @@ from agent.memory import (
     asignar_asesor_a_lead, marcar_lead_no_visto, liberar_asignacion,
     registrar_fallo_tecnico, resetear_fallos_tecnicos, RESULTADOS_CERRADOS,
     sembrar_canales_desde_env, pausar_gabi_manual, marcar_revision_prioritaria,
-    marcar_mensaje_procesado,
+    marcar_mensaje_procesado, obtener_negocio_por_codigo,
 )
 from agent.providers import obtener_proveedor
 from agent.dashboard import (
@@ -200,7 +200,31 @@ async def _barrer_conexiones_ws_inactivas():
 async def lifespan(app: FastAPI):
     """Inicializa la base de datos al arrancar el servidor."""
     await inicializar_db()
-    await sembrar_canales_desde_env()
+    # Corrección arquitectónica post-auditoría de Gate 5.2: el bootstrap de
+    # canales desde .env ya no adivina a qué Negocio pertenecen (ni "el
+    # único que hay", ni ningún nombre fijo) — el Negocio se identifica
+    # EXPLÍCITAMENTE por la variable de entorno NEGOCIO_BOOTSTRAP_CODIGO
+    # (ver .env.example). Que hoy solo exista Cálidda es dato de
+    # configuración de este .env, no una propiedad del código: un futuro
+    # Negocio 002 solo necesita su propio NEGOCIO_BOOTSTRAP_CODIGO en su
+    # propio entorno, sin tocar esta lógica. Sin la variable, o si no
+    # corresponde a ningún Negocio existente, el bootstrap de canales
+    # queda deshabilitado (fail-closed) — nunca se asume Cálidda.
+    codigo_negocio_bootstrap = os.getenv("NEGOCIO_BOOTSTRAP_CODIGO")
+    negocio_bootstrap = await obtener_negocio_por_codigo(codigo_negocio_bootstrap) if codigo_negocio_bootstrap else None
+    if codigo_negocio_bootstrap and not negocio_bootstrap:
+        logger.error(
+            f"NEGOCIO_BOOTSTRAP_CODIGO='{codigo_negocio_bootstrap}' no corresponde a ningún "
+            f"Negocio existente — el bootstrap de canales desde variables de entorno queda "
+            f"deshabilitado (fail-closed)."
+        )
+    elif not codigo_negocio_bootstrap:
+        logger.warning(
+            "NEGOCIO_BOOTSTRAP_CODIGO no está configurado — el bootstrap de canales desde "
+            "variables de entorno queda deshabilitado (fail-closed). Configúrala si este "
+            "entorno necesita sembrar canales desde .env."
+        )
+    await sembrar_canales_desde_env(negocio_bootstrap["id"] if negocio_bootstrap else None)
     await servicio_canales.sembrar_campanas_iniciales()
     await servicio_canales.corregir_patrones_desalineados()
     logger.info("Base de datos inicializada")
@@ -342,7 +366,17 @@ async def webhook_handler(request: Request):
             # desde el panel) también sepan por cuál número contestar.
             canal = await proveedor.resolver_canal(msg.numero_whatsapp_id)
             if msg.numero_whatsapp_id:
-                await actualizar_lead(msg.telefono, numero_whatsapp_id=msg.numero_whatsapp_id)
+                # Gate 5.2 (corrección H2): negocio_id se resuelve del Canal
+                # ya identificado por su phone_number_id — nunca un default
+                # global. Si el canal no pudo resolverse (numero_whatsapp_id
+                # desconocido, o ambiguo entre Negocios sin match exacto),
+                # canal es None y negocio_id queda None — actualizar_lead()
+                # falla cerrado si eso implica crear un Lead nuevo sin poder
+                # determinar su Negocio, en vez de adivinar.
+                await actualizar_lead(
+                    msg.telefono, numero_whatsapp_id=msg.numero_whatsapp_id,
+                    negocio_id=canal.get("negocio_id") if canal else None,
+                )
 
             # Coexistencia: un asesor le respondió al cliente directo desde
             # la app de WhatsApp Business en el celular, no desde Gabi ni el

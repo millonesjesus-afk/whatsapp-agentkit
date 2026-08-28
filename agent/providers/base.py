@@ -68,11 +68,14 @@ class ProveedorWhatsApp(ABC):
         """Verificación GET del webhook (solo Meta la requiere). Retorna respuesta o None."""
         return None
 
-    async def resolver_canal(self, numero_whatsapp_id: str | None) -> dict | None:
+    async def resolver_canal(self, numero_whatsapp_id: str | None, negocio_id: str | None = None) -> dict | None:
         """Dado el ID de un número de WhatsApp del negocio, retorna su
         configuración (token, etc.) para poder enviar por ese canal
-        específico. None por defecto — solo los proveedores que soportan
-        varios números a la vez (ver ProveedorMeta) lo sobreescriben."""
+        específico. `negocio_id` (Gate 5.2) acota la resolución cuando no
+        hay `numero_whatsapp_id` — evita cruzar canales entre Negocios
+        distintos, ver ProveedorMeta.resolver_canal. None por defecto —
+        solo los proveedores que soportan varios números a la vez lo
+        sobreescriben."""
         return None
 
     async def verificar_firma(self, request: Request, body: bytes) -> bool:

@@ -8,12 +8,16 @@ por número de teléfono usando SQLite (local) o PostgreSQL (producción).
 
 import os
 import csv
+import uuid
 import logging
 from datetime import datetime
 from cryptography.fernet import Fernet
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, aliased
-from sqlalchemy import String, Text, DateTime, select, Integer, Boolean, func, case, delete, update, JSON
+from sqlalchemy import (
+    String, Text, DateTime, select, Integer, Boolean, func, case, delete, update, JSON,
+    ForeignKey, Index, text,
+)
 from sqlalchemy.exc import IntegrityError
 from dotenv import load_dotenv
 
@@ -120,6 +124,172 @@ class Base(DeclarativeBase):
     pass
 
 
+def _generar_uuid() -> str:
+    """UUID como String(36) — portable entre SQLite (dev) y Postgres (prod)
+    sin depender del tipo UUID nativo de un dialecto (Gate 5.2, Arquitectura
+    Contractual §3: nombre técnico de contrato `Negocio`/`negocio_id`, UUID
+    como PK sustituta de toda entidad nueva)."""
+    return str(uuid.uuid4())
+
+
+class Negocio(Base):
+    """Entidad fundacional de aislamiento Multi-Tenant (Gate 5.2 — Fundación
+    Negocio/Unidad, Arquitectura Contractual §3/§22 Data Architecture v1).
+    "Tenant" sigue siendo el concepto SaaS de producto; `Negocio`/`negocio_id`
+    es el nombre técnico de contrato, sin excepción. Cálidda es el primer
+    Negocio real (backfill, ver migración) — no hay nada en este modelo que
+    lo trate como caso especial."""
+    __tablename__ = "negocios"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_generar_uuid)
+    nombre: Mapped[str] = mapped_column(String(150))
+    codigo: Mapped[str] = mapped_column(String(30), unique=True, index=True)
+    activo: Mapped[bool] = mapped_column(Boolean, default=True)
+    eliminado_en: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    eliminado_por: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    creado: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    actualizado: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class UnidadDeNegocio(Base):
+    """Dimensión de alcance bajo un Negocio (Gate 5.1, §4 — no es módulo de
+    producto, no hay enumeración global). Los nombres reales de las Unidades
+    de cada Negocio son dato de negocio, nunca hardcodeados acá. `codigo_interno`
+    queda deliberadamente desacoplado del nombre visible (ver colisión "FNB"
+    documentada en el Blueprint de Gate 5.0)."""
+    __tablename__ = "unidades_de_negocio"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_generar_uuid)
+    negocio_id: Mapped[str] = mapped_column(String(36), ForeignKey("negocios.id"), nullable=False, index=True)
+    nombre: Mapped[str] = mapped_column(String(150))
+    codigo_interno: Mapped[str] = mapped_column(String(30))
+    activo: Mapped[bool] = mapped_column(Boolean, default=True)
+    eliminado_en: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    eliminado_por: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    creado: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    actualizado: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    __table_args__ = (
+        Index("ix_unidad_negocio_codigo", "negocio_id", "codigo_interno", unique=True),
+    )
+
+
+class RegistroAuditoria(Base):
+    """Esqueleto append-only (Gate 5.2, alcance explícitamente limitado a la
+    fundación — sin dashboard, sin alertas, sin análisis todavía, ver
+    Arquitectura Contractual §8). Ningún código de esta capa ejecuta UPDATE
+    ni DELETE sobre esta tabla: se agregan filas nuevas únicamente, nunca se
+    modifican ni se borran (Data Architecture v1, decisión ya Approved)."""
+    __tablename__ = "registro_auditoria"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_generar_uuid)
+    # Nullable: un evento de plataforma (sin Negocio asociado) es válido —
+    # ej. una acción de un futuro superadmin de Maiek AI, fuera del alcance
+    # de este Gate pero contemplado por el propio contrato de Data Architecture.
+    negocio_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("negocios.id"), nullable=True, index=True)
+    # Username de Usuario (String suelto, sin FK — mismo criterio ya usado en
+    # el resto del esquema para `asesor_asignado`/`autor`: el registro
+    # histórico no debe cambiar si el actor se borra o se renombra después).
+    # None si la acción fue automática (sistema/Gabi), no de un humano.
+    actor: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    accion: Mapped[str] = mapped_column(String(50))
+    entidad_tipo: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    entidad_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    payload: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    creado: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+
+    __table_args__ = (
+        Index("ix_auditoria_negocio_entidad", "negocio_id", "entidad_tipo", "entidad_id"),
+    )
+
+
+async def registrar_auditoria(
+    accion: str, actor: str | None = None, negocio_id: str | None = None,
+    entidad_tipo: str | None = None, entidad_id: str | None = None, payload: dict | None = None,
+) -> None:
+    """Único punto de escritura de RegistroAuditoria — append-only, sin
+    UPDATE/DELETE en ningún llamador (Gate 5.2, esqueleto base)."""
+    async with async_session() as session:
+        session.add(RegistroAuditoria(
+            accion=accion, actor=actor, negocio_id=negocio_id,
+            entidad_tipo=entidad_tipo, entidad_id=entidad_id, payload=payload,
+        ))
+        await session.commit()
+
+
+def _negocio_a_dict(n: "Negocio") -> dict:
+    return {
+        "id": n.id, "nombre": n.nombre, "codigo": n.codigo, "activo": n.activo,
+        "creado": n.creado, "actualizado": n.actualizado,
+    }
+
+
+async def crear_negocio(nombre: str, codigo: str) -> dict:
+    """Crea un Negocio nuevo. `codigo` es el slug único (Arquitectura
+    Contractual §3) — nunca se genera automáticamente a partir del nombre
+    acá, para no inventar convenciones que el propietario del negocio no
+    definió explícitamente."""
+    async with async_session() as session:
+        negocio = Negocio(nombre=nombre, codigo=codigo)
+        session.add(negocio)
+        await session.commit()
+        await session.refresh(negocio)
+        return _negocio_a_dict(negocio)
+
+
+async def obtener_negocio(negocio_id: str) -> dict | None:
+    async with async_session() as session:
+        negocio = await session.get(Negocio, negocio_id)
+        return _negocio_a_dict(negocio) if negocio else None
+
+
+async def obtener_negocio_por_codigo(codigo: str) -> dict | None:
+    async with async_session() as session:
+        query = select(Negocio).where(Negocio.codigo == codigo)
+        resultado = await session.execute(query)
+        negocio = resultado.scalar_one_or_none()
+        return _negocio_a_dict(negocio) if negocio else None
+
+
+async def listar_negocios(solo_activos: bool = False) -> list[dict]:
+    async with async_session() as session:
+        query = select(Negocio).order_by(Negocio.creado.asc())
+        if solo_activos:
+            query = query.where(Negocio.activo.is_(True))
+        resultado = await session.execute(query)
+        return [_negocio_a_dict(n) for n in resultado.scalars().all()]
+
+
+def _unidad_a_dict(u: "UnidadDeNegocio") -> dict:
+    return {
+        "id": u.id, "negocio_id": u.negocio_id, "nombre": u.nombre,
+        "codigo_interno": u.codigo_interno, "activo": u.activo,
+        "creado": u.creado, "actualizado": u.actualizado,
+    }
+
+
+async def crear_unidad_de_negocio(negocio_id: str, nombre: str, codigo_interno: str) -> dict:
+    """Crea una Unidad de Negocio nueva bajo un Negocio. Los nombres reales
+    de las Unidades son dato de negocio — esta función nunca decide qué
+    Unidades crear, solo persiste las que el propietario del negocio ya
+    definió."""
+    async with async_session() as session:
+        unidad = UnidadDeNegocio(negocio_id=negocio_id, nombre=nombre, codigo_interno=codigo_interno)
+        session.add(unidad)
+        await session.commit()
+        await session.refresh(unidad)
+        return _unidad_a_dict(unidad)
+
+
+async def listar_unidades_de_negocio(negocio_id: str, solo_activas: bool = False) -> list[dict]:
+    async with async_session() as session:
+        query = select(UnidadDeNegocio).where(UnidadDeNegocio.negocio_id == negocio_id).order_by(UnidadDeNegocio.creado.asc())
+        if solo_activas:
+            query = query.where(UnidadDeNegocio.activo.is_(True))
+        resultado = await session.execute(query)
+        return [_unidad_a_dict(u) for u in resultado.scalars().all()]
+
+
 class Mensaje(Base):
     """Modelo de mensaje en la base de datos."""
     __tablename__ = "mensajes"
@@ -172,6 +342,17 @@ class Mensaje(Base):
     # la capa de aplicación, no en la base). Nullable: la mayoría de los
     # mensajes no citan nada, y el historial anterior a este campo tampoco.
     respondido_a_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Gate 5.2 — aislamiento estructural: se resuelve por fila propia (vía
+    # Lead.negocio_id al momento de guardar el mensaje, ver
+    # guardar_mensaje/corrección H1), nunca por JOIN indirecto contra
+    # `telefono` en cada query (Arquitectura Contractual §15: "ninguna
+    # entidad de negocio se filtra por JOIN indirecto"). Sin FK estricta
+    # hacia Negocio por el mismo motivo que archivo_id/respondido_a_id.
+    # NOT NULL a nivel de BD tras el backfill (migración a46a93329345) — el
+    # modelo debe reflejar eso mismo (corrección post-auditoría: antes decía
+    # nullable=True, desalineado con la migración real, lo que dejaba que
+    # los tests contra create_all() no detectaran la regresión de H1).
+    negocio_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
 
 
 class ArchivoAdjunto(Base):
@@ -294,6 +475,16 @@ class Lead(Base):
     # vuelve más lento a medida que se acumulan leads reales.
     actualizado: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, index=True)
     creado: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    # Gate 5.2 — Lead es HOY la entidad que contiene los datos reales de
+    # Cálidda; la separación Contact/Conversation/Opportunity es Gate 5.3 y
+    # NO se adelanta acá. PK de Lead (telefono) NO se modifica en este Gate.
+    # NOT NULL a nivel de BD tras el backfill (migración a46a93329345, 100%
+    # inequívoco contra la BD local) — el modelo debe reflejar eso mismo, no
+    # `nullable=True` (corrección post-auditoría: el desfase entre modelo y
+    # migración real era la causa raíz de que los tests con create_all() no
+    # detectaran H2 — actualizar_lead() ahora exige negocio_id explícito
+    # para crear un Lead nuevo, ver `_requiere_negocio_id_para_lead_nuevo`).
+    negocio_id: Mapped[str] = mapped_column(String(36), ForeignKey("negocios.id"), nullable=False, index=True)
 
 
 class EventoLead(Base):
@@ -491,6 +682,17 @@ class Campana(Base):
     texto_saludo: Mapped[str | None] = mapped_column(String(500), nullable=True)
     activa: Mapped[bool] = mapped_column(Boolean, default=True)
     creado: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    # Gate 5.2 — Master Data, aislamiento estructural directo en la fila.
+    # NOT NULL a nivel de BD tras el backfill (corrección post-auditoría,
+    # mismo motivo que Lead.negocio_id arriba).
+    negocio_id: Mapped[str] = mapped_column(String(36), ForeignKey("negocios.id"), nullable=False, index=True)
+    # Arquitectura Contractual §5: obligatoria (NOT NULL) para campañas
+    # NUEVAS desde este Gate en adelante — a nivel de aplicación (ver
+    # crear_campana). A nivel de columna queda nullable porque las Unidades
+    # reales de Cálidda todavía no están definidas (dato pendiente, no se
+    # inventa) — las campañas existentes no pueden backfillearse sin
+    # inventar una Unidad, lo cual está expresamente prohibido.
+    unidad_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("unidades_de_negocio.id"), nullable=True)
 
 
 class CanalWhatsApp(Base):
@@ -530,6 +732,15 @@ class CanalWhatsApp(Base):
     modo: Mapped[str] = mapped_column(String(20), default="produccion")
     creado: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     actualizado: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    # Gate 5.2 — Master Data, aislamiento estructural. NOT NULL a nivel de
+    # BD tras el backfill (todo canal existente hoy es de Cálidda, sin
+    # ambigüedad — corrección post-auditoría, mismo motivo que Lead arriba).
+    negocio_id: Mapped[str] = mapped_column(String(36), ForeignKey("negocios.id"), nullable=False, index=True)
+    # Arquitectura Contractual §6: 1 Canal : 1 Unidad hacia adelante, con
+    # excepción temporal de migración para el legado — nullable mientras las
+    # Unidades reales de Cálidda no estén definidas (mismo motivo que
+    # Campana.unidad_id arriba, no se inventa).
+    unidad_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("unidades_de_negocio.id"), nullable=True)
 
 
 class Usuario(Base):
@@ -544,16 +755,50 @@ class Usuario(Base):
     # automática) y si está disponible para recibir leads nuevos ahora mismo.
     nivel: Mapped[str | None] = mapped_column(String(20), nullable=True)  # junior | intermedio | senior
     disponible: Mapped[bool] = mapped_column(Boolean, default=True)
+    # Gate 5.2 — Master Data. NOT NULL a nivel de BD tras el backfill (todo
+    # usuario existente hoy pertenece a Cálidda, sin ambigüedad — corrección
+    # post-auditoría). El RBAC real que CONSUME este campo (ServicioIdentidad,
+    # tiene_acceso_a_lead) es Gate 5.4 — acá solo se agrega la columna, se
+    # puebla, y se exige en la creación (crear_usuario, corrección H3), sin
+    # tocar autorización.
+    negocio_id: Mapped[str] = mapped_column(String(36), ForeignKey("negocios.id"), nullable=False, index=True)
 
 
 class Configuracion(Base):
     """Ajustes simples del panel (clave/valor) editables sin tocar código —
     hoy solo los umbrales de monto para la asignación automática por nivel,
-    pero sirve para cualquier otro ajuste puntual que se agregue después."""
+    pero sirve para cualquier otro ajuste puntual que se agregue después.
+
+    Gate 5.2 migra esta tabla al contrato de Arquitectura Contractual §7:
+    clave compuesta (clave, negocio_id), con negocio_id = NULL como
+    configuración GLOBAL de plataforma. `clave` deja de ser PK — Postgres (a
+    diferencia de SQLite) no admite NULL dentro de una PRIMARY KEY, así que
+    la unicidad real (negocio_id NULL o no-NULL, sin duplicados) se aplica
+    con dos índices únicos parciales, no con la propia clave primaria (que
+    pasa a ser un `id` autoincremental sin significado de negocio — esto es
+    INFERENCIA de implementación a partir del contrato, no un cambio del
+    contrato en sí, ver informe de cierre de Gate 5.2)."""
     __tablename__ = "configuracion"
 
-    clave: Mapped[str] = mapped_column(String(50), primary_key=True)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    clave: Mapped[str] = mapped_column(String(50))
+    negocio_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("negocios.id"), nullable=True)
     valor: Mapped[str] = mapped_column(String(200))
+
+    __table_args__ = (
+        # Único activo cuando negocio_id es NULL (config global de plataforma)
+        Index(
+            "ix_config_global_unica", "clave", unique=True,
+            sqlite_where=text("negocio_id IS NULL"),
+            postgresql_where=text("negocio_id IS NULL"),
+        ),
+        # Único activo cuando negocio_id NO es NULL (override por negocio)
+        Index(
+            "ix_config_por_negocio_unica", "clave", "negocio_id", unique=True,
+            sqlite_where=text("negocio_id IS NOT NULL"),
+            postgresql_where=text("negocio_id IS NOT NULL"),
+        ),
+    )
 
 
 class MensajeProcesado(Base):
@@ -652,18 +897,31 @@ class HistorialPrecioProducto(Base):
     creado: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
 
 
-async def obtener_configuracion(clave: str, valor_default: str) -> str:
-    """Lee un valor de configuración, o el default si nunca se guardó."""
+async def obtener_configuracion(clave: str, valor_default: str, negocio_id: str | None = None) -> str:
+    """Lee un valor de configuración. `negocio_id=None` (default, sin cambio
+    de comportamiento para ningún llamador existente) lee la config GLOBAL de
+    plataforma — exactamente el mismo dato que existía antes de Gate 5.2,
+    ahora con negocio_id explícitamente NULL en vez de ausente por diseño de
+    esquema. Con `negocio_id` explícito, lee el override de ESE negocio
+    específico si existe; si no existe ninguna fila para ese negocio, cae al
+    default recibido (no al valor global — un override ausente no es lo
+    mismo que "usar el global", eso se resuelve en la capa que llama, mismo
+    criterio que ya usaba `modo` en CanalWhatsApp para no cambiar
+    comportamiento por accidente)."""
     async with async_session() as session:
-        config = await session.get(Configuracion, clave)
+        query = select(Configuracion).where(Configuracion.clave == clave, Configuracion.negocio_id == negocio_id)
+        resultado = await session.execute(query)
+        config = resultado.scalar_one_or_none()
         return config.valor if config else valor_default
 
 
-async def guardar_configuracion(clave: str, valor: str):
+async def guardar_configuracion(clave: str, valor: str, negocio_id: str | None = None):
     async with async_session() as session:
-        config = await session.get(Configuracion, clave)
+        query = select(Configuracion).where(Configuracion.clave == clave, Configuracion.negocio_id == negocio_id)
+        resultado = await session.execute(query)
+        config = resultado.scalar_one_or_none()
         if config is None:
-            config = Configuracion(clave=clave)
+            config = Configuracion(clave=clave, negocio_id=negocio_id)
             session.add(config)
         config.valor = valor
         await session.commit()
@@ -706,15 +964,30 @@ def _canal_a_dict(c: CanalWhatsApp) -> dict:
         "modo": c.modo,
         "creado": c.creado,
         "actualizado": c.actualizado,
+        # Gate 5.2 — necesario para que resolver_canal() pueda filtrar por
+        # negocio (ver agent/providers/meta.py).
+        "negocio_id": c.negocio_id,
+        "unidad_id": c.unidad_id,
     }
 
 
 async def crear_canal_whatsapp(
     nombre: str, phone_number_id: str, access_token: str = "",
     app_secret: str = "", page_access_token: str = "", modo: str = "produccion",
-    waba_id: str = "",
+    waba_id: str = "", negocio_id: str | None = None, unidad_id: str | None = None,
 ) -> dict:
-    """Agrega un número de WhatsApp nuevo administrable desde el panel."""
+    """Agrega un número de WhatsApp nuevo administrable desde el panel.
+    `negocio_id` es obligatorio (Gate 5.2, corrección H3) — quien llama debe
+    resolverlo desde una fuente legítima (el Negocio del admin que crea el
+    canal, o el único Negocio del sistema en el bootstrap desde .env). Nunca
+    se asume un Negocio por defecto. `unidad_id` sigue opcional — las
+    Unidades reales de Cálidda son dato pendiente (ver Arquitectura
+    Contractual §6, excepción temporal de migración)."""
+    if negocio_id is None:
+        raise ValueError(
+            f"crear_canal_whatsapp(): no se puede crear el canal '{nombre}' sin negocio_id "
+            f"resuelto. No se asume ningún Negocio por defecto (Gate 5.2)."
+        )
     async with async_session() as session:
         canal = CanalWhatsApp(
             nombre=nombre,
@@ -725,6 +998,8 @@ async def crear_canal_whatsapp(
             waba_id=waba_id or None,
             token_renovado_en=datetime.utcnow() if access_token else None,
             modo=modo if modo in ("produccion", "pruebas") else "produccion",
+            negocio_id=negocio_id,
+            unidad_id=unidad_id,
         )
         session.add(canal)
         await session.commit()
@@ -776,13 +1051,27 @@ async def actualizar_canal_whatsapp(canal_id: int, **campos):
         await session.commit()
 
 
-async def sembrar_canales_desde_env():
+async def sembrar_canales_desde_env(negocio_id: str | None):
     """Si la tabla de canales está vacía, la siembra a partir de las
     variables de entorno META_CANAL_N_* (o las sueltas META_ACCESS_TOKEN/
     META_PHONE_NUMBER_ID/META_APP_SECRET como canal único) — así una
     instalación que ya venía configurada por variable de entorno sigue
     funcionando igual tras este cambio, sin perder su configuración ni
-    necesitar que alguien la vuelva a escribir a mano en el panel."""
+    necesitar que alguien la vuelva a escribir a mano en el panel.
+
+    Corrección arquitectónica post-auditoría: esta función YA NO busca a qué
+    Negocio pertenecen los canales — ni por "el único que hay", ni por
+    nombre/código fijo. `negocio_id` es SIEMPRE responsabilidad exclusiva de
+    quien llama (ver `main.py`, que lo resuelve desde la variable de entorno
+    `NEGOCIO_BOOTSTRAP_CODIGO` vía `obtener_negocio_por_codigo`) — que hoy
+    exista un único Negocio operativo (Cálidda) es una condición actual del
+    sistema, no una propiedad de esta función. Con `negocio_id=None` (el
+    caller no pudo resolverlo) o un `negocio_id` que no corresponde a ningún
+    Negocio real, falla cerrado: no siembra nada, nunca asume ni el primero
+    ni el único."""
+    # Idempotencia primero (igual orden que antes de esta corrección): si ya
+    # hay canales, no se toca nada — ni siquiera vale la pena parsear el
+    # entorno ni resolver negocio_id.
     existentes = await listar_canales_whatsapp()
     if existentes:
         return
@@ -813,10 +1102,22 @@ async def sembrar_canales_desde_env():
                 "page_access_token": os.getenv("META_PAGE_ACCESS_TOKEN", ""),
             })
 
+    if not canales_env:
+        return
+
+    if negocio_id is None or await obtener_negocio(negocio_id) is None:
+        logger.error(
+            "sembrar_canales_desde_env(): hay %d canal(es) para sembrar desde variables de "
+            "entorno, pero negocio_id %s — no se siembra ninguno (fail-closed). Configura "
+            "NEGOCIO_BOOTSTRAP_CODIGO con el código de un Negocio existente antes de arrancar.",
+            len(canales_env),
+            "no fue proporcionado" if negocio_id is None else f"'{negocio_id}' no corresponde a ningún Negocio existente",
+        )
+        return
+
     for datos in canales_env:
-        await crear_canal_whatsapp(**datos)
-    if canales_env:
-        logger.info(f"Sembrados {len(canales_env)} canal(es) de WhatsApp desde variables de entorno")
+        await crear_canal_whatsapp(**datos, negocio_id=negocio_id)
+    logger.info(f"Sembrados {len(canales_env)} canal(es) de WhatsApp desde variables de entorno, Negocio {negocio_id}")
 
 
 async def inicializar_db():
@@ -840,13 +1141,33 @@ async def guardar_mensaje(
     (Mensaje.id) del mensaje que este mensaje citó al enviarse (Reply/Quote,
     ver responder_cliente) — None si no citó nada.
 
+    Gate 5.2 (corrección H1): `negocio_id` se resuelve desde el Lead ya
+    existente (`entidad padre ya correctamente scoped`, no un default
+    global) — nunca se le pide al llamador que lo pase explícitamente,
+    porque los 12 call sites reales (main.py, dashboard.py) no tienen todos
+    el mismo contexto a mano, pero TODOS operan sobre un `telefono` cuyo
+    Lead ya existe y ya tiene negocio_id (main.py llama `actualizar_lead`
+    antes de guardar cualquier mensaje del mismo request; dashboard.py solo
+    guarda mensajes de conversaciones ya abiertas). Si el Lead no existe
+    todavía o no tiene negocio_id resuelto, falla cerrado — nunca se crea un
+    Mensaje con Negocio desconocido ni se asume ninguno por defecto.
+
     Retorna el mensaje ya guardado (con su `id` real) — antes no retornaba
     nada; hace falta para que quien envía un mensaje saliente pueda
     referenciarlo después (mostrarlo con opción de reintento si
     estado_envio=="fallido", o dejar que se lo cite desde otro mensaje)."""
     async with async_session() as session:
+        lead = await session.get(Lead, telefono)
+        if lead is None or lead.negocio_id is None:
+            raise ValueError(
+                f"guardar_mensaje(): no se puede resolver negocio_id para telefono={telefono} "
+                f"— el Lead {'no existe' if lead is None else 'existe pero no tiene negocio_id'}. "
+                f"No se asume ningún Negocio por defecto (Gate 5.2). Verificar que "
+                f"actualizar_lead() ya corrió para este teléfono antes de guardar un mensaje."
+            )
         mensaje = Mensaje(
             telefono=telefono,
+            negocio_id=lead.negocio_id,
             role=role,
             content=content,
             timestamp=datetime.utcnow(),
@@ -1187,7 +1508,42 @@ async def listar_leads_esperando_asesor() -> list[dict]:
         return [_lead_a_dict(l) for l in leads if l.resultado not in RESULTADOS_CERRADOS]
 
 
-async def actualizar_lead(telefono: str, campos_explicitos: tuple[str, ...] = (), **campos):
+def _exigir_lead_existente(lead: "Lead | None", telefono: str, funcion: str) -> "Lead":
+    """Fail-closed (Gate 5.2, corrección H2): estas funciones (venta,
+    asignación, pausa manual, fallo técnico, campaña de origen) actúan sobre
+    un Lead que YA debería existir — nunca son el camino de creación
+    legítimo (ese es `actualizar_lead`, con negocio_id resuelto desde el
+    Canal). Antes de este Gate creaban silenciosamente un Lead vacío (sin
+    negocio_id posible de resolver acá) si por algún motivo no existía; ahora
+    fallan con un error claro en vez de eso — no inventan pertenencia a
+    ningún Negocio."""
+    if lead is None:
+        raise ValueError(
+            f"{funcion}(): no existe un Lead para telefono={telefono} — esta función no "
+            f"crea Leads nuevos (requeriría negocio_id, que acá no tiene de dónde "
+            f"resolverse de forma legítima). Si el Lead debería existir, verificar que "
+            f"actualizar_lead() ya corrió para este teléfono."
+        )
+    return lead
+
+
+def _requiere_negocio_id_para_lead_nuevo(negocio_id: str | None, telefono: str, funcion: str) -> None:
+    """Fail-closed (Gate 5.2, corrección H2): un Lead NUEVO nunca se crea sin
+    negocio_id resuelto — nunca se asume Cálidda ni ningún otro Negocio por
+    defecto. La fuente legítima de `negocio_id` es el Canal por el que entró
+    el mensaje (`CanalWhatsApp.negocio_id`, ya scoped por Negocio desde su
+    propia creación) — no una constante global ni "el primer Negocio"."""
+    if negocio_id is None:
+        raise ValueError(
+            f"No se puede crear un Lead nuevo (telefono={telefono}) sin negocio_id "
+            f"resuelto — llamado desde {funcion}(). No se asume ningún Negocio por "
+            f"defecto (Gate 5.2: nunca usar un Negocio como fallback silencioso)."
+        )
+
+
+async def actualizar_lead(
+    telefono: str, campos_explicitos: tuple[str, ...] = (), negocio_id: str | None = None, **campos,
+):
     """Actualiza (o crea) los datos estructurados del cliente. Por defecto solo
     sobreescribe los campos con un valor no vacío, para no perder datos ya
     conocidos — eso es lo correcto para las escrituras de Gabi, que manda lo que
@@ -1198,14 +1554,21 @@ async def actualizar_lead(telefono: str, campos_explicitos: tuple[str, ...] = ()
     Gate: si una persona limpió el campo, el sistema no puede decidir por su
     cuenta conservar el valor viejo). Esos campos se escriben tal cual llegan,
     normalizando "" a NULL. Quien llama decide cuáles son: la misma función
-    sirve para los dos casos sin que el llamador automático cambie."""
+    sirve para los dos casos sin que el llamador automático cambie.
+
+    `negocio_id` (Gate 5.2) solo importa cuando el Lead todavía no existe —
+    nunca sobreescribe el negocio_id de un Lead ya existente (el Negocio de
+    un Lead se fija una sola vez, en su creación, igual criterio que
+    `campana_origen`). Quien llama debe resolverlo desde una fuente legítima
+    (el Canal de entrada); ver `_requiere_negocio_id_para_lead_nuevo`."""
     campos = _filtrar_campos(campos, campos_explicitos)
     if not campos:
         return
     async with async_session() as session:
         lead = await session.get(Lead, telefono)
         if lead is None:
-            lead = Lead(telefono=telefono)
+            _requiere_negocio_id_para_lead_nuevo(negocio_id, telefono, "actualizar_lead")
+            lead = Lead(telefono=telefono, negocio_id=negocio_id)
             session.add(lead)
         # Antes de pisar los valores: la transición se define contra el estado
         # ANTERIOR del lead. Vive acá (y no en el router) porque ésta es la
@@ -1321,10 +1684,7 @@ async def guardar_venta(
     desde la app de WhatsApp Business) y apagarlo acá podría hacer que Gabi
     pise a un humano que está atendiendo."""
     async with async_session() as session:
-        lead = await session.get(Lead, telefono)
-        if lead is None:
-            lead = Lead(telefono=telefono)
-            session.add(lead)
+        lead = _exigir_lead_existente(await session.get(Lead, telefono), telefono, "guardar_venta")
 
         if not lineas and revertir_resultado_al_vaciar and lead.resultado == "vendido":
             habia_lineas = await session.scalar(
@@ -1391,16 +1751,16 @@ async def asignar_asesor_a_lead(telefono: str, asesor: str | None, automatico: b
     su propio evento con el autor humano — hacerlo también acá duplicaría el
     evento y saltearía la versión de dos en dos."""
     async with async_session() as session:
-        lead = await session.get(Lead, telefono)
-        es_nuevo = lead is None
-        if es_nuevo:
-            lead = Lead(telefono=telefono)
-            session.add(lead)
+        # Gate 5.2 (H2): esta función nunca es el camino de creación de un
+        # Lead — para cuando llega acá (asignación, automática o manual),
+        # actualizar_lead() ya debió haber creado el Lead con su negocio_id
+        # resuelto desde el Canal de entrada.
+        lead = _exigir_lead_existente(await session.get(Lead, telefono), telefono, "asignar_asesor_a_lead")
         anterior = lead.asesor_asignado
         lead.asesor_asignado = asesor
         lead.visto_asesor = asesor is None
         if automatico:
-            _avanzar_version(lead, es_nuevo=es_nuevo)
+            _avanzar_version(lead, es_nuevo=False)
         lead.actualizado = datetime.utcnow()
         await session.commit()
 
@@ -1487,10 +1847,7 @@ async def pausar_gabi_manual(telefono: str):
     aparezca en listar_leads_esperando_asesor() y un supervisor lo reclame y
     lo asigne a una persona real cuando pueda."""
     async with async_session() as session:
-        lead = await session.get(Lead, telefono)
-        if lead is None:
-            lead = Lead(telefono=telefono)
-            session.add(lead)
+        lead = _exigir_lead_existente(await session.get(Lead, telefono), telefono, "pausar_gabi_manual")
         lead.pausado_manual = True
         if not lead.paso_flujo:
             lead.paso_flujo = "derivado_asesor"
@@ -1501,10 +1858,7 @@ async def pausar_gabi_manual(telefono: str):
 async def registrar_fallo_tecnico(telefono: str) -> int:
     """Suma 1 a los fallos técnicos consecutivos del lead y retorna el nuevo total."""
     async with async_session() as session:
-        lead = await session.get(Lead, telefono)
-        if lead is None:
-            lead = Lead(telefono=telefono)
-            session.add(lead)
+        lead = _exigir_lead_existente(await session.get(Lead, telefono), telefono, "registrar_fallo_tecnico")
         lead.fallos_tecnicos = (lead.fallos_tecnicos or 0) + 1
         lead.actualizado = datetime.utcnow()
         await session.commit()
@@ -1587,14 +1941,29 @@ async def contar_leads_activos_por_asesor(usernames: list[str]) -> dict[str, int
         return conteos
 
 
-async def crear_usuario(username: str, password: str, nombre: str, rol: str, nivel: str | None = None):
-    """Crea (o actualiza la contraseña de) una cuenta del panel interno."""
+async def crear_usuario(
+    username: str, password: str, nombre: str, rol: str, nivel: str | None = None,
+    negocio_id: str | None = None,
+):
+    """Crea (o actualiza la contraseña de) una cuenta del panel interno.
+
+    `negocio_id` (Gate 5.2, corrección H3) es obligatorio SOLO al crear un
+    usuario nuevo — quien llama debe resolverlo desde una fuente legítima
+    (el Negocio del admin que da de alta la cuenta, ver dashboard.py). Nunca
+    se asume un Negocio por defecto. Al actualizar la contraseña de un
+    usuario YA existente, `negocio_id` no se exige ni se sobreescribe — el
+    Negocio de un usuario se fija una sola vez, en su creación."""
     import bcrypt
     password_hash = bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
     async with async_session() as session:
         usuario = await session.get(Usuario, username)
         if usuario is None:
-            usuario = Usuario(username=username)
+            if negocio_id is None:
+                raise ValueError(
+                    f"crear_usuario(): no se puede crear la cuenta '{username}' sin negocio_id "
+                    f"resuelto. No se asume ningún Negocio por defecto (Gate 5.2)."
+                )
+            usuario = Usuario(username=username, negocio_id=negocio_id)
             session.add(usuario)
         usuario.password_hash = password_hash
         usuario.nombre = nombre
@@ -1630,6 +1999,7 @@ async def obtener_usuario(username: str) -> dict | None:
             "rol": usuario.rol,
             "nivel": usuario.nivel,
             "disponible": usuario.disponible,
+            "negocio_id": usuario.negocio_id,
         }
 
 
@@ -1666,10 +2036,7 @@ async def asignar_campana_origen(telefono: str, nombre_campana: str):
     """Guarda la campaña de origen de un lead — solo si aún no tenía una
     asignada, para no perder la atribución original del primer contacto."""
     async with async_session() as session:
-        lead = await session.get(Lead, telefono)
-        if lead is None:
-            lead = Lead(telefono=telefono)
-            session.add(lead)
+        lead = _exigir_lead_existente(await session.get(Lead, telefono), telefono, "asignar_campana_origen")
         if not lead.campana_origen:
             lead.campana_origen = nombre_campana
             lead.actualizado = datetime.utcnow()
@@ -1688,15 +2055,35 @@ def _campana_a_dict(c: Campana) -> dict:
         "texto_saludo": c.texto_saludo,
         "activa": c.activa,
         "creado": c.creado,
+        "negocio_id": c.negocio_id,
+        "unidad_id": c.unidad_id,
     }
 
 
 async def crear_campana(
     nombre: str, tipo_deteccion: str, patron: str,
     codigo_material: str = "", producto_promocional: str = "", precio_promocional: str = "",
-    texto_saludo: str = "",
+    texto_saludo: str = "", negocio_id: str | None = None, unidad_id: str | None = None,
 ) -> dict:
-    """Crea una campaña nueva (ej. cuando cambia la promoción del mes)."""
+    """Crea una campaña nueva (ej. cuando cambia la promoción del mes).
+
+    `negocio_id` es obligatorio (Gate 5.2, corrección H3) — quien llama debe
+    resolverlo desde una fuente legítima (el Negocio del admin que crea la
+    campaña). Nunca se asume un Negocio por defecto.
+
+    Gate 5.2 — NOTA DE ALCANCE: la Arquitectura Contractual (§5) fija
+    `unidad_id` como obligatoria para campañas nuevas, pero hoy no existe
+    ninguna Unidad de Negocio real (dato pendiente, no se inventa — ver
+    informe de cierre). Exigirlo acá bloquearía la creación de campañas en
+    producción, violando "compatibilidad con producción > mínimo cambio".
+    Por eso `unidad_id` sigue siendo opcional a nivel de función en este
+    Gate; la validación NOT NULL se activa en el Gate donde existan
+    Unidades reales para asignar (queda documentado como dependencia)."""
+    if negocio_id is None:
+        raise ValueError(
+            f"crear_campana(): no se puede crear la campaña '{nombre}' sin negocio_id "
+            f"resuelto. No se asume ningún Negocio por defecto (Gate 5.2)."
+        )
     async with async_session() as session:
         campana = Campana(
             nombre=nombre,
@@ -1706,6 +2093,8 @@ async def crear_campana(
             producto_promocional=producto_promocional or None,
             precio_promocional=precio_promocional or None,
             texto_saludo=texto_saludo or None,
+            negocio_id=negocio_id,
+            unidad_id=unidad_id,
         )
         session.add(campana)
         await session.commit()

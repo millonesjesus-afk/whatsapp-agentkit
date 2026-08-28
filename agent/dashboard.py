@@ -5373,7 +5373,14 @@ async def crear_usuario_nuevo(
         return _pagina("Gestionar asesores", usuario, cuerpo, request=request)
 
     nueva_password = secrets.token_urlsafe(9)
-    await crear_usuario(username, nueva_password, nombre, rol, nivel if rol == "asesor" else None)
+    # Gate 5.2 (corrección H3): negocio_id se toma del Negocio del propio
+    # admin que está creando la cuenta — contexto explícito, ya resuelto por
+    # ServicioIdentidad, nunca un default global. Generaliza sin cambios a
+    # un futuro Negocio 002: su admin crea usuarios con su propio negocio_id.
+    await crear_usuario(
+        username, nueva_password, nombre, rol, nivel if rol == "asesor" else None,
+        negocio_id=usuario["negocio_id"],
+    )
 
     mensaje_html = (
         '<div class="alert alert-success py-2 small">'
@@ -5818,10 +5825,15 @@ async def crear_campana_nueva(
                 status_code=400,
                 detail="El patrón no aparece dentro del mensaje de saludo — así nunca se detectaría esta campaña. Usa un fragmento que sí esté en el saludo.",
             )
+    # Gate 5.2 (corrección H3): negocio_id del admin que crea la campaña —
+    # mismo criterio que crear_usuario_nuevo. unidad_id queda sin pasar
+    # (None) — las Unidades reales de Cálidda son dato pendiente, no se
+    # inventa (Arquitectura Contractual §5, excepción de migración).
     campana_creada = await crear_campana(
         nombre=nombre.strip(), tipo_deteccion=tipo_deteccion, patron=patron.strip().lower(),
         texto_saludo=texto_saludo.strip(), codigo_material=codigo_material,
         producto_promocional=producto_promocional.strip(), precio_promocional=precio_promocional.strip(),
+        negocio_id=usuario["negocio_id"],
     )
     return RedirectResponse(url=f"/dashboard/campanas?creada={campana_creada['id']}", status_code=303)
 
@@ -6292,10 +6304,13 @@ async def crear_canal_whatsapp_nuevo(
     usuario: dict = Depends(servicio_identidad.requiere_rol("admin")),
     _csrf: None = Depends(verificar_csrf),
 ):
+    # Gate 5.2 (corrección H3): negocio_id del admin que da de alta el canal
+    # — mismo criterio que crear_usuario_nuevo/crear_campana_nueva.
     await crear_canal_whatsapp(
         nombre=nombre.strip(), phone_number_id=phone_number_id.strip(),
         access_token=access_token.strip(), app_secret=app_secret.strip(),
         page_access_token=page_access_token.strip(), modo=modo,
+        negocio_id=usuario["negocio_id"],
     )
     return RedirectResponse(url="/dashboard/canales-whatsapp", status_code=303)
 
@@ -6366,9 +6381,12 @@ async def conectar_whatsapp_embedded_signup(
     if r_webhook.status_code != 200:
         logger.error(f"Embedded Signup: fallo al suscribir la WABA a los webhooks — {r_webhook.status_code} {r_webhook.text}")
 
+    # Gate 5.2 (corrección H3): mismo criterio — negocio_id del admin que
+    # completó el flujo de Embedded Signup.
     await crear_canal_whatsapp(
         nombre=nombre, phone_number_id=phone_number_id,
         access_token=access_token, app_secret=app_secret, waba_id=waba_id,
+        negocio_id=usuario["negocio_id"],
     )
     return JSONResponse({"ok": True})
 

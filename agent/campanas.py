@@ -220,12 +220,19 @@ async def procesar_leads_formulario(body: dict, proveedor) -> None:
                 continue
 
             campana = await detectar_campana_por_formulario(datos.get("form_id", ""), datos.get("ad_id", ""))
+            # Gate 5.2 (corrección H2): mismo principio que el webhook de
+            # mensajes — negocio_id se resuelve del Canal ya identificado,
+            # nunca un default global. Si `canal` es None (resolver_canal(None)
+            # falló cerrado por ambigüedad entre Negocios, o no hay ningún
+            # canal configurado), negocio_id queda None y actualizar_lead()
+            # falla cerrado en vez de crear un Lead con Negocio desconocido.
             await actualizar_lead(
                 telefono,
                 nombre=datos.get("nombre") or "",
                 origen_contacto="formulario_meta",
                 campana_origen=campana["nombre"] if campana else "",
                 numero_whatsapp_id=(canal or {}).get("phone_number_id") or "",
+                negocio_id=(canal or {}).get("negocio_id"),
             )
             logger.info(f"Lead de formulario creado: {telefono} (leadgen_id {leadgen_id})")
 
