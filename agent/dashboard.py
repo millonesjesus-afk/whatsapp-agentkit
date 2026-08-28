@@ -43,8 +43,13 @@ from agent.memory import (
     obtener_usuario, listar_asesores, crear_usuario,
     asignar_asesor_a_lead, marcar_lead_visto, limpiar_revision_prioritaria, actualizar_disponibilidad, actualizar_nivel_asesor,
     listar_campanas, crear_campana, actualizar_campana, contar_leads_por_campana, eliminar_campana,
+    obtener_campana, obtener_canal_whatsapp,
     cambiar_password, contar_leads_activos_por_asesor, RESULTADOS_CERRADOS, listar_leads_agendados,
     listar_leads_esperando_asesor, listar_leads_pipeline, COLUMNAS_ORDEN_PIPELINE,
+    listar_conversaciones_activas, obtener_contact_detalle, obtener_conversation_detalle, listar_eventos_de_conversation,
+    listar_conversaciones_de_contact, resolver_opportunity_operable, resolver_conversation_operable,
+    intentar_cambiar_resultado_opportunity, intentar_asignar_conversation, liberar_asignacion_via_conversation,
+    cerrar_opportunity_con_venta, resolver_ids_operables_por_telefono, listar_lineas_venta_por_opportunity,
     registrar_evento_lead, listar_eventos_lead, intentar_avanzar_version,
     obtener_configuracion, guardar_configuracion,
     listar_lineas_venta, listar_lineas_venta_de_muchos,
@@ -2421,8 +2426,13 @@ def _dto_lead_pipeline(lead: dict) -> dict:
         return valor.isoformat() if isinstance(valor, datetime) else valor
 
     return {
-        # Identidad + contrato de Lead
-        "id": lead["telefono"],
+        # Identidad + contrato de Lead — Gate 5.3 cutover real §8: `id` deja
+        # de ser el teléfono. Es el `conversation_id` (real, navegable hacia
+        # `/dashboard/conversation/{id}`) cuando ya existe Contact/Conversation
+        # para este lead; si todavía no existe (sin backfill/webhook), cae a
+        # telefono como fallback — esa fila sigue funcionando por el camino
+        # legacy hasta que exista.
+        "id": lead.get("conversation_id") or lead["telefono"],
         "telefono": lead["telefono"],
         "version": lead.get("version"),
         "revision_prioritaria": lead.get("revision_prioritaria"),
@@ -2481,6 +2491,7 @@ async def crm_pipeline(
     # API deja elegir, con tope para que nadie pida la cartera entera.
     por_pagina = min(max(1, por_pagina), POR_PAGINA_PIPELINE_MAXIMO) if quiere_json else POR_PAGINA_PIPELINE
     leads, total = await listar_leads_pipeline(
+        negocio_id=usuario["negocio_id"],
         asesor_asignado=asesor_filtro, resultado=resultado or None, busqueda=q.strip(),
         interes=interes.strip() or None,
         orden=orden, direccion=dir, pagina=pagina, por_pagina=por_pagina,
@@ -2499,6 +2510,380 @@ async def crm_pipeline(
     )
     cuerpo = f"""<div class="shell d-flex"><div class="main-pane flex-grow-1 p-4">{panel}</div></div>"""
     return _pagina("CRM / Pipeline", usuario, cuerpo, request=request)
+
+
+@router.get("/conversaciones")
+async def bandeja_conversaciones(
+    request: Request,
+    usuario: dict = Depends(_usuario_actual),
+    q: str = "",
+    asesor: str = "",
+    alcance: str = "",
+    orden: str = "actualizado",
+    dir: str = "desc",
+    pagina: int = 1,
+    por_pagina: int = POR_PAGINA_PIPELINE,
+):
+    """Gate 5.3 — Bandeja de Conversaciones, endpoint JSON dedicado (Diseño
+    Técnico §13/§18). Reemplaza el reuso de `/pipeline` que hacía
+    `maiek-frontend/app/api/conversaciones/route.ts` — deja de ser válido en
+    cuanto una Conversation pueda tener más de una Opportunity secuencial
+    (DR-3): reusar Pipeline mostraría cada Opportunity como una fila
+    separada, duplicando la conversación en la Bandeja. Esta ruta lista
+    `Conversation` (con `estado == "activa"`), no `Opportunity` — mismo
+    alcance por rol que Pipeline (`_alcance_pipeline`, reutilizado tal
+    cual: es el eje RBAC, no cambia por representar Conversation en vez de
+    Opportunity). Solo responde JSON — no tiene contraparte HTML en el
+    panel legacy, que sigue sirviéndose de `/pipeline`."""
+    asesor_filtro, _ = _alcance_pipeline(usuario, alcance, asesor)
+    if orden not in ("nombre", "resultado", "asesor", "actualizado", "creado"):
+        orden = "actualizado"
+    if dir not in ("asc", "desc"):
+        dir = "desc"
+    pagina = max(1, pagina)
+    por_pagina = min(max(1, por_pagina), POR_PAGINA_PIPELINE_MAXIMO)
+    conversaciones, total = await listar_conversaciones_activas(
+        negocio_id=usuario["negocio_id"], asesor_asignado=asesor_filtro, busqueda=q.strip(),
+        orden=orden, direccion=dir, pagina=pagina, por_pagina=por_pagina,
+    )
+    return JSONResponse({"conversaciones": conversaciones, "total": total, "pagina": pagina, "por_pagina": por_pagina})
+
+
+def _verificar_acceso_conversation(usuario: dict, asesor_asignado: str | None):
+    """Mismo criterio que `_verificar_acceso_lead` (línea ~309), aplicado a
+    Conversation en vez de Lead: un Asesor solo ve lo que tiene asignado."""
+    if not tiene_acceso_a_lead(usuario["rol"], usuario["username"], asesor_asignado):
+        raise HTTPException(status_code=403, detail="No tienes acceso a esta conversación")
+
+
+async def _contact_autorizado(contact_id: str, usuario: dict) -> dict:
+    """404 si el Contact no existe o es de otro Negocio; 403 si es de este
+    Negocio pero el usuario (rol asesor) no tiene ninguna Conversation propia
+    ahí — mismo criterio de dos capas que el resto del Gate (ver
+    `_verificar_acceso_conversation`)."""
+    contact = await obtener_contact_detalle(contact_id, usuario["negocio_id"])
+    if contact is None:
+        raise HTTPException(status_code=404, detail="Contact no encontrado")
+    if usuario["rol"] not in ROLES_CON_VISION_TOTAL:
+        tiene_alguna = any(
+            c["asesor_asignado"] == usuario["username"] for c in contact["conversaciones"]
+        )
+        if not tiene_alguna:
+            raise HTTPException(status_code=403, detail="No tienes acceso a este contacto")
+    return contact
+
+
+@router.get("/contact/{contact_id}")
+async def contact_detalle(contact_id: str, usuario: dict = Depends(_usuario_actual)):
+    """Gate 5.3 §17 — historial estructural del Contact: identidad + todas
+    sus Conversation (activas y cerradas). `negocio_id` SIEMPRE resuelto de
+    la sesión — nunca del path/query (regla de API del Gate). Solo la
+    estructura de datos: la UI de este historial es de un Gate posterior."""
+    return JSONResponse(await _contact_autorizado(contact_id, usuario))
+
+
+@router.get("/contact/{contact_id}/conversaciones")
+async def contact_conversaciones(contact_id: str, usuario: dict = Depends(_usuario_actual)):
+    """Endpoint dedicado del Diseño Técnico Gate 5.3 §13/§17 (cutover real —
+    antes solo viajaba embebido dentro de `/contact/{id}`; se agrega la ruta
+    propia para que el contrato de API coincida exactamente con el
+    ratificado, sin quitar el campo embebido de arriba)."""
+    contact = await _contact_autorizado(contact_id, usuario)
+    return JSONResponse({"conversaciones": contact["conversaciones"]})
+
+
+def _dto_conversation_detalle(conversation: dict, lineas: list[dict], eventos: list[dict]) -> dict:
+    """Gate 5.3 cutover real §8/§13 — equivalente Opportunity/Conversation de
+    `_dto_lead_detalle` (misma forma de `venta`/campos, mismo criterio de
+    sufijo `Z` en instantes reales vs. `fecha_agendada` sin `Z` por ser hora
+    tipeada por un humano): el `id` es `conversation_id`, no telefono; el
+    control de concurrencia viaja partido en `conversation_version`/
+    `opportunity_version` en vez de un solo `version`."""
+    def _iso(valor):
+        return valor.isoformat() if isinstance(valor, datetime) else valor
+
+    venta = None
+    if lineas:
+        venta = {
+            "lineas": [
+                {
+                    "id": l.get("id"), "producto_id": l.get("producto_id"),
+                    "producto": l.get("producto"), "precio": l.get("precio"),
+                    "marca": l.get("marca"), "proveedor": l.get("proveedor"), "creado": iso_utc(l.get("creado")),
+                }
+                for l in lineas
+            ],
+            "modalidad_pago": conversation.get("modalidad_pago"),
+            "cuotas": conversation.get("cuotas"),
+            "medio_pago": conversation.get("medio_pago"),
+            "total": _resumen_venta(lineas)["precio_venta"],
+        }
+
+    return {
+        "id": conversation["id"],
+        "opportunity_id": conversation.get("opportunity_id"),
+        "telefono": conversation.get("telefono"),
+        "nombre": conversation.get("nombre"),
+        "interes": conversation.get("interes"),
+        "resultado": conversation.get("resultado"),
+        "fecha_agendada": _iso(conversation.get("fecha_agendada")),
+        "fecha_cierre": iso_utc(conversation.get("fecha_cierre")),
+        "asesor_asignado": conversation.get("asesor_asignado"),
+        "pausado_manual": bool(conversation.get("pausado_manual")),
+        "revision_prioritaria": bool(conversation.get("revision_prioritaria")),
+        "conversation_version": conversation.get("conversation_version"),
+        "opportunity_version": conversation.get("opportunity_version"),
+        "creado": iso_utc(conversation.get("creado")),
+        "actualizado": iso_utc(conversation.get("actualizado")),
+        "venta": venta,
+        "eventos": [
+            {
+                "id": e.get("id"), "tipo": e["tipo"], "descripcion": e["descripcion"],
+                "autor": e.get("autor"), "creado": e["creado"], "payload": e.get("payload"),
+            }
+            for e in eventos
+        ],
+    }
+
+
+@router.get("/conversation/{conversation_id}")
+async def conversation_detalle(conversation_id: str, usuario: dict = Depends(_usuario_actual)):
+    """Detalle puntual de una Conversation (activa o cerrada) — REEMPLAZA,
+    para la Nueva Experiencia, la rama JSON de `/lead/{telefono}` (Diseño
+    Técnico Gate 5.3 §13): mismo contenido que ese DTO (venta + Timeline),
+    resuelto desde Opportunity/Conversation/Contact en vez de Lead."""
+    conversation = await obtener_conversation_detalle(conversation_id, usuario["negocio_id"])
+    if conversation is None:
+        raise HTTPException(status_code=404, detail="Conversación no encontrada")
+    _verificar_acceso_conversation(usuario, conversation["asesor_asignado"])
+    lineas = []
+    if conversation.get("opportunity_id"):
+        lineas = await listar_lineas_venta_por_opportunity(conversation["opportunity_id"], usuario["negocio_id"])
+    eventos = await listar_eventos_de_conversation(conversation_id, usuario["negocio_id"])
+    return JSONResponse(_dto_conversation_detalle(conversation, lineas, eventos))
+
+
+@router.get("/conversation/{conversation_id}/timeline")
+async def conversation_timeline(conversation_id: str, usuario: dict = Depends(_usuario_actual)):
+    """Conversation Timeline de una Conversation puntual — a diferencia de
+    `/lead/{telefono}` (que solo puede mostrar el timeline de la Conversation
+    ACTIVA vía el puente telefono→Lead), esto sirve el timeline de cualquier
+    Conversation, incluida una ya cerrada por DR-4."""
+    conversation = await obtener_conversation_detalle(conversation_id, usuario["negocio_id"])
+    if conversation is None:
+        raise HTTPException(status_code=404, detail="Conversación no encontrada")
+    _verificar_acceso_conversation(usuario, conversation["asesor_asignado"])
+    eventos = await listar_eventos_de_conversation(conversation_id, usuario["negocio_id"])
+    return JSONResponse({"eventos": eventos})
+
+
+# ── Gate 5.3 — cutover real: Opportunity/Conversation como fuente de verdad
+# de las 3 escrituras humanas del CRM (Resolución Arquitectónica Gate 5.3,
+# Diseño Técnico Gate 5.3 §13). REEMPLAZAN el camino real de
+# `/lead/{telefono}/resultado|venta|asignar` — esos endpoints siguen
+# existiendo, pero como wrappers delgados que delegan acá (ver más abajo,
+# donde están definidos). `negocio_id` siempre de la sesión; el
+# `opportunity_id`/`conversation_id` del cliente identifica el recurso, nunca
+# autoriza sobre él (§9): primero ownership (404), después rol (403), recién
+# ahí se opera.
+#
+# Mismo contrato de envelope que ya usan Productos y `/lead/{telefono}/...`
+# (ver comentario más abajo, junto a `_json_lead_actualizado`):
+# {"ok": true, "lead": DTO} en éxito, {"ok": false, "detail": ...,
+# "version_actual": N} con 409 en conflicto — la clave sigue llamándose
+# "lead" (no "conversacion") a propósito: es el mismo contrato que ya
+# entiende `lib/api.ts` (`desenvolver<LeadDetalle>(crudo, "lead")`), renombrar
+# la clave no aporta nada y obligaría a tocar código del frontend que no
+# necesita cambiar.
+
+
+async def _json_conversation_actualizada(conversation_id: str, negocio_id: str) -> JSONResponse:
+    """Éxito de una escritura sobre Opportunity/Conversation: relee el estado
+    YA actualizado (misma razón que `_json_lead_actualizado`: la escritura
+    tocó la version, LineaVenta y/o el Timeline; devolver el estado real le
+    ahorra un GET al cliente y le da la version nueva)."""
+    conversation = await obtener_conversation_detalle(conversation_id, negocio_id)
+    if conversation is None:
+        raise HTTPException(status_code=404, detail="Conversación no encontrada")
+    lineas = []
+    if conversation.get("opportunity_id"):
+        lineas = await listar_lineas_venta_por_opportunity(conversation["opportunity_id"], negocio_id)
+    eventos = await listar_eventos_de_conversation(conversation_id, negocio_id)
+    return JSONResponse({"ok": True, "lead": _dto_conversation_detalle(conversation, lineas, eventos)})
+
+
+async def _json_conflicto_opportunity(opportunity_id: str, negocio_id: str) -> JSONResponse:
+    actual = await resolver_opportunity_operable(opportunity_id, negocio_id)
+    if actual is None:
+        raise HTTPException(status_code=404, detail="Opportunity no encontrada")
+    return JSONResponse(
+        {
+            "ok": False,
+            "detail": "Alguien más modificó esta conversación mientras la editabas. Revisa los datos actuales antes de volver a guardar.",
+            "version_actual": actual["version"],
+        },
+        status_code=409,
+    )
+
+
+async def _json_conflicto_conversation(conversation_id: str, negocio_id: str) -> JSONResponse:
+    actual = await resolver_conversation_operable(conversation_id, negocio_id)
+    if actual is None:
+        raise HTTPException(status_code=404, detail="Conversación no encontrada")
+    return JSONResponse(
+        {
+            "ok": False,
+            "detail": "Alguien más modificó esta conversación mientras la editabas. Revisa los datos actuales antes de volver a guardar.",
+            "version_actual": actual["version"],
+        },
+        status_code=409,
+    )
+
+
+@router.post("/opportunity/{opportunity_id}/resultado")
+async def opportunity_resultado(
+    opportunity_id: str,
+    request: Request,
+    resultado: str = Form(""),
+    fecha_agendada: str = Form(""),
+    version: int = Form(...),
+    usuario: dict = Depends(_usuario_actual),
+    _csrf: None = Depends(verificar_csrf),
+):
+    opp = await resolver_opportunity_operable(opportunity_id, usuario["negocio_id"])
+    if opp is None:
+        raise HTTPException(status_code=404, detail="Opportunity no encontrada")
+    _verificar_acceso_conversation(usuario, opp["asesor_asignado"])
+    if resultado and resultado not in RESULTADOS:
+        raise HTTPException(status_code=400, detail="Resultado inválido")
+
+    # Misma distinción que el endpoint legacy (dashboard.py, actualizar_resultado):
+    # "resultado" ausente del formulario = no tocar; presente y vacío = quitarlo.
+    formulario = await request.form()
+    campos: dict = {}
+    if "resultado" in formulario:
+        campos["resultado"] = resultado or None
+        if resultado != "agendado":
+            campos["fecha_agendada"] = None
+        elif fecha_agendada:
+            try:
+                campos["fecha_agendada"] = datetime.fromisoformat(fecha_agendada)
+            except ValueError:
+                raise HTTPException(status_code=400, detail="Fecha de la cita inválida")
+
+    descripcion = (
+        f"Cambió el resultado a «{ETIQUETAS_RESULTADO.get(resultado, resultado)}»"
+        if resultado else "Quitó el resultado"
+    )
+    evento = {
+        "tipo": "resultado_cambiado", "descripcion": descripcion, "autor": usuario["nombre"],
+        "payload": {"campo": "resultado", "anterior": opp.get("resultado"), "nuevo": resultado or None},
+    }
+    if not await intentar_cambiar_resultado_opportunity(opportunity_id, version, campos, evento=evento):
+        return await _json_conflicto_opportunity(opportunity_id, usuario["negocio_id"])
+    return await _json_conversation_actualizada(opp["conversation_id"], usuario["negocio_id"])
+
+
+@router.post("/opportunity/{opportunity_id}/venta")
+async def opportunity_venta(
+    opportunity_id: str,
+    lineas_venta: str = Form("[]"),
+    modalidad_pago: str = Form(""),
+    cuotas: str = Form(""),
+    medio_pago: str = Form(""),
+    version: int = Form(...),
+    usuario: dict = Depends(_usuario_actual),
+    _csrf: None = Depends(verificar_csrf),
+):
+    opp = await resolver_opportunity_operable(opportunity_id, usuario["negocio_id"])
+    if opp is None:
+        raise HTTPException(status_code=404, detail="Opportunity no encontrada")
+    _verificar_acceso_conversation(usuario, opp["asesor_asignado"])
+
+    try:
+        venta = servicio_comercial.validar_venta(lineas_venta, modalidad_pago, cuotas, medio_pago)
+        await servicio_comercial.validar_productos_de_venta(venta)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    campos: dict = {"modalidad_pago": venta["modalidad_pago"], "cuotas": venta["cuotas"], "medio_pago": venta["medio_pago"]}
+    if venta["lineas"]:
+        campos["resultado"] = "vendido"
+
+    evento = {
+        "tipo": "venta_registrada",
+        "descripcion": f"Registró una venta ({len(venta['lineas'])} producto(s), {venta['modalidad_pago'] or 'sin modalidad'})",
+        "autor": usuario["nombre"],
+        "payload": {
+            "lineas_venta": venta["lineas"], "modalidad_pago": venta["modalidad_pago"],
+            "cuotas": venta["cuotas"], "medio_pago": venta["medio_pago"],
+        },
+    }
+    ok = await cerrar_opportunity_con_venta(
+        opportunity_id, version, venta["lineas"], campos,
+        revertir_resultado_al_vaciar=True, evento=evento,
+    )
+    if not ok:
+        return await _json_conflicto_opportunity(opportunity_id, usuario["negocio_id"])
+    return await _json_conversation_actualizada(opp["conversation_id"], usuario["negocio_id"])
+
+
+@router.post("/conversation/{conversation_id}/asignar")
+async def conversation_asignar(
+    conversation_id: str,
+    asesor_asignado: str = Form(""),
+    version: int = Form(...),
+    usuario: dict = Depends(servicio_identidad.requiere_rol(*ROLES_CON_VISION_TOTAL)),
+    _csrf: None = Depends(verificar_csrf),
+):
+    conv = await resolver_conversation_operable(conversation_id, usuario["negocio_id"])
+    if conv is None:
+        raise HTTPException(status_code=404, detail="Conversación no encontrada")
+
+    anterior = conv["asesor_asignado"]
+    evento = None
+    if asesor_asignado:
+        asesor_info = await obtener_usuario(asesor_asignado)
+        nombre_asesor = asesor_info["nombre"] if asesor_info else asesor_asignado
+        evento = {
+            "tipo": "asignado", "descripcion": f"Asignó la conversación a {nombre_asesor}", "autor": usuario["nombre"],
+            "payload": {"campo": "asesor_asignado", "anterior": anterior, "nuevo": asesor_asignado},
+        }
+    elif anterior:
+        # "Sin asignar" (value="") es una decisión explícita del supervisor —
+        # mismo criterio que el endpoint legacy (dashboard.py, asignar_lead).
+        asesor_info = await obtener_usuario(anterior)
+        nombre_anterior = asesor_info["nombre"] if asesor_info else anterior
+        evento = {
+            "tipo": "desasignado", "descripcion": f"Quitó la asignación de {nombre_anterior}", "autor": usuario["nombre"],
+            "payload": {"campo": "asesor_asignado", "anterior": anterior, "nuevo": None},
+        }
+
+    if not await intentar_asignar_conversation(conversation_id, version, asesor_asignado or None, evento=evento):
+        return await _json_conflicto_conversation(conversation_id, usuario["negocio_id"])
+    return await _json_conversation_actualizada(conversation_id, usuario["negocio_id"])
+
+
+@router.post("/conversation/{conversation_id}/liberar")
+async def conversation_liberar(
+    conversation_id: str,
+    usuario: dict = Depends(_usuario_actual),
+    _csrf: None = Depends(verificar_csrf),
+):
+    """Devuelve el control a Gabi — equivalente Conversation-first de
+    `/lead/{telefono}/reactivar-gabi`. Sin chequeo de `version`: el endpoint
+    legacy nunca lo tuvo (es un efecto de un clic, no un formulario con datos
+    que puedan chocar) — mismo contrato real, no uno más estricto inventado
+    acá (cutover real §2)."""
+    conv = await resolver_conversation_operable(conversation_id, usuario["negocio_id"])
+    if conv is None:
+        raise HTTPException(status_code=404, detail="Conversación no encontrada")
+    _verificar_acceso_conversation(usuario, conv["asesor_asignado"])
+
+    telefono = await liberar_asignacion_via_conversation(conversation_id, usuario["negocio_id"], autor=usuario["nombre"])
+    if telefono is None:
+        raise HTTPException(status_code=400, detail="Esta conversación ya está vendida — no se puede reactivar a Gabi desde acá")
+    return await _json_conversation_actualizada(conversation_id, usuario["negocio_id"])
 
 
 COLUMNAS_EXPORTACION = [
@@ -4963,24 +5348,49 @@ async def actualizar_resultado(
             except ValueError:
                 raise HTTPException(status_code=400, detail="Fecha de la cita inválida")
 
-    # Concurrencia optimista (MAIEK_AI_PRODUCT_PATTERNS.md, Cap. 6): si alguien
-    # más ya escribió sobre este lead desde que se abrió el formulario, no se
-    # aplica nada — se muestra el conflicto (Human Decision Gate) en vez de
-    # sobrescribir en silencio.
+    # Concurrencia optimista sobre Lead.version — SIGUE siendo el gate de
+    # ESTE endpoint (el panel HTML legacy nunca conoció opportunity_version,
+    # ver Gate 5.3 cutover real §2). Lo que cambia con el cutover es lo que
+    # pasa DESPUÉS de que este chequeo pasa: la escritura real delega a
+    # Opportunity (fuente de verdad) en vez de aplicarse sobre Lead — todo
+    # camino nuevo también avanza Lead.version de forma incondicional, así
+    # que este chequeo sigue protegiendo contra cualquier escritura
+    # concurrente, venga por el endpoint que venga.
     if not await intentar_avanzar_version(telefono, version):
         if _pide_json_explicitamente(request):
             return await _json_conflicto_lead(telefono)
         return await _renderizar_detalle_lead(telefono, request, usuario, hay_conflicto=True)
 
-    await actualizar_lead(telefono, campos_explicitos=tuple(campos_explicitos), **campos)
     descripcion = (
         f"Cambió el resultado a «{ETIQUETAS_RESULTADO.get(resultado, resultado)}»"
         if resultado else "Quitó el resultado"
     )
-    await registrar_evento_lead(
-        telefono, tipo="resultado_cambiado", descripcion=descripcion, autor=usuario["nombre"],
-        payload={"campo": "resultado", "anterior": lead.get("resultado"), "nuevo": resultado or None},
-    )
+    evento = {
+        "tipo": "resultado_cambiado", "descripcion": descripcion, "autor": usuario["nombre"],
+        "payload": {"campo": "resultado", "anterior": lead.get("resultado"), "nuevo": resultado or None},
+    }
+    ids = await resolver_ids_operables_por_telefono(telefono)
+    if ids is not None:
+        # Camino REAL — LEGACY / COMPATIBILIDAD: delega hacia Opportunity
+        # (cutover real §1/§7). La version vigente de la Opportunity se
+        # resuelve server-side (nunca la manda este cliente, que no la
+        # conoce); el chequeo de Lead.version de arriba ya serializó este
+        # request contra cualquier otra escritura, así que el 409 acá solo
+        # puede darse por una ventana de carrera extremadamente angosta.
+        campos_opportunity = {k: (v if v != "" else None) for k, v in campos.items()}
+        if not await intentar_cambiar_resultado_opportunity(
+            ids["opportunity_id"], ids["opportunity_version"], campos_opportunity, evento=evento,
+        ):
+            raise HTTPException(status_code=409, detail="La conversación fue modificada por otra sesión — recargá para ver el estado actual")
+    else:
+        # Fallback — todavía no hay Contact/Conversation/Opportunity para
+        # este teléfono (no pasó por el webhook, o falta backfill). Lead
+        # sigue siendo la única fuente hasta que exista; no se inventa nada.
+        await actualizar_lead(telefono, campos_explicitos=tuple(campos_explicitos), **campos)
+        await registrar_evento_lead(
+            telefono, tipo=evento["tipo"], descripcion=evento["descripcion"],
+            autor=evento["autor"], payload=evento["payload"],
+        )
     if _pide_json_explicitamente(request):
         return await _json_lead_actualizado(telefono)
     return RedirectResponse(url=f"/dashboard/lead/{telefono}", status_code=303)
@@ -5058,22 +5468,41 @@ async def registrar_venta(
             return await _json_conflicto_lead(telefono)
         return await _renderizar_detalle_lead(telefono, request, usuario, hay_conflicto=True)
 
-    await servicio_comercial.persistir_venta(telefono, venta)
     # El Timeline registra lo que REALMENTE se guardó (las líneas ya validadas y
     # recortadas, la forma de pago ya normalizada), no el crudo del formulario:
     # antes anotaba `medio_pago: ""` en una venta financiada que en la fila
     # quedó como "Recibo de gas".
-    await registrar_evento_lead(
-        telefono, tipo="venta_registrada",
-        descripcion=f"Registró una venta ({len(venta['lineas'])} producto(s), {venta['modalidad_pago'] or 'sin modalidad'})",
-        autor=usuario["nombre"],
-        payload={
-            "lineas_venta": venta["lineas"],
-            "modalidad_pago": venta["modalidad_pago"],
-            "cuotas": venta["cuotas"],
-            "medio_pago": venta["medio_pago"],
+    evento = {
+        "tipo": "venta_registrada",
+        "descripcion": f"Registró una venta ({len(venta['lineas'])} producto(s), {venta['modalidad_pago'] or 'sin modalidad'})",
+        "autor": usuario["nombre"],
+        "payload": {
+            "lineas_venta": venta["lineas"], "modalidad_pago": venta["modalidad_pago"],
+            "cuotas": venta["cuotas"], "medio_pago": venta["medio_pago"],
         },
-    )
+    }
+    campos = {"modalidad_pago": venta["modalidad_pago"], "cuotas": venta["cuotas"], "medio_pago": venta["medio_pago"]}
+    if venta["lineas"]:
+        campos["resultado"] = "vendido"
+
+    ids = await resolver_ids_operables_por_telefono(telefono)
+    if ids is not None:
+        # Camino REAL — LEGACY / COMPATIBILIDAD (cutover real §1/§7/§10): la
+        # version vigente de la Opportunity se resuelve server-side, el
+        # chequeo de Lead.version de arriba ya serializó este request.
+        if not await cerrar_opportunity_con_venta(
+            ids["opportunity_id"], ids["opportunity_version"], venta["lineas"], campos,
+            revertir_resultado_al_vaciar=True, evento=evento,
+        ):
+            raise HTTPException(status_code=409, detail="La conversación fue modificada por otra sesión — recargá para ver el estado actual")
+    else:
+        # Fallback — sin Contact/Conversation/Opportunity todavía para este
+        # teléfono; Lead sigue siendo la única fuente hasta que exista.
+        await servicio_comercial.persistir_venta(telefono, venta)
+        await registrar_evento_lead(
+            telefono, tipo=evento["tipo"], descripcion=evento["descripcion"],
+            autor=evento["autor"], payload=evento["payload"],
+        )
     if _pide_json_explicitamente(request):
         return await _json_lead_actualizado(telefono)
     return RedirectResponse(url=f"/dashboard/lead/{telefono}", status_code=303)
@@ -5099,28 +5528,50 @@ async def asignar_lead(
             return await _json_conflicto_lead(telefono)
         return await _renderizar_detalle_lead(telefono, request, usuario, hay_conflicto=True)
 
+    evento = None
     if asesor_asignado:
-        await asignar_asesor_a_lead(telefono, asesor_asignado)
         asesor_info = await obtener_usuario(asesor_asignado)
         nombre_asesor = asesor_info["nombre"] if asesor_info else asesor_asignado
-        await registrar_evento_lead(
-            telefono, tipo="asignado", descripcion=f"Asignó el lead a {nombre_asesor}", autor=usuario["nombre"],
-            payload={"campo": "asesor_asignado", "anterior": lead.get("asesor_asignado"), "nuevo": asesor_asignado},
-        )
+        evento = {
+            "tipo": "asignado", "descripcion": f"Asignó el lead a {nombre_asesor}", "autor": usuario["nombre"],
+            "payload": {"campo": "asesor_asignado", "anterior": lead.get("asesor_asignado"), "nuevo": asesor_asignado},
+        }
     elif lead.get("asesor_asignado"):
         # "Sin asignar" (value="") es una decisión explícita del supervisor, no
         # un formulario incompleto: hay que desasignar. Solo si había alguien
         # asignado — desasignar un lead que ya está libre no cambia nada y no
         # merece una línea en el Timeline.
         anterior = lead["asesor_asignado"]
-        await asignar_asesor_a_lead(telefono, None)
         asesor_info = await obtener_usuario(anterior)
         nombre_anterior = asesor_info["nombre"] if asesor_info else anterior
-        await registrar_evento_lead(
-            telefono, tipo="desasignado", descripcion=f"Quitó la asignación de {nombre_anterior}",
-            autor=usuario["nombre"],
-            payload={"campo": "asesor_asignado", "anterior": anterior, "nuevo": None},
-        )
+        evento = {
+            "tipo": "desasignado", "descripcion": f"Quitó la asignación de {nombre_anterior}", "autor": usuario["nombre"],
+            "payload": {"campo": "asesor_asignado", "anterior": anterior, "nuevo": None},
+        }
+
+    ids = await resolver_ids_operables_por_telefono(telefono)
+    if ids is not None:
+        # Camino REAL — LEGACY / COMPATIBILIDAD (cutover real §1/§7):
+        # asesor_asignado_id es campo de Conversation, no de Opportunity.
+        # `evento is None` implica que no había nada que cambiar (ni asignar
+        # ni un asesor previo que desasignar) — mismo criterio que el
+        # original, que en ese caso tampoco escribía nada.
+        if evento is not None:
+            if not await intentar_asignar_conversation(
+                ids["conversation_id"], ids["conversation_version"], asesor_asignado or None, evento=evento,
+            ):
+                raise HTTPException(status_code=409, detail="La conversación fue modificada por otra sesión — recargá para ver el estado actual")
+    else:
+        # Fallback — sin Contact/Conversation todavía para este teléfono.
+        if asesor_asignado:
+            await asignar_asesor_a_lead(telefono, asesor_asignado)
+        elif lead.get("asesor_asignado"):
+            await asignar_asesor_a_lead(telefono, None)
+        if evento is not None:
+            await registrar_evento_lead(
+                telefono, tipo=evento["tipo"], descripcion=evento["descripcion"],
+                autor=evento["autor"], payload=evento["payload"],
+            )
     if _pide_json_explicitamente(request):
         return await _json_lead_actualizado(telefono)
     return RedirectResponse(url=f"/dashboard/lead/{telefono}", status_code=303)
@@ -5154,13 +5605,23 @@ async def reactivar_gabi(
         raise HTTPException(status_code=404, detail="Lead no encontrado")
     _verificar_acceso_lead(usuario, lead)
 
-    if lead.get("resultado") == "vendido":
-        raise HTTPException(
-            status_code=400,
-            detail="Este lead ya está vendido — Gabi permanece pausada indefinidamente y no se puede reactivar desde acá",
+    mensaje_vendido = "Este lead ya está vendido — Gabi permanece pausada indefinidamente y no se puede reactivar desde acá"
+    ids = await resolver_ids_operables_por_telefono(telefono)
+    if ids is not None:
+        # Camino REAL — LEGACY / COMPATIBILIDAD (cutover real §1/§6): el
+        # guardia de "vendido" se resuelve sobre Opportunity (fuente de
+        # verdad), no sobre Lead.resultado — `liberar_asignacion_via_conversation`
+        # ya lo hace así y reusa `liberar_asignacion()` tal cual.
+        telefono_liberado = await liberar_asignacion_via_conversation(
+            ids["conversation_id"], usuario["negocio_id"], autor=usuario["nombre"], motivo="reactivado_manual",
         )
-
-    await liberar_asignacion(telefono, autor=usuario["nombre"], motivo="reactivado_manual")
+        if telefono_liberado is None:
+            raise HTTPException(status_code=400, detail=mensaje_vendido)
+    else:
+        # Fallback — sin Contact/Conversation todavía para este teléfono.
+        if lead.get("resultado") == "vendido":
+            raise HTTPException(status_code=400, detail=mensaje_vendido)
+        await liberar_asignacion(telefono, autor=usuario["nombre"], motivo="reactivado_manual")
 
     if _pide_json_explicitamente(request):
         return await _json_lead_actualizado(telefono)
@@ -5838,6 +6299,19 @@ async def crear_campana_nueva(
     return RedirectResponse(url=f"/dashboard/campanas?creada={campana_creada['id']}", status_code=303)
 
 
+async def _verificar_ownership_campana(usuario: dict, campana_id: int) -> dict:
+    """Gate 5.3 — corrección pequeña: el gate de rol (`admin`) ya existía,
+    pero ninguna de las 3 rutas verificaba que la campaña perteneciera al
+    mismo Negocio del admin que la edita/apaga/borra (hallazgo del bloque de
+    Diseño Técnico). 404 (no 403): no confirma la existencia del recurso a
+    quien no tiene acceso — mismo criterio que se aplicará al resto de
+    chequeos de ownership nuevos de este Gate."""
+    campana = await obtener_campana(campana_id)
+    if campana is None or campana.get("negocio_id") != usuario.get("negocio_id"):
+        raise HTTPException(status_code=404, detail="Campaña no encontrada")
+    return campana
+
+
 @router.post("/campanas/{campana_id}/editar")
 async def editar_promo_campana(
     campana_id: int,
@@ -5847,6 +6321,7 @@ async def editar_promo_campana(
     usuario: dict = Depends(servicio_identidad.requiere_rol("admin")),
     _csrf: None = Depends(verificar_csrf),
 ):
+    await _verificar_ownership_campana(usuario, campana_id)
     codigo_material = codigo_material.strip()
     if codigo_material and await obtener_producto_por_codigo(codigo_material) is None:
         raise HTTPException(status_code=400, detail=f"El código de material '{codigo_material}' no existe en la lista de precios vigente")
@@ -5861,16 +6336,14 @@ async def editar_promo_campana(
 
 @router.post("/campanas/{campana_id}/toggle")
 async def toggle_campana(campana_id: int, usuario: dict = Depends(servicio_identidad.requiere_rol("admin")), _csrf: None = Depends(verificar_csrf)):
-    campanas = await listar_campanas()
-    actual = next((c for c in campanas if c["id"] == campana_id), None)
-    if actual is None:
-        raise HTTPException(status_code=404, detail="Campaña no encontrada")
+    actual = await _verificar_ownership_campana(usuario, campana_id)
     await actualizar_campana(campana_id, activa=not actual["activa"])
     return RedirectResponse(url="/dashboard/campanas", status_code=303)
 
 
 @router.post("/campanas/{campana_id}/eliminar")
 async def eliminar_campana_ruta(campana_id: int, usuario: dict = Depends(servicio_identidad.requiere_rol("admin")), _csrf: None = Depends(verificar_csrf)):
+    await _verificar_ownership_campana(usuario, campana_id)
     borrada = await eliminar_campana(campana_id)
     if not borrada:
         raise HTTPException(
@@ -6391,6 +6864,17 @@ async def conectar_whatsapp_embedded_signup(
     return JSONResponse({"ok": True})
 
 
+async def _verificar_ownership_canal(usuario: dict, canal_id: int) -> dict:
+    """Gate 5.3 — corrección pequeña, misma familia que
+    `_verificar_ownership_campana`, con prioridad más alta acá por tocar
+    credenciales de canal (access_token/app_secret) — un admin de otro
+    Negocio no debe poder ni siquiera confirmar que el canal existe."""
+    canal = await obtener_canal_whatsapp(canal_id)
+    if canal is None or canal.get("negocio_id") != usuario.get("negocio_id"):
+        raise HTTPException(status_code=404, detail="Canal no encontrado")
+    return canal
+
+
 @router.post("/canales-whatsapp/{canal_id}/editar")
 async def editar_canal_whatsapp_ruta(
     canal_id: int,
@@ -6405,9 +6889,7 @@ async def editar_canal_whatsapp_ruta(
     (aprobado 2026-08-14): sin phone_number_id ni waba_id, sin alertas de
     caducidad. Resuelve el caso real de hoy: renovar el Access Token de
     Coexistencia antes de que caduque a los 60 días."""
-    canales = await listar_canales_whatsapp()
-    if not any(c["id"] == canal_id for c in canales):
-        raise HTTPException(status_code=404, detail="Canal no encontrado")
+    await _verificar_ownership_canal(usuario, canal_id)
     await actualizar_canal_whatsapp(
         canal_id, nombre=nombre.strip(), access_token=access_token.strip(),
         app_secret=app_secret.strip(), page_access_token=page_access_token.strip(),
@@ -6417,20 +6899,14 @@ async def editar_canal_whatsapp_ruta(
 
 @router.post("/canales-whatsapp/{canal_id}/toggle")
 async def toggle_canal_whatsapp(canal_id: int, usuario: dict = Depends(servicio_identidad.requiere_rol("admin")), _csrf: None = Depends(verificar_csrf)):
-    canales = await listar_canales_whatsapp()
-    actual = next((c for c in canales if c["id"] == canal_id), None)
-    if actual is None:
-        raise HTTPException(status_code=404, detail="Canal no encontrado")
+    actual = await _verificar_ownership_canal(usuario, canal_id)
     await actualizar_canal_whatsapp(canal_id, activo=not actual["activo"])
     return RedirectResponse(url="/dashboard/canales-whatsapp", status_code=303)
 
 
 @router.post("/canales-whatsapp/{canal_id}/modo")
 async def toggle_modo_canal_whatsapp(canal_id: int, usuario: dict = Depends(servicio_identidad.requiere_rol("admin")), _csrf: None = Depends(verificar_csrf)):
-    canales = await listar_canales_whatsapp()
-    actual = next((c for c in canales if c["id"] == canal_id), None)
-    if actual is None:
-        raise HTTPException(status_code=404, detail="Canal no encontrado")
+    actual = await _verificar_ownership_canal(usuario, canal_id)
     nuevo_modo = "pruebas" if actual.get("modo", "produccion") == "produccion" else "produccion"
     await actualizar_canal_whatsapp(canal_id, modo=nuevo_modo)
     return RedirectResponse(url="/dashboard/canales-whatsapp", status_code=303)
@@ -6576,7 +7052,14 @@ async def sesion_actual(request: Request, usuario: dict = Depends(_usuario_actua
     csrf_token de la sesión de forma lazy) y el mismo token que ya viaja como
     <meta name="csrf-token"> en el panel HTML."""
     return JSONResponse({
-        "usuario": {"username": usuario["username"], "rol": usuario["rol"]},
+        # Gate 5.3 — corrección pequeña ya identificada en rondas anteriores:
+        # `usuario["negocio_id"]` ya está disponible acá (viene de
+        # ServicioIdentidad -> obtener_usuario, poblado desde Gate 5.2) pero
+        # se descartaba al armar esta respuesta — es el bloqueador exacto del
+        # futuro chip de contexto Negocio/Unidad (Gate 5.6). El BFF de
+        # maiek-frontend (app/api/sesion/route.ts) ya es passthrough puro, no
+        # necesita cambios para que este campo llegue al cliente.
+        "usuario": {"username": usuario["username"], "rol": usuario["rol"], "negocio_id": usuario.get("negocio_id")},
         "capacidades": _capacidades_de(usuario["rol"]),
         "csrf_token": request.session.get("csrf_token", ""),
     })

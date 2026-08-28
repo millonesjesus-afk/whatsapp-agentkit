@@ -16,7 +16,7 @@ from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sess
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, aliased
 from sqlalchemy import (
     String, Text, DateTime, select, Integer, Boolean, func, case, delete, update, JSON,
-    ForeignKey, Index, text,
+    ForeignKey, Index, text, and_ as sa_and,
 )
 from sqlalchemy.exc import IntegrityError
 from dotenv import load_dotenv
@@ -353,6 +353,12 @@ class Mensaje(Base):
     # nullable=True, desalineado con la migración real, lo que dejaba que
     # los tests contra create_all() no detectaran la regresión de H1).
     negocio_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    # Gate 5.3 — EXPAND: nullable hasta que el backfill (M3) lo pueble para
+    # todo el histórico; CONTRACT lo deja NOT NULL. Mensajes nuevos lo
+    # resuelven en el punto de escritura (ver guardar_mensaje), nunca por
+    # JOIN posterior. Sin ForeignKey estricta, mismo criterio ya vigente
+    # para archivo_id/respondido_a_id en esta misma tabla.
+    conversation_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
 
 
 class ArchivoAdjunto(Base):
@@ -489,7 +495,7 @@ class Lead(Base):
 
 class EventoLead(Base):
     """Conversation Timeline (MAIEK_AI_PRODUCT_PATTERNS.md, Cap. 6) — eventos
-    de NEGOCIO sobre un lead (resultado cambiado, asignado, venta registrada),
+    de NEGOCIO sobre un hilo (resultado cambiado, asignado, venta registrada),
     distintos de los mensajes de chat crudos. Append-only: nunca se actualiza
     ni se borra una fila existente. `payload` guarda valores estructurados
     (campo/anterior/nuevo, líneas de venta, etc.) — no solo el texto de
@@ -499,30 +505,76 @@ class EventoLead(Base):
     hizo el cambio TAL COMO ERA en ese momento (no una referencia viva a
     Usuario) — práctica estándar de bitácora: el registro histórico no debe
     cambiar si alguien edita su nombre después. None si el cambio fue
-    automático (Gabi)."""
+    automático (Gabi).
+
+    Gate 5.3 — hallazgo del bloque de Diseño Técnico (Agente B): este modelo
+    tenía el MISMO patrón telefono-only que LineaVenta, en lectura Y
+    escritura — y es exactamente lo que este mismo Gate expone como
+    Conversation Timeline por API. `telefono` se elimina; toda lectura/
+    escritura usa las claves fuertes `negocio_id`/`conversation_id`/
+    `opportunity_id`, nunca telefono en solitario."""
     __tablename__ = "eventos_lead"
 
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    telefono: Mapped[str] = mapped_column(String(50), index=True)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)  # D2 (política UUID retroactiva) sigue Pendiente — no se migra por anticipación
+    negocio_id: Mapped[str] = mapped_column(String(36), ForeignKey("negocios.id"), nullable=False, index=True)
+    conversation_id: Mapped[str] = mapped_column(String(36), ForeignKey("conversations.id"), nullable=False, index=True)
+    # NULL para eventos de Conversation (asignado/desasignado); poblado para
+    # eventos de Opportunity (resultado_cambiado, venta_registrada).
+    opportunity_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("opportunities.id"), nullable=True, index=True)
     tipo: Mapped[str] = mapped_column(String(30))  # resultado_cambiado | asignado | venta_registrada
     descripcion: Mapped[str] = mapped_column(String(300))
     payload: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     autor: Mapped[str | None] = mapped_column(String(100), nullable=True)
     creado: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
 
+    __table_args__ = (
+        Index("ix_evento_negocio_conversation_creado", "negocio_id", "conversation_id", "creado"),
+    )
+
 
 async def registrar_evento_lead(telefono: str, tipo: str, descripcion: str, autor: str | None, payload: dict | None = None):
+    """Interfaz pública SIN CAMBIOS (sigue siendo telefono, como todos sus
+    call sites existentes en dashboard.py/memory.py) — Gate 5.3 resuelve
+    `negocio_id`/`conversation_id`/`opportunity_id` INTERNAMENTE, mismo
+    patrón que `guardar_mensaje` ya usa para `negocio_id` desde Gate 5.2
+    (H1): nunca se le pide al llamador que resuelva el contexto, y nunca se
+    acepta un `conversation_id` externo que pudiera manipularse o duplicar
+    la resolución. Falla cerrado si el Contact/Conversation no existen
+    todavía (no se inventa ninguno acá — la creación es responsabilidad del
+    flujo de entrada, ver `_resolver_conversation_activa` en el webhook)."""
     async with async_session() as session:
-        session.add(EventoLead(telefono=telefono, tipo=tipo, descripcion=descripcion, autor=autor, payload=payload))
+        conversation = await _obtener_conversation_activa_por_telefono(session, telefono)
+        if conversation is None:
+            raise ValueError(
+                f"registrar_evento_lead(): no existe una Conversation activa para telefono={telefono} "
+                f"— no se puede registrar el evento sin resolver el hilo. Verificar que la Conversation "
+                f"ya fue creada para este teléfono (webhook o backfill)."
+            )
+        opportunity = await _obtener_opportunity_vigente(session, conversation.id)
+        session.add(EventoLead(
+            conversation_id=conversation.id, negocio_id=conversation.negocio_id,
+            opportunity_id=opportunity.id if opportunity else None,
+            tipo=tipo, descripcion=descripcion, autor=autor, payload=payload,
+        ))
         await session.commit()
 
 
 async def listar_eventos_lead(telefono: str, limite: int | None = None) -> list[dict]:
     """Del más reciente al más antiguo — para el Conversation Timeline y,
     tomando solo el primero, para el aviso de conflicto de edición (quién,
-    cuándo, qué cambió)."""
+    cuándo, qué cambió). Interfaz pública sin cambios (telefono); internamente
+    filtra por `conversation_id` + `negocio_id` (doble candado) — nunca por
+    telefono contra la tabla `eventos_lead` (hallazgo GRAVE del bloque de
+    Diseño Técnico, ver comentario de la clase EventoLead)."""
     async with async_session() as session:
-        query = select(EventoLead).where(EventoLead.telefono == telefono).order_by(EventoLead.creado.desc())
+        conversation = await _obtener_conversation_activa_por_telefono(session, telefono)
+        if conversation is None:
+            return []
+        query = (
+            select(EventoLead)
+            .where(EventoLead.conversation_id == conversation.id, EventoLead.negocio_id == conversation.negocio_id)
+            .order_by(EventoLead.creado.desc())
+        )
         if limite:
             query = query.limit(limite)
         result = await session.execute(query)
@@ -532,6 +584,7 @@ async def listar_eventos_lead(telefono: str, limite: int | None = None) -> list[
                 # evento (el frontend la usa como key de lista y para anclar
                 # un evento puntual): la PK ya existía, solo no se exponía.
                 "id": e.id,
+                "conversation_id": e.conversation_id, "opportunity_id": e.opportunity_id,
                 "tipo": e.tipo, "descripcion": e.descripcion, "payload": e.payload,
                 "autor": e.autor, "creado": e.creado,
             }
@@ -627,16 +680,130 @@ def _marcar_cierre_vendido(lead: "Lead"):
     lead.pausado_manual = True
 
 
+class Contact(Base):
+    """Gate 5.3 — identidad del cliente, independiente del hilo conversacional
+    (Conversation) y del ciclo comercial (Opportunity). Arquitectura
+    Contractual §8: `telefono` deja de ser identidad global — el mismo número
+    puede existir como Contact DISTINTO en dos Negocios (unique compuesto
+    negocio_id+telefono, nunca telefono solo)."""
+    __tablename__ = "contacts"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_generar_uuid)
+    negocio_id: Mapped[str] = mapped_column(String(36), ForeignKey("negocios.id"), nullable=False, index=True)
+    telefono: Mapped[str] = mapped_column(String(50), nullable=False)
+    nombre: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    eliminado_en: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    eliminado_por: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    creado: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    actualizado: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, index=True)
+
+    __table_args__ = (
+        Index("ix_contact_negocio_telefono", "negocio_id", "telefono", unique=True),
+    )
+
+
+class Conversation(Base):
+    """Gate 5.3 — hilo conversacional con un Contact (Arquitectura Contractual
+    §9). Un Contact puede tener varias Conversation SUCESIVAS en el tiempo
+    (DR-4, Resolución Arquitectónica Gate 5.3) — nunca simultáneas: solo una
+    puede estar `estado == "activa"` a la vez para un mismo Contact."""
+    __tablename__ = "conversations"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_generar_uuid)
+    negocio_id: Mapped[str] = mapped_column(String(36), ForeignKey("negocios.id"), nullable=False, index=True)
+    # Heredado del Canal — nullable SOLO mientras CanalWhatsApp.unidad_id siga
+    # nullable por la excepción de migración legada (Arquitectura Contractual
+    # §6). Nunca se inventa un valor.
+    unidad_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("unidades_de_negocio.id"), nullable=True, index=True)
+    contact_id: Mapped[str] = mapped_column(String(36), ForeignKey("contacts.id"), nullable=False, index=True)
+    # Integer real — CanalWhatsApp.id NO migra a UUID en este Gate (Data
+    # Architecture v1 ya lo excluye explícitamente de migración retroactiva,
+    # confirmado en Diseño Técnico Gate 5.3 §5).
+    canal_id: Mapped[int] = mapped_column(Integer, ForeignKey("canales_whatsapp.id"), nullable=False, index=True)
+    campana_origen_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("campanas.id", ondelete="SET NULL"), nullable=True)
+    # "activa" | "cerrada" — se marca "cerrada" únicamente en el instante en
+    # que DR-4 abre una Conversation nueva para el mismo Contact (efecto
+    # automático, sin chequeo de version — mismo criterio que _avanzar_version).
+    estado: Mapped[str] = mapped_column(String(20), nullable=False, default="activa", index=True)
+    # String suelto sin FK, NO Usuario.username — mismo patrón que
+    # Lead.asesor_asignado hoy (Usuario migra a PK UUID recién en Gate 5.4).
+    asesor_asignado_id: Mapped[str | None] = mapped_column(String(50), nullable=True, index=True)
+    paso_flujo: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    origen_contacto: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    visto_asesor: Mapped[bool] = mapped_column(Boolean, default=True)
+    fallos_tecnicos: Mapped[int] = mapped_column(Integer, default=0)
+    pausado_manual: Mapped[bool] = mapped_column(Boolean, default=False)
+    revision_prioritaria: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Concurrencia optimista propia — separada de Opportunity.version (DR-1,
+    # Resolución Arquitectónica Gate 5.3: partir Lead.version en las dos
+    # entidades que hoy comparten un solo contador).
+    version: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    creado: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+    actualizado: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, index=True)
+
+    __table_args__ = (
+        Index("ix_conversation_negocio_unidad", "negocio_id", "unidad_id"),
+        Index("ix_conversation_contact_creado", "contact_id", "creado"),
+        Index("ix_conversation_negocio_asesor", "negocio_id", "asesor_asignado_id"),
+    )
+
+
+class Opportunity(Base):
+    """Gate 5.3 — ciclo comercial dentro de una Conversation (Arquitectura
+    Contractual §10). 1 Conversation : 0..N Opportunity, secuencial en el
+    tiempo (DR-3) — se crea única y exclusivamente en el mismo instante en
+    que se crea una Conversation nueva, nunca dentro de una ya existente
+    (sin evidencia de necesidad de Opportunities simultáneas, Diseño Técnico
+    Gate 5.3 §6)."""
+    __tablename__ = "opportunities"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_generar_uuid)
+    negocio_id: Mapped[str] = mapped_column(String(36), ForeignKey("negocios.id"), nullable=False, index=True)
+    unidad_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("unidades_de_negocio.id"), nullable=True, index=True)
+    conversation_id: Mapped[str] = mapped_column(String(36), ForeignKey("conversations.id"), nullable=False, index=True)
+    contact_id: Mapped[str] = mapped_column(String(36), ForeignKey("contacts.id"), nullable=False, index=True)  # denormalizado, Arquitectura Contractual §10
+    interes: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    producto_tipo: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    producto_marca: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    producto_modalidad: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    resultado: Mapped[str | None] = mapped_column(String(50), nullable=True, index=True)
+    fecha_agendada: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    fecha_cierre: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    modalidad_pago: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    cuotas: Mapped[str | None] = mapped_column(String(10), nullable=True)
+    medio_pago: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    version: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    creado: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+    actualizado: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    __table_args__ = (
+        Index("ix_opportunity_negocio_resultado", "negocio_id", "resultado"),
+        Index("ix_opportunity_conversation_creado", "conversation_id", "creado"),
+    )
+
+
 class LineaVenta(Base):
-    """Un producto o servicio dentro del cierre de venta de un lead — un
-    cliente puede comprar un artefacto, varios, un servicio, o un mix de
-    ambos, así que la venta de un lead es una LISTA de líneas en vez de un
-    solo producto. La forma de pago (modalidad_pago/cuotas/medio_pago)
-    sigue siendo una sola para toda la venta y vive en Lead, no acá."""
+    """Un producto o servicio dentro del cierre de venta de una Opportunity —
+    un cliente puede comprar un artefacto, varios, un servicio, o un mix de
+    ambos, así que la venta es una LISTA de líneas en vez de un solo
+    producto. La forma de pago (modalidad_pago/cuotas/medio_pago) sigue
+    siendo una sola para toda la venta y vive en Opportunity, no acá.
+
+    Gate 5.3 — REGLA CRÍTICA: `telefono` se ELIMINA de esta tabla. Antes de
+    este Gate, `registrar_venta_opportunity` (ex `guardar_venta`) hacía
+    `DELETE ... WHERE telefono = :telefono` — seguro mientras `Lead.telefono`
+    era PK global, pero un riesgo real de fuga/corrupción cross-negocio en
+    cuanto `Contact.telefono` deja de ser único globalmente (dos Negocios
+    pueden compartir número). Todo reemplazo de líneas filtra por
+    `opportunity_id` (clave fuerte, única globalmente) + `negocio_id`
+    redundante — doble candado, nunca telefono en solitario (hallazgo del
+    bloque de Decisiones Arquitectónicas Gate 5.3, confirmado por 2 agentes
+    de forma independiente)."""
     __tablename__ = "lineas_venta"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    telefono: Mapped[str] = mapped_column(String(50), index=True)
+    opportunity_id: Mapped[str] = mapped_column(String(36), ForeignKey("opportunities.id"), nullable=False, index=True)
+    negocio_id: Mapped[str] = mapped_column(String(36), ForeignKey("negocios.id"), nullable=False, index=True)
     # Producto real del catálogo que se eligió al armar el carrito
     # (Producto.id). Nullable a propósito por DOS motivos, no uno: (a) las
     # líneas históricas, guardadas antes de este campo, no lo tienen y no hay
@@ -651,6 +818,673 @@ class LineaVenta(Base):
     marca: Mapped[str | None] = mapped_column(String(100), nullable=True)
     proveedor: Mapped[str | None] = mapped_column(String(150), nullable=True)
     creado: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    __table_args__ = (
+        Index("ix_lineaventa_opportunity_negocio", "opportunity_id", "negocio_id"),
+    )
+
+
+# ── Gate 5.3 — Identidad técnica: Contact / Conversation / Opportunity ──
+#
+# Diseño Técnico Gate 5.3 §10. `negocio_id` siempre resuelto server-side
+# (nunca del payload) — la única fuente legítima es CanalWhatsApp.negocio_id
+# en el punto de entrada (webhook), o el Lead/Contact ya existente para
+# escrituras posteriores sobre un hilo ya abierto.
+
+
+async def _obtener_contact(session, negocio_id: str, telefono: str) -> "Contact | None":
+    query = select(Contact).where(
+        Contact.negocio_id == negocio_id, Contact.telefono == telefono, Contact.eliminado_en.is_(None),
+    )
+    return (await session.execute(query)).scalar_one_or_none()
+
+
+async def obtener_o_crear_contact(session, negocio_id: str, telefono: str, nombre: str | None = None) -> "Contact":
+    """Identidad del cliente — negocio_id SIEMPRE resuelto server-side por
+    quien llama (Diseño Técnico Gate 5.3 §10). No crea un Contact "adivinado":
+    si ya existe, lo retorna tal cual (no pisa `nombre` — mismo criterio que
+    Lead: el nombre se actualiza aparte, explícitamente, no como efecto
+    colateral de resolver identidad)."""
+    contact = await _obtener_contact(session, negocio_id, telefono)
+    if contact is None:
+        contact = Contact(negocio_id=negocio_id, telefono=telefono, nombre=nombre)
+        session.add(contact)
+        await session.flush()
+    return contact
+
+
+async def _obtener_conversation_activa(session, contact_id: str) -> "Conversation | None":
+    """La Conversation con estado=='activa' de un Contact — a lo sumo una
+    (DR-4: nunca simultáneas). Si por alguna razón hubiera más de una fila
+    marcada activa (no debería ocurrir con el flujo normal), toma la más
+    reciente — no falla el request por un estado inconsistente que además no
+    puede repararse desde una lectura."""
+    query = (
+        select(Conversation)
+        .where(Conversation.contact_id == contact_id, Conversation.estado == "activa")
+        .order_by(Conversation.creado.desc())
+        .limit(1)
+    )
+    return (await session.execute(query)).scalar_one_or_none()
+
+
+async def _obtener_conversation_activa_por_telefono(session, telefono: str) -> "Conversation | None":
+    """Puente telefono → Conversation activa, para las funciones de interfaz
+    pública que todavía reciben `telefono` (registrar_evento_lead,
+    listar_eventos_lead, guardar_venta, asignar_asesor_a_lead,
+    liberar_asignacion) — mismo patrón que `guardar_mensaje` ya usa para
+    resolver `negocio_id` desde el Lead (Gate 5.2, H1): nunca se le pide al
+    llamador que resuelva el contexto, y `negocio_id` nunca llega como
+    parámetro externo. Retorna None si el Lead o el Contact todavía no
+    existen (nunca inventa ninguno)."""
+    lead = await session.get(Lead, telefono)
+    if lead is None or lead.negocio_id is None:
+        return None
+    contact = await _obtener_contact(session, lead.negocio_id, telefono)
+    if contact is None:
+        return None
+    return await _obtener_conversation_activa(session, contact.id)
+
+
+async def _obtener_opportunity_vigente(session, conversation_id: str) -> "Opportunity | None":
+    """La Opportunity más reciente de una Conversation — DR-3: 1 Conversation
+    : 0..N Opportunity secuenciales, la vigente es siempre la última creada."""
+    query = (
+        select(Opportunity)
+        .where(Opportunity.conversation_id == conversation_id)
+        .order_by(Opportunity.creado.desc())
+        .limit(1)
+    )
+    return (await session.execute(query)).scalar_one_or_none()
+
+
+def _debe_abrir_conversation_nueva(conversation: "Conversation | None", opportunity_vigente: "Opportunity | None") -> bool:
+    """DR-4 (Resolución Arquitectónica Gate 5.3), traducida a la condición
+    exacta: se abre una Conversation nueva cuando llega un mensaje de un
+    Contact cuya Conversation activa está asignada/pausada Y su Opportunity
+    vigente tiene un resultado cerrado que NO es "vendido" — mismo punto
+    donde hoy corre `liberar_asignacion` (main.py). "vendido" nunca reabre
+    solo (Human Decision Gate) — el mensaje entra a la Conversation existente
+    para revisión humana."""
+    if conversation is None:
+        return True
+    if not (conversation.asesor_asignado_id is not None or conversation.pausado_manual):
+        return False
+    if opportunity_vigente is None:
+        return False
+    return (
+        opportunity_vigente.resultado in RESULTADOS_CERRADOS
+        and opportunity_vigente.resultado != "vendido"
+    )
+
+
+async def resolver_conversation_activa(
+    telefono: str, negocio_id: str, canal_id: int, unidad_id: str | None = None,
+    campana_origen_id: int | None = None, origen_contacto: str | None = None, nombre: str | None = None,
+) -> tuple["Conversation", "Opportunity"]:
+    """Punto de entrada único para el webhook (main.py): resuelve (o crea)
+    Contact + Conversation activa + Opportunity vigente para un mensaje
+    entrante, aplicando DR-4. `negocio_id`/`canal_id` deben venir YA
+    resueltos por `resolver_canal()` — nunca se re-resuelven acá ni se
+    aceptan de una fuente distinta al Canal de entrada."""
+    async with async_session() as session:
+        contact = await obtener_o_crear_contact(session, negocio_id, telefono, nombre)
+        conversation = await _obtener_conversation_activa(session, contact.id)
+        opportunity = await _obtener_opportunity_vigente(session, conversation.id) if conversation else None
+
+        if _debe_abrir_conversation_nueva(conversation, opportunity):
+            if conversation is not None:
+                # Efecto automático — se cierra, no se borra ni se reescribe.
+                # Sin chequeo de version (mismo criterio que _avanzar_version).
+                conversation.estado = "cerrada"
+                conversation.version = Conversation.version + 1
+            conversation = Conversation(
+                negocio_id=negocio_id, unidad_id=unidad_id, contact_id=contact.id,
+                canal_id=canal_id, campana_origen_id=campana_origen_id,
+                origen_contacto=origen_contacto, estado="activa",
+            )
+            session.add(conversation)
+            await session.flush()
+            opportunity = Opportunity(
+                negocio_id=negocio_id, unidad_id=unidad_id,
+                conversation_id=conversation.id, contact_id=contact.id,
+            )
+            session.add(opportunity)
+            await session.flush()
+
+        await session.commit()
+        await session.refresh(conversation)
+        await session.refresh(opportunity)
+        return conversation, opportunity
+
+
+async def intentar_avanzar_version_conversation(conversation_id: str, version_esperada: int) -> bool:
+    """Concurrencia optimista de Conversation — mismo mecanismo atómico que
+    `intentar_avanzar_version` (Lead), ver esa función para el detalle de por
+    qué el chequeo viaja DENTRO del UPDATE."""
+    async with async_session() as session:
+        resultado = await session.execute(
+            update(Conversation)
+            .where(Conversation.id == conversation_id, Conversation.version == version_esperada)
+            .values(version=version_esperada + 1)
+        )
+        if resultado.rowcount == 0:
+            await session.rollback()
+            return False
+        await session.commit()
+        return True
+
+
+async def intentar_avanzar_version_opportunity(opportunity_id: str, version_esperada: int) -> bool:
+    """Concurrencia optimista de Opportunity — separada de Conversation.version
+    (DR-1: partir el contador único de Lead.version en las dos entidades que
+    hoy lo comparten)."""
+    async with async_session() as session:
+        resultado = await session.execute(
+            update(Opportunity)
+            .where(Opportunity.id == opportunity_id, Opportunity.version == version_esperada)
+            .values(version=version_esperada + 1)
+        )
+        if resultado.rowcount == 0:
+            await session.rollback()
+            return False
+        await session.commit()
+        return True
+
+
+async def _lead_del_contact(session, conversation: "Conversation | None") -> "Lead | None":
+    """Resuelve el Lead legacy de esta Conversation — SOLO si su negocio_id
+    coincide (Gate 5.3 cutover real §1/§2): el mismo teléfono puede existir
+    como Lead de OTRO Negocio, y sincronizar ahí sería exactamente el mismo
+    hallazgo de LineaVenta/EventoLead pero en dirección inversa (Opportunity
+    → Lead en vez de Lead → Opportunity). None si no hay Conversation, no hay
+    Lead, o el Lead pertenece a otro Negocio — nunca se crea uno acá."""
+    if conversation is None:
+        return None
+    contact = await session.get(Contact, conversation.contact_id)
+    if contact is None:
+        return None
+    lead = await session.get(Lead, contact.telefono)
+    if lead is None or lead.negocio_id != conversation.negocio_id:
+        return None
+    return lead
+
+
+def _registrar_evento_en_sesion(session, conversation: "Conversation", opportunity_id: str | None, evento: dict | None):
+    """Inserta un EventoLead DENTRO de la transacción que llama — Gate 5.3
+    cutover real §12: si el cierre de una Opportunity falla, el evento que lo
+    describe no puede quedar escrito sin la escritura que describe (o al
+    revés). `evento` es `{"tipo", "descripcion", "autor", "payload"}`; None
+    = no registrar nada (compatibilidad con llamadores que ya registran su
+    propio evento por fuera, como los tests existentes)."""
+    if evento is None:
+        return
+    session.add(EventoLead(
+        conversation_id=conversation.id, negocio_id=conversation.negocio_id, opportunity_id=opportunity_id,
+        tipo=evento["tipo"], descripcion=evento["descripcion"], autor=evento.get("autor"), payload=evento.get("payload"),
+    ))
+
+
+async def intentar_cambiar_resultado_opportunity(
+    opportunity_id: str, version_esperada: int, campos: dict, evento: dict | None = None,
+) -> bool:
+    """Escritura humana de RESULTADO — Gate 5.3 cutover real §1/§4/§6:
+    Opportunity es la fuente de verdad, no un espejo de Lead. Atómica: el
+    chequeo de `version` y la escritura son el mismo commit (mismo criterio
+    que `cerrar_opportunity_con_venta`).
+
+    Sincroniza `Lead.version` INCONDICIONALMENTE al final (get-only, nunca
+    crea nada) — no es "Lead como fuente de verdad", es mantener su version
+    como gate de concurrencia válido para el endpoint legacy que todavía no
+    conoce `opportunity_version` (cutover real §2): si esta escritura no
+    avanzara Lead.version, un cliente legacy con una version vieja pero
+    todavía "vigente" podría sobrescribir en silencio un cambio hecho acá."""
+    async with async_session() as session:
+        async with session.begin():
+            resultado_version = await session.execute(
+                update(Opportunity)
+                .where(Opportunity.id == opportunity_id, Opportunity.version == version_esperada)
+                .values(version=version_esperada + 1)
+            )
+            if resultado_version.rowcount == 0:
+                await session.rollback()
+                return False
+
+            opportunity = await session.get(Opportunity, opportunity_id)
+            transicion_a_vendido = _es_transicion_a_vendido_opportunity(opportunity, campos)
+            for campo, valor in campos.items():
+                setattr(opportunity, campo, valor)
+            opportunity.actualizado = datetime.utcnow()
+
+            conversation = await session.get(Conversation, opportunity.conversation_id)
+            if transicion_a_vendido and conversation is not None:
+                opportunity.fecha_cierre = datetime.utcnow()
+                conversation.pausado_manual = True
+                conversation.version = Conversation.version + 1
+
+            lead = await _lead_del_contact(session, conversation)
+            if lead is not None:
+                for campo, valor in campos.items():
+                    if hasattr(Lead, campo):
+                        setattr(lead, campo, valor)
+                if transicion_a_vendido:
+                    _marcar_cierre_vendido(lead)
+                _avanzar_version(lead)
+                lead.actualizado = datetime.utcnow()
+
+            if conversation is not None:
+                _registrar_evento_en_sesion(session, conversation, opportunity_id, evento)
+        return True
+
+
+async def intentar_asignar_conversation(
+    conversation_id: str, version_esperada: int, asesor_asignado: str | None, evento: dict | None = None,
+) -> bool:
+    """Escritura humana de ASIGNACIÓN — Gate 5.3 cutover real §1/§4/§6:
+    `asesor_asignado_id` es un campo de Conversation, no de Opportunity (la
+    identidad de "quién atiende" pertenece al hilo, no al ciclo comercial) —
+    mismo criterio que ya fijaba el modelo. Atómica, mismo patrón que
+    `intentar_cambiar_resultado_opportunity`: chequeo + escritura + sync de
+    Lead.version en un solo commit."""
+    async with async_session() as session:
+        async with session.begin():
+            resultado_version = await session.execute(
+                update(Conversation)
+                .where(Conversation.id == conversation_id, Conversation.version == version_esperada)
+                .values(version=version_esperada + 1)
+            )
+            if resultado_version.rowcount == 0:
+                await session.rollback()
+                return False
+
+            conversation = await session.get(Conversation, conversation_id)
+            conversation.asesor_asignado_id = asesor_asignado
+            conversation.visto_asesor = asesor_asignado is None
+            conversation.actualizado = datetime.utcnow()
+
+            lead = await _lead_del_contact(session, conversation)
+            if lead is not None:
+                lead.asesor_asignado = asesor_asignado
+                lead.visto_asesor = asesor_asignado is None
+                _avanzar_version(lead)
+                lead.actualizado = datetime.utcnow()
+
+            opportunity = await _obtener_opportunity_vigente(session, conversation.id)
+            _registrar_evento_en_sesion(session, conversation, opportunity.id if opportunity else None, evento)
+        return True
+
+
+async def cerrar_opportunity_con_venta(
+    opportunity_id: str, version_esperada: int, lineas: list[dict], campos: dict,
+    revertir_resultado_al_vaciar: bool = False, evento: dict | None = None,
+) -> bool:
+    """Cierre de venta ATÓMICO — Opportunity + LineaVenta + (si corresponde)
+    Conversation.pausado_manual + sincronización de Lead + evento del
+    Timeline, en UN SOLO commit (Gate 5.3 cutover real §1/§6/§12: Opportunity
+    es la fuente de verdad, Lead recibe sincronización mínima, no al revés).
+
+    Corrección de un defecto preexistente en producción (encontrado en el
+    bloque de Diseño Técnico Gate 5.3, no introducido por esta migración):
+    `intentar_avanzar_version` y `guardar_venta` corrían en DOS transacciones
+    separadas con DOS commits distintos — ventana real de inconsistencia
+    entre el chequeo de versión y la escritura de la venta. Acá el chequeo de
+    versión y la escritura son la MISMA transacción: si el chequeo falla
+    (`rowcount == 0`), se hace rollback de todo y se retorna False (409) sin
+    tocar LineaVenta, Conversation ni Lead.
+
+    `revertir_resultado_al_vaciar`: mismo criterio que `guardar_venta` — si
+    el carrito queda vacío y la Opportunity estaba "vendido" TENIENDO líneas,
+    se le quita el resultado en vez de dejarla huérfana.
+
+    Retorna False si la version de Opportunity no coincide (conflicto 409) —
+    en ese caso NO se toca nada, ni Opportunity, ni LineaVenta, ni
+    Conversation, ni Lead."""
+    async with async_session() as session:
+        async with session.begin():
+            resultado_version = await session.execute(
+                update(Opportunity)
+                .where(Opportunity.id == opportunity_id, Opportunity.version == version_esperada)
+                .values(version=version_esperada + 1)
+            )
+            if resultado_version.rowcount == 0:
+                await session.rollback()
+                return False
+
+            opportunity = await session.get(Opportunity, opportunity_id)
+
+            if not lineas and revertir_resultado_al_vaciar and opportunity.resultado == "vendido":
+                habia_lineas = await session.scalar(
+                    select(func.count()).select_from(LineaVenta).where(
+                        LineaVenta.opportunity_id == opportunity_id, LineaVenta.negocio_id == opportunity.negocio_id,
+                    )
+                )
+                if habia_lineas:
+                    campos = {
+                        **campos,
+                        "resultado": None, "fecha_cierre": None,
+                        "modalidad_pago": None, "medio_pago": None,
+                    }
+
+            transicion_a_vendido = _es_transicion_a_vendido_opportunity(opportunity, campos)
+            for campo, valor in campos.items():
+                setattr(opportunity, campo, valor)
+            if transicion_a_vendido:
+                opportunity.fecha_cierre = datetime.utcnow()
+            opportunity.actualizado = datetime.utcnow()
+
+            # Doble candado — nunca DELETE/SELECT solo por telefono (regla
+            # crítica de LineaVenta, ver la clase).
+            await session.execute(
+                delete(LineaVenta).where(
+                    LineaVenta.opportunity_id == opportunity_id,
+                    LineaVenta.negocio_id == opportunity.negocio_id,
+                )
+            )
+            for l in lineas:
+                session.add(LineaVenta(
+                    opportunity_id=opportunity_id, negocio_id=opportunity.negocio_id,
+                    producto_id=l.get("producto_id"), producto=l["producto"],
+                    precio=l.get("precio") or None, marca=l.get("marca") or None,
+                    proveedor=l.get("proveedor") or None,
+                ))
+
+            conversation = await session.get(Conversation, opportunity.conversation_id)
+            if transicion_a_vendido and conversation is not None:
+                # Efecto automático — sin exigir la version vigente de
+                # Conversation al formulario de venta (que solo conoce la
+                # version de Opportunity). Mismo criterio que
+                # _avanzar_version: nunca bloquear un efecto de sistema
+                # por lo que esté haciendo un humano con otro formulario.
+                conversation.pausado_manual = True
+                conversation.version = Conversation.version + 1
+
+            lead = await _lead_del_contact(session, conversation)
+            if lead is not None:
+                for campo, valor in campos.items():
+                    if hasattr(Lead, campo):
+                        setattr(lead, campo, valor)
+                if transicion_a_vendido:
+                    _marcar_cierre_vendido(lead)
+                _avanzar_version(lead)
+                lead.actualizado = datetime.utcnow()
+
+            if conversation is not None:
+                _registrar_evento_en_sesion(session, conversation, opportunity_id, evento)
+        # session.begin() ya hizo commit atómico al salir sin excepción.
+        return True
+
+
+def _es_transicion_a_vendido_opportunity(opportunity: "Opportunity", campos: dict) -> bool:
+    """Mismo criterio que `_es_transicion_a_vendido` (Lead): True solo si
+    ESTA escritura hace pasar la Opportunity a "vendido" viniendo de otro
+    estado — no si ya estaba vendida y solo se reedita la venta."""
+    return campos.get("resultado") == "vendido" and opportunity.resultado != "vendido"
+
+
+async def listar_conversaciones_activas(
+    negocio_id: str, asesor_asignado: str | None = None, busqueda: str = "",
+    orden: str = "actualizado", direccion: str = "desc", pagina: int = 1, por_pagina: int = 20,
+) -> tuple[list[dict], int]:
+    """Bandeja de Conversaciones (Diseño Técnico Gate 5.3 §13/§18) — a
+    diferencia de Pipeline (que lista Opportunity), esto lista `Conversation`
+    con `estado == "activa"`: un Contact con Opportunities secuenciales (DR-3)
+    aparece como UNA sola fila mientras su Conversation siga activa, nunca
+    duplicado. Devuelve filas con el MISMO nombre de campo que
+    `_dto_lead_pipeline` (id, telefono, version, resultado, ...) para que los
+    componentes del frontend que ya consumen esa forma no necesiten tocarse
+    — solo cambia la fuente (Conversation, no Opportunity)."""
+    columnas_orden = {
+        "nombre": Contact.nombre, "resultado": Opportunity.resultado,
+        "asesor": Conversation.asesor_asignado_id, "actualizado": Conversation.actualizado,
+        "creado": Conversation.creado,
+    }
+    columna = columnas_orden.get(orden, Conversation.actualizado)
+
+    async with async_session() as session:
+        # Opportunity vigente por Conversation — row_number() por
+        # conversation_id, mismo patrón ya usado en obtener_ultimos_mensajes.
+        fila = (
+            func.row_number()
+            .over(partition_by=Opportunity.conversation_id, order_by=Opportunity.creado.desc())
+            .label("fila")
+        )
+        subconsulta_opp = (
+            select(Opportunity).add_columns(fila).subquery()
+        )
+        opportunity_vigente = aliased(Opportunity, subconsulta_opp)
+
+        query = (
+            select(Conversation, Contact, opportunity_vigente)
+            .join(Contact, Contact.id == Conversation.contact_id)
+            .outerjoin(
+                subconsulta_opp,
+                sa_and(subconsulta_opp.c.conversation_id == Conversation.id, subconsulta_opp.c.fila == 1),
+            )
+            .where(Conversation.negocio_id == negocio_id, Conversation.estado == "activa")
+        )
+        if asesor_asignado:
+            query = query.where(Conversation.asesor_asignado_id == asesor_asignado)
+        if busqueda:
+            patron = f"%{busqueda}%"
+            query = query.where(Contact.nombre.ilike(patron) | Contact.telefono.ilike(patron))
+
+        total = (await session.execute(select(func.count()).select_from(query.subquery()))).scalar_one()
+
+        orden_columna = columna.asc() if direccion == "asc" else columna.desc()
+        query = query.order_by(orden_columna).offset((pagina - 1) * por_pagina).limit(por_pagina)
+        result = await session.execute(query)
+
+        filas = []
+        for conversation, contact, opportunity in result.all():
+            filas.append({
+                "id": conversation.id, "telefono": contact.telefono,
+                "version": conversation.version,
+                "revision_prioritaria": conversation.revision_prioritaria,
+                "pausado_manual": conversation.pausado_manual,
+                "asesor_asignado": conversation.asesor_asignado_id,
+                "nombre": contact.nombre,
+                "interes": opportunity.interes if opportunity else None,
+                "resultado": opportunity.resultado if opportunity else None,
+                "actualizado": iso_utc(conversation.actualizado),
+                "creado": iso_utc(conversation.creado),
+                "fecha_agendada": opportunity.fecha_agendada.isoformat() if opportunity and opportunity.fecha_agendada else None,
+                "visto_asesor": conversation.visto_asesor,
+            })
+        return filas, total
+
+
+def _dto_contact(contact: "Contact") -> dict:
+    return {
+        "id": contact.id, "telefono": contact.telefono, "nombre": contact.nombre,
+        "creado": iso_utc(contact.creado), "actualizado": iso_utc(contact.actualizado),
+    }
+
+
+def _dto_conversation_resumen(conversation: "Conversation", opportunity: "Opportunity | None") -> dict:
+    return {
+        "id": conversation.id, "estado": conversation.estado,
+        "asesor_asignado": conversation.asesor_asignado_id,
+        "interes": opportunity.interes if opportunity else None,
+        "resultado": opportunity.resultado if opportunity else None,
+        "creado": iso_utc(conversation.creado), "actualizado": iso_utc(conversation.actualizado),
+    }
+
+
+async def obtener_contact_detalle(contact_id: str, negocio_id: str) -> dict | None:
+    """Gate 5.3 §17 — historial estructural del Contact: la identidad del
+    cliente más el resumen de TODAS sus Conversation (no solo la activa),
+    cada una con su Opportunity vigente. Doble candado `id + negocio_id`
+    (nunca un Contact de otro Negocio, aunque alguien adivine el UUID) —
+    mismo criterio que `_verificar_ownership_campana`/`_verificar_ownership_canal`:
+    404, no 403, para no confirmar la existencia del recurso a quien no
+    tiene acceso. Solo estructura de datos — la UI del historial es de un
+    Gate posterior (Diseño Técnico Gate 5.3 §17)."""
+    async with async_session() as session:
+        contact = await session.get(Contact, contact_id)
+        if contact is None or contact.negocio_id != negocio_id or contact.eliminado_en is not None:
+            return None
+        dto = _dto_contact(contact)
+        dto["conversaciones"] = await listar_conversaciones_de_contact(contact_id, negocio_id)
+        return dto
+
+
+async def obtener_conversation_detalle(conversation_id: str, negocio_id: str) -> dict | None:
+    """Detalle de una Conversation puntual — Gate 5.3 cutover real §8/§13:
+    REEMPLAZA la rama JSON de `/lead/{telefono}` para la Nueva Experiencia
+    (antes solo traía un resumen liviano; ahora lleva todos los campos que
+    `_dto_lead_detalle` armaba desde Lead, resueltos desde Opportunity/
+    Conversation/Contact). Mismo doble candado `id + negocio_id` que
+    `obtener_contact_detalle`. El router (`dashboard.py`) todavía envuelve
+    esto con `listar_lineas_venta_por_opportunity` + `listar_eventos_de_
+    conversation` para armar `venta`/`eventos` — mismo patrón que
+    `_dto_lead_detalle` (memory.py trae los datos, dashboard.py arma el DTO
+    final, ninguna de las dos capas duplica a la otra)."""
+    async with async_session() as session:
+        conversation = await session.get(Conversation, conversation_id)
+        if conversation is None or conversation.negocio_id != negocio_id:
+            return None
+        contact = await session.get(Contact, conversation.contact_id)
+        opportunity = await _obtener_opportunity_vigente(session, conversation.id)
+        return {
+            "id": conversation.id,
+            "telefono": contact.telefono if contact else None,
+            "nombre": contact.nombre if contact else None,
+            "opportunity_id": opportunity.id if opportunity else None,
+            "interes": opportunity.interes if opportunity else None,
+            "resultado": opportunity.resultado if opportunity else None,
+            "fecha_agendada": opportunity.fecha_agendada if opportunity else None,
+            "fecha_cierre": opportunity.fecha_cierre if opportunity else None,
+            "modalidad_pago": opportunity.modalidad_pago if opportunity else None,
+            "cuotas": opportunity.cuotas if opportunity else None,
+            "medio_pago": opportunity.medio_pago if opportunity else None,
+            "asesor_asignado": conversation.asesor_asignado_id,
+            "pausado_manual": conversation.pausado_manual,
+            "revision_prioritaria": conversation.revision_prioritaria,
+            "conversation_version": conversation.version,
+            "opportunity_version": opportunity.version if opportunity else None,
+            "creado": conversation.creado,
+            "actualizado": conversation.actualizado,
+        }
+
+
+async def listar_lineas_venta_por_opportunity(opportunity_id: str, negocio_id: str) -> list[dict]:
+    """Igual que `listar_lineas_venta` pero indexado directo por
+    `opportunity_id` (no por el puente telefono→Conversation activa) — para
+    poder mostrar la venta de una Opportunity puntual, incluida una ya
+    cerrada/histórica. Doble candado `opportunity_id + negocio_id`, mismo
+    criterio que el resto de LineaVenta."""
+    async with async_session() as session:
+        query = (
+            select(LineaVenta)
+            .where(LineaVenta.opportunity_id == opportunity_id, LineaVenta.negocio_id == negocio_id)
+            .order_by(LineaVenta.id.asc())
+        )
+        result = await session.execute(query)
+        return [
+            {
+                "id": l.id, "producto_id": l.producto_id,
+                "producto": l.producto, "precio": l.precio, "marca": l.marca, "proveedor": l.proveedor,
+                "creado": l.creado,
+            }
+            for l in result.scalars().all()
+        ]
+
+
+async def resolver_ids_operables_por_telefono(telefono: str) -> dict | None:
+    """Puente telefono → (conversation_id, opportunity_id) para que los
+    endpoints LEGACY (`/lead/{telefono}/resultado|venta|asignar`, Gate 5.3
+    cutover real §7) puedan delegar hacia las funciones atómicas nuevas sin
+    que el cliente legacy conozca esos IDs. Mismo puente y misma limitación
+    conocida que `_obtener_conversation_activa_por_telefono` (bridge por
+    Lead.telefono, todavía PK global — ver test
+    `test_limitacion_conocida_bridge_telefono_solo_sirve_al_negocio_del_lead`).
+    None si todavía no hay Conversation/Opportunity para este teléfono (Lead
+    pre-existente sin backfill, o entorno que no pasó por el webhook) — en
+    ese caso el llamador no tiene nada que delegar y Lead sigue siendo la
+    única fuente por ahora."""
+    async with async_session() as session:
+        conversation = await _obtener_conversation_activa_por_telefono(session, telefono)
+        if conversation is None:
+            return None
+        opportunity = await _obtener_opportunity_vigente(session, conversation.id)
+        if opportunity is None:
+            return None
+        return {
+            "conversation_id": conversation.id, "conversation_version": conversation.version,
+            "opportunity_id": opportunity.id, "opportunity_version": opportunity.version,
+        }
+
+
+async def resolver_opportunity_operable(opportunity_id: str, negocio_id: str) -> dict | None:
+    """Gate 5.3 cutover real §9 — lo mínimo para AUTORIZAR y operar sobre una
+    Opportunity antes de escribir: `negocio_id` (ownership, resuelto
+    server-side, nunca del cliente) y el `asesor_asignado` de su Conversation
+    (mismo criterio de rol que `_verificar_acceso_lead`). None si la
+    Opportunity no existe o es de otro Negocio — el router responde 404 sin
+    distinguir cuál de los dos casos fue (no confirma la existencia del
+    recurso a quien no tiene acceso)."""
+    async with async_session() as session:
+        opportunity = await session.get(Opportunity, opportunity_id)
+        if opportunity is None or opportunity.negocio_id != negocio_id:
+            return None
+        conversation = await session.get(Conversation, opportunity.conversation_id)
+        return {
+            "id": opportunity.id, "conversation_id": opportunity.conversation_id,
+            "version": opportunity.version, "resultado": opportunity.resultado,
+            "asesor_asignado": conversation.asesor_asignado_id if conversation else None,
+        }
+
+
+async def resolver_conversation_operable(conversation_id: str, negocio_id: str) -> dict | None:
+    """Mismo criterio que `resolver_opportunity_operable`, para Conversation
+    (asignación/liberación)."""
+    async with async_session() as session:
+        conversation = await session.get(Conversation, conversation_id)
+        if conversation is None or conversation.negocio_id != negocio_id:
+            return None
+        return {"id": conversation.id, "version": conversation.version, "asesor_asignado": conversation.asesor_asignado_id}
+
+
+async def listar_conversaciones_de_contact(contact_id: str, negocio_id: str) -> list[dict]:
+    """Todas las Conversation de un Contact (activas Y cerradas), de la más
+    reciente a la más antigua — el historial que DR-4 va acumulando cada vez
+    que abre una Conversation nueva tras un cierre no-venta. Doble candado
+    `contact_id + negocio_id`."""
+    async with async_session() as session:
+        query = (
+            select(Conversation)
+            .where(Conversation.contact_id == contact_id, Conversation.negocio_id == negocio_id)
+            .order_by(Conversation.creado.desc())
+        )
+        conversaciones = (await session.execute(query)).scalars().all()
+        resultado = []
+        for conversation in conversaciones:
+            opportunity = await _obtener_opportunity_vigente(session, conversation.id)
+            resultado.append(_dto_conversation_resumen(conversation, opportunity))
+        return resultado
+
+
+async def listar_eventos_de_conversation(conversation_id: str, negocio_id: str) -> list[dict]:
+    """Conversation Timeline de UNA Conversation puntual (a diferencia de
+    `listar_eventos_lead`, que resuelve la Conversation ACTIVA vía el puente
+    telefono → Lead) — para poder ver el timeline de una Conversation ya
+    cerrada, no solo la vigente. Mismo doble candado `conversation_id +
+    negocio_id` que el resto de la tabla (regla crítica de EventoLead, ver
+    la clase)."""
+    async with async_session() as session:
+        query = (
+            select(EventoLead)
+            .where(EventoLead.conversation_id == conversation_id, EventoLead.negocio_id == negocio_id)
+            .order_by(EventoLead.creado.desc())
+        )
+        return [
+            {
+                "id": e.id, "conversation_id": e.conversation_id, "opportunity_id": e.opportunity_id,
+                "tipo": e.tipo, "descripcion": e.descripcion, "payload": e.payload,
+                "autor": e.autor, "creado": iso_utc(e.creado),
+            }
+            for e in (await session.execute(query)).scalars().all()
+        ]
 
 
 class Campana(Base):
@@ -1019,6 +1853,17 @@ async def listar_canales_whatsapp(solo_activos: bool = False) -> list[dict]:
         return [_canal_a_dict(c) for c in result.scalars().all()]
 
 
+async def obtener_canal_whatsapp(canal_id: int) -> dict | None:
+    """Gate 5.3 — corrección pequeña: existe para que las rutas admin de
+    edición/toggle/modo puedan verificar `negocio_id` del recurso ANTES de
+    mutar (hallazgo de la ronda de Diseño Técnico: la FK ya es correcta,
+    faltaba el chequeo de ownership — hoy con un solo Negocio el gate de rol
+    ya bastaba, deja de bastar en cuanto exista un segundo)."""
+    async with async_session() as session:
+        canal = await session.get(CanalWhatsApp, canal_id)
+        return _canal_a_dict(canal) if canal else None
+
+
 async def actualizar_canal_whatsapp(canal_id: int, **campos):
     """Actualiza los datos de un canal (nombre, tokens, activo/inactivo).
     Los campos de credenciales, si vienen presentes, se cifran antes de
@@ -1165,9 +2010,18 @@ async def guardar_mensaje(
                 f"No se asume ningún Negocio por defecto (Gate 5.2). Verificar que "
                 f"actualizar_lead() ya corrió para este teléfono antes de guardar un mensaje."
             )
+        # Gate 5.3 — conversation_id resuelto internamente, mismo criterio
+        # que negocio_id arriba (H1): nunca se le pide al llamador que lo
+        # resuelva, nunca se acepta uno externo. Get-only (no crea Contact/
+        # Conversation acá) — si todavía no existen, el mensaje se guarda
+        # igual con conversation_id=None (columna nullable durante EXPAND,
+        # ver Mensaje) y quedará entre los "REQUIERE RESOLUCIÓN" del backfill
+        # si nunca llega a crearse la Conversation.
+        conversation = await _obtener_conversation_activa_por_telefono(session, telefono)
         mensaje = Mensaje(
             telefono=telefono,
             negocio_id=lead.negocio_id,
+            conversation_id=conversation.id if conversation else None,
             role=role,
             content=content,
             timestamp=datetime.utcnow(),
@@ -1184,7 +2038,7 @@ async def guardar_mensaje(
             "id": mensaje.id, "telefono": mensaje.telefono, "role": mensaje.role,
             "content": mensaje.content, "archivo_id": mensaje.archivo_id, "via_app": mensaje.via_app,
             "mensaje_id_meta": mensaje.mensaje_id_meta, "estado_envio": mensaje.estado_envio,
-            "respondido_a_id": mensaje.respondido_a_id,
+            "respondido_a_id": mensaje.respondido_a_id, "conversation_id": mensaje.conversation_id,
             "timestamp": mensaje.timestamp,
         }
 
@@ -1212,11 +2066,21 @@ async def obtener_timestamp_ultimo_mensaje_usuario(telefono: str) -> datetime | 
     WhatsApp sigue abierta antes de intentar un envío saliente. Meta
     rechaza cualquier mensaje libre (no-plantilla) fuera de esa ventana; sin
     este chequeo, ese rechazo se veía como el mismo 502 genérico de
-    cualquier otra falla de la API (token vencido, etc.)."""
+    cualquier otra falla de la API (token vencido, etc.).
+
+    Gate 5.3 — corrección pequeña: `Mensaje.negocio_id` ya existe desde
+    Gate 5.2 pero esta consulta no lo usaba (mismo hallazgo que
+    `obtener_historial`/`limpiar_historial`). Se agrega como filtro
+    adicional — defensa en profundidad, no cambia el resultado hoy (un
+    teléfono sigue siendo único por Lead), pero cierra el mismo patrón de
+    "columna presente, filtro ausente" ya corregido en el resto del Gate."""
     async with async_session() as session:
+        lead = await session.get(Lead, telefono)
+        if lead is None:
+            return None
         query = (
             select(Mensaje.timestamp)
-            .where(Mensaje.telefono == telefono, Mensaje.role == "user")
+            .where(Mensaje.telefono == telefono, Mensaje.negocio_id == lead.negocio_id, Mensaje.role == "user")
             .order_by(Mensaje.timestamp.desc())
             .limit(1)
         )
@@ -1234,14 +2098,21 @@ async def obtener_historial(telefono: str, limite: int = 20) -> list[dict]:
 
     Returns:
         Lista de diccionarios con role y content
+
+    Gate 5.3 — corrección pequeña: agrega `Mensaje.negocio_id` como filtro
+    (ya existe la columna desde Gate 5.2, esta consulta no la usaba —
+    defensa en profundidad, no cambia el resultado hoy).
     """
     async with async_session() as session:
+        lead = await session.get(Lead, telefono)
         query = (
             select(Mensaje)
             .where(Mensaje.telefono == telefono)
             .order_by(Mensaje.timestamp.desc())
             .limit(limite)
         )
+        if lead is not None:
+            query = query.where(Mensaje.negocio_id == lead.negocio_id)
         result = await session.execute(query)
         mensajes = result.scalars().all()
 
@@ -1424,6 +2295,7 @@ COLUMNAS_ORDEN_PIPELINE = {
 
 
 async def listar_leads_pipeline(
+    negocio_id: str,
     asesor_asignado: str | None = None,
     resultado: str | None = None,
     busqueda: str = "",
@@ -1446,10 +2318,17 @@ async def listar_leads_pipeline(
     columna, para que la API JSON pueda combinar ambas cosas (buscar "Ana"
     dentro de los leads interesados en "cocina"). Es ILIKE por contiene y no
     igualdad porque `Lead.interes` es texto libre que escribe la IA, no una
-    lista cerrada de valores como `resultado`."""
+    lista cerrada de valores como `resultado`.
+
+    `negocio_id` (Gate 5.3 cutover real §18 — hallazgo de la auditoría
+    adversarial): esta consulta NUNCA filtraba por negocio_id — un
+    admin/supervisor con `alcance=todos` veía el Pipeline de TODOS los
+    Negocios, no solo el propio (`_alcance_pipeline` solo acota por asesor,
+    nunca por negocio_id). Ahora es un parámetro obligatorio, resuelto
+    server-side por el router desde la sesión — nunca del cliente."""
     columna = COLUMNAS_ORDEN_PIPELINE.get(orden, Lead.actualizado)
     async with async_session() as session:
-        query = select(Lead)
+        query = select(Lead).where(Lead.negocio_id == negocio_id)
         if asesor_asignado:
             query = query.where(Lead.asesor_asignado == asesor_asignado)
         if resultado:
@@ -1468,6 +2347,28 @@ async def listar_leads_pipeline(
         query = query.order_by(orden_columna).offset((pagina - 1) * por_pagina).limit(por_pagina)
         result = await session.execute(query)
         leads = [_lead_a_dict(lead) for lead in result.scalars().all()]
+
+        # Gate 5.3 cutover real §8 — Pipeline deja de exponer `telefono` como
+        # `id`: se resuelve en bloque (no N+1) el conversation_id ACTIVO de
+        # cada telefono, doblemente candado por negocio_id. Un lead sin
+        # Conversation todavía (no backfilleado / no pasó por el webhook) no
+        # se inventa ninguna — su fila sigue navegando por telefono como
+        # fallback (ver _dto_lead_pipeline).
+        telefonos = [l["telefono"] for l in leads]
+        conversation_id_por_telefono: dict[str, str] = {}
+        if telefonos:
+            filas = (await session.execute(
+                select(Contact.telefono, Conversation.id)
+                .join(Conversation, Conversation.contact_id == Contact.id)
+                .where(
+                    Contact.negocio_id == negocio_id, Contact.telefono.in_(telefonos),
+                    Conversation.negocio_id == negocio_id, Conversation.estado == "activa",
+                )
+            )).all()
+            conversation_id_por_telefono = {telefono: conversation_id for telefono, conversation_id in filas}
+
+        for l in leads:
+            l["conversation_id"] = conversation_id_por_telefono.get(l["telefono"])
         return leads, total
 
 
@@ -1579,7 +2480,56 @@ async def actualizar_lead(
         if transicion_a_vendido:
             _marcar_cierre_vendido(lead)
         lead.actualizado = datetime.utcnow()
+
+        # Gate 5.3 — mirror best-effort hacia Conversation/Opportunity, EN LA
+        # MISMA transacción. Solo si ya existen (esta función no las crea —
+        # la creación real ocurre en resolver_conversation_activa, llamada
+        # desde el webhook con el Canal ya resuelto; acá no hay de dónde
+        # sacar canal_id). Mientras no existan, Lead sigue siendo la única
+        # fuente de verdad para este teléfono, sin bloquear nada.
+        await _mirror_campos_lead_a_conversation_opportunity(session, lead, campos, transicion_a_vendido)
+
         await session.commit()
+
+
+_CAMPOS_OPPORTUNITY = (
+    "interes", "producto_tipo", "producto_marca", "producto_modalidad",
+    "resultado", "fecha_agendada", "fecha_cierre", "modalidad_pago", "cuotas", "medio_pago",
+)
+_CAMPOS_CONVERSATION = (
+    "paso_flujo", "visto_asesor", "fallos_tecnicos", "pausado_manual",
+    "revision_prioritaria", "origen_contacto",
+)
+
+
+async def _mirror_campos_lead_a_conversation_opportunity(session, lead: "Lead", campos: dict, transicion_a_vendido: bool):
+    """Matriz de migración de Lead (Diseño Técnico Gate 5.3 §11) aplicada
+    campo por campo, en vivo: cada escritura sobre Lead que toque un campo
+    ya migrado a Conversation/Opportunity se refleja ahí también. Get-only
+    (nunca crea Contact/Conversation/Opportunity acá)."""
+    contact = await _obtener_contact(session, lead.negocio_id, lead.telefono)
+    if contact is None:
+        return
+    conversation = await _obtener_conversation_activa(session, contact.id)
+    if conversation is None:
+        return
+    campos_conversation = {k: v for k, v in campos.items() if k in _CAMPOS_CONVERSATION}
+    if campos_conversation:
+        for campo, valor in campos_conversation.items():
+            setattr(conversation, campo, valor)
+        conversation.actualizado = datetime.utcnow()
+
+    opportunity = await _obtener_opportunity_vigente(session, conversation.id)
+    if opportunity is None:
+        return
+    campos_opportunity = {k: v for k, v in campos.items() if k in _CAMPOS_OPPORTUNITY}
+    if campos_opportunity:
+        for campo, valor in campos_opportunity.items():
+            setattr(opportunity, campo, valor)
+        opportunity.actualizado = datetime.utcnow()
+    if transicion_a_vendido:
+        opportunity.fecha_cierre = lead.fecha_cierre
+        conversation.pausado_manual = True
 
 
 def _filtrar_campos(campos: dict, campos_explicitos: tuple[str, ...]) -> dict:
@@ -1598,12 +2548,28 @@ async def listar_lineas_venta(telefono: str, con_metadatos: bool = False) -> lis
     """Líneas de venta de un lead (un artefacto, varios, o un mix con
     servicio), en el orden en que se agregaron.
 
+    Gate 5.3: interfaz pública sin cambios (telefono); internamente resuelve
+    la Opportunity vigente vía Contact/Conversation y filtra por
+    `opportunity_id` — nunca `telefono` contra `lineas_venta` (esa columna ya
+    no existe, ver clase LineaVenta). Retorna `[]` si todavía no hay
+    Conversation/Opportunity para este teléfono.
+
     `con_metadatos` agrega `id` y `creado` — los pide el DTO JSON del detalle
     de Lead, y NO viajan por defecto a propósito: el panel legacy serializa
     esta misma lista con json.dumps() para precargar el carrito del cierre de
     venta, y un datetime crudo ahí revienta la serialización."""
     async with async_session() as session:
-        query = select(LineaVenta).where(LineaVenta.telefono == telefono).order_by(LineaVenta.id.asc())
+        conversation = await _obtener_conversation_activa_por_telefono(session, telefono)
+        if conversation is None:
+            return []
+        opportunity = await _obtener_opportunity_vigente(session, conversation.id)
+        if opportunity is None:
+            return []
+        query = (
+            select(LineaVenta)
+            .where(LineaVenta.opportunity_id == opportunity.id, LineaVenta.negocio_id == opportunity.negocio_id)
+            .order_by(LineaVenta.id.asc())
+        )
         result = await session.execute(query)
         return [
             {
@@ -1616,24 +2582,61 @@ async def listar_lineas_venta(telefono: str, con_metadatos: bool = False) -> lis
 
 
 async def listar_lineas_venta_de_muchos(telefonos: list[str]) -> dict[str, list[dict]]:
-    """Igual que listar_lineas_venta pero para varios leads a la vez en una
-    sola consulta — para pintar la tabla de leads/exportar sin hacer un
-    query por fila (N+1)."""
+    """Igual que listar_lineas_venta pero para varios leads a la vez — para
+    pintar la tabla de leads/exportar sin hacer un query por fila (N+1).
+
+    Gate 5.3: resuelve primero (Contact, Conversation activa, Opportunity
+    vigente) de cada teléfono en consultas agregadas (no N+1), luego trae
+    las líneas de todas esas Opportunities de una sola vez, filtrando por
+    `opportunity_id` — nunca `telefono` contra `lineas_venta`."""
     if not telefonos:
         return {}
     async with async_session() as session:
+        contacts = (await session.execute(
+            select(Contact.id, Contact.telefono).where(Contact.telefono.in_(telefonos))
+        )).all()
+        contact_id_por_telefono = {c.telefono: c.id for c in contacts}
+        if not contact_id_por_telefono:
+            return {}
+        conversations = (await session.execute(
+            select(Conversation.id, Conversation.contact_id)
+            .where(Conversation.contact_id.in_(contact_id_por_telefono.values()), Conversation.estado == "activa")
+        )).all()
+        conversation_id_por_contact = {c.contact_id: c.id for c in conversations}
+        if not conversation_id_por_contact:
+            return {}
+        opportunities = (await session.execute(
+            select(Opportunity.id, Opportunity.conversation_id, Opportunity.creado)
+            .where(Opportunity.conversation_id.in_(conversation_id_por_contact.values()))
+            .order_by(Opportunity.creado.desc())
+        )).all()
+        # La primera (más reciente) por conversation_id es la vigente.
+        opportunity_id_por_conversation: dict[str, str] = {}
+        for o in opportunities:
+            opportunity_id_por_conversation.setdefault(o.conversation_id, o.id)
+        opportunity_id_por_telefono = {
+            telefono: opportunity_id_por_conversation.get(conversation_id_por_contact.get(contact_id_por_telefono.get(telefono)))
+            for telefono in telefonos
+            if contact_id_por_telefono.get(telefono) and conversation_id_por_contact.get(contact_id_por_telefono[telefono])
+        }
+        ids_opportunity = [oid for oid in opportunity_id_por_telefono.values() if oid]
+        if not ids_opportunity:
+            return {}
         query = (
             select(LineaVenta)
-            .where(LineaVenta.telefono.in_(telefonos))
+            .where(LineaVenta.opportunity_id.in_(ids_opportunity))
             .order_by(LineaVenta.id.asc())
         )
         result = await session.execute(query)
-        agrupado: dict[str, list[dict]] = {}
+        lineas_por_opportunity: dict[str, list[dict]] = {}
         for l in result.scalars().all():
-            agrupado.setdefault(l.telefono, []).append(
+            lineas_por_opportunity.setdefault(l.opportunity_id, []).append(
                 {"producto": l.producto, "precio": l.precio, "marca": l.marca, "proveedor": l.proveedor}
             )
-        return agrupado
+        return {
+            telefono: lineas_por_opportunity.get(oid, [])
+            for telefono, oid in opportunity_id_por_telefono.items()
+        }
 
 
 async def ids_de_productos_existentes(ids: set[int]) -> set[int]:
@@ -1686,9 +2689,20 @@ async def guardar_venta(
     async with async_session() as session:
         lead = _exigir_lead_existente(await session.get(Lead, telefono), telefono, "guardar_venta")
 
+        # Gate 5.3 — resuelto ACÁ (antes del chequeo de abajo), get-only, para
+        # que el conteo de "¿había líneas?" pueda usar la clave fuerte
+        # `opportunity_id` en vez de `telefono` — REGLA CRÍTICA de LineaVenta:
+        # la columna `telefono` ya no existe en esta tabla (Gate 5.3), nunca
+        # se vuelve a consultar por ella.
+        contact = await obtener_o_crear_contact(session, lead.negocio_id, telefono)
+        conversation = await _obtener_conversation_activa(session, contact.id)
+        opportunity = await _obtener_opportunity_vigente(session, conversation.id) if conversation else None
+
         if not lineas and revertir_resultado_al_vaciar and lead.resultado == "vendido":
-            habia_lineas = await session.scalar(
-                select(func.count()).select_from(LineaVenta).where(LineaVenta.telefono == telefono)
+            habia_lineas = bool(opportunity) and await session.scalar(
+                select(func.count()).select_from(LineaVenta).where(
+                    LineaVenta.opportunity_id == opportunity.id, LineaVenta.negocio_id == opportunity.negocio_id,
+                )
             )
             if habia_lineas:
                 # Además del resultado: la forma de pago también queda
@@ -1704,17 +2718,6 @@ async def guardar_venta(
                     "resultado", "fecha_cierre", "modalidad_pago", "medio_pago",
                 )
 
-        await session.execute(delete(LineaVenta).where(LineaVenta.telefono == telefono))
-        for l in lineas:
-            session.add(LineaVenta(
-                telefono=telefono,
-                producto_id=l.get("producto_id"),
-                producto=l["producto"],
-                precio=l.get("precio") or None,
-                marca=l.get("marca") or None,
-                proveedor=l.get("proveedor") or None,
-            ))
-
         campos = _filtrar_campos(campos, tuple(campos_explicitos))
         transicion_a_vendido = _es_transicion_a_vendido(lead, campos)
         for campo, valor in campos.items():
@@ -1722,6 +2725,42 @@ async def guardar_venta(
         if transicion_a_vendido:
             _marcar_cierre_vendido(lead)
         lead.actualizado = datetime.utcnow()
+
+        # Gate 5.3 — mirror hacia Contact/Conversation/Opportunity, EN LA
+        # MISMA transacción que el escrito de Lead (cierra en el mismo commit
+        # el defecto de "dos transacciones separadas" encontrado en el
+        # bloque de Diseño Técnico: acá Lead + Opportunity + LineaVenta caen
+        # en un solo commit). `opportunity_id` es la clave fuerte del
+        # reemplazo de líneas — REGLA CRÍTICA: nunca `telefono` en solitario.
+        # (`contact`/`conversation`/`opportunity` ya resueltos arriba.)
+        if opportunity is not None:
+            await session.execute(
+                delete(LineaVenta).where(
+                    LineaVenta.opportunity_id == opportunity.id,
+                    LineaVenta.negocio_id == opportunity.negocio_id,
+                )
+            )
+            for l in lineas:
+                session.add(LineaVenta(
+                    opportunity_id=opportunity.id, negocio_id=opportunity.negocio_id,
+                    producto_id=l.get("producto_id"), producto=l["producto"],
+                    precio=l.get("precio") or None, marca=l.get("marca") or None,
+                    proveedor=l.get("proveedor") or None,
+                ))
+            for campo, valor in campos.items():
+                if hasattr(Opportunity, campo):
+                    setattr(opportunity, campo, valor)
+            if transicion_a_vendido:
+                opportunity.fecha_cierre = lead.fecha_cierre
+                conversation.pausado_manual = True
+            opportunity.version = Opportunity.version + 1
+            conversation.version = Conversation.version + 1
+        # Si todavía no hay Conversation/Opportunity para este teléfono (caso
+        # de un Lead pre-existente cuyo backfill no corrió, o un entorno de
+        # test que no pasó por el webhook), NO se inventa ninguna acá — el
+        # mirror simplemente no aplica; Lead sigue siendo la fuente de verdad
+        # hasta que exista. No bloquea el flujo legacy.
+
         await session.commit()
 
 
@@ -1762,6 +2801,17 @@ async def asignar_asesor_a_lead(telefono: str, asesor: str | None, automatico: b
         if automatico:
             _avanzar_version(lead, es_nuevo=False)
         lead.actualizado = datetime.utcnow()
+
+        # Gate 5.3 — mirror best-effort (get-only) hacia Conversation.
+        contact = await _obtener_contact(session, lead.negocio_id, telefono)
+        if contact is not None:
+            conversation = await _obtener_conversation_activa(session, contact.id)
+            if conversation is not None:
+                conversation.asesor_asignado_id = asesor
+                conversation.visto_asesor = asesor is None
+                conversation.version = Conversation.version + 1
+                conversation.actualizado = datetime.utcnow()
+
         await session.commit()
 
     if automatico and anterior != asesor:
@@ -1823,6 +2873,22 @@ async def liberar_asignacion(telefono: str, autor: str | None = None, motivo: st
         lead.visto_asesor = True
         _avanzar_version(lead)
         lead.actualizado = datetime.utcnow()
+
+        # Gate 5.3 — mirror best-effort (get-only) hacia Conversation. Si el
+        # llamador es el webhook automático (main.py), `resolver_conversation_
+        # activa` ya corrió ANTES y ya abrió la Conversation nueva si DR-4 lo
+        # exigía — acá solo se refleja el estado limpio (no evalúa DR-4 de
+        # nuevo, evita duplicar la lógica de apertura).
+        contact = await _obtener_contact(session, lead.negocio_id, telefono)
+        if contact is not None:
+            conversation = await _obtener_conversation_activa(session, contact.id)
+            if conversation is not None:
+                conversation.asesor_asignado_id = None
+                conversation.pausado_manual = False
+                conversation.visto_asesor = True
+                conversation.version = Conversation.version + 1
+                conversation.actualizado = datetime.utcnow()
+
         await session.commit()
 
     descripcion = (
@@ -1836,6 +2902,34 @@ async def liberar_asignacion(telefono: str, autor: str | None = None, motivo: st
         autor=autor,
         payload={"campo": "asesor_asignado", "anterior": anterior, "nuevo": None, "motivo": motivo},
     )
+
+
+async def liberar_asignacion_via_conversation(conversation_id: str, negocio_id: str, autor: str, motivo: str = "reactivado_manual") -> str | None:
+    """Punto de entrada para el endpoint nuevo `/conversation/{id}/liberar`
+    (Gate 5.3 cutover real §1/§4/§8) — resuelve el teléfono get-only y
+    reusa `liberar_asignacion()` tal cual (ya mirror-ea Conversation +
+    Lead.version incondicional, sin duplicar esa lógica). No agrega chequeo
+    de concurrencia nuevo: la propia función legacy nunca lo tuvo — esto
+    conserva ese contrato real en vez de inventar uno más estricto.
+
+    Retorna None si la Opportunity vigente de la Conversation ya está
+    "vendido" (guardia de producto: un caso vendido nunca vuelve a Gabi por
+    acá — verificado sobre Opportunity, la fuente de verdad, no sobre Lead)
+    o si la Conversation no existe/no es de este Negocio. Si puede liberar,
+    retorna el teléfono (para que el router registre el DTO de respuesta)."""
+    async with async_session() as session:
+        conversation = await session.get(Conversation, conversation_id)
+        if conversation is None or conversation.negocio_id != negocio_id:
+            return None
+        opportunity = await _obtener_opportunity_vigente(session, conversation.id)
+        if opportunity is not None and opportunity.resultado == "vendido":
+            return None
+        contact = await session.get(Contact, conversation.contact_id)
+        telefono = contact.telefono if contact else None
+    if telefono is None:
+        return None
+    await liberar_asignacion(telefono, autor=autor, motivo=motivo)
+    return telefono
 
 
 async def pausar_gabi_manual(telefono: str):
@@ -2112,6 +3206,14 @@ async def listar_campanas(solo_activas: bool = False) -> list[dict]:
         return [_campana_a_dict(c) for c in result.scalars().all()]
 
 
+async def obtener_campana(campana_id: int) -> dict | None:
+    """Gate 5.3 — corrección pequeña: mismo motivo que obtener_canal_whatsapp
+    — habilita el chequeo de ownership de negocio_id en editar/toggle/eliminar."""
+    async with async_session() as session:
+        campana = await session.get(Campana, campana_id)
+        return _campana_a_dict(campana) if campana else None
+
+
 async def obtener_campana_por_nombre(nombre: str) -> dict | None:
     """Recupera una campaña por su nombre exacto (ej. para saber qué promo
     ofrecer según la campana_origen guardada en el lead). Usa .first() con
@@ -2172,9 +3274,19 @@ async def contar_leads_por_campana() -> list[dict]:
 
 
 async def limpiar_historial(telefono: str):
-    """Borra todo el historial de una conversación."""
+    """Borra todo el historial de una conversación.
+
+    Gate 5.3 — corrección: mismo patrón telefono-only que tenía
+    `guardar_venta` antes de este Gate (DELETE filtrado SOLO por telefono,
+    hallazgo del bloque de Decisiones Arquitectónicas Gate 5.3). Código sin
+    call sites reales hoy (confirmado por grep en toda la auditoría), pero
+    corregido igual — mina latente si se conecta a un endpoint real sin
+    revisar antes. Se agrega `negocio_id` como candado adicional."""
     async with async_session() as session:
+        lead = await session.get(Lead, telefono)
         query = select(Mensaje).where(Mensaje.telefono == telefono)
+        if lead is not None:
+            query = query.where(Mensaje.negocio_id == lead.negocio_id)
         result = await session.execute(query)
         mensajes = result.scalars().all()
         for msg in mensajes:

@@ -23,6 +23,7 @@ from agent.memory import (
     registrar_fallo_tecnico, resetear_fallos_tecnicos, RESULTADOS_CERRADOS,
     sembrar_canales_desde_env, pausar_gabi_manual, marcar_revision_prioritaria,
     marcar_mensaje_procesado, obtener_negocio_por_codigo,
+    resolver_conversation_activa,
 )
 from agent.providers import obtener_proveedor
 from agent.dashboard import (
@@ -377,6 +378,23 @@ async def webhook_handler(request: Request):
                     msg.telefono, numero_whatsapp_id=msg.numero_whatsapp_id,
                     negocio_id=canal.get("negocio_id") if canal else None,
                 )
+                if canal and canal.get("negocio_id"):
+                    # Gate 5.3 — punto de entrada único para Contact/
+                    # Conversation/Opportunity (Diseño Técnico Gate 5.3 §10).
+                    # Aplica DR-4 acá mismo: si la Conversation activa está
+                    # asignada/pausada y su Opportunity vigente tiene un
+                    # resultado cerrado distinto de "vendido", la cierra y
+                    # abre una nueva ANTES de que el resto del flujo (guardar
+                    # mensaje, liberar_asignacion) corra — así todo lo que
+                    # sigue ya opera sobre la Conversation correcta. Sin
+                    # canal resuelto no se puede crear ninguna (canal_id es
+                    # NOT NULL) — se deja para el próximo mensaje que sí
+                    # resuelva canal, mismo criterio fail-closed que ya usa
+                    # actualizar_lead() arriba.
+                    await resolver_conversation_activa(
+                        msg.telefono, canal["negocio_id"], canal["id"],
+                        unidad_id=canal.get("unidad_id"),
+                    )
 
             # Coexistencia: un asesor le respondió al cliente directo desde
             # la app de WhatsApp Business en el celular, no desde Gabi ni el
