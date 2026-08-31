@@ -1578,10 +1578,26 @@ class CanalWhatsApp(Base):
 
 
 class Usuario(Base):
-    """Cuenta de acceso al panel interno (/dashboard). Roles: admin, supervisor, asesor."""
+    """Cuenta de acceso al panel interno (/dashboard). Roles: admin, supervisor, asesor.
+
+    Gate 5.4 (T3) — PK migrada de `username` (global) a `id` (UUID). Antes
+    de este Gate, `username` como PK global implicaba que dos Negocios NO
+    podían tener ambos, por ejemplo, un usuario "admin" — y `crear_usuario()`
+    pisaba silenciosamente password/rol de la cuenta de OTRO Negocio si
+    coincidía el username (hallazgo real, Arquitectura Integrada Gate 5.4,
+    T3: no era solo sobre-escritura de metadata, permitía toma de cuenta
+    cross-tenant vía reset de password). `username` sigue siendo el
+    identificador de login — único ahora por `(negocio_id, username)`, no
+    globalmente (mismo patrón que `Contact.negocio_id+telefono`, Gate 5.3:
+    el precedente ya establecido en este repo para identificadores
+    naturales en Multi-Tenant). Confirmado antes de este cambio: ningún FK
+    real apunta a `Usuario.username` en todo el repo (`asesor_asignado`/
+    `Conversation.asesor_asignado_id` son `String` sueltos por diseño) —
+    la migración no tiene cascada que romper."""
     __tablename__ = "usuarios"
 
-    username: Mapped[str] = mapped_column(String(50), primary_key=True)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_generar_uuid)
+    username: Mapped[str] = mapped_column(String(50))
     password_hash: Mapped[str] = mapped_column(String(200))
     nombre: Mapped[str] = mapped_column(String(100))
     rol: Mapped[str] = mapped_column(String(20))  # admin | supervisor | asesor
@@ -1596,6 +1612,10 @@ class Usuario(Base):
     # puebla, y se exige en la creación (crear_usuario, corrección H3), sin
     # tocar autorización.
     negocio_id: Mapped[str] = mapped_column(String(36), ForeignKey("negocios.id"), nullable=False, index=True)
+
+    __table_args__ = (
+        Index("ix_usuario_negocio_username", "negocio_id", "username", unique=True),
+    )
 
 
 class Configuracion(Base):
@@ -1841,12 +1861,26 @@ async def crear_canal_whatsapp(
         return _canal_a_dict(canal)
 
 
-async def listar_canales_whatsapp(solo_activos: bool = False) -> list[dict]:
+async def listar_canales_whatsapp(negocio_id: str | None = None, solo_activos: bool = False) -> list[dict]:
     """Recupera los canales de WhatsApp configurados, con sus credenciales
     descifradas — usado tanto por ProveedorMeta (para enviar/verificar) como
-    por la pantalla de administración del panel."""
+    por la pantalla de administración del panel.
+
+    `negocio_id` (Gate 5.4, T2) es OPCIONAL a propósito, a diferencia de las
+    demás funciones de listado corregidas en este mismo Gate — es la única
+    excepción documentada. `resolver_canal()` (agent/providers/meta.py) llama
+    a esta función SIN negocio_id cuando todavía está tratando de averiguar a
+    qué Negocio pertenece un mensaje entrante por su phone_number_id: es
+    estructuralmente imposible pedirle de antemano el dato que está
+    resolviendo (resolución de identidad del webhook). Cuando SÍ se pasa
+    negocio_id (panel de administración, ver gestionar_canales_whatsapp en
+    dashboard.py), se filtra con candado normal. Si se omite, la función
+    devuelve canales de TODOS los Negocios — comportamiento intencional solo
+    para ese único llamador legítimo, nunca para una pantalla del panel."""
     async with async_session() as session:
         query = select(CanalWhatsApp).order_by(CanalWhatsApp.creado.asc())
+        if negocio_id is not None:
+            query = query.where(CanalWhatsApp.negocio_id == negocio_id)
         if solo_activos:
             query = query.where(CanalWhatsApp.activo.is_(True))
         result = await session.execute(query)
@@ -2202,7 +2236,7 @@ def _extracto_cita(content: str) -> str:
     return content[:LARGO_EXTRACTO_CITA].rstrip() + "…"
 
 
-async def obtener_ultimos_mensajes(telefonos: list[str]) -> dict[str, dict]:
+async def obtener_ultimos_mensajes(telefonos: list[str], negocio_id: str) -> dict[str, dict]:
     """Último mensaje de cada teléfono (para la vista previa en la bandeja),
     en una sola consulta para toda la lista visible — no una por lead en un
     loop (mismo problema de N consultas que contar_leads_activos_por_asesor).
@@ -2211,7 +2245,13 @@ async def obtener_ultimos_mensajes(telefonos: list[str]) -> dict[str, dict]:
     quedarse con el primero en Python — un lead con una conversación larga
     (cientos de mensajes) habría traído toda esa historia solo para
     descartarla, lo cual es justo el mismo tipo de desperdicio que se
-    intentaba evitar. row_number() funciona igual en SQLite y Postgres."""
+    intentaba evitar. row_number() funciona igual en SQLite y Postgres.
+
+    `negocio_id` (Gate 5.4, T2): esta consulta nunca filtraba por negocio_id
+    — un teléfono ajeno colado en `telefonos` (bug de otro lado) habría
+    devuelto el último mensaje de un Negocio distinto. Mensaje.negocio_id ya
+    es NOT NULL (Gate 5.2, H1), así que el filtro es directo en la fila,
+    nunca por JOIN indirecto."""
     if not telefonos:
         return {}
     async with async_session() as session:
@@ -2221,7 +2261,10 @@ async def obtener_ultimos_mensajes(telefonos: list[str]) -> dict[str, dict]:
             .label("fila")
         )
         subconsulta = (
-            select(Mensaje).where(Mensaje.telefono.in_(telefonos)).add_columns(fila).subquery()
+            select(Mensaje)
+            .where(Mensaje.telefono.in_(telefonos), Mensaje.negocio_id == negocio_id)
+            .add_columns(fila)
+            .subquery()
         )
         ultimo_por_telefono = aliased(Mensaje, subconsulta)
         query = select(ultimo_por_telefono).where(subconsulta.c.fila == 1)
@@ -2235,6 +2278,7 @@ async def obtener_ultimos_mensajes(telefonos: list[str]) -> dict[str, dict]:
 def _lead_a_dict(lead: Lead) -> dict:
     return {
         "telefono": lead.telefono,
+        "negocio_id": lead.negocio_id,
         "nombre": lead.nombre,
         "interes": lead.interes,
         "producto_tipo": lead.producto_tipo,
@@ -2265,20 +2309,45 @@ def _lead_a_dict(lead: Lead) -> dict:
     }
 
 
-async def obtener_lead(telefono: str) -> dict | None:
-    """Recupera los datos estructurados conocidos de un cliente, si existen."""
+async def obtener_lead(telefono: str, negocio_id: str | None = None) -> dict | None:
+    """Recupera los datos estructurados conocidos de un cliente, si existen.
+
+    Gate 5.4 (T1) — `negocio_id`, igual criterio que `actualizar_lead()`:
+    explícito en la firma, NUNCA inferido. Si se pasa, es el candado de
+    ownership — si el Lead existe pero pertenece a otro Negocio, retorna
+    `None` (mismo comportamiento que "no existe": 404, no 403 — no
+    confirma la existencia del recurso a quien no tiene acceso). Todo
+    llamador con contexto de autorización (rutas HTTP, WebSocket del
+    panel) DEBE pasarlo — es la corrección central del hallazgo T1
+    (Arquitectura Integrada Gate 5.4): `Lead.telefono` es la PK, pero
+    nunca fue el único candado.
+
+    `negocio_id=None` (default) preserva el comportamiento anterior —
+    reservado a los pocos llamadores internos del webhook (`agent/main.py`,
+    `agent/campanas.py`) que están resolviendo el `negocio_id` de ESTE
+    mismo teléfono a partir de un Canal ya identificado, no verificando el
+    acceso de un tercero: no hay "otro usuario" que pueda explotar esa
+    ausencia de candado, así que no es el mismo riesgo que en una ruta
+    HTTP/WS con sesión. Nunca usar `negocio_id=None` desde un endpoint
+    autenticado."""
     async with async_session() as session:
         lead = await session.get(Lead, telefono)
         if lead is None:
             return None
+        if negocio_id is not None and lead.negocio_id != negocio_id:
+            return None
         return _lead_a_dict(lead)
 
 
-async def listar_leads(asesor_asignado: str | None = None) -> list[dict]:
+async def listar_leads(negocio_id: str, asesor_asignado: str | None = None) -> list[dict]:
     """Recupera los leads, del más recientemente actualizado al más antiguo.
-    Si se pasa asesor_asignado, solo trae los leads asignados a ese asesor."""
+    Si se pasa asesor_asignado, solo trae los leads asignados a ese asesor.
+
+    `negocio_id` (Gate 5.4, T2 — mismo hallazgo que listar_leads_pipeline en
+    Gate 5.3): esta consulta NUNCA filtraba por negocio_id. Ahora es
+    obligatorio, resuelto server-side desde la sesión — nunca del cliente."""
     async with async_session() as session:
-        query = select(Lead).order_by(Lead.actualizado.desc())
+        query = select(Lead).where(Lead.negocio_id == negocio_id).order_by(Lead.actualizado.desc())
         if asesor_asignado:
             query = query.where(Lead.asesor_asignado == asesor_asignado)
         result = await session.execute(query)
@@ -2372,14 +2441,19 @@ async def listar_leads_pipeline(
         return leads, total
 
 
-async def listar_leads_agendados(asesor_asignado: str | None = None) -> list[dict]:
+async def listar_leads_agendados(negocio_id: str, asesor_asignado: str | None = None) -> list[dict]:
     """Leads con una cita agendada (resultado == 'agendado' y fecha_agendada
     definida), de la más próxima a la más lejana — para el aviso de "Próximas
-    citas" dentro del panel. Si se pasa asesor_asignado, solo las de ese asesor."""
+    citas" dentro del panel. Si se pasa asesor_asignado, solo las de ese asesor.
+
+    `negocio_id` (Gate 5.4, T2) obligatorio — mismo hallazgo que listar_leads."""
     async with async_session() as session:
         query = (
             select(Lead)
-            .where(Lead.resultado == "agendado", Lead.fecha_agendada.is_not(None))
+            .where(
+                Lead.negocio_id == negocio_id,
+                Lead.resultado == "agendado", Lead.fecha_agendada.is_not(None),
+            )
             .order_by(Lead.fecha_agendada.asc())
         )
         if asesor_asignado:
@@ -2388,7 +2462,7 @@ async def listar_leads_agendados(asesor_asignado: str | None = None) -> list[dic
         return [_lead_a_dict(lead) for lead in result.scalars().all()]
 
 
-async def listar_leads_esperando_asesor() -> list[dict]:
+async def listar_leads_esperando_asesor(negocio_id: str) -> list[dict]:
     """Leads derivados a un asesor que se quedaron sin nadie disponible en su
     momento (asesor_asignado sigue vacío), del más antiguo al más reciente —
     para poder asignarlos apenas un asesor se ponga disponible, en vez de
@@ -2397,11 +2471,16 @@ async def listar_leads_esperando_asesor() -> list[dict]:
     El filtro de resultado se hace en Python (no en el WHERE de SQL) porque
     la mayoría de estos leads tiene resultado NULL (pendiente) — un
     `NOT IN` en SQL excluiría también esas filas por cómo SQL trata NULL en
-    comparaciones, que no es lo que queremos."""
+    comparaciones, que no es lo que queremos.
+
+    `negocio_id` (Gate 5.4, T2) obligatorio — mismo hallazgo que listar_leads."""
     async with async_session() as session:
         query = (
             select(Lead)
-            .where(Lead.paso_flujo == "derivado_asesor", Lead.asesor_asignado.is_(None))
+            .where(
+                Lead.negocio_id == negocio_id,
+                Lead.paso_flujo == "derivado_asesor", Lead.asesor_asignado.is_(None),
+            )
             .order_by(Lead.actualizado.asc())
         )
         result = await session.execute(query)
@@ -3035,28 +3114,37 @@ async def contar_leads_activos_por_asesor(usernames: list[str]) -> dict[str, int
         return conteos
 
 
+async def _obtener_usuario_orm(session, negocio_id: str, username: str) -> "Usuario | None":
+    """Lookup scoped — reemplaza `session.get(Usuario, username)` en toda
+    escritura sobre una cuenta puntual (Gate 5.4, T3): `username` dejó de
+    ser PK, la identidad real de una fila es `(negocio_id, username)`.
+    Nunca usar fuera de un contexto donde `negocio_id` ya viene resuelto
+    server-side (sesión del que llama) — ver `obtener_usuario()` para el
+    único caso legítimo de búsqueda sin `negocio_id` (login)."""
+    return (await session.execute(
+        select(Usuario).where(Usuario.negocio_id == negocio_id, Usuario.username == username)
+    )).scalar_one_or_none()
+
+
 async def crear_usuario(
-    username: str, password: str, nombre: str, rol: str, nivel: str | None = None,
-    negocio_id: str | None = None,
+    username: str, password: str, nombre: str, rol: str, negocio_id: str, nivel: str | None = None,
 ):
     """Crea (o actualiza la contraseña de) una cuenta del panel interno.
 
-    `negocio_id` (Gate 5.2, corrección H3) es obligatorio SOLO al crear un
-    usuario nuevo — quien llama debe resolverlo desde una fuente legítima
-    (el Negocio del admin que da de alta la cuenta, ver dashboard.py). Nunca
-    se asume un Negocio por defecto. Al actualizar la contraseña de un
-    usuario YA existente, `negocio_id` no se exige ni se sobreescribe — el
-    Negocio de un usuario se fija una sola vez, en su creación."""
+    `negocio_id` (Gate 5.4, T3) es SIEMPRE obligatorio — antes solo se
+    exigía al crear una cuenta nueva; ahora también es el candado de
+    ownership para actualizar una existente (mismo `crear_usuario` se usa
+    tanto para alta como para editar rol/nivel desde el panel). Antes de
+    este Gate, dos Negocios con el mismo `username` colisionaban en la
+    misma fila global — un admin de Negocio B dando de alta "admin" podía
+    pisar password/rol de la cuenta "admin" de Negocio A sin darse cuenta.
+    Ahora la búsqueda es por `(negocio_id, username)`: si no existe una
+    fila para ESE Negocio, se crea una nueva — nunca se toca la de otro."""
     import bcrypt
     password_hash = bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
     async with async_session() as session:
-        usuario = await session.get(Usuario, username)
+        usuario = await _obtener_usuario_orm(session, negocio_id, username)
         if usuario is None:
-            if negocio_id is None:
-                raise ValueError(
-                    f"crear_usuario(): no se puede crear la cuenta '{username}' sin negocio_id "
-                    f"resuelto. No se asume ningún Negocio por defecto (Gate 5.2)."
-                )
             usuario = Usuario(username=username, negocio_id=negocio_id)
             session.add(usuario)
         usuario.password_hash = password_hash
@@ -3067,23 +3155,50 @@ async def crear_usuario(
         await session.commit()
 
 
-async def cambiar_password(username: str, password_nueva: str):
-    """Actualiza SOLO la contraseña de una cuenta (self-service), sin tocar
-    nombre/rol/nivel — a diferencia de crear_usuario, que los sobreescribe."""
+async def cambiar_password(username: str, negocio_id: str, password_nueva: str):
+    """Actualiza SOLO la contraseña de una cuenta, sin tocar nombre/rol/nivel
+    — a diferencia de crear_usuario, que los sobreescribe. Dos llamadores:
+    self-service (el propio usuario cambia su contraseña, `negocio_id` de su
+    propia sesión) y reset por un admin/supervisor (Gate 5.4, T3: antes SIN
+    ningún chequeo de ownership — un supervisor de Negocio B podía resetear
+    la contraseña de un usuario de Negocio A si conocía/adivinaba el
+    username. `negocio_id` ahora es el mismo candado que el resto del Gate:
+    si el username no existe PARA ESE Negocio, no se toca nada."""
     import bcrypt
     password_hash = bcrypt.hashpw(password_nueva.encode(), bcrypt.gensalt()).decode()
     async with async_session() as session:
-        usuario = await session.get(Usuario, username)
+        usuario = await _obtener_usuario_orm(session, negocio_id, username)
         if usuario is None:
             return
         usuario.password_hash = password_hash
         await session.commit()
 
 
-async def obtener_usuario(username: str) -> dict | None:
-    """Recupera una cuenta del panel interno (incluye el hash, para verificar login)."""
+async def obtener_usuario(username: str, negocio_id: str | None = None) -> dict | None:
+    """Recupera una cuenta del panel interno (incluye el hash, para verificar
+    login).
+
+    `negocio_id` (Gate 5.4, T3) — mismo criterio de opcionalidad que
+    `obtener_lead()`: si se pasa, es el candado real de ownership. Si NO se
+    pasa (login, y resumen de sesión — WebSocket del panel, que solo tiene
+    el `username` guardado en la cookie), busca por `username` en TODOS los
+    Negocios. Con `username` único por `(negocio_id, username)` en vez de
+    global, eso puede dar más de un resultado el día que exista una
+    colisión real entre Negocios (recién posible con un Tenant 002 real) —
+    en ese caso, falla cerrado (retorna `None`) en vez de adivinar cuál de
+    los dos: es una limitación conocida del login por username puro, no
+    resuelta acá (necesitaría una UX de selección de Negocio en el login,
+    Gate posterior) — preferible a autenticar contra la cuenta equivocada."""
     async with async_session() as session:
-        usuario = await session.get(Usuario, username)
+        if negocio_id is not None:
+            usuario = await _obtener_usuario_orm(session, negocio_id, username)
+        else:
+            candidatos = (await session.execute(
+                select(Usuario).where(Usuario.username == username)
+            )).scalars().all()
+            if len(candidatos) != 1:
+                return None
+            usuario = candidatos[0]
         if usuario is None:
             return None
         return {
@@ -3097,10 +3212,18 @@ async def obtener_usuario(username: str) -> dict | None:
         }
 
 
-async def listar_asesores() -> list[dict]:
-    """Recupera las cuentas con rol 'asesor', para el selector de asignación."""
+async def listar_asesores(negocio_id: str) -> list[dict]:
+    """Recupera las cuentas con rol 'asesor', para el selector de asignación.
+
+    `negocio_id` (Gate 5.4, T2) obligatorio — esta consulta nunca filtraba
+    por negocio_id, exponiendo asesores de cualquier Negocio al selector de
+    asignación de otro."""
     async with async_session() as session:
-        query = select(Usuario).where(Usuario.rol == "asesor").order_by(Usuario.nombre)
+        query = (
+            select(Usuario)
+            .where(Usuario.rol == "asesor", Usuario.negocio_id == negocio_id)
+            .order_by(Usuario.nombre)
+        )
         result = await session.execute(query)
         return [
             {"username": u.username, "nombre": u.nombre, "nivel": u.nivel, "disponible": u.disponible}
@@ -3108,19 +3231,27 @@ async def listar_asesores() -> list[dict]:
         ]
 
 
-async def actualizar_disponibilidad(username: str, disponible: bool):
-    """El propio asesor togglea si está disponible para recibir leads nuevos."""
+async def actualizar_disponibilidad(username: str, negocio_id: str, disponible: bool):
+    """El propio asesor togglea si está disponible para recibir leads nuevos
+    — siempre self-service (su propio `negocio_id` de sesión), pero
+    `session.get(Usuario, username)` dejó de servir (Gate 5.4, T3: `username`
+    ya no es PK) — mismo lookup scoped que el resto de las funciones de
+    identidad."""
     async with async_session() as session:
-        usuario = await session.get(Usuario, username)
+        usuario = await _obtener_usuario_orm(session, negocio_id, username)
         if usuario is not None:
             usuario.disponible = disponible
             await session.commit()
 
 
-async def actualizar_nivel_asesor(username: str, nivel: str):
-    """El supervisor/admin ajusta el nivel de experiencia de un asesor."""
+async def actualizar_nivel_asesor(username: str, negocio_id: str, nivel: str):
+    """El supervisor/admin ajusta el nivel de experiencia de un asesor.
+
+    `negocio_id` (Gate 5.4, T3) — antes SIN ningún chequeo de ownership,
+    mismo hallazgo que `cambiar_password`: un supervisor de otro Negocio
+    podía cambiar el nivel de un asesor ajeno si adivinaba el username."""
     async with async_session() as session:
-        usuario = await session.get(Usuario, username)
+        usuario = await _obtener_usuario_orm(session, negocio_id, username)
         if usuario is not None:
             usuario.nivel = nivel
             await session.commit()
@@ -3196,10 +3327,14 @@ async def crear_campana(
         return _campana_a_dict(campana)
 
 
-async def listar_campanas(solo_activas: bool = False) -> list[dict]:
-    """Recupera las campañas configuradas, más recientes primero."""
+async def listar_campanas(negocio_id: str, solo_activas: bool = False) -> list[dict]:
+    """Recupera las campañas configuradas, más recientes primero.
+
+    `negocio_id` (Gate 5.4, T2) obligatorio — esta consulta nunca filtraba
+    por negocio_id, exponiendo campañas (y su detección/promoción) de
+    cualquier Negocio a otro."""
     async with async_session() as session:
-        query = select(Campana).order_by(Campana.creado.desc())
+        query = select(Campana).where(Campana.negocio_id == negocio_id).order_by(Campana.creado.desc())
         if solo_activas:
             query = query.where(Campana.activa.is_(True))
         result = await session.execute(query)
@@ -3214,15 +3349,27 @@ async def obtener_campana(campana_id: int) -> dict | None:
         return _campana_a_dict(campana) if campana else None
 
 
-async def obtener_campana_por_nombre(nombre: str) -> dict | None:
+async def obtener_campana_por_nombre(nombre: str, negocio_id: str) -> dict | None:
     """Recupera una campaña por su nombre exacto (ej. para saber qué promo
-    ofrecer según la campana_origen guardada en el lead). Usa .first() con
-    límite en vez de esperar una fila única: el nombre no tiene una
-    restricción UNIQUE a nivel de base de datos, así que si llegara a haber
-    más de una campaña con el mismo nombre, esto no debe tumbar el arranque
-    del servidor — se toma la primera."""
+    ofrecer según la campana_origen guardada en el lead).
+
+    `negocio_id` (Gate 5.4, hallazgo B del checkpoint anterior) obligatorio
+    — sin candado, dos Negocios con una campaña del mismo `nombre` podían
+    devolver la fila del Negocio equivocado (`Campana.nombre` nunca tuvo
+    restricción UNIQUE). Ambos llamadores (`brain.py`, `campanas.py`) ya
+    resuelven `negocio_id` desde un Canal/bootstrap conocido antes de
+    llegar acá — nunca se adivina ni se cae a Cálidda por default.
+
+    Sigue usando `.limit(1)` con `.first()` DENTRO de ese Negocio — no es
+    una selección implícita entre Negocios, es la misma tolerancia previa
+    a nombres duplicados dentro de uno solo (higiene de datos, no
+    aislamiento)."""
     async with async_session() as session:
-        query = select(Campana).where(Campana.nombre == nombre).limit(1)
+        query = (
+            select(Campana)
+            .where(Campana.nombre == nombre, Campana.negocio_id == negocio_id)
+            .limit(1)
+        )
         result = await session.execute(query)
         campana = result.scalars().first()
         return _campana_a_dict(campana) if campana else None

@@ -173,7 +173,9 @@ def obtener_mensaje_escalado_por_confianza() -> str:
     )
 
 
-async def _armar_bloques_contexto(mensaje: str, historial: list[dict], lead: dict | None) -> list[str]:
+async def _armar_bloques_contexto(
+    mensaje: str, historial: list[dict], lead: dict | None, negocio_id: str | None,
+) -> list[str]:
     """Arma los bloques de contexto dinámico (datos del lead + catálogo/base de
     conocimiento) para este turno puntual. Van en el mensaje del usuario, NUNCA
     en el system prompt, para que este último quede idéntico entre llamadas."""
@@ -195,8 +197,8 @@ async def _armar_bloques_contexto(mensaje: str, historial: list[dict], lead: dic
         # Si el lead llegó por una campaña con promoción vigente, se prioriza
         # ese producto/precio sobre el catálogo general — es lo que el
         # cliente vio en el anuncio/SMS antes de escribir.
-        if lead.get("campana_origen"):
-            campana = await obtener_campana_por_nombre(lead["campana_origen"])
+        if lead.get("campana_origen") and negocio_id is not None:
+            campana = await obtener_campana_por_nombre(lead["campana_origen"], negocio_id)
             promo = await resolver_promo(campana) if campana else None
             if promo:
                 detalle = f"Producto: {promo['producto']}"
@@ -231,7 +233,7 @@ async def _armar_bloques_contexto(mensaje: str, historial: list[dict], lead: dic
     # producto, no solo el código exacto. Los códigos de LA PROPIA campaña
     # del cliente (si tiene) no se excluyen, para que también salgan con
     # detalle de cuotas en el listado numerado del catálogo.
-    codigos_promocionales = await obtener_codigos_promocionales_activos()
+    codigos_promocionales = await obtener_codigos_promocionales_activos(negocio_id)
     codigos_a_excluir = codigos_promocionales - codigos_propios
 
     # Se incluyen los últimos mensajes del cliente (no solo el actual) para no
@@ -336,6 +338,7 @@ async def _generar_respuesta_protocolo_confianza(
 
 async def generar_respuesta(
     mensaje: str, historial: list[dict], lead: dict | None = None, modo: str = "produccion",
+    negocio_id: str | None = None,
 ) -> tuple[str, bool, str | None, str | None]:
     """
     Genera una respuesta usando Claude API.
@@ -353,6 +356,11 @@ async def generar_respuesta(
             producción). En modo "produccion" el comportamiento es
             exactamente el mismo que antes de esta sub-etapa: texto libre,
             sin tools.
+        negocio_id: Negocio resuelto del Canal por el que llegó el mensaje
+            (Gate 5.4, T2) — puede ser None si el webhook no pudo resolver el
+            Canal todavía; en ese caso el contexto de campañas/promociones se
+            arma vacío (fail-safe), nunca se listan campañas de cualquier
+            Negocio.
 
     Returns:
         Tupla (texto_respuesta, hubo_error, confianza, razon). hubo_error=True
@@ -366,7 +374,7 @@ async def generar_respuesta(
         return obtener_mensaje_fallback(), False, None, None
 
     system_prompt = await obtener_system_prompt(modo)
-    bloques_contexto = await _armar_bloques_contexto(mensaje, historial, lead)
+    bloques_contexto = await _armar_bloques_contexto(mensaje, historial, lead, negocio_id)
 
     # Construir mensajes para la API. Claude solo acepta los roles "user" y
     # "assistant" — los mensajes que escribió un asesor humano (guardados con

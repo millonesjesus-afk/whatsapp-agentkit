@@ -44,11 +44,11 @@ class ServicioComercial:
     líneas de venta — ningún otro módulo de Backend implementa esta lógica
     por su cuenta, todos pasan por acá."""
 
-    async def elegir_asesor_automatico(self, interes: str) -> str | None:
-        return await asignacion.elegir_asesor_automatico(interes)
+    async def elegir_asesor_automatico(self, interes: str, negocio_id: str | None) -> str | None:
+        return await asignacion.elegir_asesor_automatico(interes, negocio_id)
 
-    async def asignar_lead_pendiente_a_asesor(self, username: str, nivel_asesor: str | None) -> str | None:
-        return await asignacion.asignar_lead_pendiente_a_asesor(username, nivel_asesor)
+    async def asignar_lead_pendiente_a_asesor(self, username: str, nivel_asesor: str | None, negocio_id: str) -> str | None:
+        return await asignacion.asignar_lead_pendiente_a_asesor(username, nivel_asesor, negocio_id)
 
     def validar_venta(
         self, lineas_venta_json: str, modalidad_pago: str, cuotas: str, medio_pago: str,

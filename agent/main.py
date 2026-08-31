@@ -226,8 +226,8 @@ async def lifespan(app: FastAPI):
             "entorno necesita sembrar canales desde .env."
         )
     await sembrar_canales_desde_env(negocio_bootstrap["id"] if negocio_bootstrap else None)
-    await servicio_canales.sembrar_campanas_iniciales()
-    await servicio_canales.corregir_patrones_desalineados()
+    await servicio_canales.sembrar_campanas_iniciales(negocio_bootstrap["id"] if negocio_bootstrap else None)
+    await servicio_canales.corregir_patrones_desalineados(negocio_bootstrap["id"] if negocio_bootstrap else None)
     logger.info("Base de datos inicializada")
     logger.info(f"Servidor AgentKit corriendo en puerto {PORT}")
     logger.info(f"Proveedor de WhatsApp: {proveedor.__class__.__name__}")
@@ -407,7 +407,7 @@ async def webhook_handler(request: Request):
                 await servicio_conversacion.guardar_mensaje(
                     msg.telefono, "assistant", contenido, via_app=True, mensaje_id_meta=msg.mensaje_id or None,
                 )
-                lead_actual = await obtener_lead(msg.telefono)
+                lead_actual = await obtener_lead(msg.telefono, negocio_id=canal.get("negocio_id") if canal else None)
                 if not (lead_actual and lead_actual.get("asesor_asignado")):
                     await pausar_gabi_manual(msg.telefono)
                 logger.info(f"Echo de app registrado para {msg.telefono}: {contenido}")
@@ -452,7 +452,7 @@ async def webhook_handler(request: Request):
 
             logger.info(f"Mensaje de {msg.telefono}: {msg.texto}")
 
-            lead = await obtener_lead(msg.telefono)
+            lead = await obtener_lead(msg.telefono, negocio_id=canal.get("negocio_id") if canal else None)
 
             # Primer contacto (o aún sin campaña detectada): se intenta
             # reconocer de qué campaña viene el lead — por el texto del
@@ -460,9 +460,11 @@ async def webhook_handler(request: Request):
             # Meta — para medir conversión por campaña y ofrecer la promo
             # correcta. Se guarda una sola vez y nunca se sobreescribe.
             if not lead or not lead.get("campana_origen"):
-                campana = await servicio_canales.detectar_y_asignar_campana(msg.telefono, msg.texto, msg.referral)
+                campana = await servicio_canales.detectar_y_asignar_campana(
+                    msg.telefono, msg.texto, msg.referral, canal.get("negocio_id") if canal else None,
+                )
                 if campana:
-                    lead = await obtener_lead(msg.telefono)
+                    lead = await obtener_lead(msg.telefono, negocio_id=canal.get("negocio_id") if canal else None)
 
             # Si ya hay un asesor humano asignado (o alguien le respondió
             # directo desde la app en coexistencia, sin asignación formal),
@@ -484,7 +486,7 @@ async def webhook_handler(request: Request):
                     # puede reasignar manualmente si hace falta).
                     await liberar_asignacion(msg.telefono)
                     logger.info(f"Caso de {msg.telefono} ya estaba cerrado — Gabi retoma la atención")
-                    lead = await obtener_lead(msg.telefono)
+                    lead = await obtener_lead(msg.telefono, negocio_id=canal.get("negocio_id") if canal else None)
                 else:
                     # Caso todavía abierto: se guarda el mensaje y se reactiva
                     # el indicador de "Nuevo" para que el asesor no se lo pierda,
@@ -512,7 +514,8 @@ async def webhook_handler(request: Request):
             # promovido a producción desde el panel.
             modo_canal = (canal or {}).get("modo", "produccion")
             respuesta, hubo_error, confianza, razon = await servicio_inteligencia.generar_respuesta(
-                msg.texto, historial, lead, modo=modo_canal
+                msg.texto, historial, lead, modo=modo_canal,
+                negocio_id=canal.get("negocio_id") if canal else None,
             )
 
             # Si Claude falla, se pide reintentar la primera vez. Si vuelve a
@@ -556,10 +559,12 @@ async def webhook_handler(request: Request):
             logger.info(f"Respuesta a {msg.telefono}: {respuesta}")
 
             if escalado_por_falla:
-                asesor = await servicio_comercial.elegir_asesor_automatico((lead or {}).get("interes") or "")
+                asesor = await servicio_comercial.elegir_asesor_automatico(
+                    (lead or {}).get("interes") or "", canal.get("negocio_id") if canal else None,
+                )
                 if asesor:
                     await asignar_asesor_a_lead(msg.telefono, asesor, automatico=True)
-                lead_actualizado = await obtener_lead(msg.telefono)
+                lead_actualizado = await obtener_lead(msg.telefono, negocio_id=canal.get("negocio_id") if canal else None)
                 await notificar_lead_derivado(
                     msg.telefono, lead_actualizado or {},
                     "[Escalado automáticamente por fallas técnicas repetidas del bot]",
@@ -571,10 +576,12 @@ async def webhook_handler(request: Request):
                 # La IA deja de tomar decisiones sobre esta conversación —
                 # mismo patrón de asignación que el escalado por falla técnica,
                 # pero disparado por la señal de confianza real del modelo.
-                asesor = await servicio_comercial.elegir_asesor_automatico((lead or {}).get("interes") or "")
+                asesor = await servicio_comercial.elegir_asesor_automatico(
+                    (lead or {}).get("interes") or "", canal.get("negocio_id") if canal else None,
+                )
                 if asesor:
                     await asignar_asesor_a_lead(msg.telefono, asesor, automatico=True)
-                lead_actualizado = await obtener_lead(msg.telefono)
+                lead_actualizado = await obtener_lead(msg.telefono, negocio_id=canal.get("negocio_id") if canal else None)
                 await notificar_lead_derivado(
                     msg.telefono, lead_actualizado or {},
                     f"[Escalado automáticamente por baja confianza de la IA — razón: {razon}]",
@@ -599,12 +606,14 @@ async def webhook_handler(request: Request):
             ya_estaba_derivado = bool(lead) and lead.get("paso_flujo") == "derivado_asesor"
             ahora_derivado = datos_lead.get("paso_flujo") == "derivado_asesor"
             if ahora_derivado and not ya_estaba_derivado:
-                lead_actualizado = await obtener_lead(msg.telefono)
+                lead_actualizado = await obtener_lead(msg.telefono, negocio_id=canal.get("negocio_id") if canal else None)
                 if lead_actualizado and not lead_actualizado.get("asesor_asignado"):
-                    asesor = await servicio_comercial.elegir_asesor_automatico(lead_actualizado.get("interes") or "")
+                    asesor = await servicio_comercial.elegir_asesor_automatico(
+                        lead_actualizado.get("interes") or "", canal.get("negocio_id") if canal else None,
+                    )
                     if asesor:
                         await asignar_asesor_a_lead(msg.telefono, asesor, automatico=True)
-                        lead_actualizado = await obtener_lead(msg.telefono)
+                        lead_actualizado = await obtener_lead(msg.telefono, negocio_id=canal.get("negocio_id") if canal else None)
                 await notificar_lead_derivado(msg.telefono, lead_actualizado or {}, msg.texto)
 
         return {"status": "ok"}

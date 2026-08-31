@@ -75,11 +75,11 @@ _PALETA_CANAL = [
 ]
 
 
-async def _mapa_canales() -> dict:
+async def _mapa_canales(negocio_id: str) -> dict:
     """Nombre + color de cada canal de WhatsApp, indexado por phone_number_id
     — para pintar el badge de canal en leads/conversaciones sin repetir la
     consulta en cada fila."""
-    canales = await listar_canales_whatsapp()
+    canales = await listar_canales_whatsapp(negocio_id=negocio_id)
     return {
         c["phone_number_id"]: {"nombre": c["nombre"], "color": _PALETA_CANAL[i % len(_PALETA_CANAL)]}
         for i, c in enumerate(canales)
@@ -378,7 +378,7 @@ async def websocket_panel(websocket: WebSocket):
         await websocket.close(code=4401)
         return
 
-    await gestor_conexiones.conectar(websocket, username, usuario["rol"])
+    await gestor_conexiones.conectar(websocket, username, usuario["rol"], usuario["negocio_id"])
     try:
         while True:
             datos = await websocket.receive_json()
@@ -390,8 +390,10 @@ async def websocket_panel(websocket: WebSocket):
                     # antes se aceptaba cualquier teléfono que el cliente
                     # mandara sin validar nada, así que un asesor podía
                     # marcarse como "viendo" un lead ajeno y recibir el
-                    # "escribiendo..." de esa conversación.
-                    lead_pedido = await obtener_lead(telefono_pedido)
+                    # "escribiendo..." de esa conversación. Gate 5.4 (T1):
+                    # negocio_id siempre de la sesión WS ya resuelta arriba
+                    # (usuario["negocio_id"]), nunca del mensaje del cliente.
+                    lead_pedido = await obtener_lead(telefono_pedido, negocio_id=usuario["negocio_id"])
                     if lead_pedido is None or not tiene_acceso_a_lead(
                         usuario["rol"], usuario["username"], lead_pedido.get("asesor_asignado"),
                     ):
@@ -1434,8 +1436,10 @@ async def _datos_bandeja(usuario: dict, estado_filtro: str, asesor_filtro: str, 
     """Consulta y filtra los leads una sola vez, para que el rail de estados
     y la lista de conversaciones (columnas separadas) no dupliquen queries."""
     vision_total = usuario["rol"] in ROLES_CON_VISION_TOTAL
-    leads_todos = await listar_leads(asesor_asignado=None if vision_total else usuario["username"])
-    mapa_canales = await _mapa_canales()
+    leads_todos = await listar_leads(
+        usuario["negocio_id"], asesor_asignado=None if vision_total else usuario["username"]
+    )
+    mapa_canales = await _mapa_canales(usuario["negocio_id"])
     if canal_filtro:
         leads_todos = [l for l in leads_todos if l.get("numero_whatsapp_id") == canal_filtro]
 
@@ -1556,7 +1560,7 @@ async def _renderizar_rail_estados(usuario: dict, datos: dict, estado_filtro: st
 
     equipo_html = ""
     if vision_total:
-        asesores = await listar_asesores()
+        asesores = await listar_asesores(usuario["negocio_id"])
         filas_equipo = []
         if estado_filtro == "todos":
             # Sin filtro de estado: se muestra la carga activa total de cada
@@ -1663,7 +1667,9 @@ async def _renderizar_lista_conversaciones(
     # Una sola consulta para el último mensaje de TODOS los leads visibles,
     # no una por lead (ver obtener_ultimos_mensajes) — con Postgres en
     # producción, N consultas secuenciales se sienten en cada carga de página.
-    ultimos_mensajes = await servicio_conversacion.obtener_ultimos_mensajes([l["telefono"] for l in leads_filtrados])
+    ultimos_mensajes = await servicio_conversacion.obtener_ultimos_mensajes(
+        [l["telefono"] for l in leads_filtrados], usuario["negocio_id"]
+    )
 
     items = []
     for lead in leads_filtrados:
@@ -1998,6 +2004,28 @@ BLOQUEO_LOGIN_SEGUNDOS = 15 * 60
 MAX_LOGIN_POR_IP_POR_MINUTO = 10
 
 
+async def _resolver_login(username: str) -> tuple[dict | None, str]:
+    """Resuelve la cuenta candidata para un intento de login y la clave a
+    usar para el bloqueo por intentos fallidos.
+
+    Gate 5.4 (hallazgo B del checkpoint de auditoría): `username` ya no es
+    único globalmente (dos Negocios pueden tener legítimamente el mismo
+    username, ver T3) — bloquear por el username crudo permitía que un
+    ataque de fuerza bruta contra "admin" de un Negocio bloqueara también a
+    "admin" de otro Negocio (denegación de servicio cross-tenant por destino
+    compartido). Se resuelve la cuenta PRIMERO (antes se llamaba más abajo,
+    después del chequeo de bloqueo — el costo de la consulta extra ya está
+    acotado por el rate limit de IP que corre antes) para poder candadear
+    por `(negocio_id, username)` cuando la cuenta es identificable sin
+    ambigüedad. Si el username no existe o es ambiguo entre Negocios (mismo
+    caso límite ya documentado en `obtener_usuario`), no hay una cuenta
+    específica de un Negocio real que aislar — se conserva el candado por
+    el username crudo, comportamiento idéntico al de antes de este fix."""
+    usuario = await obtener_usuario(username)
+    clave_bloqueo = f"{usuario['negocio_id']}:{username}" if usuario else username
+    return usuario, clave_bloqueo
+
+
 @router.post("/login")
 async def login_submit(request: Request, username: str = Form(...), password: str = Form(...)):
     # Rate limiting por IP — mitiga fuerza bruta distribuida entre varios
@@ -2009,9 +2037,11 @@ async def login_submit(request: Request, username: str = Form(...), password: st
             status_code=303,
         )
 
-    # Bloqueo por intentos fallidos consecutivos sobre el mismo username
+    usuario, clave_bloqueo = await _resolver_login(username)
+
+    # Bloqueo por intentos fallidos consecutivos sobre la misma cuenta
     # (Security Architecture, P1 — antes no había ningún límite).
-    restante = bloqueo_login.segundos_restantes(username)
+    restante = bloqueo_login.segundos_restantes(clave_bloqueo)
     if restante is not None:
         minutos = max(1, round(restante / 60))
         return RedirectResponse(
@@ -2019,15 +2049,14 @@ async def login_submit(request: Request, username: str = Form(...), password: st
             status_code=303,
         )
 
-    usuario = await obtener_usuario(username)
     credenciales_validas = usuario is not None and bcrypt.checkpw(
         password.encode(), usuario["password_hash"].encode()
     )
     if not credenciales_validas:
-        bloqueo_login.registrar_fallo(username, MAX_INTENTOS_LOGIN, BLOQUEO_LOGIN_SEGUNDOS)
+        bloqueo_login.registrar_fallo(clave_bloqueo, MAX_INTENTOS_LOGIN, BLOQUEO_LOGIN_SEGUNDOS)
         return RedirectResponse(url="/dashboard/login?error=Usuario+o+contraseña+incorrectos", status_code=303)
 
-    bloqueo_login.registrar_exito(username)
+    bloqueo_login.registrar_exito(clave_bloqueo)
     request.session["username"] = usuario["username"]
     return RedirectResponse(url="/dashboard", status_code=303)
 
@@ -2196,7 +2225,7 @@ async def metricas(request: Request, usuario: dict = Depends(servicio_identidad.
     # server-side con su propio username.
     vision_total = usuario["rol"] in ROLES_CON_VISION_TOTAL
     leads = await _adjuntar_resumen_ventas(
-        await listar_leads(asesor_asignado=None if vision_total else usuario["username"])
+        await listar_leads(usuario["negocio_id"], asesor_asignado=None if vision_total else usuario["username"])
     )
     panel = await _contenido_metricas(leads, mostrar_derivados=vision_total, mostrar_exportar=vision_total)
     cuerpo = f"""<div class="shell d-flex"><div class="main-pane flex-grow-1 p-4">{panel}</div></div>"""
@@ -2502,7 +2531,7 @@ async def crm_pipeline(
             "total": total, "pagina": pagina, "por_pagina": por_pagina,
         })
 
-    asesores = await listar_asesores() if vision_total else []
+    asesores = await listar_asesores(usuario["negocio_id"]) if vision_total else []
     panel = _contenido_pipeline(
         leads, total, q, resultado,
         asesor if (vision_total and alcance_aplicado == "todos") else "",
@@ -2843,7 +2872,7 @@ async def conversation_asignar(
     anterior = conv["asesor_asignado"]
     evento = None
     if asesor_asignado:
-        asesor_info = await obtener_usuario(asesor_asignado)
+        asesor_info = await obtener_usuario(asesor_asignado, negocio_id=usuario["negocio_id"])
         nombre_asesor = asesor_info["nombre"] if asesor_info else asesor_asignado
         evento = {
             "tipo": "asignado", "descripcion": f"Asignó la conversación a {nombre_asesor}", "autor": usuario["nombre"],
@@ -2852,7 +2881,7 @@ async def conversation_asignar(
     elif anterior:
         # "Sin asignar" (value="") es una decisión explícita del supervisor —
         # mismo criterio que el endpoint legacy (dashboard.py, asignar_lead).
-        asesor_info = await obtener_usuario(anterior)
+        asesor_info = await obtener_usuario(anterior, negocio_id=usuario["negocio_id"])
         nombre_anterior = asesor_info["nombre"] if asesor_info else anterior
         evento = {
             "tipo": "desasignado", "descripcion": f"Quitó la asignación de {nombre_anterior}", "autor": usuario["nombre"],
@@ -2916,7 +2945,7 @@ async def exportar_metricas_csv(usuario: dict = Depends(servicio_identidad.requi
     import csv
     import io
 
-    leads = await _adjuntar_resumen_ventas(await listar_leads())
+    leads = await _adjuntar_resumen_ventas(await listar_leads(usuario["negocio_id"]))
     buffer = io.StringIO()
     escritor = csv.writer(buffer)
     escritor.writerow(COLUMNAS_EXPORTACION)
@@ -2936,7 +2965,7 @@ async def exportar_metricas_xlsx(usuario: dict = Depends(servicio_identidad.requ
     from openpyxl import Workbook
     from openpyxl.styles import Font
 
-    leads = await _adjuntar_resumen_ventas(await listar_leads())
+    leads = await _adjuntar_resumen_ventas(await listar_leads(usuario["negocio_id"]))
     filas = _filas_exportacion(leads)
     libro = Workbook()
     hoja = libro.active
@@ -3008,7 +3037,7 @@ async def _zona_accion_asesor(usuario: dict, datos: dict) -> str:
         (l for l in datos["leads_todos"] if l.get("pausado_manual")),
         key=lambda l: l.get("actualizado") or datetime.min,
     )
-    agendados = await listar_leads_agendados(asesor_asignado=usuario["username"])
+    agendados = await listar_leads_agendados(usuario["negocio_id"], asesor_asignado=usuario["username"])
 
     if not esperando and not agendados:
         return _zona_accion_vacia("No tenés conversaciones que requieran tu atención ahora mismo.")
@@ -3020,15 +3049,15 @@ async def _zona_accion_asesor(usuario: dict, datos: dict) -> str:
     return "".join(items)
 
 
-async def _zona_accion_admin(datos: dict) -> str:
+async def _zona_accion_admin(datos: dict, negocio_id: str) -> str:
     """Deterministica, misma disciplina que la del Asesor — qué requiere
     intervención de Administrador/Supervisor hoy, no un resumen pasivo."""
-    esperando_asignar = await listar_leads_esperando_asesor()
+    esperando_asignar = await listar_leads_esperando_asesor(negocio_id)
     esperando_respuesta = sorted(
         (l for l in datos["leads_todos"] if l.get("pausado_manual")),
         key=lambda l: l.get("actualizado") or datetime.min,
     )
-    agendados = await listar_leads_agendados()
+    agendados = await listar_leads_agendados(negocio_id)
 
     if not esperando_asignar and not esperando_respuesta and not agendados:
         return _zona_accion_vacia("El equipo no tiene conversaciones que requieran tu intervención ahora mismo.")
@@ -3073,8 +3102,8 @@ async def _vista_inicio(request: Request, usuario: dict) -> HTMLResponse:
     datos = await _datos_bandeja(usuario, "todos", "", "")
 
     if datos["vision_total"]:
-        zona_accion_html = await _zona_accion_admin(datos)
-        asesores = await listar_asesores()
+        zona_accion_html = await _zona_accion_admin(datos, usuario["negocio_id"])
+        asesores = await listar_asesores(usuario["negocio_id"])
         zona_indicadores_html = _zona_indicadores_admin(datos, asesores)
     else:
         zona_accion_html = await _zona_accion_asesor(usuario, datos)
@@ -3107,7 +3136,7 @@ async def panel_principal(
     datos = await _datos_bandeja(usuario, estado, asesor, canal)
     rail = await _renderizar_rail_estados(usuario, datos, estado, asesor, canal)
 
-    asesores = await listar_asesores() if datos["vision_total"] else []
+    asesores = await listar_asesores(usuario["negocio_id"]) if datos["vision_total"] else []
     resumen = _barra_resumen(datos, asesores, estado) if datos["vision_total"] else ""
 
     if asesor:
@@ -3149,7 +3178,7 @@ async def panel_principal(
     aviso_citas = ""
     if estado == "todos" and not asesor:
         agendados = await listar_leads_agendados(
-            asesor_asignado=None if datos["vision_total"] else usuario["username"]
+            usuario["negocio_id"], asesor_asignado=None if datos["vision_total"] else usuario["username"]
         )
         aviso_citas = _aviso_proximas_citas(agendados, datos["vision_total"])
 
@@ -3843,7 +3872,7 @@ async def _bloque_gestion_lead(
 
     bloque_asignacion = ""
     if usuario["rol"] in ROLES_CON_VISION_TOTAL:
-        asesores = await listar_asesores()
+        asesores = await listar_asesores(usuario["negocio_id"])
         opciones_asesor = '<option value="">Sin asignar</option>' + "".join(
             f'<option value="{html.escape(a["username"])}" {"selected" if lead.get("asesor_asignado") == a["username"] else ""}>'
             f'{html.escape(a["nombre"])} — {html.escape((a.get("nivel") or "sin nivel").capitalize())}'
@@ -4379,7 +4408,7 @@ async def _bloque_resumen_cliente(
     compacta) — seguido de los formularios de gestión, todo en una sola
     columna que se muestra siempre junto al chat."""
     nombre_mostrado = lead.get("nombre") or "(sin nombre)"
-    badge_canal = _badge_canal(lead.get("numero_whatsapp_id"), await _mapa_canales())
+    badge_canal = _badge_canal(lead.get("numero_whatsapp_id"), await _mapa_canales(usuario["negocio_id"]))
 
     filas_info = "".join(
         f'<div class="d-flex justify-content-between align-items-center py-1 gap-2">'
@@ -4449,7 +4478,7 @@ async def _renderizar_detalle_lead(
     de escritura del CRM (resultado/venta/asignar) puedan reusarla tal cual
     cuando detectan un conflicto de edición (Cap. 6) — mismo render que la
     ruta GET, con el banner de conflicto de más."""
-    lead = await obtener_lead(telefono)
+    lead = await obtener_lead(telefono, negocio_id=usuario["negocio_id"])
     if lead is None:
         raise HTTPException(status_code=404, detail="Lead no encontrado")
     _verificar_acceso_lead(usuario, lead)
@@ -4464,7 +4493,7 @@ async def _renderizar_detalle_lead(
 
     datos = await _datos_bandeja(usuario, estado, asesor)
     rail = await _renderizar_rail_estados(usuario, datos, estado, asesor)
-    asesores_equipo = await listar_asesores() if datos["vision_total"] else []
+    asesores_equipo = await listar_asesores(usuario["negocio_id"]) if datos["vision_total"] else []
     resumen_barra = _barra_resumen(datos, asesores_equipo, estado) if datos["vision_total"] else ""
 
     # La lista de conversaciones solo se muestra si se llegó filtrando por un
@@ -4682,7 +4711,7 @@ def _dto_lead_detalle(lead: dict, lineas: list[dict], eventos: list[dict]) -> di
 # otra cosa, y confundirlos le haría mostrar al frontend un mensaje falso.
 
 
-async def _json_lead_actualizado(telefono: str) -> JSONResponse:
+async def _json_lead_actualizado(telefono: str, negocio_id: str) -> JSONResponse:
     """Éxito de una escritura: relee el lead YA actualizado y devuelve el
     mismo DTO que sirve GET /dashboard/lead/{telefono} en JSON.
 
@@ -4690,8 +4719,11 @@ async def _json_lead_actualizado(telefono: str) -> JSONResponse:
     entrar a la ruta): la escritura tocó la versión, el `actualizado`, y en el
     caso de venta también LineaVenta y el Timeline. Devolver el estado real
     posterior le ahorra al cliente un GET de vuelta y, sobre todo, le da la
-    `version` nueva —sin ella su próximo guardado chocaría siempre."""
-    lead = await obtener_lead(telefono)
+    `version` nueva —sin ella su próximo guardado chocaría siempre.
+
+    `negocio_id` (Gate 5.4, T1): siempre el de la sesión de quien llama —
+    nunca se infiere ni se vuelve a resolver acá."""
+    lead = await obtener_lead(telefono, negocio_id=negocio_id)
     if lead is None:
         # Solo si alguien borró el lead entre la escritura y esta relectura.
         raise HTTPException(status_code=404, detail="Lead no encontrado")
@@ -4700,11 +4732,12 @@ async def _json_lead_actualizado(telefono: str) -> JSONResponse:
     return JSONResponse({"ok": True, "lead": _dto_lead_detalle(lead, lineas, eventos)})
 
 
-async def _json_conflicto_lead(telefono: str) -> JSONResponse:
+async def _json_conflicto_lead(telefono: str, negocio_id: str) -> JSONResponse:
     """409 de conflicto de edición con la versión vigente, para que el cliente
     pueda recargar y comparar sin adivinar (Human Decision Gate). Mismo texto
-    que Productos, adaptado a lead."""
-    actual = await obtener_lead(telefono)
+    que Productos, adaptado a lead. `negocio_id` — mismo criterio que
+    `_json_lead_actualizado` (Gate 5.4, T1)."""
+    actual = await obtener_lead(telefono, negocio_id=negocio_id)
     if actual is None:
         # intentar_avanzar_version() también da False si el lead ya no existe:
         # eso es un 404, no un conflicto.
@@ -4733,7 +4766,7 @@ async def detalle_lead(
     conversación, y el frontend nuevo tendrá su propio momento para hacerlo.
     Un GET de API no debería escribir de paso."""
     if _pide_json_explicitamente(request):
-        lead = await obtener_lead(telefono)
+        lead = await obtener_lead(telefono, negocio_id=usuario["negocio_id"])
         if lead is None:
             raise HTTPException(status_code=404, detail="Lead no encontrado")
         _verificar_acceso_lead(usuario, lead)
@@ -4753,7 +4786,7 @@ async def mensajes_json(telefono: str, usuario: dict = Depends(_usuario_actual))
     navegador SIEMPRE que la conversación sigue abierta en pantalla, sin
     importar el estado del WS/SSE — por eso es la fuente de verdad de "el
     navegador sigue ahí", no el tráfico del propio WS."""
-    lead = await obtener_lead(telefono)
+    lead = await obtener_lead(telefono, negocio_id=usuario["negocio_id"])
     if lead is None:
         raise HTTPException(status_code=404, detail="Lead no encontrado")
     _verificar_acceso_lead(usuario, lead)
@@ -4768,7 +4801,7 @@ async def generar_resumen_ia(telefono: str, usuario: dict = Depends(_usuario_act
     — sin persistir nada: se genera cada vez que se pide, no hay "el" resumen
     guardado del lead. Mismo control de acceso que el resto de endpoints del
     lead (un Asesor solo puede pedirlo de sus propios leads)."""
-    lead = await obtener_lead(telefono)
+    lead = await obtener_lead(telefono, negocio_id=usuario["negocio_id"])
     if lead is None:
         raise HTTPException(status_code=404, detail="Lead no encontrado")
     _verificar_acceso_lead(usuario, lead)
@@ -4791,13 +4824,13 @@ async def notificaciones_json(usuario: dict = Depends(_usuario_actual)):
     ahora_peru = datetime.utcnow() - timedelta(hours=5)
     limite_peru = ahora_peru + timedelta(minutes=10)
 
-    leads = await listar_leads(asesor_asignado=username)
+    leads = await listar_leads(usuario["negocio_id"], asesor_asignado=username)
     leads_nuevos = [
         {"telefono": l["telefono"], "nombre": l["nombre"] or l["telefono"]}
         for l in leads if not l["visto_asesor"]
     ]
 
-    agendados = await listar_leads_agendados(asesor_asignado=username)
+    agendados = await listar_leads_agendados(usuario["negocio_id"], asesor_asignado=username)
     agendados_proximos = [
         {
             "telefono": a["telefono"],
@@ -4853,7 +4886,7 @@ async def responder_cliente(
 ):
     """El asesor humano responde al cliente por el mismo número de WhatsApp
     (Gabi ya está pausada para este lead porque tiene asesor_asignado)."""
-    lead = await obtener_lead(telefono)
+    lead = await obtener_lead(telefono, negocio_id=usuario["negocio_id"])
     if lead is None:
         raise HTTPException(status_code=404, detail="Lead no encontrado")
     # Antes había acá un guard adicional (`if not lead.get("asesor_asignado"):
@@ -5006,7 +5039,7 @@ async def enviar_archivo_chat(
     """El asesor sube una proforma/imagen puntual y se la manda al cliente
     de una — se guarda en ARCHIVOS_DIR (persistente) para poder reabrirla
     después desde el historial del chat."""
-    lead = await obtener_lead(telefono)
+    lead = await obtener_lead(telefono, negocio_id=usuario["negocio_id"])
     if lead is None:
         raise HTTPException(status_code=404, detail="Lead no encontrado")
     # Mismo criterio que responder_cliente: se removió a propósito el guard
@@ -5061,7 +5094,7 @@ async def enviar_audio_chat(
     """El asesor graba una nota de voz en el navegador (WebM/Opus) — se
     convierte a OGG/Opus (único formato de audio que acepta WhatsApp) antes
     de subirla y enviarla, y se guarda ya convertida para poder reabrirla."""
-    lead = await obtener_lead(telefono)
+    lead = await obtener_lead(telefono, negocio_id=usuario["negocio_id"])
     if lead is None:
         raise HTTPException(status_code=404, detail="Lead no encontrado")
     # Mismo criterio que responder_cliente: se removió a propósito el guard
@@ -5120,7 +5153,7 @@ async def enviar_catalogo_chat(telefono: str, archivo_id: int, usuario: dict = D
     """Reenvía un archivo de la librería de catálogos reutilizables — se
     vuelve a subir a WhatsApp desde nuestra copia en disco (el media_id de
     Meta es de un solo uso/temporal, no se reutiliza entre conversaciones)."""
-    lead = await obtener_lead(telefono)
+    lead = await obtener_lead(telefono, negocio_id=usuario["negocio_id"])
     if lead is None:
         raise HTTPException(status_code=404, detail="Lead no encontrado")
     # Mismo criterio que responder_cliente: se removió a propósito el guard
@@ -5170,7 +5203,7 @@ async def descargar_archivo(archivo_id: int, usuario: dict = Depends(_usuario_ac
     if not archivo["reutilizable"]:
         telefono_lead = await servicio_conversacion.obtener_telefono_de_archivo(archivo_id)
         if telefono_lead:
-            lead = await obtener_lead(telefono_lead)
+            lead = await obtener_lead(telefono_lead, negocio_id=usuario["negocio_id"])
             if lead:
                 _verificar_acceso_lead(usuario, lead)
     if not os.path.exists(archivo["ruta_disco"]):
@@ -5313,7 +5346,7 @@ async def actualizar_resultado(
     usuario: dict = Depends(_usuario_actual),
     _csrf: None = Depends(verificar_csrf),
 ):
-    lead = await obtener_lead(telefono)
+    lead = await obtener_lead(telefono, negocio_id=usuario["negocio_id"])
     if lead is None:
         raise HTTPException(status_code=404, detail="Lead no encontrado")
     _verificar_acceso_lead(usuario, lead)
@@ -5358,7 +5391,7 @@ async def actualizar_resultado(
     # concurrente, venga por el endpoint que venga.
     if not await intentar_avanzar_version(telefono, version):
         if _pide_json_explicitamente(request):
-            return await _json_conflicto_lead(telefono)
+            return await _json_conflicto_lead(telefono, usuario["negocio_id"])
         return await _renderizar_detalle_lead(telefono, request, usuario, hay_conflicto=True)
 
     descripcion = (
@@ -5392,7 +5425,7 @@ async def actualizar_resultado(
             autor=evento["autor"], payload=evento["payload"],
         )
     if _pide_json_explicitamente(request):
-        return await _json_lead_actualizado(telefono)
+        return await _json_lead_actualizado(telefono, usuario["negocio_id"])
     return RedirectResponse(url=f"/dashboard/lead/{telefono}", status_code=303)
 
 
@@ -5434,7 +5467,7 @@ async def registrar_venta(
     usuario: dict = Depends(_usuario_actual),
     _csrf: None = Depends(verificar_csrf),
 ):
-    lead = await obtener_lead(telefono)
+    lead = await obtener_lead(telefono, negocio_id=usuario["negocio_id"])
     if lead is None:
         raise HTTPException(status_code=404, detail="Lead no encontrado")
     _verificar_acceso_lead(usuario, lead)
@@ -5465,7 +5498,7 @@ async def registrar_venta(
         # frecuente en la práctica (dos cierres de venta simultáneos sobre
         # el mismo lead).
         if _pide_json_explicitamente(request):
-            return await _json_conflicto_lead(telefono)
+            return await _json_conflicto_lead(telefono, usuario["negocio_id"])
         return await _renderizar_detalle_lead(telefono, request, usuario, hay_conflicto=True)
 
     # El Timeline registra lo que REALMENTE se guardó (las líneas ya validadas y
@@ -5504,7 +5537,7 @@ async def registrar_venta(
             autor=evento["autor"], payload=evento["payload"],
         )
     if _pide_json_explicitamente(request):
-        return await _json_lead_actualizado(telefono)
+        return await _json_lead_actualizado(telefono, usuario["negocio_id"])
     return RedirectResponse(url=f"/dashboard/lead/{telefono}", status_code=303)
 
 
@@ -5519,18 +5552,18 @@ async def asignar_lead(
     usuario: dict = Depends(servicio_identidad.requiere_rol(*ROLES_CON_VISION_TOTAL)),
     _csrf: None = Depends(verificar_csrf),
 ):
-    lead = await obtener_lead(telefono)
+    lead = await obtener_lead(telefono, negocio_id=usuario["negocio_id"])
     if lead is None:
         raise HTTPException(status_code=404, detail="Lead no encontrado")
 
     if not await intentar_avanzar_version(telefono, version):
         if _pide_json_explicitamente(request):
-            return await _json_conflicto_lead(telefono)
+            return await _json_conflicto_lead(telefono, usuario["negocio_id"])
         return await _renderizar_detalle_lead(telefono, request, usuario, hay_conflicto=True)
 
     evento = None
     if asesor_asignado:
-        asesor_info = await obtener_usuario(asesor_asignado)
+        asesor_info = await obtener_usuario(asesor_asignado, negocio_id=usuario["negocio_id"])
         nombre_asesor = asesor_info["nombre"] if asesor_info else asesor_asignado
         evento = {
             "tipo": "asignado", "descripcion": f"Asignó el lead a {nombre_asesor}", "autor": usuario["nombre"],
@@ -5542,7 +5575,7 @@ async def asignar_lead(
         # asignado — desasignar un lead que ya está libre no cambia nada y no
         # merece una línea en el Timeline.
         anterior = lead["asesor_asignado"]
-        asesor_info = await obtener_usuario(anterior)
+        asesor_info = await obtener_usuario(anterior, negocio_id=usuario["negocio_id"])
         nombre_anterior = asesor_info["nombre"] if asesor_info else anterior
         evento = {
             "tipo": "desasignado", "descripcion": f"Quitó la asignación de {nombre_anterior}", "autor": usuario["nombre"],
@@ -5573,7 +5606,7 @@ async def asignar_lead(
                 autor=evento["autor"], payload=evento["payload"],
             )
     if _pide_json_explicitamente(request):
-        return await _json_lead_actualizado(telefono)
+        return await _json_lead_actualizado(telefono, usuario["negocio_id"])
     return RedirectResponse(url=f"/dashboard/lead/{telefono}", status_code=303)
 
 
@@ -5600,7 +5633,7 @@ async def reactivar_gabi(
     "vendido" NUNCA se reactiva por acá — Gabi debe quedar pausada
     indefinidamente en ese estado, sin ninguna ruta indirecta que la
     reactive."""
-    lead = await obtener_lead(telefono)
+    lead = await obtener_lead(telefono, negocio_id=usuario["negocio_id"])
     if lead is None:
         raise HTTPException(status_code=404, detail="Lead no encontrado")
     _verificar_acceso_lead(usuario, lead)
@@ -5624,7 +5657,7 @@ async def reactivar_gabi(
         await liberar_asignacion(telefono, autor=usuario["nombre"], motivo="reactivado_manual")
 
     if _pide_json_explicitamente(request):
-        return await _json_lead_actualizado(telefono)
+        return await _json_lead_actualizado(telefono, usuario["negocio_id"])
     return RedirectResponse(url=f"/dashboard/lead/{telefono}", status_code=303)
 
 
@@ -5632,7 +5665,7 @@ async def reactivar_gabi(
 async def toggle_disponibilidad(usuario: dict = Depends(servicio_identidad.requiere_rol("asesor")), _csrf: None = Depends(verificar_csrf)):
     """El asesor togglea si está disponible para recibir leads nuevos automáticamente."""
     ahora_disponible = not usuario.get("disponible", True)
-    await actualizar_disponibilidad(usuario["username"], ahora_disponible)
+    await actualizar_disponibilidad(usuario["username"], usuario["negocio_id"], ahora_disponible)
 
     # Si se acaba de poner disponible, revisa si hay algún lead que se quedó
     # esperando (derivado a un asesor, pero sin nadie disponible en su
@@ -5640,9 +5673,11 @@ async def toggle_disponibilidad(usuario: dict = Depends(servicio_identidad.requi
     # tampoco se le dumpea toda la cola acumulada a quien se conecta primero;
     # si hay más pendientes, se reparten con el siguiente asesor que conecte.
     if ahora_disponible:
-        telefono_asignado = await servicio_comercial.asignar_lead_pendiente_a_asesor(usuario["username"], usuario.get("nivel"))
+        telefono_asignado = await servicio_comercial.asignar_lead_pendiente_a_asesor(
+            usuario["username"], usuario.get("nivel"), usuario["negocio_id"]
+        )
         if telefono_asignado:
-            lead_asignado = await obtener_lead(telefono_asignado)
+            lead_asignado = await obtener_lead(telefono_asignado, negocio_id=usuario["negocio_id"])
             await notificar_lead_derivado(
                 telefono_asignado, lead_asignado or {},
                 "[Asignado automáticamente al ponerse disponible el asesor — estaba en espera]",
@@ -5653,7 +5688,7 @@ async def toggle_disponibilidad(usuario: dict = Depends(servicio_identidad.requi
 
 async def _pagina_gestionar_asesores(usuario: dict, request: Request | None = None, mensaje_html: str = "") -> str:
     sidebar = await _renderizar_sidebar(usuario, telefono_activo=None)
-    asesores = await listar_asesores()
+    asesores = await listar_asesores(usuario["negocio_id"])
     umbral_senior = await obtener_configuracion("umbral_senior", str(UMBRAL_SENIOR_DEFAULT))
     umbral_intermedio = await obtener_configuracion("umbral_intermedio", str(UMBRAL_INTERMEDIO_DEFAULT))
 
@@ -5784,13 +5819,20 @@ async def resetear_password_asesor(
 ):
     """Genera una contraseña temporal nueva para un asesor — para cuando pide
     recuperar acceso. Se muestra una sola vez aquí; el admin debe pasársela
-    por su canal habitual, y el asesor puede cambiarla luego desde su perfil."""
-    objetivo = await obtener_usuario(username)
+    por su canal habitual, y el asesor puede cambiarla luego desde su perfil.
+
+    Gate 5.4 (T3) — hallazgo real corregido: antes NO verificaba que
+    `username` perteneciera al mismo Negocio del admin/supervisor que
+    ejecuta la acción — toma de cuenta cross-tenant real (reset de
+    contraseña ajena, visible en texto plano abajo). `negocio_id` de la
+    sesión es ahora el candado: `obtener_usuario`/`cambiar_password` fallan
+    (devuelven None / no aplican nada) si `username` es de otro Negocio."""
+    objetivo = await obtener_usuario(username, negocio_id=usuario["negocio_id"])
     if objetivo is None:
         raise HTTPException(status_code=404, detail="Usuario no encontrado")
 
     nueva_password = secrets.token_urlsafe(9)
-    await cambiar_password(username, nueva_password)
+    await cambiar_password(username, usuario["negocio_id"], nueva_password)
 
     mensaje_html = (
         '<div class="alert alert-success py-2 small">'
@@ -5813,9 +5855,11 @@ async def crear_usuario_nuevo(
     _csrf: None = Depends(verificar_csrf),
 ):
     """Alta de cuentas del panel — exclusivamente Admin. Rechaza si el
-    username ya existe en vez de dejar que crear_usuario() lo sobreescriba
-    silenciosamente (Security Current State Assessment, hallazgo ya
-    registrado)."""
+    username ya existe EN ESTE MISMO NEGOCIO en vez de dejar que
+    crear_usuario() lo sobreescriba silenciosamente (Security Current State
+    Assessment, hallazgo ya registrado — y Gate 5.4, T3: el mismo username
+    SÍ puede existir en OTRO Negocio ahora, `username` es único por
+    `(negocio_id, username)`, no globalmente)."""
     username = username.strip()
     if not username:
         raise HTTPException(status_code=400, detail="El usuario no puede estar vacío")
@@ -5824,7 +5868,7 @@ async def crear_usuario_nuevo(
     if rol == "asesor" and nivel not in NIVELES_ASESOR:
         raise HTTPException(status_code=400, detail="Nivel inválido")
 
-    if await obtener_usuario(username) is not None:
+    if await obtener_usuario(username, negocio_id=usuario["negocio_id"]) is not None:
         mensaje_html = (
             '<div class="alert alert-danger py-2 small">'
             f'Ya existe una cuenta con el usuario <strong>{html.escape(username)}</strong> — elige otro.'
@@ -5839,8 +5883,8 @@ async def crear_usuario_nuevo(
     # ServicioIdentidad, nunca un default global. Generaliza sin cambios a
     # un futuro Negocio 002: su admin crea usuarios con su propio negocio_id.
     await crear_usuario(
-        username, nueva_password, nombre, rol, nivel if rol == "asesor" else None,
-        negocio_id=usuario["negocio_id"],
+        username, nueva_password, nombre, rol, negocio_id=usuario["negocio_id"],
+        nivel=nivel if rol == "asesor" else None,
     )
 
     mensaje_html = (
@@ -5862,7 +5906,7 @@ async def actualizar_nivel(
 ):
     if nivel not in NIVELES_ASESOR:
         raise HTTPException(status_code=400, detail="Nivel inválido")
-    await actualizar_nivel_asesor(username, nivel)
+    await actualizar_nivel_asesor(username, usuario["negocio_id"], nivel)
     return RedirectResponse(url="/dashboard/asesores", status_code=303)
 
 
@@ -5908,7 +5952,7 @@ async def gestionar_campanas(request: Request, usuario: dict = Depends(servicio_
     # card "Nueva campaña". Las rutas POST de escritura siguen siendo
     # admin-only del lado del servidor, no solo ocultas acá.
     puede_escribir = usuario["rol"] == "admin"
-    campanas = await listar_campanas()
+    campanas = await listar_campanas(usuario["negocio_id"])
     conteos = {c["campana"]: c for c in await contar_leads_por_campana()}
 
     banner_html = ""
@@ -6462,7 +6506,7 @@ def _estado_token_canal(canal: dict) -> str:
 @router.get("/canales-whatsapp", response_class=HTMLResponse)
 async def gestionar_canales_whatsapp(request: Request, usuario: dict = Depends(servicio_identidad.requiere_rol("admin"))):
     sidebar = await _renderizar_sidebar(usuario, telefono_activo=None)
-    canales = await listar_canales_whatsapp()
+    canales = await listar_canales_whatsapp(negocio_id=usuario["negocio_id"])
 
     filas = []
     for c in canales:
@@ -6985,7 +7029,7 @@ async def cambiar_password_propia(
     if password_nueva != password_nueva_repetir:
         return RedirectResponse(url="/dashboard/perfil?error=Las+contraseñas+nuevas+no+coinciden", status_code=303)
 
-    await cambiar_password(usuario["username"], password_nueva)
+    await cambiar_password(usuario["username"], usuario["negocio_id"], password_nueva)
     return RedirectResponse(url="/dashboard/perfil?ok=Contraseña+actualizada+correctamente", status_code=303)
 
 

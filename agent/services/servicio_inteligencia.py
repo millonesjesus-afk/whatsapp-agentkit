@@ -52,8 +52,9 @@ class ServicioInteligencia:
 
     async def generar_respuesta(
         self, mensaje: str, historial: list[dict], lead: dict | None = None, modo: str = "produccion",
+        negocio_id: str | None = None,
     ) -> tuple[str, bool, str | None, str | None]:
-        return await brain.generar_respuesta(mensaje, historial, lead, modo=modo)
+        return await brain.generar_respuesta(mensaje, historial, lead, modo=modo, negocio_id=negocio_id)
 
     async def extraer_datos_lead(self, mensaje_cliente: str, respuesta_gabi: str, lead_actual: dict | None) -> dict:
         return await brain.extraer_datos_lead(mensaje_cliente, respuesta_gabi, lead_actual)

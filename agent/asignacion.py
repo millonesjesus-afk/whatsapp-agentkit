@@ -55,9 +55,18 @@ async def _nivel_requerido(interes: str) -> str:
     return "junior"
 
 
-async def elegir_asesor_automatico(interes: str) -> str | None:
-    """Retorna el username del asesor más adecuado y disponible, o None si no hay ninguno."""
-    asesores = await listar_asesores()
+async def elegir_asesor_automatico(interes: str, negocio_id: str | None) -> str | None:
+    """Retorna el username del asesor más adecuado y disponible, o None si no hay ninguno.
+
+    `negocio_id` (Gate 5.4, T2): esta función llama a listar_asesores(), que
+    ahora exige negocio_id. Se llama desde el flujo de mensajes del webhook
+    (ver main.py), donde el Canal —y por lo tanto el Negocio— puede no
+    haberse podido resolver todavía; con negocio_id=None se falla cerrado
+    (no hay ningún asesor elegible) en vez de listar asesores de cualquier
+    Negocio."""
+    if negocio_id is None:
+        return None
+    asesores = await listar_asesores(negocio_id)
     disponibles = [a for a in asesores if a.get("disponible")]
     if not disponibles:
         return None
@@ -85,7 +94,7 @@ async def elegir_asesor_automatico(interes: str) -> str | None:
     return elegido
 
 
-async def asignar_lead_pendiente_a_asesor(username: str, nivel_asesor: str | None) -> str | None:
+async def asignar_lead_pendiente_a_asesor(username: str, nivel_asesor: str | None, negocio_id: str) -> str | None:
     """
     Cuando un asesor se pone disponible, revisa si hay leads que se quedaron
     esperando (derivados a un asesor, pero sin nadie disponible en su
@@ -99,8 +108,13 @@ async def asignar_lead_pendiente_a_asesor(username: str, nivel_asesor: str | Non
     antiguo (mejor atenderlo con el nivel que sea, que dejarlo esperando
     indefinidamente). Retorna el teléfono asignado, o None si no había nada
     pendiente.
+
+    `negocio_id` (Gate 5.4, T2) obligatorio — a diferencia de
+    elegir_asesor_automatico, quien llama a esta función siempre lo hace
+    desde una sesión HTTP real del panel (el propio asesor togglea su
+    disponibilidad), así que hay un Negocio legítimo garantizado.
     """
-    pendientes = await listar_leads_esperando_asesor()
+    pendientes = await listar_leads_esperando_asesor(negocio_id)
     if not pendientes:
         return None
 

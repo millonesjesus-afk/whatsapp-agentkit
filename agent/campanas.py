@@ -75,7 +75,7 @@ async def resolver_promo(campana: dict) -> dict | None:
     return None
 
 
-async def obtener_codigos_promocionales_activos() -> set[str]:
+async def obtener_codigos_promocionales_activos(negocio_id: str | None) -> set[str]:
     """
     Códigos de material (CODIGO HANA) reservados a alguna campaña activa —
     se usa para excluirlos de la búsqueda general del catálogo, así un precio
@@ -89,8 +89,16 @@ async def obtener_codigos_promocionales_activos() -> set[str]:
     un cliente sin esa campaña tampoco ve, por ejemplo, la Secadora Rinnai
     10Kg + Conexión + Combo a un precio que en realidad es parte de la misma
     promoción, solo que en otra variante de instalación.
-    """
-    campanas = await listar_campanas(solo_activas=True)
+
+    `negocio_id` (Gate 5.4, T2): esta función llama a listar_campanas(), que
+    ahora exige negocio_id. Se llama desde el flujo de mensajes del webhook
+    (ver brain.py, _armar_bloques_contexto), donde el Canal —y por lo tanto
+    el Negocio— puede no haberse podido resolver todavía; con negocio_id=None
+    se falla cerrado devolviendo un set vacío (ninguna exclusión) en vez de
+    listar campañas de cualquier Negocio."""
+    if negocio_id is None:
+        return set()
+    campanas = await listar_campanas(negocio_id, solo_activas=True)
     codigos = set()
     for c in campanas:
         if not c.get("codigo_material"):
@@ -122,13 +130,23 @@ def generar_link_whatsapp(texto_saludo: str) -> str:
     return f"https://wa.me/{WHATSAPP_NUMERO_PUBLICO}?text={texto_codificado}"
 
 
-async def detectar_y_asignar_campana(telefono: str, texto_mensaje: str, referral: dict | None) -> dict | None:
+async def detectar_y_asignar_campana(
+    telefono: str, texto_mensaje: str, referral: dict | None, negocio_id: str | None,
+) -> dict | None:
     """
     Si el lead aún no tiene campaña de origen, intenta detectarla a partir del
     primer mensaje (texto del saludo) o del objeto referral de Meta Ads.
     Si la detecta, la persiste (una sola vez) y la retorna.
-    """
-    campanas = await listar_campanas(solo_activas=True)
+
+    `negocio_id` (Gate 5.4, T2): mismo motivo que
+    obtener_codigos_promocionales_activos — se resuelve del Canal identificado
+    por el webhook (main.py). Si no pudo resolverse (canal=None), no hay
+    ningún Negocio legítimo contra el cual buscar campañas: se falla cerrado
+    devolviendo None (no se detecta campaña) en vez de listar campañas de
+    cualquier Negocio."""
+    if negocio_id is None:
+        return None
+    campanas = await listar_campanas(negocio_id, solo_activas=True)
     if not campanas:
         return None
 
@@ -164,10 +182,15 @@ def _normalizar_telefono(telefono: str) -> str:
     return (telefono or "").strip().lstrip("+").replace(" ", "").replace("-", "")
 
 
-async def detectar_campana_por_formulario(form_id: str, ad_id: str) -> dict | None:
+async def detectar_campana_por_formulario(form_id: str, ad_id: str, negocio_id: str) -> dict | None:
     """Busca una campaña de tipo 'leadgen_meta' cuyo patrón coincida con el
-    formulario o el anuncio de origen de un lead de Meta Lead Ads."""
-    campanas = await listar_campanas(solo_activas=True)
+    formulario o el anuncio de origen de un lead de Meta Lead Ads.
+
+    `negocio_id` (Gate 5.4, T2) obligatorio — a diferencia de
+    detectar_y_asignar_campana, quien llama (procesar_leads_formulario) solo
+    invoca esta función cuando `canal` ya se resolvió (ver más abajo), así
+    que acá sí hay un Negocio legítimo garantizado."""
+    campanas = await listar_campanas(negocio_id, solo_activas=True)
     form_norm = _normalizar(form_id)
     ad_norm = _normalizar(ad_id)
     for campana in campanas:
@@ -214,12 +237,24 @@ async def procesar_leads_formulario(body: dict, proveedor) -> None:
 
             # Ya es un lead conocido (llegó antes por WhatsApp u otro
             # formulario) — no se le manda otra plantilla de "primer
-            # contacto", solo se completa el dato si faltaba.
-            if await obtener_lead(telefono):
+            # contacto", solo se completa el dato si faltaba. Gate 5.4 (T1):
+            # si `canal` no se pudo resolver (ambiguo entre Negocios), no hay
+            # negocio_id legítimo para este chequeo — se salta (cae al mismo
+            # fail-closed que ya tiene actualizar_lead más abajo) en vez de
+            # adivinar consultando sin candado.
+            if canal and await obtener_lead(telefono, negocio_id=canal["negocio_id"]):
                 logger.info(f"Lead de formulario {leadgen_id} ya existía como {telefono} — no se reenvía la plantilla")
                 continue
 
-            campana = await detectar_campana_por_formulario(datos.get("form_id", ""), datos.get("ad_id", ""))
+            # Gate 5.4 (T2): mismo motivo que el chequeo de arriba — sin
+            # `canal` resuelto no hay negocio_id legítimo contra el cual
+            # buscar campañas (detectar_campana_por_formulario ahora lo
+            # exige obligatorio), así que se salta la detección en vez de
+            # adivinar un Negocio.
+            campana = (
+                await detectar_campana_por_formulario(datos.get("form_id", ""), datos.get("ad_id", ""), canal["negocio_id"])
+                if canal else None
+            )
             # Gate 5.2 (corrección H2): mismo principio que el webhook de
             # mensajes — negocio_id se resuelve del Canal ya identificado,
             # nunca un default global. Si `canal` es None (resolver_canal(None)
@@ -332,16 +367,30 @@ CAMPANAS_INICIALES = [
 ]
 
 
-async def sembrar_campanas_iniciales():
+async def sembrar_campanas_iniciales(negocio_id: str | None):
     """Crea las campañas conocidas si la tabla está vacía (solo primer arranque).
-    No pisa nada si el equipo ya las administró desde el panel."""
+    No pisa nada si el equipo ya las administró desde el panel.
+
+    `negocio_id` (Gate 5.4, T2): esta función llama a listar_campanas(), que
+    ahora exige negocio_id — mismo patrón ya establecido por
+    sembrar_canales_desde_env (Gate 5.2, corrección post-auditoría): quien
+    llama (main.py, lifespan) lo resuelve EXPLÍCITAMENTE desde
+    NEGOCIO_BOOTSTRAP_CODIGO, nunca se asume ningún Negocio por defecto. Con
+    negocio_id=None (no configurado, o no corresponde a ningún Negocio real)
+    falla cerrado: no siembra nada."""
     from agent.memory import crear_campana
 
-    existentes = await listar_campanas()
+    if negocio_id is None:
+        logger.warning(
+            "sembrar_campanas_iniciales(): negocio_id no resuelto — siembra de "
+            "campañas iniciales deshabilitada (fail-closed)."
+        )
+        return
+    existentes = await listar_campanas(negocio_id)
     if existentes:
         return
     for datos in CAMPANAS_INICIALES:
-        await crear_campana(**datos)
+        await crear_campana(**datos, negocio_id=negocio_id)
     logger.info(f"Sembradas {len(CAMPANAS_INICIALES)} campañas iniciales")
 
 
@@ -359,15 +408,22 @@ PATRONES_CORREGIDOS = {
 }
 
 
-async def corregir_patrones_desalineados():
+async def corregir_patrones_desalineados(negocio_id: str | None):
     """Arregla, en la tabla ya sembrada, el patrón de las campañas listadas
     en PATRONES_CORREGIDOS si no coincide con el valor correcto — para que
     el fix también aplique a una base de datos que ya tenía estas campañas
-    creadas con el patrón viejo (no solo a una instalación nueva)."""
+    creadas con el patrón viejo (no solo a una instalación nueva).
+
+    `negocio_id` (Gate 5.4): mismo criterio que `sembrar_campanas_iniciales`
+    — viene del bootstrap de `main.py` (lifespan), fail-closed si no hay
+    Negocio resuelto (no corrige nada en vez de adivinar uno)."""
     from agent.memory import actualizar_campana
 
+    if negocio_id is None:
+        return
+
     for nombre, patron_correcto in PATRONES_CORREGIDOS.items():
-        campana = await obtener_campana_por_nombre(nombre)
+        campana = await obtener_campana_por_nombre(nombre, negocio_id)
         if campana and campana.get("patron") != patron_correcto:
             await actualizar_campana(campana["id"], patron=patron_correcto)
             logger.info(f"Patrón corregido para la campaña '{nombre}'")

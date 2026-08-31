@@ -11,20 +11,24 @@ procesos.
 
 Dos tipos de evento:
 - "mensaje_nuevo" (telefono): se manda SOLO a las conexiones cuyo usuario
-  tiene acceso real a ese lead (mismo criterio que _verificar_acceso_lead en
-  dashboard.py: admin/supervisor ven todo, un asesor solo lo suyo — ver
-  tiene_acceso_a_lead en agent/memory.py). Antes se mandaba a TODAS las
-  conexiones sin filtrar: cualquier miembro del equipo conectado al panel
-  se enteraba del teléfono (PII) de leads ajenos con solo tener el panel
-  abierto. Cada cliente que SÍ lo recibe decide si le importa más allá de
-  eso (si tiene esa conversación abierta, refresca el chat; si no, solo
-  dispara un refresco liviano de la lista/tabla).
+  tiene acceso real a ese lead — mismo criterio que _verificar_acceso_lead
+  en dashboard.py (admin/supervisor ven todo DENTRO DE SU NEGOCIO, un
+  asesor solo lo suyo — ver tiene_acceso_a_lead en agent/memory.py), MÁS
+  el candado de negocio_id (Gate 5.4, T1 — Arquitectura Integrada Gate
+  5.4): antes de este Gate, "admin/supervisor ven todo" no distinguía de
+  qué Negocio — cualquier admin/supervisor conectado al panel, sin importar
+  su Negocio, recibía los eventos de CUALQUIER lead. Cada cliente que SÍ lo
+  recibe decide si le importa más allá de eso (si tiene esa conversación
+  abierta, refresca el chat; si no, solo dispara un refresco liviano de la
+  lista/tabla).
 - "asesor_escribiendo" (telefono, username): solo a quienes tienen ESE lead
   abierto en este momento (telefono_activo) — no tiene sentido mandarlo a
   todo el mundo, y además molestaría a alguien mirando una conversación
-  distinta. No se filtra por acceso además de eso: si alguien ya tiene el
-  lead abierto como telefono_activo es porque `ver_lead` ya validó su
-  acceso al conectarlo (ver websocket_panel en dashboard.py).
+  distinta. No se filtra por negocio_id de nuevo acá: si alguien ya tiene
+  el lead abierto como telefono_activo es porque `ver_lead` ya validó su
+  acceso (rol + negocio_id) al conectarlo (ver websocket_panel en
+  dashboard.py) — filtrar de nuevo acá sería repetir un chequeo que ya se
+  hizo en el único punto donde telefono_activo pudo haberse fijado.
 
   La exclusión de quien disparó la señal es por USERNAME, no por identidad
   de objeto WebSocket (ver emitir_escribiendo) — con la arquitectura SSE +
@@ -37,6 +41,13 @@ Dos tipos de evento:
   Excluir por username filtra TODAS las conexiones de esa persona sobre
   ese lead, sin importar cuál está "escuchando" — sigue funcionando igual
   para el panel legado (una sola conexión persistente por asesor).
+
+Ambos eventos llevan `conversation_id: null` de forma aditiva desde Gate
+5.4 (Diseño Técnico Gate 5.3 §23.5) — preparación de contrato para Gate
+5.5+, que migrará la CLAVE de este mecanismo de `telefono` a
+`conversation_id`. Ese Gate NO se adelanta acá: el campo viaja fijo en
+`None`, sin resolverse todavía, y el filtro de acceso sigue siendo
+telefono + negocio_id + rol.
 """
 
 import logging
@@ -55,20 +66,26 @@ CODIGO_WS_INACTIVA = 4408
 
 class GestorConexiones:
     def __init__(self):
-        # ws -> {"username": str, "rol": str, "telefono_activo": str | None,
+        # ws -> {"username": str, "rol": str, "negocio_id": str,
+        #        "telefono_activo": str | None,
         #        "ultima_actividad": float (time.monotonic())}
         self._conexiones: dict[WebSocket, dict] = {}
 
-    async def conectar(self, ws: WebSocket, username: str, rol: str):
-        """`rol` se guarda al conectar (no se vuelve a resolver en cada
-        emisión) — evita una consulta a la base de datos por conexión en
-        cada mensaje nuevo del sistema entero, a costa de que un cambio de
-        rol de alguien no tome efecto hasta que reconecte (misma sesión de
-        navegador ya trae el panel recargado si eso pasa, en la práctica no
-        es un problema real)."""
+    async def conectar(self, ws: WebSocket, username: str, rol: str, negocio_id: str):
+        """`rol`/`negocio_id` se guardan al conectar (no se vuelven a
+        resolver en cada emisión) — evita una consulta a la base de datos
+        por conexión en cada mensaje nuevo del sistema entero, a costa de
+        que un cambio de rol/Negocio de alguien no tome efecto hasta que
+        reconecte (misma sesión de navegador ya trae el panel recargado si
+        eso pasa, en la práctica no es un problema real — un usuario no
+        cambia de Negocio en caliente).
+
+        `negocio_id` (Gate 5.4, T1): candado real de emisión — ver
+        `emitir_mensaje_nuevo`. Sin este campo, "admin/supervisor ven todo"
+        significaba "ven todo de cualquier Negocio"."""
         await ws.accept()
         self._conexiones[ws] = {
-            "username": username, "rol": rol, "telefono_activo": None,
+            "username": username, "rol": rol, "negocio_id": negocio_id, "telefono_activo": None,
             "ultima_actividad": time.monotonic(),
         }
 
@@ -195,11 +212,25 @@ class GestorConexiones:
 
     async def emitir_mensaje_nuevo(self, telefono: str):
         """Filtra por acceso ANTES de emitir — una sola consulta al lead
-        (no una por conexión) para saber a quién le corresponde."""
+        (no una por conexión) para saber a quién le corresponde.
+
+        Gate 5.4 (T1): `obtener_lead(telefono)` acá SIN `negocio_id` es
+        intencional — es el mismo puente que el resto del Gate usa para
+        resolver identidad desde un teléfono (no hay "otro usuario" del que
+        proteger esta lectura puntual, es la propia función la que está
+        DESCUBRIENDO a qué Negocio pertenece este mensaje). El candado real
+        es el filtro de abajo: cada conexión solo recibe el evento si su
+        `negocio_id` coincide con el del lead, además del criterio de rol
+        de siempre."""
         lead = await obtener_lead(telefono)
         asesor_asignado = lead.get("asesor_asignado") if lead else None
-        evento = {"tipo": "mensaje_nuevo", "telefono": telefono}
+        negocio_id_lead = lead.get("negocio_id") if lead else None
+        if negocio_id_lead is None:
+            return  # sin lead resoluble, no hay a quién emitirle con seguridad
+        evento = {"tipo": "mensaje_nuevo", "telefono": telefono, "conversation_id": None}
         for ws, info in list(self._conexiones.items()):
+            if info.get("negocio_id") != negocio_id_lead:
+                continue
             if tiene_acceso_a_lead(info["rol"], info["username"], asesor_asignado):
                 await self._enviar_seguro(ws, evento)
 
@@ -210,8 +241,15 @@ class GestorConexiones:
         TODAS sus conexiones sobre este lead, no solo la que originó el
         evento (ver comentario de cabecera — la conexión que dispara la señal
         y la que la recibiría de vuelta pueden ser dos WebSockets distintos
-        del mismo usuario)."""
-        evento = {"tipo": "asesor_escribiendo", "telefono": telefono, "username": nombre_mostrar}
+        del mismo usuario).
+
+        Sin candado de `negocio_id` explícito acá (Gate 5.4, T1): a
+        diferencia de `emitir_mensaje_nuevo`, esta función solo le llega a
+        conexiones cuyo `telefono_activo` ya fue fijado por `ver_lead`, que
+        ya exige el mismo candado de negocio_id antes de aceptar el
+        teléfono — repetir el chequeo acá sería redundante, no una
+        protección adicional real."""
+        evento = {"tipo": "asesor_escribiendo", "telefono": telefono, "username": nombre_mostrar, "conversation_id": None}
         for ws, info in list(self._conexiones.items()):
             if info["telefono_activo"] == telefono and info["username"] != excluir_username:
                 await self._enviar_seguro(ws, evento)

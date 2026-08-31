@@ -36,14 +36,16 @@ class ServicioCanales:
     """Fachada sobre agent/campanas.py — main.py y dashboard.py no llaman
     a su lógica de campañas directamente, pasan por acá."""
 
-    async def detectar_y_asignar_campana(self, telefono: str, texto_mensaje: str, referral: dict | None) -> dict | None:
-        return await campanas.detectar_y_asignar_campana(telefono, texto_mensaje, referral)
+    async def detectar_y_asignar_campana(
+        self, telefono: str, texto_mensaje: str, referral: dict | None, negocio_id: str | None,
+    ) -> dict | None:
+        return await campanas.detectar_y_asignar_campana(telefono, texto_mensaje, referral, negocio_id)
 
-    async def sembrar_campanas_iniciales(self):
-        return await campanas.sembrar_campanas_iniciales()
+    async def sembrar_campanas_iniciales(self, negocio_id: str | None):
+        return await campanas.sembrar_campanas_iniciales(negocio_id)
 
-    async def corregir_patrones_desalineados(self):
-        return await campanas.corregir_patrones_desalineados()
+    async def corregir_patrones_desalineados(self, negocio_id: str | None):
+        return await campanas.corregir_patrones_desalineados(negocio_id)
 
     async def procesar_leads_formulario(self, body: dict, proveedor) -> None:
         return await campanas.procesar_leads_formulario(body, proveedor)

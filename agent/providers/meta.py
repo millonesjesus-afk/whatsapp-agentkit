@@ -58,6 +58,12 @@ class ProveedorMeta(ProveedorWhatsApp):
            **falla cerrado** (retorna None) en vez de adivinar — nunca se
            inventa un canal ni se usa "el primero" a ciegas entre Negocios
            distintos."""
+        # Gate 5.4 (T2): listar_canales_whatsapp() ahora exige negocio_id en
+        # todos sus demás llamadores (panel de administración) — ESTA es la
+        # única excepción documentada, a propósito sin negocio_id: esta
+        # función es la resolución de identidad en sí (todavía no sabe a qué
+        # Negocio pertenece el mensaje entrante), así que filtra por Negocio
+        # en Python más abajo, sobre TODOS los canales activos.
         canales = await listar_canales_whatsapp(solo_activos=True)
 
         if numero_whatsapp_id:
@@ -109,6 +115,11 @@ class ProveedorMeta(ProveedorWhatsApp):
         Fail-closed en todos los casos: si no hay ningún secreto contra el
         que validar, se rechaza la solicitud (Decisión ya Objetivo de
         Security Architecture, sección 3 — antes esto fallaba abierto)."""
+        # Gate 5.4 (T2): mismo motivo que resolver_canal() arriba — antes de
+        # verificar la firma todavía no se sabe a qué Negocio pertenece el
+        # webhook (ni siquiera hay phone_number_id resoluble en algunos
+        # casos, ver comentario de arriba), así que se necesita el universo
+        # completo de canales activos para probar la firma contra todos.
         canales = await listar_canales_whatsapp(solo_activos=True)
 
         phone_number_id = self._extraer_phone_number_id(body)

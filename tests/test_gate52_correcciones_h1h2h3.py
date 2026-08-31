@@ -168,20 +168,32 @@ async def test_usuario_creado_con_negocio_b_queda_aislado():
 
 
 async def test_crear_usuario_nunca_usa_default_silencioso_a_ningun_negocio():
+    """Desde Gate 5.4 (T3): negocio_id pasó de opcional-con-ValueError a
+    obligatorio en la firma — Python mismo lo exige (TypeError), ninguna
+    llamada puede omitirlo ni caer en un default silencioso."""
     await mem.crear_negocio("Único Negocio", "unico")
-    with pytest.raises(ValueError, match="negocio_id"):
+    with pytest.raises(TypeError):
         await mem.crear_usuario("usuario_sin_negocio", "clave", "X", "asesor")
 
 
-async def test_cambiar_password_de_usuario_existente_no_exige_negocio_id():
-    negocio_a, _ = await _dos_negocios()
+async def test_cambiar_password_de_usuario_existente_exige_negocio_id_correcto():
+    """Desde Gate 5.4 (T3): username ya no es PK global (puede repetirse
+    entre Negocios), así que "actualizar por username solo" dejó de ser una
+    operación válida — reemplaza a la vieja
+    test_cambiar_password_de_usuario_existente_no_exige_negocio_id.
+    Actualizar SIEMPRE exige negocio_id, y solo actualiza la fila de ESE
+    Negocio (nunca crea una fila duplicada ni pisa la de otro)."""
+    negocio_a, negocio_b = await _dos_negocios()
     await mem.crear_usuario("usuario_a", "clave", "Usuario A", "asesor", negocio_id=negocio_a["id"])
-    # Reutilizar crear_usuario para cambiar datos de un usuario YA existente
-    # no debe exigir negocio_id de nuevo, ni sobreescribirlo.
-    await mem.crear_usuario("usuario_a", "clave-nueva", "Usuario A Renombrado", "asesor")
-    usuario = await mem.obtener_usuario("usuario_a")
+
+    with pytest.raises(TypeError):
+        await mem.crear_usuario("usuario_a", "clave-nueva", "Usuario A Renombrado", "asesor")
+
+    await mem.crear_usuario("usuario_a", "clave-nueva", "Usuario A Renombrado", "asesor", negocio_id=negocio_a["id"])
+    usuario = await mem.obtener_usuario("usuario_a", negocio_id=negocio_a["id"])
     assert usuario["negocio_id"] == negocio_a["id"]
     assert usuario["nombre"] == "Usuario A Renombrado"
+    assert await mem.obtener_usuario("usuario_a", negocio_id=negocio_b["id"]) is None
 
 
 # ---------------------------------------------------------------------------

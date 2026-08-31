@@ -365,8 +365,9 @@ async def test_listar_canales_whatsapp_sigue_funcionando_sin_filtrar_por_negocio
 
 async def test_crear_usuario_sin_negocio_id_falla_cerrado():
     """Corrección post-auditoría (H3): crear un usuario NUEVO sin negocio_id
-    resuelto ahora falla cerrado con un error claro — ya NO se permite crear
-    una cuenta con negocio_id=None (ver test_gate52_correcciones_h1h2h3.py
-    para la cobertura completa de H1/H2/H3)."""
-    with pytest.raises(ValueError):
+    falla cerrado (ver test_gate52_correcciones_h1h2h3.py para H1/H2/H3).
+    Desde Gate 5.4 (T3), `negocio_id` pasó de ser un parámetro opcional con
+    chequeo en runtime (ValueError) a un parámetro obligatorio de la firma
+    — Python mismo lo exige (TypeError), garantía más fuerte que antes."""
+    with pytest.raises(TypeError):
         await mem.crear_usuario("asesor_test", "clave123", "Asesor de Prueba", "asesor")

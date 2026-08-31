@@ -49,8 +49,8 @@ class ServicioConversacion:
     async def obtener_historial(self, telefono: str, limite: int = 20) -> list[dict]:
         return await obtener_historial(telefono, limite=limite)
 
-    async def obtener_ultimos_mensajes(self, telefonos: list[str]) -> dict[str, dict]:
-        return await obtener_ultimos_mensajes(telefonos)
+    async def obtener_ultimos_mensajes(self, telefonos: list[str], negocio_id: str) -> dict[str, dict]:
+        return await obtener_ultimos_mensajes(telefonos, negocio_id)
 
     async def limpiar_historial(self, telefono: str):
         return await limpiar_historial(telefono)
