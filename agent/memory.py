@@ -745,6 +745,21 @@ class Conversation(Base):
         Index("ix_conversation_negocio_unidad", "negocio_id", "unidad_id"),
         Index("ix_conversation_contact_creado", "contact_id", "creado"),
         Index("ix_conversation_negocio_asesor", "negocio_id", "asesor_asignado_id"),
+        # Gate 5.5 — hallazgo de concurrencia del checkpoint de investigación:
+        # DR-4 ("nunca simultáneas") estaba declarada acá arriba pero no
+        # forzada por la base — dos webhooks concurrentes para el mismo
+        # Contact podían, bajo Postgres, crear dos Conversation con
+        # estado="activa". SQLite serializa escrituras a nivel de archivo y
+        # enmascaraba el riesgo en desarrollo local. Mismo patrón que
+        # ix_config_global_unica/ix_config_por_negocio_unica (índice único
+        # parcial, sqlite_where + postgresql_where) — resolver_conversation_
+        # activa() atrapa el IntegrityError y relee la fila que ganó la
+        # carrera en vez de fallar el request.
+        Index(
+            "ix_conversation_una_activa_por_contact", "contact_id", unique=True,
+            sqlite_where=text("estado = 'activa'"),
+            postgresql_where=text("estado = 'activa'"),
+        ),
     )
 
 
@@ -844,12 +859,28 @@ async def obtener_o_crear_contact(session, negocio_id: str, telefono: str, nombr
     quien llama (Diseño Técnico Gate 5.3 §10). No crea un Contact "adivinado":
     si ya existe, lo retorna tal cual (no pisa `nombre` — mismo criterio que
     Lead: el nombre se actualiza aparte, explícitamente, no como efecto
-    colateral de resolver identidad)."""
+    colateral de resolver identidad).
+
+    Gate 5.5 — mismo hallazgo de concurrencia que `resolver_conversation_
+    activa`, un nivel más abajo: `ix_contact_negocio_telefono` (único,
+    Gate 5.3) ya candadeaba la fila, pero sin manejar la colisión — dos
+    webhooks concurrentes para un Contact nuevo podían ambos ver "no existe"
+    y ambos intentar insertarlo, tumbando al perdedor con un
+    `IntegrityError` sin atrapar. Mismo patrón que el resto del Gate 5.5:
+    insert + catch, releer al que ganó la carrera."""
     contact = await _obtener_contact(session, negocio_id, telefono)
     if contact is None:
-        contact = Contact(negocio_id=negocio_id, telefono=telefono, nombre=nombre)
-        session.add(contact)
-        await session.flush()
+        contact_nuevo = Contact(negocio_id=negocio_id, telefono=telefono, nombre=nombre)
+        session.add(contact_nuevo)
+        try:
+            await session.flush()
+        except IntegrityError:
+            await session.rollback()
+            contact = await _obtener_contact(session, negocio_id, telefono)
+            if contact is None:
+                raise
+            return contact
+        contact = contact_nuevo
     return contact
 
 
@@ -884,6 +915,68 @@ async def _obtener_conversation_activa_por_telefono(session, telefono: str) -> "
     if contact is None:
         return None
     return await _obtener_conversation_activa(session, contact.id)
+
+
+async def obtener_conversation_realtime(conversation_id: str, negocio_id: str | None = None) -> dict | None:
+    """Datos mínimos de una Conversation para Realtime (Gate 5.5), más
+    `telefono` (vía Contact) para que el panel legacy, que sigue filtrando
+    eventos por teléfono, siga recibiéndolos sin cambios. NO usa el bridge
+    legacy `Lead.telefono` — va directo por la PK de `Conversation`, que ya
+    trae su propio `negocio_id` scoped desde su creación, así que no hay
+    ambigüedad posible entre Negocios al resolver por este id (a diferencia
+    de resolver por `telefono`, que si puede colisionar entre Negocios).
+
+    `negocio_id` — mismo criterio dual que `obtener_lead()`/`obtener_usuario()`:
+    si se pasa, es el candado real de ownership (404, no 403, si la
+    Conversation es de otro Negocio). Si se omite, es descubrimiento de
+    identidad puro (uso interno de `GestorConexiones.emitir_mensaje_nuevo`,
+    que no verifica el acceso de un tercero — cada conexión aplica su propio
+    filtro de `negocio_id` después). Nunca usar `negocio_id=None` desde un
+    endpoint autenticado."""
+    async with async_session() as session:
+        conversation = await session.get(Conversation, conversation_id)
+        if conversation is None:
+            return None
+        if negocio_id is not None and conversation.negocio_id != negocio_id:
+            return None
+        contact = await session.get(Contact, conversation.contact_id)
+        return {
+            "id": conversation.id,
+            "negocio_id": conversation.negocio_id,
+            "telefono": contact.telefono if contact else None,
+            "estado": conversation.estado,
+            "asesor_asignado_id": conversation.asesor_asignado_id,
+        }
+
+
+async def obtener_conversation_activa_de_telefono(telefono: str, negocio_id: str) -> dict | None:
+    """Puente telefono → Conversation activa, con `negocio_id` explícito —
+    reemplaza a `_obtener_conversation_activa_por_telefono` para los
+    llamadores que SÍ conocen su Negocio de antemano (Gate 5.5, Realtime).
+
+    A diferencia del bridge legacy (que resuelve `negocio_id` desde
+    `Lead.telefono`, PK global — el hallazgo central del checkpoint de
+    investigación de Gate 5.5: con el mismo teléfono en dos Negocios, el
+    bridge solo puede resolver al que "ganó" la fila `Lead`), esta función
+    va DIRECTO por `Contact.negocio_id` (columna propia, ya scoped desde su
+    creación en Gate 5.3) — nunca pasa por `Lead`. Retorna `None` si el
+    Contact o su Conversation activa no existen PARA ESE Negocio (nunca
+    revela si existen para otro — mismo criterio 404-no-403 que el resto
+    del Gate 5.4/5.5)."""
+    async with async_session() as session:
+        contact = await _obtener_contact(session, negocio_id, telefono)
+        if contact is None:
+            return None
+        conversation = await _obtener_conversation_activa(session, contact.id)
+        if conversation is None:
+            return None
+        return {
+            "id": conversation.id,
+            "negocio_id": conversation.negocio_id,
+            "contact_id": conversation.contact_id,
+            "estado": conversation.estado,
+            "asesor_asignado_id": conversation.asesor_asignado_id,
+        }
 
 
 async def _obtener_opportunity_vigente(session, conversation_id: str) -> "Opportunity | None":
@@ -926,7 +1019,17 @@ async def resolver_conversation_activa(
     Contact + Conversation activa + Opportunity vigente para un mensaje
     entrante, aplicando DR-4. `negocio_id`/`canal_id` deben venir YA
     resueltos por `resolver_canal()` — nunca se re-resuelven acá ni se
-    aceptan de una fuente distinta al Canal de entrada."""
+    aceptan de una fuente distinta al Canal de entrada.
+
+    Gate 5.5 — candado de concurrencia real (hallazgo del checkpoint de
+    investigación): la lectura-luego-escritura de acá abajo, por sí sola, no
+    impedía que dos webhooks concurrentes para el mismo Contact ambos vieran
+    "sin Conversation activa" y ambos intentaran crear una — violando DR-4
+    bajo Postgres real (SQLite lo enmascara). `ix_conversation_una_activa_
+    por_contact` (índice único parcial) es el candado real; acá solo se
+    atrapa el `IntegrityError` cuando se pierde la carrera y se relee la fila
+    que sí ganó — mismo patrón que `marcar_mensaje_procesado` (insert +
+    catch, no check-then-insert)."""
     async with async_session() as session:
         contact = await obtener_o_crear_contact(session, negocio_id, telefono, nombre)
         conversation = await _obtener_conversation_activa(session, contact.id)
@@ -938,13 +1041,30 @@ async def resolver_conversation_activa(
                 # Sin chequeo de version (mismo criterio que _avanzar_version).
                 conversation.estado = "cerrada"
                 conversation.version = Conversation.version + 1
-            conversation = Conversation(
+            conversation_nueva = Conversation(
                 negocio_id=negocio_id, unidad_id=unidad_id, contact_id=contact.id,
                 canal_id=canal_id, campana_origen_id=campana_origen_id,
                 origen_contacto=origen_contacto, estado="activa",
             )
-            session.add(conversation)
-            await session.flush()
+            session.add(conversation_nueva)
+            try:
+                await session.flush()
+            except IntegrityError:
+                # Otro proceso/corrutina ganó la carrera y ya insertó la
+                # Conversation activa de este Contact — se descarta el
+                # intento propio (incluido el cierre de la vieja, que
+                # tampoco debe persistir: la ganadora ya resolvió esa
+                # transición) y se relee la que quedó activa de verdad.
+                await session.rollback()
+                async with async_session() as session_relectura:
+                    conversation = await _obtener_conversation_activa(session_relectura, contact.id)
+                    opportunity = await _obtener_opportunity_vigente(session_relectura, conversation.id) if conversation else None
+                    if conversation is None:
+                        # No debería poder pasar (el IntegrityError implica que
+                        # SÍ hay una fila activa) — pero no se inventa nada.
+                        raise
+                    return conversation, opportunity
+            conversation = conversation_nueva
             opportunity = Opportunity(
                 negocio_id=negocio_id, unidad_id=unidad_id,
                 conversation_id=conversation.id, contact_id=contact.id,
@@ -2008,7 +2128,7 @@ async def inicializar_db():
 
 
 async def guardar_mensaje(
-    telefono: str, role: str, content: str, archivo_id: int | None = None, via_app: bool = False,
+    telefono: str, role: str, content: str, negocio_id: str | None, archivo_id: int | None = None, via_app: bool = False,
     mensaje_id_meta: str | None = None, estado_envio: str | None = None,
     respondido_a_id: int | None = None,
 ) -> dict:
@@ -2020,41 +2140,48 @@ async def guardar_mensaje(
     (Mensaje.id) del mensaje que este mensaje citó al enviarse (Reply/Quote,
     ver responder_cliente) — None si no citó nada.
 
-    Gate 5.2 (corrección H1): `negocio_id` se resuelve desde el Lead ya
-    existente (`entidad padre ya correctamente scoped`, no un default
-    global) — nunca se le pide al llamador que lo pase explícitamente,
-    porque los 12 call sites reales (main.py, dashboard.py) no tienen todos
-    el mismo contexto a mano, pero TODOS operan sobre un `telefono` cuyo
-    Lead ya existe y ya tiene negocio_id (main.py llama `actualizar_lead`
-    antes de guardar cualquier mensaje del mismo request; dashboard.py solo
-    guarda mensajes de conversaciones ya abiertas). Si el Lead no existe
-    todavía o no tiene negocio_id resuelto, falla cerrado — nunca se crea un
-    Mensaje con Negocio desconocido ni se asume ninguno por defecto.
+    `negocio_id` (Gate 5.5 — corrección de integridad de escritura, hallazgo
+    del propio proceso de implementación de Realtime): antes se resolvía
+    internamente desde `Lead.telefono` (Gate 5.2, corrección H1) — un bridge
+    global, sin candado de Negocio, que en el escenario que motiva este Gate
+    (mismo teléfono en dos Negocios) podía escribir el `Mensaje` con el
+    `negocio_id`/`conversation_id` del Negocio que "ganó" la fila `Lead`, no
+    necesariamente el del Canal por el que realmente llegó ESTE mensaje.
+    Ahora es explícito en la firma y obligatorio en la práctica — los 12
+    call sites reales (main.py, dashboard.py) YA tienen `negocio_id`
+    disponible sin resolución adicional (el Canal ya identificado en el
+    webhook, o `usuario["negocio_id"]` de la sesión del panel). Se acepta
+    `None` en el tipo SOLO porque el webhook puede legítimamente no haber
+    podido resolver el Canal todavía (mismo caso ya fail-closed que
+    `actualizar_lead`/`obtener_lead` en ese mismo flujo) — en ese caso se
+    falla cerrado con un error claro, nunca se infiere de `telefono`, nunca
+    se cae a "el único Lead" ni a ningún otro default implícito.
 
     Retorna el mensaje ya guardado (con su `id` real) — antes no retornaba
     nada; hace falta para que quien envía un mensaje saliente pueda
     referenciarlo después (mostrarlo con opción de reintento si
     estado_envio=="fallido", o dejar que se lo cite desde otro mensaje)."""
+    if negocio_id is None:
+        raise ValueError(
+            f"guardar_mensaje(): negocio_id no resuelto para telefono={telefono} — "
+            f"no se puede escribir un Mensaje sin saber a qué Negocio pertenece. "
+            f"No se asume ningún Negocio por defecto (Gate 5.5)."
+        )
     async with async_session() as session:
-        lead = await session.get(Lead, telefono)
-        if lead is None or lead.negocio_id is None:
-            raise ValueError(
-                f"guardar_mensaje(): no se puede resolver negocio_id para telefono={telefono} "
-                f"— el Lead {'no existe' if lead is None else 'existe pero no tiene negocio_id'}. "
-                f"No se asume ningún Negocio por defecto (Gate 5.2). Verificar que "
-                f"actualizar_lead() ya corrió para este teléfono antes de guardar un mensaje."
-            )
-        # Gate 5.3 — conversation_id resuelto internamente, mismo criterio
-        # que negocio_id arriba (H1): nunca se le pide al llamador que lo
-        # resuelva, nunca se acepta uno externo. Get-only (no crea Contact/
-        # Conversation acá) — si todavía no existen, el mensaje se guarda
-        # igual con conversation_id=None (columna nullable durante EXPAND,
-        # ver Mensaje) y quedará entre los "REQUIERE RESOLUCIÓN" del backfill
-        # si nunca llega a crearse la Conversation.
-        conversation = await _obtener_conversation_activa_por_telefono(session, telefono)
+        # Gate 5.5 — conversation_id resuelto vía la cadena Contact→
+        # Conversation YA scoped por negocio_id (mismos helpers que usa
+        # resolver_conversation_activa) — reemplaza al bridge global
+        # `_obtener_conversation_activa_por_telefono` (que seguía resolviendo
+        # desde `Lead.telefono`, sin candado). Get-only (no crea Contact/
+        # Conversation acá) — si todavía no existen PARA ESTE Negocio, el
+        # mensaje se guarda igual con conversation_id=None (columna nullable
+        # durante EXPAND, ver Mensaje) y queda entre los "REQUIERE
+        # RESOLUCIÓN" del backfill si nunca llega a crearse la Conversation.
+        contact = await _obtener_contact(session, negocio_id, telefono)
+        conversation = await _obtener_conversation_activa(session, contact.id) if contact else None
         mensaje = Mensaje(
             telefono=telefono,
-            negocio_id=lead.negocio_id,
+            negocio_id=negocio_id,
             conversation_id=conversation.id if conversation else None,
             role=role,
             content=content,

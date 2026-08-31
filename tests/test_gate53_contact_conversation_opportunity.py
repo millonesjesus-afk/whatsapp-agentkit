@@ -357,7 +357,7 @@ async def test_guardar_mensaje_resuelve_conversation_id_internamente():
     conversation, _ = await _abrir_conversacion(negocio, canal, telefono)
     await mem.actualizar_lead(telefono, negocio_id=negocio["id"], nombre="Test")
 
-    mensaje = await mem.guardar_mensaje(telefono, "user", "Hola")
+    mensaje = await mem.guardar_mensaje(telefono, "user", "Hola", negocio_id=negocio["id"])
     assert mensaje["conversation_id"] == conversation.id
 
 
@@ -515,8 +515,15 @@ async def test_tenant_002_aislamiento_completo_mismo_telefono():
     assert conv2.negocio_id == negocio_2["id"]
 
     await mem.actualizar_lead(telefono, negocio_id=negocio_1["id"], nombre="Cliente T002")
-    m1 = await mem.guardar_mensaje(telefono, "user", "Mensaje en Negocio 1")
-    assert m1["conversation_id"] == conv1.id  # resuelve por el Lead ya scoped a Negocio 1
+    # Gate 5.5 — negocio_id explícito, ya NO vía el bridge Lead.telefono (que
+    # solo podía resolver al Negocio "ganador" de esa fila global): cada
+    # mensaje respeta el negocio_id que le pasa su llamador de confianza,
+    # incluso con el mismo teléfono en los dos Negocios.
+    m1 = await mem.guardar_mensaje(telefono, "user", "Mensaje en Negocio 1", negocio_id=negocio_1["id"])
+    m2 = await mem.guardar_mensaje(telefono, "user", "Mensaje en Negocio 2", negocio_id=negocio_2["id"])
+    assert m1["conversation_id"] == conv1.id
+    assert m2["conversation_id"] == conv2.id
+    assert m1["conversation_id"] != m2["conversation_id"]
 
     await mem.cerrar_opportunity_con_venta(opp1.id, 0, [{"producto": "P1"}], {"resultado": "vendido"})
     await mem.cerrar_opportunity_con_venta(opp2.id, 0, [{"producto": "P2"}], {"resultado": "vendido"})

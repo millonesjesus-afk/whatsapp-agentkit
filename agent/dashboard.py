@@ -58,6 +58,7 @@ from agent.memory import (
     toggle_producto, listar_historial_producto, importar_catalogo_desde_csv,
     CAMPOS_NEGOCIO_PRODUCTO, PLAZOS_CUOTAS_CATALOGO,
     iso_utc, ROLES_CON_VISION_TOTAL, tiene_acceso_a_lead, liberar_asignacion,
+    obtener_conversation_realtime, obtener_conversation_activa_de_telefono,
 )
 from agent.services.servicio_conversacion import servicio_conversacion
 from agent.http_utils import get_con_reintentos, post_con_reintentos
@@ -362,6 +363,24 @@ def _origen_websocket_permitido(websocket: WebSocket) -> bool:
     return origen in _ORIGENES_WS_PERMITIDOS
 
 
+async def _resolver_conversation_ws(datos: dict, negocio_id: str) -> dict | None:
+    """Resuelve la Conversation pedida por un mensaje `ver_lead`/`escribiendo`
+    del cliente WS, aceptando CUALQUIERA de los dos identificadores que hoy
+    coexisten (Gate 5.5, Legacy — coexistencia, no ventana de transición):
+    `conversation_id` (Nueva Experiencia, una vez migrado el BFF) o
+    `telefono` (panel legacy, que sigue usándolo indefinidamente). Ambos se
+    resuelven con candado de `negocio_id` — SIEMPRE de la sesión WS ya
+    resuelta en `websocket_panel`, nunca del mensaje del cliente (mismo
+    criterio Gate 5.4/T1, extendido a la identidad nueva)."""
+    conversation_id = datos.get("conversation_id") or None
+    if conversation_id:
+        return await obtener_conversation_realtime(conversation_id, negocio_id=negocio_id)
+    telefono = datos.get("telefono") or None
+    if telefono:
+        return await obtener_conversation_activa_de_telefono(telefono, negocio_id)
+    return None
+
+
 @router.websocket("/ws")
 async def websocket_panel(websocket: WebSocket):
     if not _origen_websocket_permitido(websocket):
@@ -384,24 +403,26 @@ async def websocket_panel(websocket: WebSocket):
             datos = await websocket.receive_json()
             tipo = datos.get("tipo")
             if tipo == "ver_lead":
-                telefono_pedido = datos.get("telefono") or None
-                if telefono_pedido:
+                conversation_pedida = None
+                if datos.get("conversation_id") or datos.get("telefono"):
                     # Mismo criterio de acceso que _verificar_acceso_lead —
                     # antes se aceptaba cualquier teléfono que el cliente
                     # mandara sin validar nada, así que un asesor podía
                     # marcarse como "viendo" un lead ajeno y recibir el
-                    # "escribiendo..." de esa conversación. Gate 5.4 (T1):
+                    # "escribiendo..." de esa conversación. Gate 5.4/5.5:
                     # negocio_id siempre de la sesión WS ya resuelta arriba
                     # (usuario["negocio_id"]), nunca del mensaje del cliente.
-                    lead_pedido = await obtener_lead(telefono_pedido, negocio_id=usuario["negocio_id"])
-                    if lead_pedido is None or not tiene_acceso_a_lead(
-                        usuario["rol"], usuario["username"], lead_pedido.get("asesor_asignado"),
+                    conversation_pedida = await _resolver_conversation_ws(datos, usuario["negocio_id"])
+                    if conversation_pedida is None or not tiene_acceso_a_lead(
+                        usuario["rol"], usuario["username"], conversation_pedida.get("asesor_asignado_id"),
                     ):
                         continue
-                await gestor_conexiones.set_telefono_activo(websocket, telefono_pedido)
+                await gestor_conexiones.set_conversation_activa(
+                    websocket, conversation_pedida["id"] if conversation_pedida else None,
+                )
             elif tipo == "escribiendo":
-                telefono = datos.get("telefono")
-                if telefono:
+                conversation_actual = await _resolver_conversation_ws(datos, usuario["negocio_id"])
+                if conversation_actual:
                     # excluir_username (no `excluir=websocket`): la conexión
                     # que dispara esta señal puede ser la efímera que abre el
                     # relay del BFF para POST /api/conversaciones/escribiendo,
@@ -409,7 +430,10 @@ async def websocket_panel(websocket: WebSocket):
                     # usuario que recibe el relay SSE — excluir por identidad
                     # de socket nunca las hacía coincidir (ver
                     # agent/tiempo_real.py).
-                    await gestor_conexiones.emitir_escribiendo(telefono, usuario["nombre"], excluir_username=username)
+                    await gestor_conexiones.emitir_escribiendo(
+                        conversation_actual["id"], conversation_actual.get("telefono"),
+                        usuario["nombre"], excluir_username=username,
+                    )
     except WebSocketDisconnect:
         pass
     except Exception as e:
@@ -4790,7 +4814,9 @@ async def mensajes_json(telefono: str, usuario: dict = Depends(_usuario_actual))
     if lead is None:
         raise HTTPException(status_code=404, detail="Lead no encontrado")
     _verificar_acceso_lead(usuario, lead)
-    gestor_conexiones.tocar_actividad(usuario["username"], telefono)
+    conversation_activa = await obtener_conversation_activa_de_telefono(telefono, usuario["negocio_id"])
+    if conversation_activa:
+        gestor_conexiones.tocar_actividad(usuario["username"], conversation_activa["id"])
     historial = await servicio_conversacion.obtener_historial(telefono, limite=200)
     return JSONResponse(historial)
 
@@ -4929,7 +4955,7 @@ async def responder_cliente(
     # información: trae el id del mensaje ya guardado para que el frontend
     # pueda ofrecer "reintentar" sobre ÉL, no solo mostrar un error genérico.
     mensaje_guardado = await servicio_conversacion.guardar_mensaje(
-        telefono, "asesor", mensaje,
+        telefono, "asesor", mensaje, negocio_id=usuario["negocio_id"],
         mensaje_id_meta=wamid, estado_envio=None if enviado else "fallido",
         # Persiste la relación con el mensaje citado (Reply/Quote) — antes
         # solo se resolvía el wamid para el envío a Meta y se perdía acá, así
@@ -4939,7 +4965,7 @@ async def responder_cliente(
         # es de esta conversación, tiene wamid) antes de llegar a este punto.
         respondido_a_id=mensaje_id_citado,
     )
-    await gestor_conexiones.emitir_mensaje_nuevo(telefono)
+    await gestor_conexiones.emitir_mensaje_nuevo(mensaje_guardado["conversation_id"])
 
     if not enviado:
         return _respuesta_envio_fallido(
@@ -5071,10 +5097,10 @@ async def enviar_archivo_chat(
         tamano_bytes=len(contenido), subido_por=usuario["username"], reutilizable=False,
     )
     mensaje_guardado = await servicio_conversacion.guardar_mensaje(
-        telefono, "asesor", caption.strip() or archivo.filename,
+        telefono, "asesor", caption.strip() or archivo.filename, negocio_id=usuario["negocio_id"],
         archivo_id=archivo_guardado["id"], mensaje_id_meta=wamid, estado_envio=None if enviado else "fallido",
     )
-    await gestor_conexiones.emitir_mensaje_nuevo(telefono)
+    await gestor_conexiones.emitir_mensaje_nuevo(mensaje_guardado["conversation_id"])
 
     if not enviado:
         return _respuesta_envio_fallido(
@@ -5135,10 +5161,10 @@ async def enviar_audio_chat(
         tamano_bytes=len(contenido_ogg), subido_por=usuario["username"], reutilizable=False,
     )
     mensaje_guardado = await servicio_conversacion.guardar_mensaje(
-        telefono, "asesor", "Nota de voz", archivo_id=archivo_guardado["id"],
+        telefono, "asesor", "Nota de voz", negocio_id=usuario["negocio_id"], archivo_id=archivo_guardado["id"],
         mensaje_id_meta=wamid, estado_envio=None if enviado else "fallido",
     )
-    await gestor_conexiones.emitir_mensaje_nuevo(telefono)
+    await gestor_conexiones.emitir_mensaje_nuevo(mensaje_guardado["conversation_id"])
 
     if not enviado:
         return _respuesta_envio_fallido(
@@ -5179,10 +5205,10 @@ async def enviar_catalogo_chat(telefono: str, archivo_id: int, usuario: dict = D
     # estado_envio="fallido" si Meta no lo confirmó, mismo patrón que los
     # otros 3 endpoints de envío.
     mensaje_guardado = await servicio_conversacion.guardar_mensaje(
-        telefono, "asesor", archivo["nombre_original"], archivo_id=archivo["id"],
+        telefono, "asesor", archivo["nombre_original"], negocio_id=usuario["negocio_id"], archivo_id=archivo["id"],
         mensaje_id_meta=wamid, estado_envio=None if enviado else "fallido",
     )
-    await gestor_conexiones.emitir_mensaje_nuevo(telefono)
+    await gestor_conexiones.emitir_mensaje_nuevo(mensaje_guardado["conversation_id"])
 
     if not enviado:
         return _respuesta_envio_fallido(
@@ -5190,6 +5216,25 @@ async def enviar_catalogo_chat(telefono: str, archivo_id: int, usuario: dict = D
             mensaje_guardado["id"],
         )
     return JSONResponse({"status": "ok", "mensaje_id": mensaje_guardado["id"]})
+
+
+async def _verificar_acceso_archivo(archivo_id: int, usuario: dict) -> None:
+    """Candado de acceso a un archivo NO reutilizable — mismo criterio que
+    ver la conversación a la que se le mandó.
+
+    Corrección residual de Gate 5.4 (hallazgo Alta severidad, checkpoint de
+    investigación de Gate 5.5): cuando `telefono_lead` existe pero
+    `obtener_lead(..., negocio_id=...)` devuelve `None` — el lead pertenece a
+    OTRO Negocio — el chequeo `if lead:` se saltaba en silencio y el archivo
+    se servía igual. Ahora un `telefono_lead` sin lead resoluble PARA ESTE
+    Negocio es un 403 explícito, no un fallthrough."""
+    telefono_lead = await servicio_conversacion.obtener_telefono_de_archivo(archivo_id)
+    if not telefono_lead:
+        return
+    lead = await obtener_lead(telefono_lead, negocio_id=usuario["negocio_id"])
+    if lead is None:
+        raise HTTPException(status_code=403, detail="No tienes acceso a este archivo")
+    _verificar_acceso_lead(usuario, lead)
 
 
 @router.get("/archivo/{archivo_id}")
@@ -5201,11 +5246,7 @@ async def descargar_archivo(archivo_id: int, usuario: dict = Depends(_usuario_ac
     if archivo is None:
         raise HTTPException(status_code=404, detail="Archivo no encontrado")
     if not archivo["reutilizable"]:
-        telefono_lead = await servicio_conversacion.obtener_telefono_de_archivo(archivo_id)
-        if telefono_lead:
-            lead = await obtener_lead(telefono_lead, negocio_id=usuario["negocio_id"])
-            if lead:
-                _verificar_acceso_lead(usuario, lead)
+        await _verificar_acceso_archivo(archivo_id, usuario)
     if not os.path.exists(archivo["ruta_disco"]):
         raise HTTPException(status_code=404, detail="El archivo ya no está disponible")
     return FileResponse(archivo["ruta_disco"], filename=archivo["nombre_original"], media_type=archivo["content_type"])
@@ -5410,6 +5451,18 @@ async def actualizar_resultado(
         # conoce); el chequeo de Lead.version de arriba ya serializó este
         # request contra cualquier otra escritura, así que el 409 acá solo
         # puede darse por una ventana de carrera extremadamente angosta.
+        #
+        # Gate 5.5 — corrección de escritura cross-tenant (checkpoint de
+        # investigación): `resolver_ids_operables_por_telefono` resuelve el
+        # `opportunity_id` vía el bridge legacy `Lead.telefono` (PK global,
+        # sin candado de negocio_id) — con el mismo teléfono en dos
+        # Negocios, podía resolver el `opportunity_id` de OTRO Negocio.
+        # `intentar_cambiar_resultado_opportunity` no tiene candado propio
+        # (confía en que quien la llama ya validó ownership, mismo patrón
+        # que los endpoints NUEVOS ya usan). Acá faltaba esa revalidación —
+        # se agrega con la misma función ya usada por /opportunity/{id}/resultado.
+        if await resolver_opportunity_operable(ids["opportunity_id"], usuario["negocio_id"]) is None:
+            raise HTTPException(status_code=404, detail="Lead no encontrado")
         campos_opportunity = {k: (v if v != "" else None) for k, v in campos.items()}
         if not await intentar_cambiar_resultado_opportunity(
             ids["opportunity_id"], ids["opportunity_version"], campos_opportunity, evento=evento,
@@ -5523,6 +5576,13 @@ async def registrar_venta(
         # Camino REAL — LEGACY / COMPATIBILIDAD (cutover real §1/§7/§10): la
         # version vigente de la Opportunity se resuelve server-side, el
         # chequeo de Lead.version de arriba ya serializó este request.
+        #
+        # Gate 5.5 — mismo hallazgo/corrección que /resultado: `ids` viene
+        # del bridge legacy sin candado — revalidar ownership antes de
+        # escribir la venta, con la misma función que ya usa el endpoint
+        # nuevo /opportunity/{id}/venta.
+        if await resolver_opportunity_operable(ids["opportunity_id"], usuario["negocio_id"]) is None:
+            raise HTTPException(status_code=404, detail="Lead no encontrado")
         if not await cerrar_opportunity_con_venta(
             ids["opportunity_id"], ids["opportunity_version"], venta["lineas"], campos,
             revertir_resultado_al_vaciar=True, evento=evento,
@@ -5590,6 +5650,12 @@ async def asignar_lead(
         # ni un asesor previo que desasignar) — mismo criterio que el
         # original, que en ese caso tampoco escribía nada.
         if evento is not None:
+            # Gate 5.5 — mismo hallazgo/corrección que /resultado y /venta:
+            # `ids` viene del bridge legacy sin candado — revalidar
+            # ownership antes de escribir la asignación, con la misma
+            # función que ya usa el endpoint nuevo /conversation/{id}/asignar.
+            if await resolver_conversation_operable(ids["conversation_id"], usuario["negocio_id"]) is None:
+                raise HTTPException(status_code=404, detail="Lead no encontrado")
             if not await intentar_asignar_conversation(
                 ids["conversation_id"], ids["conversation_version"], asesor_asignado or None, evento=evento,
             ):

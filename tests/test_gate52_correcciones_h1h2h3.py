@@ -111,7 +111,7 @@ async def test_funciones_defensivas_de_lead_funcionan_con_lead_ya_existente():
 async def test_mensaje_persistido_para_negocio_a_queda_scoped_correctamente():
     negocio_a, negocio_b = await _dos_negocios()
     await mem.actualizar_lead("51900000010", nombre="Cliente A", negocio_id=negocio_a["id"])
-    mensaje = await mem.guardar_mensaje("51900000010", "user", "hola desde negocio A")
+    mensaje = await mem.guardar_mensaje("51900000010", "user", "hola desde negocio A", negocio_id=negocio_a["id"])
     assert mensaje["telefono"] == "51900000010"
     async with mem.async_session() as session:
         fila = await session.get(mem.Mensaje, mensaje["id"])
@@ -122,30 +122,35 @@ async def test_mensaje_persistido_para_negocio_a_queda_scoped_correctamente():
 async def test_mensaje_persistido_para_negocio_b_queda_scoped_correctamente():
     negocio_a, negocio_b = await _dos_negocios()
     await mem.actualizar_lead("51900000011", nombre="Cliente B", negocio_id=negocio_b["id"])
-    mensaje = await mem.guardar_mensaje("51900000011", "user", "hola desde negocio B")
+    mensaje = await mem.guardar_mensaje("51900000011", "user", "hola desde negocio B", negocio_id=negocio_b["id"])
     async with mem.async_session() as session:
         fila = await session.get(mem.Mensaje, mensaje["id"])
         assert fila.negocio_id == negocio_b["id"]
 
 
-async def test_mensaje_negocio_id_viene_del_lead_no_de_un_parametro_manipulable():
-    """El negocio_id de un Mensaje SIEMPRE se resuelve del Lead — no existe
-    ningún parámetro que un llamador pueda usar para "cruzar" el mensaje
-    hacia otro Negocio distinto del que realmente tiene el Lead."""
-    negocio_a, negocio_b = await _dos_negocios()
-    await mem.actualizar_lead("51900000012", nombre="Cliente A", negocio_id=negocio_a["id"])
+async def test_mensaje_negocio_id_es_explicito_y_obligatorio_en_la_firma():
+    """Desde Gate 5.5 (corrección de integridad de escritura): `negocio_id`
+    dejó de resolverse internamente desde `Lead.telefono` (bridge global,
+    sin candado — el mismo hallazgo que motivó T1 de Gate 5.4, ahora cerrado
+    también en escritura) y pasó a ser explícito en la firma — reemplaza a
+    la vieja `test_mensaje_negocio_id_viene_del_lead_no_de_un_parametro_
+    manipulable`, cuya premisa (negocio_id NUNCA es un parámetro) ya no
+    aplica. La responsabilidad de pasar el `negocio_id` correcto es del
+    LLAMADOR de confianza (Canal ya resuelto en el webhook, o
+    `usuario["negocio_id"]` de la sesión del panel) — nunca del cliente."""
     import inspect
     firma = inspect.signature(mem.guardar_mensaje)
-    assert "negocio_id" not in firma.parameters
+    assert "negocio_id" in firma.parameters
 
 
-async def test_guardar_mensaje_falla_cerrado_sin_lead_existente():
-    """`Mensaje.negocio_id` es NOT NULL a nivel de columna (corrección
-    post-auditoría) — ya no es posible que un Lead exista sin negocio_id,
-    así que el único camino real de fail-closed es "el Lead no existe
-    todavía"."""
+async def test_guardar_mensaje_falla_cerrado_sin_negocio_id():
+    """Gate 5.5 — mismo criterio fail-closed que antes (el bridge vía Lead
+    también fallaba si no podía resolver negocio_id), ahora sobre el
+    parámetro explícito: si el llamador no pudo resolverlo (p. ej. el Canal
+    del webhook no se identificó), `guardar_mensaje` nunca adivina — ni
+    "el único Lead", ni ningún otro default implícito."""
     with pytest.raises(ValueError, match="negocio_id"):
-        await mem.guardar_mensaje("51900000099", "user", "no debería guardarse nunca")
+        await mem.guardar_mensaje("51900000099", "user", "no debería guardarse nunca", negocio_id=None)
 
 
 # ---------------------------------------------------------------------------

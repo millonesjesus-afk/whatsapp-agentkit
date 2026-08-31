@@ -179,8 +179,8 @@ async def test_obtener_ultimos_mensajes_no_trae_mensajes_de_otro_negocio():
     telefono_b = "51900300008"
     await mem.actualizar_lead(telefono_a, nombre="Cliente A", negocio_id=negocio_a["id"])
     await mem.actualizar_lead(telefono_b, nombre="Cliente B", negocio_id=negocio_b["id"])
-    await mem.guardar_mensaje(telefono_a, "user", "Hola desde A")
-    await mem.guardar_mensaje(telefono_b, "user", "Hola desde B")
+    await mem.guardar_mensaje(telefono_a, "user", "Hola desde A", negocio_id=negocio_a["id"])
+    await mem.guardar_mensaje(telefono_b, "user", "Hola desde B", negocio_id=negocio_b["id"])
 
     # Un bug de otro lado podría colar un teléfono ajeno en la lista — el
     # candado real acá es negocio_id, no confiar en que `telefonos` venga

@@ -7,28 +7,49 @@ Registro en memoria de las conexiones WebSocket activas del panel — un solo
 proceso en Railway para este proyecto, así que no hace falta un pub/sub
 externo (Redis) para esta escala; si el día de mañana se corre en varias
 instancias a la vez, esto tendría que moverse a algo compartido entre
-procesos.
+procesos (confirmado sin evidencia de que haga falta hoy — Arquitectura
+Integrada Gate 5.5, sección Multi-proceso).
+
+Gate 5.5 — identidad de Realtime migrada de `telefono` a `conversation_id`
+(Arquitectura Integrada Gate 5.5, pregunta central): antes, `emitir_mensaje_
+nuevo` resolvía el Negocio de un evento vía `obtener_lead(telefono)`, un
+bridge global (`Lead.telefono` es PK global, sin candado de negocio_id) con
+una limitación de aislamiento ya documentada y testeada desde Gate 5.3 — con
+el mismo teléfono en dos Negocios, el bridge solo podía resolver al que
+"ganó" la fila `Lead`. Ahora se resuelve directo por `Conversation.id`
+(UUID, sin ambigüedad posible entre Negocios) vía
+`obtener_conversation_realtime()`. `conversation_id` es la identidad; el
+candado de autorización real sigue siendo `negocio_id`, SEPARADO y siempre
+resuelto server-side — un `conversation_id` con formato válido nunca
+sustituye ese candado.
+
+`telefono` sigue viajando en ambos eventos, de forma aditiva: el panel
+legacy (`/dashboard/...` en HTML) sigue usando `telefono` indefinidamente
+(Arquitectura Integrada Gate 5.5, Legacy — coexistencia, no ventana de
+transición) y su script filtra por ese campo. No es un campo especulativo:
+tiene una razón funcional real y vigente.
 
 Dos tipos de evento:
-- "mensaje_nuevo" (telefono): se manda SOLO a las conexiones cuyo usuario
-  tiene acceso real a ese lead — mismo criterio que _verificar_acceso_lead
-  en dashboard.py (admin/supervisor ven todo DENTRO DE SU NEGOCIO, un
-  asesor solo lo suyo — ver tiene_acceso_a_lead en agent/memory.py), MÁS
-  el candado de negocio_id (Gate 5.4, T1 — Arquitectura Integrada Gate
-  5.4): antes de este Gate, "admin/supervisor ven todo" no distinguía de
-  qué Negocio — cualquier admin/supervisor conectado al panel, sin importar
-  su Negocio, recibía los eventos de CUALQUIER lead. Cada cliente que SÍ lo
-  recibe decide si le importa más allá de eso (si tiene esa conversación
-  abierta, refresca el chat; si no, solo dispara un refresco liviano de la
-  lista/tabla).
-- "asesor_escribiendo" (telefono, username): solo a quienes tienen ESE lead
-  abierto en este momento (telefono_activo) — no tiene sentido mandarlo a
-  todo el mundo, y además molestaría a alguien mirando una conversación
-  distinta. No se filtra por negocio_id de nuevo acá: si alguien ya tiene
-  el lead abierto como telefono_activo es porque `ver_lead` ya validó su
+- "mensaje_nuevo" (conversation_id, telefono): se manda SOLO a las
+  conexiones cuyo usuario tiene acceso real a esa Conversation — mismo
+  criterio que _verificar_acceso_lead en dashboard.py (admin/supervisor ven
+  todo DENTRO DE SU NEGOCIO, un asesor solo lo suyo — ver tiene_acceso_a_lead
+  en agent/memory.py), más el candado de negocio_id (Gate 5.4/5.5): antes de
+  Gate 5.4, "admin/supervisor ven todo" no distinguía de qué Negocio.
+  Además, no se emite si la Conversation ya no está activa (Gate 5.5,
+  Contrato WebSocket — una Conversation cerrada no debe seguir generando
+  eventos de mensaje nuevo). Cada cliente que SÍ lo recibe decide si le
+  importa más allá de eso (si tiene esa conversación abierta, refresca el
+  chat; si no, solo dispara un refresco liviano de la lista/tabla).
+- "asesor_escribiendo" (conversation_id, telefono, username): solo a
+  quienes tienen ESA Conversation abierta en este momento
+  (conversation_id_activo) — no tiene sentido mandarlo a todo el mundo, y
+  además molestaría a alguien mirando una conversación distinta. No se
+  filtra por negocio_id de nuevo acá: si alguien ya tiene la Conversation
+  abierta como conversation_id_activo es porque `ver_lead` ya validó su
   acceso (rol + negocio_id) al conectarlo (ver websocket_panel en
   dashboard.py) — filtrar de nuevo acá sería repetir un chequeo que ya se
-  hizo en el único punto donde telefono_activo pudo haberse fijado.
+  hizo en el único punto donde conversation_id_activo pudo haberse fijado.
 
   La exclusión de quien disparó la señal es por USERNAME, no por identidad
   de objeto WebSocket (ver emitir_escribiendo) — con la arquitectura SSE +
@@ -39,22 +60,15 @@ Dos tipos de evento:
   `ws is not excluir` nunca podía coincidir entre esas dos conexiones, así
   que el usuario terminaba viendo su propio "X está escribiendo...".
   Excluir por username filtra TODAS las conexiones de esa persona sobre
-  ese lead, sin importar cuál está "escuchando" — sigue funcionando igual
-  para el panel legado (una sola conexión persistente por asesor).
-
-Ambos eventos llevan `conversation_id: null` de forma aditiva desde Gate
-5.4 (Diseño Técnico Gate 5.3 §23.5) — preparación de contrato para Gate
-5.5+, que migrará la CLAVE de este mecanismo de `telefono` a
-`conversation_id`. Ese Gate NO se adelanta acá: el campo viaja fijo en
-`None`, sin resolverse todavía, y el filtro de acceso sigue siendo
-telefono + negocio_id + rol.
+  esa Conversation, sin importar cuál está "escuchando" — sigue funcionando
+  igual para el panel legado (una sola conexión persistente por asesor).
 """
 
 import logging
 import time
 from fastapi import WebSocket
 
-from agent.memory import obtener_lead, tiene_acceso_a_lead
+from agent.memory import obtener_conversation_realtime, tiene_acceso_a_lead
 
 logger = logging.getLogger("agentkit")
 
@@ -67,7 +81,7 @@ CODIGO_WS_INACTIVA = 4408
 class GestorConexiones:
     def __init__(self):
         # ws -> {"username": str, "rol": str, "negocio_id": str,
-        #        "telefono_activo": str | None,
+        #        "conversation_id_activo": str | None,
         #        "ultima_actividad": float (time.monotonic())}
         self._conexiones: dict[WebSocket, dict] = {}
 
@@ -85,16 +99,17 @@ class GestorConexiones:
         significaba "ven todo de cualquier Negocio"."""
         await ws.accept()
         self._conexiones[ws] = {
-            "username": username, "rol": rol, "negocio_id": negocio_id, "telefono_activo": None,
+            "username": username, "rol": rol, "negocio_id": negocio_id, "conversation_id_activo": None,
             "ultima_actividad": time.monotonic(),
         }
 
     def desconectar(self, ws: WebSocket):
         self._conexiones.pop(ws, None)
 
-    async def set_telefono_activo(self, ws: WebSocket, telefono: str | None):
+    async def set_conversation_activa(self, ws: WebSocket, conversation_id: str | None):
         """Garantiza como máximo 1 conexión activa por usuario+conversación
-        (Gate 4.1, remediación de conexión huérfana).
+        (Gate 4.1, remediación de conexión huérfana; Gate 5.5, clave
+        migrada de `telefono` a `conversation_id`).
 
         Por qué esto vive ACÁ y no depende de que el cliente avise que se
         desconectó: instrumentando el relay del BFF (`app/api/conversaciones/
@@ -113,33 +128,33 @@ class GestorConexiones:
         NUEVA (cuyo `ver_lead` sí llegó, por definición, porque es la que se
         está procesando ahora) cierra activamente cualquier otra que ya esté
         mirando la MISMA conversación bajo el MISMO usuario. Acotado a
-        (usuario, teléfono) — no a "1 conexión por usuario" a secas — para no
-        romper el caso legítimo de un usuario con 2 pestañas mirando 2
-        conversaciones distintas al mismo tiempo.
+        (usuario, conversation_id) — no a "1 conexión por usuario" a secas —
+        para no romper el caso legítimo de un usuario con 2 pestañas mirando
+        2 conversaciones distintas al mismo tiempo.
 
         Limitación conocida: esto cierra duplicados cuando una conexión
-        NUEVA para la misma (usuario, teléfono) efectivamente llega. Si una
-        conexión queda huérfana y el usuario nunca vuelve a esa MISMA
+        NUEVA para la misma (usuario, conversation_id) efectivamente llega.
+        Si una conexión queda huérfana y el usuario nunca vuelve a esa MISMA
         conversación (p. ej. cerró la pestaña y el aviso de cierre se perdió
         en el mismo viaje), esta conexión puntual no tiene un mecanismo que
         la reclame — no se resolvió acá por no ampliar el alcance de esta
         remediación; ver reporte de la investigación."""
         if ws not in self._conexiones:
             return
-        self._conexiones[ws]["telefono_activo"] = telefono
+        self._conexiones[ws]["conversation_id_activo"] = conversation_id
         self._conexiones[ws]["ultima_actividad"] = time.monotonic()
-        if telefono is None:
+        if conversation_id is None:
             return
         username = self._conexiones[ws]["username"]
         duplicadas = [
             otro for otro, info in list(self._conexiones.items())
-            if otro is not ws and info["username"] == username and info["telefono_activo"] == telefono
+            if otro is not ws and info["username"] == username and info["conversation_id_activo"] == conversation_id
         ]
         for otro in duplicadas:
             logger.info(
-                "Cerrando conexión WS duplicada del panel (usuario=%s, telefono=%s) — "
+                "Cerrando conexión WS duplicada del panel (usuario=%s, conversation_id=%s) — "
                 "reemplazada por una conexión más nueva para la misma conversación.",
-                username, telefono,
+                username, conversation_id,
             )
             try:
                 await otro.close(code=4409)  # 4409: cerrada por duplicado (mismo usuario+conversación) — no colisiona con 4401/4403 (sesión/origin).
@@ -147,11 +162,10 @@ class GestorConexiones:
                 pass
             self.desconectar(otro)
 
-    def tocar_actividad(self, username: str, telefono: str) -> None:
-        """Marca a (usuario, teléfono) como recién visto — llamado desde
-        `GET /lead/{telefono}/mensajes.json` (agent/dashboard.py), el
-        endpoint que el polling incondicional del panel golpea cada 20s
-        SIEMPRE que esa conversación está abierta en pantalla
+    def tocar_actividad(self, username: str, conversation_id: str) -> None:
+        """Marca a (usuario, conversation_id) como recién visto — llamado
+        desde el endpoint de mensajes del panel, que el polling incondicional
+        golpea cada 20s SIEMPRE que esa conversación está abierta en pantalla
         (`usePollingIncondicional` en maiek-frontend), sin importar el
         estado del WS/SSE.
 
@@ -172,7 +186,7 @@ class GestorConexiones:
         su cuenta."""
         ahora = time.monotonic()
         for info in self._conexiones.values():
-            if info["username"] == username and info["telefono_activo"] == telefono:
+            if info["username"] == username and info["conversation_id_activo"] == conversation_id:
                 info["ultima_actividad"] = ahora
 
     async def cerrar_inactivas(self, umbral_segundos: float) -> int:
@@ -182,11 +196,11 @@ class GestorConexiones:
         inicial) tenga más de `umbral_segundos`.
 
         Gate 4.1, cuarta capa de hardening: a diferencia de la expulsión de
-        duplicados (`set_telefono_activo`), esta NO depende de que llegue una
-        conexión nueva para la MISMA conversación — cubre exactamente lo que
-        esa limitación conocida deja afuera (ver su docstring): el usuario
-        nunca vuelve a esa conversación, así que ninguna conexión nueva va a
-        llegar nunca a expulsar a la vieja.
+        duplicados (`set_conversation_activa`), esta NO depende de que
+        llegue una conexión nueva para la MISMA conversación — cubre
+        exactamente lo que esa limitación conocida deja afuera (ver su
+        docstring): el usuario nunca vuelve a esa conversación, así que
+        ninguna conexión nueva va a llegar nunca a expulsar a la vieja.
 
         Retorna cuántas conexiones cerró (para logging/instrumentación de
         pruebas)."""
@@ -198,9 +212,9 @@ class GestorConexiones:
         for ws in inactivas:
             info = self._conexiones.get(ws, {})
             logger.info(
-                "Cerrando conexión WS del panel por inactividad (usuario=%s, telefono=%s, "
+                "Cerrando conexión WS del panel por inactividad (usuario=%s, conversation_id=%s, "
                 "inactiva hace %.0fs) — Gate 4.1, idle timeout.",
-                info.get("username", "?"), info.get("telefono_activo", "?"),
+                info.get("username", "?"), info.get("conversation_id_activo", "?"),
                 ahora - info.get("ultima_actividad", ahora),
             )
             try:
@@ -210,48 +224,58 @@ class GestorConexiones:
             self.desconectar(ws)
         return len(inactivas)
 
-    async def emitir_mensaje_nuevo(self, telefono: str):
-        """Filtra por acceso ANTES de emitir — una sola consulta al lead
-        (no una por conexión) para saber a quién le corresponde.
+    async def emitir_mensaje_nuevo(self, conversation_id: str | None):
+        """Filtra por acceso ANTES de emitir — una sola consulta a la
+        Conversation (no una por conexión) para saber a quién le corresponde.
 
-        Gate 5.4 (T1): `obtener_lead(telefono)` acá SIN `negocio_id` es
-        intencional — es el mismo puente que el resto del Gate usa para
-        resolver identidad desde un teléfono (no hay "otro usuario" del que
-        proteger esta lectura puntual, es la propia función la que está
-        DESCUBRIENDO a qué Negocio pertenece este mensaje). El candado real
-        es el filtro de abajo: cada conexión solo recibe el evento si su
-        `negocio_id` coincide con el del lead, además del criterio de rol
-        de siempre."""
-        lead = await obtener_lead(telefono)
-        asesor_asignado = lead.get("asesor_asignado") if lead else None
-        negocio_id_lead = lead.get("negocio_id") if lead else None
-        if negocio_id_lead is None:
-            return  # sin lead resoluble, no hay a quién emitirle con seguridad
-        evento = {"tipo": "mensaje_nuevo", "telefono": telefono, "conversation_id": None}
+        Gate 5.5: `obtener_conversation_realtime(conversation_id)` SIN
+        `negocio_id` es intencional — es descubrimiento de identidad, no
+        verificación del acceso de un tercero (mismo criterio que tenía
+        `obtener_lead(telefono)` antes de esta migración, pero ahora sin la
+        ambigüedad del bridge: `conversation_id` es una PK real, nunca
+        colisiona entre Negocios). El candado real es el filtro de abajo:
+        cada conexión solo recibe el evento si su `negocio_id` coincide con
+        el de la Conversation, además del criterio de rol de siempre. No se
+        emite si la Conversation ya no está activa (Contrato WebSocket,
+        Arquitectura Integrada Gate 5.5)."""
+        if conversation_id is None:
+            return  # mensaje sin Conversation resoluble (huérfano histórico) — no hay a quién emitirle con seguridad
+        conversation = await obtener_conversation_realtime(conversation_id)
+        if conversation is None or conversation["estado"] != "activa":
+            return
+        evento = {
+            "tipo": "mensaje_nuevo", "conversation_id": conversation_id,
+            "telefono": conversation["telefono"],
+        }
+        asesor_asignado = conversation.get("asesor_asignado_id")
+        negocio_id_conversation = conversation["negocio_id"]
         for ws, info in list(self._conexiones.items()):
-            if info.get("negocio_id") != negocio_id_lead:
+            if info.get("negocio_id") != negocio_id_conversation:
                 continue
             if tiene_acceso_a_lead(info["rol"], info["username"], asesor_asignado):
                 await self._enviar_seguro(ws, evento)
 
-    async def emitir_escribiendo(self, telefono: str, nombre_mostrar: str, excluir_username: str):
+    async def emitir_escribiendo(self, conversation_id: str, telefono: str | None, nombre_mostrar: str, excluir_username: str):
         """`nombre_mostrar` es lo que se muestra en el aviso ("X está
         escribiendo...") — puede repetirse entre personas. `excluir_username`
         es el username (login, único) de quien disparó la señal: se excluyen
-        TODAS sus conexiones sobre este lead, no solo la que originó el
-        evento (ver comentario de cabecera — la conexión que dispara la señal
-        y la que la recibiría de vuelta pueden ser dos WebSockets distintos
-        del mismo usuario).
+        TODAS sus conexiones sobre esta Conversation, no solo la que originó
+        el evento (ver comentario de cabecera — la conexión que dispara la
+        señal y la que la recibiría de vuelta pueden ser dos WebSockets
+        distintos del mismo usuario).
 
-        Sin candado de `negocio_id` explícito acá (Gate 5.4, T1): a
+        Sin candado de `negocio_id` explícito acá (Gate 5.4/5.5): a
         diferencia de `emitir_mensaje_nuevo`, esta función solo le llega a
-        conexiones cuyo `telefono_activo` ya fue fijado por `ver_lead`, que
-        ya exige el mismo candado de negocio_id antes de aceptar el
-        teléfono — repetir el chequeo acá sería redundante, no una
-        protección adicional real."""
-        evento = {"tipo": "asesor_escribiendo", "telefono": telefono, "username": nombre_mostrar, "conversation_id": None}
+        conexiones cuyo `conversation_id_activo` ya fue fijado por
+        `ver_lead`, que ya exige el mismo candado de negocio_id antes de
+        aceptar la Conversation — repetir el chequeo acá sería redundante,
+        no una protección adicional real."""
+        evento = {
+            "tipo": "asesor_escribiendo", "conversation_id": conversation_id,
+            "telefono": telefono, "username": nombre_mostrar,
+        }
         for ws, info in list(self._conexiones.items()):
-            if info["telefono_activo"] == telefono and info["username"] != excluir_username:
+            if info["conversation_id_activo"] == conversation_id and info["username"] != excluir_username:
                 await self._enviar_seguro(ws, evento)
 
     async def _enviar_seguro(self, ws: WebSocket, evento: dict):

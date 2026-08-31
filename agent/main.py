@@ -404,14 +404,15 @@ async def webhook_handler(request: Request):
             # respuesta, porque no es un mensaje nuevo del cliente.
             if msg.tipo_evento == "echo":
                 contenido = msg.texto if msg.texto else f"[{msg.tipo}]"
-                await servicio_conversacion.guardar_mensaje(
-                    msg.telefono, "assistant", contenido, via_app=True, mensaje_id_meta=msg.mensaje_id or None,
+                mensaje_guardado = await servicio_conversacion.guardar_mensaje(
+                    msg.telefono, "assistant", contenido, negocio_id=canal.get("negocio_id") if canal else None,
+                    via_app=True, mensaje_id_meta=msg.mensaje_id or None,
                 )
                 lead_actual = await obtener_lead(msg.telefono, negocio_id=canal.get("negocio_id") if canal else None)
                 if not (lead_actual and lead_actual.get("asesor_asignado")):
                     await pausar_gabi_manual(msg.telefono)
                 logger.info(f"Echo de app registrado para {msg.telefono}: {contenido}")
-                await gestor_conexiones.emitir_mensaje_nuevo(msg.telefono)
+                await gestor_conexiones.emitir_mensaje_nuevo(mensaje_guardado["conversation_id"])
                 continue
 
             # Multimedia entrante soportada (imagen, documento, nota de voz)
@@ -428,12 +429,15 @@ async def webhook_handler(request: Request):
                 archivo_id_creado = await _guardar_media_entrante(msg, canal)
                 contenido_usuario = (msg.media or {}).get("caption") or f"[{msg.tipo}]"
                 await servicio_conversacion.guardar_mensaje(
-                    msg.telefono, "user", contenido_usuario,
+                    msg.telefono, "user", contenido_usuario, negocio_id=canal.get("negocio_id") if canal else None,
                     archivo_id=archivo_id_creado, mensaje_id_meta=msg.mensaje_id or None,
                 )
                 enviado, wamid = await proveedor.enviar_mensaje(msg.telefono, respuesta, canal=canal)
-                await servicio_conversacion.guardar_mensaje(msg.telefono, "assistant", respuesta, mensaje_id_meta=wamid)
-                await gestor_conexiones.emitir_mensaje_nuevo(msg.telefono)
+                mensaje_guardado = await servicio_conversacion.guardar_mensaje(
+                    msg.telefono, "assistant", respuesta, negocio_id=canal.get("negocio_id") if canal else None,
+                    mensaje_id_meta=wamid,
+                )
+                await gestor_conexiones.emitir_mensaje_nuevo(mensaje_guardado["conversation_id"])
                 continue
 
             # Tipos que aún no procesamos (video, sticker, ubicación, etc.):
@@ -441,10 +445,16 @@ async def webhook_handler(request: Request):
             if msg.tipo != "text":
                 logger.info(f"Mensaje no soportado ({msg.tipo}) de {msg.telefono}")
                 respuesta = servicio_inteligencia.obtener_mensaje_no_soportado()
-                await servicio_conversacion.guardar_mensaje(msg.telefono, "user", f"[{msg.tipo}]", mensaje_id_meta=msg.mensaje_id or None)
+                await servicio_conversacion.guardar_mensaje(
+                    msg.telefono, "user", f"[{msg.tipo}]", negocio_id=canal.get("negocio_id") if canal else None,
+                    mensaje_id_meta=msg.mensaje_id or None,
+                )
                 enviado, wamid = await proveedor.enviar_mensaje(msg.telefono, respuesta, canal=canal)
-                await servicio_conversacion.guardar_mensaje(msg.telefono, "assistant", respuesta, mensaje_id_meta=wamid)
-                await gestor_conexiones.emitir_mensaje_nuevo(msg.telefono)
+                mensaje_guardado = await servicio_conversacion.guardar_mensaje(
+                    msg.telefono, "assistant", respuesta, negocio_id=canal.get("negocio_id") if canal else None,
+                    mensaje_id_meta=wamid,
+                )
+                await gestor_conexiones.emitir_mensaje_nuevo(mensaje_guardado["conversation_id"])
                 continue
 
             if not msg.texto:
@@ -491,13 +501,16 @@ async def webhook_handler(request: Request):
                     # Caso todavía abierto: se guarda el mensaje y se reactiva
                     # el indicador de "Nuevo" para que el asesor no se lo pierda,
                     # aunque ya hubiera visto mensajes anteriores de este lead.
-                    await servicio_conversacion.guardar_mensaje(msg.telefono, "user", msg.texto, mensaje_id_meta=msg.mensaje_id or None)
+                    mensaje_guardado = await servicio_conversacion.guardar_mensaje(
+                        msg.telefono, "user", msg.texto, negocio_id=canal.get("negocio_id") if canal else None,
+                        mensaje_id_meta=msg.mensaje_id or None,
+                    )
                     await marcar_lead_no_visto(msg.telefono)
                     logger.info(
                         f"Mensaje de {msg.telefono} guardado sin respuesta automática "
                         f"(asignado a {lead['asesor_asignado']})"
                     )
-                    await gestor_conexiones.emitir_mensaje_nuevo(msg.telefono)
+                    await gestor_conexiones.emitir_mensaje_nuevo(mensaje_guardado["conversation_id"])
                     continue
 
             # Obtener historial ANTES de guardar el mensaje actual
@@ -552,10 +565,16 @@ async def webhook_handler(request: Request):
                     f"(acción: {accion_confianza}) — razón: {razon}"
                 )
 
-            await servicio_conversacion.guardar_mensaje(msg.telefono, "user", msg.texto, mensaje_id_meta=msg.mensaje_id or None)
+            await servicio_conversacion.guardar_mensaje(
+                msg.telefono, "user", msg.texto, negocio_id=canal.get("negocio_id") if canal else None,
+                mensaje_id_meta=msg.mensaje_id or None,
+            )
             enviado, wamid = await proveedor.enviar_mensaje(msg.telefono, respuesta, canal=canal)
-            await servicio_conversacion.guardar_mensaje(msg.telefono, "assistant", respuesta, mensaje_id_meta=wamid)
-            await gestor_conexiones.emitir_mensaje_nuevo(msg.telefono)
+            mensaje_guardado = await servicio_conversacion.guardar_mensaje(
+                msg.telefono, "assistant", respuesta, negocio_id=canal.get("negocio_id") if canal else None,
+                mensaje_id_meta=wamid,
+            )
+            await gestor_conexiones.emitir_mensaje_nuevo(mensaje_guardado["conversation_id"])
             logger.info(f"Respuesta a {msg.telefono}: {respuesta}")
 
             if escalado_por_falla:

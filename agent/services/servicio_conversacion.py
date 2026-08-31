@@ -30,12 +30,12 @@ class ServicioConversacion:
     por acá."""
 
     async def guardar_mensaje(
-        self, telefono: str, role: str, content: str, archivo_id: int | None = None, via_app: bool = False,
+        self, telefono: str, role: str, content: str, negocio_id: str, archivo_id: int | None = None, via_app: bool = False,
         mensaje_id_meta: str | None = None, estado_envio: str | None = None,
         respondido_a_id: int | None = None,
     ) -> dict:
         return await guardar_mensaje(
-            telefono, role, content, archivo_id=archivo_id, via_app=via_app,
+            telefono, role, content, negocio_id, archivo_id=archivo_id, via_app=via_app,
             mensaje_id_meta=mensaje_id_meta, estado_envio=estado_envio,
             respondido_a_id=respondido_a_id,
         )
