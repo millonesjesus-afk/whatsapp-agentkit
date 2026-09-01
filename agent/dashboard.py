@@ -42,9 +42,9 @@ from agent.memory import (
     listar_leads, obtener_lead, actualizar_lead,
     obtener_usuario, listar_asesores, crear_usuario,
     asignar_asesor_a_lead, marcar_lead_visto, limpiar_revision_prioritaria, actualizar_disponibilidad, actualizar_nivel_asesor,
-    listar_campanas, crear_campana, actualizar_campana, contar_leads_por_campana, eliminar_campana,
+    listar_campanas, crear_campana, actualizar_campana, contar_opportunities_por_campana, eliminar_campana,
     obtener_campana, obtener_canal_whatsapp,
-    cambiar_password, contar_leads_activos_por_asesor, RESULTADOS_CERRADOS, listar_leads_agendados,
+    cambiar_password, contar_conversations_activas_por_asesor, RESULTADOS_CERRADOS, listar_leads_agendados,
     listar_leads_esperando_asesor, listar_leads_pipeline, COLUMNAS_ORDEN_PIPELINE,
     listar_conversaciones_activas, obtener_contact_detalle, obtener_conversation_detalle, listar_eventos_de_conversation,
     listar_conversaciones_de_contact, resolver_opportunity_operable, resolver_conversation_operable,
@@ -915,13 +915,13 @@ def _resumen_venta(lineas: list[dict]) -> dict:
     }
 
 
-async def _adjuntar_resumen_ventas(leads: list[dict]) -> list[dict]:
+async def _adjuntar_resumen_ventas(leads: list[dict], negocio_id: str) -> list[dict]:
     """Sobreescribe producto_vendido/marca_venta/proveedor_venta/precio_venta
     de cada lead con el resumen de sus líneas de venta (una consulta para
     todos los leads, no una por fila) — para que la tabla/exportación, que
     ya leen esos 4 campos, muestren el cierre real sin cambiar su código."""
     telefonos = [l["telefono"] for l in leads]
-    lineas_por_lead = await listar_lineas_venta_de_muchos(telefonos)
+    lineas_por_lead = await listar_lineas_venta_de_muchos(telefonos, negocio_id)
     for lead in leads:
         lead.update(_resumen_venta(lineas_por_lead.get(lead["telefono"], [])))
     return leads
@@ -1590,7 +1590,7 @@ async def _renderizar_rail_estados(usuario: dict, datos: dict, estado_filtro: st
             # Sin filtro de estado: se muestra la carga activa total de cada
             # asesor — una sola consulta para todo el equipo, no una por
             # asesor (ver contar_leads_activos_por_asesor).
-            conteos_carga = await contar_leads_activos_por_asesor([a["username"] for a in asesores])
+            conteos_carga = await contar_conversations_activas_por_asesor(usuario["negocio_id"], [a["username"] for a in asesores])
             for a in asesores:
                 carga = conteos_carga.get(a["username"], 0)
                 filas_equipo.append(_item_equipo(a["nombre"], a["username"], carga, asesor_filtro == a["username"]))
@@ -2249,7 +2249,8 @@ async def metricas(request: Request, usuario: dict = Depends(servicio_identidad.
     # server-side con su propio username.
     vision_total = usuario["rol"] in ROLES_CON_VISION_TOTAL
     leads = await _adjuntar_resumen_ventas(
-        await listar_leads(usuario["negocio_id"], asesor_asignado=None if vision_total else usuario["username"])
+        await listar_leads(usuario["negocio_id"], asesor_asignado=None if vision_total else usuario["username"]),
+        usuario["negocio_id"],
     )
     panel = await _contenido_metricas(leads, mostrar_derivados=vision_total, mostrar_exportar=vision_total)
     cuerpo = f"""<div class="shell d-flex"><div class="main-pane flex-grow-1 p-4">{panel}</div></div>"""
@@ -2969,7 +2970,7 @@ async def exportar_metricas_csv(usuario: dict = Depends(servicio_identidad.requi
     import csv
     import io
 
-    leads = await _adjuntar_resumen_ventas(await listar_leads(usuario["negocio_id"]))
+    leads = await _adjuntar_resumen_ventas(await listar_leads(usuario["negocio_id"]), usuario["negocio_id"])
     buffer = io.StringIO()
     escritor = csv.writer(buffer)
     escritor.writerow(COLUMNAS_EXPORTACION)
@@ -2989,7 +2990,7 @@ async def exportar_metricas_xlsx(usuario: dict = Depends(servicio_identidad.requ
     from openpyxl import Workbook
     from openpyxl.styles import Font
 
-    leads = await _adjuntar_resumen_ventas(await listar_leads(usuario["negocio_id"]))
+    leads = await _adjuntar_resumen_ventas(await listar_leads(usuario["negocio_id"]), usuario["negocio_id"])
     filas = _filas_exportacion(leads)
     libro = Workbook()
     hoja = libro.active
@@ -6019,7 +6020,7 @@ async def gestionar_campanas(request: Request, usuario: dict = Depends(servicio_
     # admin-only del lado del servidor, no solo ocultas acá.
     puede_escribir = usuario["rol"] == "admin"
     campanas = await listar_campanas(usuario["negocio_id"])
-    conteos = {c["campana"]: c for c in await contar_leads_por_campana()}
+    conteos = {c["campana"]: c for c in await contar_opportunities_por_campana(usuario["negocio_id"])}
 
     banner_html = ""
     if creada:
@@ -6454,7 +6455,7 @@ async def toggle_campana(campana_id: int, usuario: dict = Depends(servicio_ident
 @router.post("/campanas/{campana_id}/eliminar")
 async def eliminar_campana_ruta(campana_id: int, usuario: dict = Depends(servicio_identidad.requiere_rol("admin")), _csrf: None = Depends(verificar_csrf)):
     await _verificar_ownership_campana(usuario, campana_id)
-    borrada = await eliminar_campana(campana_id)
+    borrada = await eliminar_campana(campana_id, usuario["negocio_id"])
     if not borrada:
         raise HTTPException(
             status_code=400,

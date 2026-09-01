@@ -745,6 +745,11 @@ class Conversation(Base):
         Index("ix_conversation_negocio_unidad", "negocio_id", "unidad_id"),
         Index("ix_conversation_contact_creado", "contact_id", "creado"),
         Index("ix_conversation_negocio_asesor", "negocio_id", "asesor_asignado_id"),
+        # Gate 5.6 — optimización recomendada (no bloqueante) para
+        # contar_opportunities_por_campana(); ver migración 4642f3d55e15
+        # para la nota completa sobre por qué es un índice simple, no el
+        # compuesto (negocio_id, campana_origen_id) sugerido originalmente.
+        Index("ix_conversation_campana_origen", "campana_origen_id"),
         # Gate 5.5 — hallazgo de concurrencia del checkpoint de investigación:
         # DR-4 ("nunca simultáneas") estaba declarada acá arriba pero no
         # forzada por la base — dos webhooks concurrentes para el mismo
@@ -2787,19 +2792,29 @@ async def listar_lineas_venta(telefono: str, con_metadatos: bool = False) -> lis
         ]
 
 
-async def listar_lineas_venta_de_muchos(telefonos: list[str]) -> dict[str, list[dict]]:
+async def listar_lineas_venta_de_muchos(telefonos: list[str], negocio_id: str) -> dict[str, list[dict]]:
     """Igual que listar_lineas_venta pero para varios leads a la vez — para
     pintar la tabla de leads/exportar sin hacer un query por fila (N+1).
 
     Gate 5.3: resuelve primero (Contact, Conversation activa, Opportunity
     vigente) de cada teléfono en consultas agregadas (no N+1), luego trae
     las líneas de todas esas Opportunities de una sola vez, filtrando por
-    `opportunity_id` — nunca `telefono` contra `lineas_venta`."""
+    `opportunity_id` — nunca `telefono` contra `lineas_venta`.
+
+    Gate 5.6 — corrección: resolvía `Contact` por `telefono` SIN `negocio_id`
+    — con el mismo teléfono existiendo como Contact en dos Negocios, podía
+    adjuntar producto/marca/proveedor/precio de la venta de OTRO Negocio en
+    la tabla de Métricas y sus exports (hallazgo de la investigación de Gate
+    5.6). `negocio_id` ahora es obligatorio y candado doble: en la resolución
+    de `Contact` y en el `WHERE` final de `LineaVenta` — mismo criterio ya
+    documentado en el docstring de la clase `LineaVenta`."""
     if not telefonos:
         return {}
     async with async_session() as session:
         contacts = (await session.execute(
-            select(Contact.id, Contact.telefono).where(Contact.telefono.in_(telefonos))
+            select(Contact.id, Contact.telefono).where(
+                Contact.telefono.in_(telefonos), Contact.negocio_id == negocio_id,
+            )
         )).all()
         contact_id_por_telefono = {c.telefono: c.id for c in contacts}
         if not contact_id_por_telefono:
@@ -2830,7 +2845,7 @@ async def listar_lineas_venta_de_muchos(telefonos: list[str]) -> dict[str, list[
             return {}
         query = (
             select(LineaVenta)
-            .where(LineaVenta.opportunity_id.in_(ids_opportunity))
+            .where(LineaVenta.opportunity_id.in_(ids_opportunity), LineaVenta.negocio_id == negocio_id)
             .order_by(LineaVenta.id.asc())
         )
         result = await session.execute(query)
@@ -3221,18 +3236,42 @@ async def contar_leads_activos(asesor: str) -> int:
         return sum(1 for r in resultados if r not in RESULTADOS_CERRADOS)
 
 
-async def contar_leads_activos_por_asesor(usernames: list[str]) -> dict[str, int]:
+async def contar_conversations_activas_por_asesor(
+    negocio_id: str, usernames: list[str], unidad_id: str | None = None,
+) -> dict[str, int]:
     """Igual que contar_leads_activos, pero para todo el equipo en una sola
     consulta — el sidebar (rail EQUIPO) antes llamaba a contar_leads_activos
     una vez POR asesor en un loop, o sea un viaje de ida y vuelta a la base
     de datos por cada uno; con Postgres en producción (a diferencia de
     SQLite local, que es casi instantáneo) esa latencia por consulta se
     siente en cada carga completa de página. Acá se trae todo de una vez y
-    se cuenta en Python."""
+    se cuenta en Python.
+
+    Gate 5.6 — reemplaza `contar_leads_activos_por_asesor()`: la versión
+    anterior filtraba `Lead.asesor_asignado IN (usernames)` SIN `negocio_id`
+    — con el mismo username de asesor existiendo en dos Negocios, la carga de
+    trabajo de uno se sumaba a la del otro (hallazgo de la investigación de
+    Gate 5.6). La asignación real vive en `Conversation.asesor_asignado_id`
+    desde Gate 5.4/5.5 (`intentar_asignar_conversation`); "activo" sigue
+    siendo el mismo criterio que antes — la Opportunity de esa Conversation
+    todavía no llegó a un resultado cerrado (`RESULTADOS_CERRADOS`). Usa el
+    índice ya existente `ix_conversation_negocio_asesor`, sin migración
+    nueva. Asume, como el resto del modelo (Diseño Técnico Gate 5.3 §6), que
+    cada Conversation tiene a lo sumo 1 Opportunity vigente — una Conversation
+    sin ninguna Opportunity todavía simplemente no cuenta como carga activa."""
     if not usernames:
         return {}
     async with async_session() as session:
-        query = select(Lead.asesor_asignado, Lead.resultado).where(Lead.asesor_asignado.in_(usernames))
+        query = (
+            select(Conversation.asesor_asignado_id, Opportunity.resultado)
+            .join(Opportunity, Opportunity.conversation_id == Conversation.id)
+            .where(
+                Conversation.negocio_id == negocio_id,
+                Conversation.asesor_asignado_id.in_(usernames),
+            )
+        )
+        if unidad_id is not None:
+            query = query.where(Conversation.unidad_id == unidad_id)
         result = await session.execute(query)
         conteos = {u: 0 for u in usernames}
         for asesor, resultado in result.all():
@@ -3513,37 +3552,90 @@ async def actualizar_campana(campana_id: int, **campos):
         await session.commit()
 
 
-async def eliminar_campana(campana_id: int) -> bool:
-    """Borra una campaña por completo — SOLO si nunca tuvo ningún lead
-    atribuido (así no se pierde historial de conversión real). Si ya tiene
-    al menos un lead, no la borra y retorna False; el camino normal para una
-    campaña con leads es desactivarla (ver actualizar_campana activa=False),
-    no borrarla."""
+async def eliminar_campana(campana_id: int, negocio_id: str) -> bool:
+    """Borra una campaña por completo — SOLO si nunca tuvo ninguna
+    Conversation atribuida (así no se pierde historial de conversión real).
+    Si ya tiene al menos una, no la borra y retorna False; el camino normal
+    para una campaña con actividad es desactivarla (ver actualizar_campana
+    activa=False), no borrarla.
+
+    Gate 5.6 — corrección: contaba `Lead.campana_origen == campana.nombre`
+    (match por nombre, global, sin `negocio_id`) — dos Negocios con una
+    campaña homónima bloqueaban/permitían el borrado según la actividad del
+    OTRO Negocio (hallazgo de la investigación de Gate 5.6). Ahora cuenta
+    `Conversation.campana_origen_id` (FK real, ya resuelto por Negocio vía la
+    propia Campana) y valida `negocio_id` explícitamente antes de tocar la
+    fila — mismo criterio de defensa en profundidad de Gate 5.5, aunque el
+    router ya valida ownership antes de llamar acá (`_verificar_ownership_
+    campana`)."""
     async with async_session() as session:
         campana = await session.get(Campana, campana_id)
-        if campana is None:
+        if campana is None or campana.negocio_id != negocio_id:
             return False
-        query_conteo = select(func.count()).select_from(Lead).where(Lead.campana_origen == campana.nombre)
-        total_leads = (await session.execute(query_conteo)).scalar_one()
-        if total_leads > 0:
+        query_conteo = select(func.count()).select_from(Conversation).where(
+            Conversation.campana_origen_id == campana_id
+        )
+        total_conversations = (await session.execute(query_conteo)).scalar_one()
+        if total_conversations > 0:
             return False
         await session.delete(campana)
         await session.commit()
         return True
 
 
-async def contar_leads_por_campana() -> list[dict]:
-    """Cuenta leads y ventas por campaña de origen — para medir conversión por campaña."""
+async def contar_opportunities_por_campana(negocio_id: str, unidad_id: str | None = None) -> list[dict]:
+    """Cuenta Conversation/Opportunity por campaña de origen, scoped por
+    Negocio (y opcionalmente Unidad) — para medir conversión por campaña.
+
+    Gate 5.6 — reemplaza `contar_leads_por_campana()`: la versión anterior
+    agrupaba por `Lead.campana_origen` (string legacy, first-touch inmutable)
+    SIN `negocio_id` — con dos Negocios usando una campaña de nombre igual,
+    los conteos de leads/ventas se mezclaban entre ambos (hallazgo confirmado
+    de forma independiente por los 4 agentes de la investigación de Gate
+    5.6). Esta versión cuenta sobre `Conversation.campana_origen_id` (FK real
+    a Campana, poblada desde Gate 5.3) en vez de reconstruir el mismo tipo de
+    bug sobre el modelo legacy.
+
+    Dos consultas scoped (campañas del Negocio, luego conteos agregados por
+    campana_origen_id) en vez de un JOIN directo Campana→Conversation→
+    Opportunity: un LEFT JOIN de 3 tablas infla `total` si alguna vez una
+    Conversation llega a tener más de una Opportunity (la cardinalidad hoy es
+    0..1 por diseño, Diseño Técnico Gate 5.3 §6, pero esta forma es correcta
+    sin depender de esa suposición). Sigue sin ser N+1: son 3 queries fijas,
+    sin importar cuántas campañas o conversations existan.
+
+    No filtra por `Conversation.estado` — cuenta TODA conversación histórica
+    atribuida a la campaña, igual que el conteo legacy (que tampoco filtraba
+    por estado del Lead). Filtrar solo "activas" sería una regresión
+    silenciosa de comportamiento, no una corrección."""
     async with async_session() as session:
-        query = select(
-            Lead.campana_origen,
-            func.count().label("total"),
-            func.sum(case((Lead.resultado == "vendido", 1), else_=0)).label("vendidos"),
-        ).where(Lead.campana_origen.is_not(None)).group_by(Lead.campana_origen)
-        result = await session.execute(query)
+        query_campanas = select(Campana.id, Campana.nombre).where(Campana.negocio_id == negocio_id)
+        if unidad_id is not None:
+            query_campanas = query_campanas.where(Campana.unidad_id == unidad_id)
+        campanas = (await session.execute(query_campanas)).all()
+        if not campanas:
+            return []
+        ids_campana = [c.id for c in campanas]
+
+        query_total = (
+            select(Conversation.campana_origen_id, func.count(Conversation.id))
+            .where(Conversation.campana_origen_id.in_(ids_campana))
+            .group_by(Conversation.campana_origen_id)
+        )
+        totales = dict((await session.execute(query_total)).all())
+
+        query_vendidos = (
+            select(Conversation.campana_origen_id, func.count(func.distinct(Conversation.id)))
+            .select_from(Conversation)
+            .join(Opportunity, Opportunity.conversation_id == Conversation.id)
+            .where(Conversation.campana_origen_id.in_(ids_campana), Opportunity.resultado == "vendido")
+            .group_by(Conversation.campana_origen_id)
+        )
+        vendidos = dict((await session.execute(query_vendidos)).all())
+
         return [
-            {"campana": fila.campana_origen, "total": fila.total, "vendidos": fila.vendidos or 0}
-            for fila in result.all()
+            {"campana": c.nombre, "total": totales.get(c.id, 0), "vendidos": vendidos.get(c.id, 0)}
+            for c in campanas
         ]
 
 
