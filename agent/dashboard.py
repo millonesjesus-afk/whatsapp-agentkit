@@ -35,6 +35,7 @@ from datetime import datetime, timedelta
 from urllib.parse import urlencode
 from fastapi import APIRouter, Depends, HTTPException, Form, Request, UploadFile, File, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse, Response, FileResponse
+from sqlalchemy.exc import IntegrityError
 
 from agent.tiempo_real import gestor_conexiones
 from agent.rate_limit import limitador_login, bloqueo_login, ip_cliente
@@ -6673,7 +6674,16 @@ async def gestionar_canales_whatsapp(request: Request, usuario: dict = Depends(s
                 }} else if (datos.event === 'ERROR') {{
                     mostrarEstado('Meta reportó un error: ' + ((datos.data && datos.data.error_message) || 'desconocido'), 'danger');
                 }} else if (datos.event === 'FINISH' && datos.data) {{
+                    // Cloud API estándar — el número es nuevo, hay que registrarlo.
                     datosSignup = datos.data;
+                    datosSignup.es_coexistencia = false;
+                }} else if (datos.event === 'FINISH_WHATSAPP_BUSINESS_APP_ONBOARDING' && datos.data) {{
+                    // Gate 5.7 — Coexistencia: el número ya está en la app de
+                    // WhatsApp Business del celular y ya está registrado en
+                    // Cloud API. Es la señal que Meta ya nos da — nunca se
+                    // infiere del lado del servidor.
+                    datosSignup = datos.data;
+                    datosSignup.es_coexistencia = true;
                 }}
             }});
 
@@ -6705,6 +6715,7 @@ async def gestionar_canales_whatsapp(request: Request, usuario: dict = Depends(s
                                 phone_number_id: datosSignup.phone_number_id || '',
                                 pin: pinInput.value,
                                 nombre: nombreInput.value.trim(),
+                                es_coexistencia: datosSignup.es_coexistencia || false,
                             }}),
                         }}).then(function(r) {{
                             return r.json().then(function(j) {{ return {{ status: r.status, j: j }}; }});
@@ -6909,13 +6920,26 @@ async def conectar_whatsapp_embedded_signup(
     completar Embedded Signup ("Conectar WhatsApp") y termina de registrar
     el número para Cloud API — reemplaza, para el caso de Coexistencia, el
     copiar/pegar manual del formulario "Nuevo canal" de abajo. Ver plan en
-    memoria del proyecto: project_coexistencia_embedded_signup_requerido."""
+    memoria del proyecto: project_coexistencia_embedded_signup_requerido.
+
+    Gate 5.7 — cierra el gap confirmado por la Auditoría Histórica de
+    Coexistencia: hasta acá, el callback trataba TODO como Cloud API
+    estándar (llamaba `/register` siempre), sin distinguir el caso real de
+    Coexistencia (número que ya está en la app de WhatsApp Business del
+    celular, ya registrado). `es_coexistencia` viaja desde el frontend,
+    resuelto por el propio evento que Meta entrega
+    (`FINISH_WHATSAPP_BUSINESS_APP_ONBOARDING` vs `FINISH`) — nunca inferido
+    acá. Alcance mínimo aprobado (Diseño Técnico Gate 5.7 §10): se cumple el
+    protocolo de Meta (sincronización de contactos/historial solicitada,
+    dentro de la ventana de 24h) sin persistir ese contenido en
+    Contact/Conversation/Mensaje — esa importación queda fuera de este Gate."""
     datos = await request.json()
     code = (datos.get("code") or "").strip()
     waba_id = (datos.get("waba_id") or "").strip()
     phone_number_id = (datos.get("phone_number_id") or "").strip()
     pin = (datos.get("pin") or "").strip()
     nombre = (datos.get("nombre") or "").strip()
+    es_coexistencia = bool(datos.get("es_coexistencia"))
 
     if not code or not waba_id or not phone_number_id or not nombre or len(pin) != 6:
         return JSONResponse({"ok": False, "detail": "Faltan datos para completar la conexión."}, status_code=400)
@@ -6943,16 +6967,43 @@ async def conectar_whatsapp_embedded_signup(
 
     headers = {"Authorization": f"Bearer {access_token}"}
 
-    r = await post_con_reintentos(
-        f"https://graph.facebook.com/{api_version}/{phone_number_id}/register",
-        headers=headers, json={"messaging_product": "whatsapp", "pin": pin},
-    )
-    if r.status_code != 200:
-        logger.error(f"Embedded Signup: fallo al registrar el número — {r.status_code} {r.text}")
-        return JSONResponse(
-            {"ok": False, "detail": "No se pudo registrar el número en Cloud API. Verifica el PIN e intenta de nuevo."},
-            status_code=400,
+    if not es_coexistencia:
+        r = await post_con_reintentos(
+            f"https://graph.facebook.com/{api_version}/{phone_number_id}/register",
+            headers=headers, json={"messaging_product": "whatsapp", "pin": pin},
         )
+        if r.status_code != 200:
+            logger.error(f"Embedded Signup: fallo al registrar el número — {r.status_code} {r.text}")
+            return JSONResponse(
+                {"ok": False, "detail": "No se pudo registrar el número en Cloud API. Verifica el PIN e intenta de nuevo."},
+                status_code=400,
+            )
+    else:
+        # Gate 5.7 — Coexistencia: el número YA está registrado (viene de la
+        # app de WhatsApp Business del celular) — Meta indica explícitamente
+        # que hay que SALTAR /register acá, no repetirlo. En su lugar, se
+        # solicita la sincronización de contactos e historial (SMB App Data
+        # API) dentro de la ventana de 24h que exige Meta — sin esto, o el
+        # negocio debe re-onboardear. Un fallo acá no aborta la creación del
+        # canal (mismo criterio que /subscribed_apps más abajo): mejor un
+        # canal conectado sin sincronización que perder todo el trabajo ya
+        # hecho. El contenido sincronizado no se persiste en este Gate (ver
+        # docstring arriba) — la solicitud en sí es lo que exige Meta.
+        for tipo_sync in ("smb_app_state_sync", "history"):
+            r_sync = await post_con_reintentos(
+                f"https://graph.facebook.com/{api_version}/{phone_number_id}/smb_app_data",
+                headers=headers, json={"messaging_product": "whatsapp", "sync_type": tipo_sync},
+            )
+            if r_sync.status_code != 200:
+                logger.warning(
+                    f"Embedded Signup (Coexistencia): fallo al solicitar sincronización "
+                    f"'{tipo_sync}' — {r_sync.status_code} {r_sync.text}"
+                )
+            else:
+                logger.info(
+                    f"Embedded Signup (Coexistencia): sincronización '{tipo_sync}' solicitada, "
+                    f"request_id={r_sync.json().get('request_id', '')}"
+                )
 
     # Sin esto, ningún mensaje de esta WABA llegaría a nuestro /webhook — el
     # número quedaría registrado pero mudo. Si falla, no abortamos: el canal
@@ -6967,11 +7018,22 @@ async def conectar_whatsapp_embedded_signup(
 
     # Gate 5.2 (corrección H3): mismo criterio — negocio_id del admin que
     # completó el flujo de Embedded Signup.
-    await crear_canal_whatsapp(
-        nombre=nombre, phone_number_id=phone_number_id,
-        access_token=access_token, app_secret=app_secret, waba_id=waba_id,
-        negocio_id=usuario["negocio_id"],
-    )
+    try:
+        await crear_canal_whatsapp(
+            nombre=nombre, phone_number_id=phone_number_id,
+            access_token=access_token, app_secret=app_secret, waba_id=waba_id,
+            negocio_id=usuario["negocio_id"],
+        )
+    except IntegrityError:
+        # Gate 5.7 — idempotencia: doble click, o el número ya fue conectado
+        # antes (a mano o por un intento previo de Embedded Signup).
+        # phone_number_id es unique — la fila ya existe, no hay nada que
+        # romper, solo informarlo con claridad en vez de un 500 genérico.
+        logger.warning(f"Embedded Signup: intento de crear un canal duplicado para phone_number_id={phone_number_id}")
+        return JSONResponse(
+            {"ok": False, "detail": "Este número ya está conectado como canal — revisa la lista de canales."},
+            status_code=409,
+        )
     return JSONResponse({"ok": True})
 
 
