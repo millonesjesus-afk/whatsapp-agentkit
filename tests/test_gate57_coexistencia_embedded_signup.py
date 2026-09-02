@@ -13,6 +13,7 @@
 # Datos sintéticos únicamente.
 
 import asyncio
+import logging
 
 import pytest
 
@@ -42,10 +43,22 @@ async def _negocio(codigo: str):
     return await mem.crear_negocio(f"Negocio {codigo}", codigo)
 
 
-def _mock_http(monkeypatch, llamadas: list, respuesta_register=None, respuesta_sync=None):
+def _mock_http(monkeypatch, llamadas: list, respuesta_register=None, respuesta_sync=None,
+                numeros_waba=None, respuesta_phone_numbers=None):
     """Registra en `llamadas` cada (url, json_enviado) de post_con_reintentos.
-    Permite forzar respuestas específicas para /register y /smb_app_data."""
+    Permite forzar respuestas específicas para /register y /smb_app_data.
+
+    `numeros_waba`: lista de dicts que simula el `data` de
+    `GET /{waba_id}/phone_numbers` (Coexistence Gap Analysis: resolución
+    server-side de phone_number_id) — default 1 número sintético.
+    `respuesta_phone_numbers`: para forzar una respuesta completa (error,
+    vacía, etc.) en vez de construirla desde `numeros_waba`."""
+    if numeros_waba is None:
+        numeros_waba = [{"id": "90000000000"}]
+
     async def _get_fake(url, **kwargs):
+        if "/phone_numbers" in url:
+            return respuesta_phone_numbers or _RespuestaFalsa(200, {"data": numeros_waba})
         return _RespuestaFalsa(200, {"access_token": "token-falso-de-meta"})
 
     async def _post_fake(url, **kwargs):
@@ -125,7 +138,7 @@ async def test_sin_es_coexistencia_en_el_payload_se_comporta_como_estandar(monke
 async def test_coexistencia_no_llama_register_llama_smb_app_data_dos_veces(monkeypatch):
     negocio = await _negocio("g57-c")
     llamadas = []
-    _mock_http(monkeypatch, llamadas)
+    _mock_http(monkeypatch, llamadas, numeros_waba=[{"id": "80000000003"}])
 
     resultado = await dashboard.conectar_whatsapp_embedded_signup(
         request=_RequestFalso(_payload_base("80000000003", es_coexistencia=True)),
@@ -145,7 +158,8 @@ async def test_coexistencia_no_llama_register_llama_smb_app_data_dos_veces(monke
 async def test_coexistencia_sync_fallido_no_aborta_creacion_del_canal(monkeypatch):
     negocio = await _negocio("g57-d")
     llamadas = []
-    _mock_http(monkeypatch, llamadas, respuesta_sync=_RespuestaFalsa(400, texto="rechazado"))
+    _mock_http(monkeypatch, llamadas, respuesta_sync=_RespuestaFalsa(400, texto="rechazado"),
+               numeros_waba=[{"id": "80000000004"}])
 
     resultado = await dashboard.conectar_whatsapp_embedded_signup(
         request=_RequestFalso(_payload_base("80000000004", es_coexistencia=True)),
@@ -167,6 +181,8 @@ async def test_coexistencia_state_sync_ok_history_2593109_ambas_se_intentan_igua
     llamadas = []
 
     async def _get_fake(url, **kwargs):
+        if "/phone_numbers" in url:
+            return _RespuestaFalsa(200, {"data": [{"id": "80000000009"}]})
         return _RespuestaFalsa(200, {"access_token": "token-falso-de-meta"})
 
     async def _post_fake(url, **kwargs):
@@ -204,6 +220,7 @@ async def test_coexistencia_rechazo_historial_2593109_no_rompe_el_flujo(monkeypa
     _mock_http(
         monkeypatch, llamadas,
         respuesta_sync=_RespuestaFalsa(400, payload={"error": {"code": 2593109}}, texto='{"error":{"code":2593109}}'),
+        numeros_waba=[{"id": "80000000005"}],
     )
 
     resultado = await dashboard.conectar_whatsapp_embedded_signup(
@@ -243,7 +260,7 @@ async def test_canal_duplicado_devuelve_409_no_500(monkeypatch):
 async def test_doble_ejecucion_coexistencia_tampoco_duplica_el_canal(monkeypatch):
     negocio = await _negocio("g57-g")
     llamadas = []
-    _mock_http(monkeypatch, llamadas)
+    _mock_http(monkeypatch, llamadas, numeros_waba=[{"id": "80000000007"}])
     payload = _payload_base("80000000007", es_coexistencia=True)
 
     primero = await dashboard.conectar_whatsapp_embedded_signup(
@@ -271,7 +288,7 @@ async def test_doble_ejecucion_concurrente_real_nunca_duplica_el_canal(monkeypat
     producir dos filas de CanalWhatsApp ni un estado a medio escribir."""
     negocio = await _negocio("g57-h")
     llamadas = []
-    _mock_http(monkeypatch, llamadas)
+    _mock_http(monkeypatch, llamadas, numeros_waba=[{"id": "80000000008"}])
     payload = _payload_base("80000000008", es_coexistencia=True)
 
     resultados = await asyncio.gather(
@@ -295,3 +312,224 @@ async def test_doble_ejecucion_concurrente_real_nunca_duplica_el_canal(monkeypat
     canales = await mem.listar_canales_whatsapp(negocio_id=negocio["id"])
     coincidencias = [c for c in canales if c["phone_number_id"] == "80000000008"]
     assert len(coincidencias) == 1  # nunca dos filas, ni un estado a medio escribir
+
+
+# ---------------------------------------------------------------------------
+# Coexistence Gap Analysis — resolución server-side de phone_number_id desde
+# waba_id (Meta no lo entrega en FINISH_WHATSAPP_BUSINESS_APP_ONBOARDING).
+# ---------------------------------------------------------------------------
+
+async def test_coexistencia_sin_phone_number_id_en_payload_se_resuelve_igual(monkeypatch):
+    """Caso real: el frontend nunca tiene phone_number_id para Coexistencia
+    (Meta no lo manda en el evento) — el payload le llega vacío. No debe
+    devolver 400 por 'faltan datos'; se resuelve server-side."""
+    negocio = await _negocio("g57-j")
+    llamadas = []
+    _mock_http(monkeypatch, llamadas, numeros_waba=[{"id": "80000000010"}])
+    payload = _payload_base("", es_coexistencia=True)
+
+    resultado = await dashboard.conectar_whatsapp_embedded_signup(
+        request=_RequestFalso(payload), usuario={"negocio_id": negocio["id"]}, _csrf=None,
+    )
+
+    assert resultado.status_code == 200
+    canales = await mem.listar_canales_whatsapp(negocio_id=negocio["id"])
+    assert any(c["phone_number_id"] == "80000000010" for c in canales)
+
+
+async def test_coexistencia_ignora_phone_number_id_del_payload_si_viene(monkeypatch):
+    """Nunca confiar en un phone_number_id que el cliente mande para
+    Coexistencia, aunque venga (cliente viejo, o manipulado): el servidor
+    siempre resuelve el suyo propio vía Graph API y ese es el que se usa."""
+    negocio = await _negocio("g57-k")
+    llamadas = []
+    _mock_http(monkeypatch, llamadas, numeros_waba=[{"id": "80000000011"}])
+    payload = _payload_base("99999999999", es_coexistencia=True)  # valor falso/ajeno
+
+    resultado = await dashboard.conectar_whatsapp_embedded_signup(
+        request=_RequestFalso(payload), usuario={"negocio_id": negocio["id"]}, _csrf=None,
+    )
+
+    assert resultado.status_code == 200
+    canales = await mem.listar_canales_whatsapp(negocio_id=negocio["id"])
+    assert any(c["phone_number_id"] == "80000000011" for c in canales)
+    assert not any(c["phone_number_id"] == "99999999999" for c in canales)
+
+
+async def test_coexistencia_waba_sin_numeros_rechazo_controlado(monkeypatch):
+    negocio = await _negocio("g57-l")
+    llamadas = []
+    _mock_http(monkeypatch, llamadas, numeros_waba=[])
+    payload = _payload_base("", es_coexistencia=True)
+
+    resultado = await dashboard.conectar_whatsapp_embedded_signup(
+        request=_RequestFalso(payload), usuario={"negocio_id": negocio["id"]}, _csrf=None,
+    )
+
+    assert resultado.status_code == 400
+    canales = await mem.listar_canales_whatsapp(negocio_id=negocio["id"])
+    assert canales == []
+
+
+async def test_coexistencia_waba_con_varios_numeros_no_elige_arbitrariamente(monkeypatch):
+    negocio = await _negocio("g57-m")
+    llamadas = []
+    _mock_http(monkeypatch, llamadas, numeros_waba=[{"id": "80000000012"}, {"id": "80000000013"}])
+    payload = _payload_base("", es_coexistencia=True)
+
+    resultado = await dashboard.conectar_whatsapp_embedded_signup(
+        request=_RequestFalso(payload), usuario={"negocio_id": negocio["id"]}, _csrf=None,
+    )
+
+    assert resultado.status_code == 400
+    canales = await mem.listar_canales_whatsapp(negocio_id=negocio["id"])
+    assert canales == []
+
+
+async def test_coexistencia_error_graph_api_al_resolver_no_crea_canal_incompleto(monkeypatch):
+    negocio = await _negocio("g57-n")
+    llamadas = []
+    _mock_http(
+        monkeypatch, llamadas,
+        respuesta_phone_numbers=_RespuestaFalsa(400, texto="Graph API caída"),
+    )
+    payload = _payload_base("", es_coexistencia=True)
+
+    resultado = await dashboard.conectar_whatsapp_embedded_signup(
+        request=_RequestFalso(payload), usuario={"negocio_id": negocio["id"]}, _csrf=None,
+    )
+
+    assert resultado.status_code == 400
+    canales = await mem.listar_canales_whatsapp(negocio_id=negocio["id"])
+    assert canales == []
+
+
+# ---------------------------------------------------------------------------
+# Hardening de logging (auditoría de la implementación, hallazgo §6) — nunca
+# volcar r.text crudo de una respuesta de error de Graph API al logger;
+# allowlist de campos seguros (status/type/code/message/fbtrace_id), y
+# truncamiento seguro cuando el cuerpo no es JSON reconocible.
+# ---------------------------------------------------------------------------
+
+async def test_log_error_meta_conserva_informacion_util_para_diagnostico(monkeypatch, caplog):
+    negocio = await _negocio("g57-o")
+    llamadas = []
+    _mock_http(
+        monkeypatch, llamadas,
+        respuesta_phone_numbers=_RespuestaFalsa(
+            400,
+            payload={"error": {"type": "OAuthException", "code": 190,
+                                "message": "Invalid OAuth access token", "fbtrace_id": "AbCdEfGhIjK"}},
+        ),
+    )
+    payload = _payload_base("", es_coexistencia=True)
+
+    with caplog.at_level(logging.ERROR):
+        resultado = await dashboard.conectar_whatsapp_embedded_signup(
+            request=_RequestFalso(payload), usuario={"negocio_id": negocio["id"]}, _csrf=None,
+        )
+
+    assert resultado.status_code == 400
+    assert "400" in caplog.text
+    assert "OAuthException" in caplog.text
+    assert "190" in caplog.text
+    assert "Invalid OAuth access token" in caplog.text
+    assert "AbCdEfGhIjK" in caplog.text
+
+
+async def test_log_error_meta_nunca_expone_access_token_authorization_ni_code(monkeypatch, caplog):
+    """Dispara el error en el punto de resolución de phone_number_id y
+    confirma que ninguno de los valores sensibles conocidos de este flujo
+    — el access_token ya obtenido, el header Authorization, el code de
+    intercambio ni el app_secret — aparece nunca en el log."""
+    negocio = await _negocio("g57-p")
+    llamadas = []
+    _mock_http(
+        monkeypatch, llamadas,
+        respuesta_phone_numbers=_RespuestaFalsa(
+            400, payload={"error": {"type": "OAuthException", "code": 190, "message": "token inválido"}},
+        ),
+    )
+    payload = _payload_base("", es_coexistencia=True)
+    payload["code"] = "code-de-meta-sintetico-secreto"
+
+    with caplog.at_level(logging.ERROR):
+        resultado = await dashboard.conectar_whatsapp_embedded_signup(
+            request=_RequestFalso(payload), usuario={"negocio_id": negocio["id"]}, _csrf=None,
+        )
+
+    assert resultado.status_code == 400
+    assert "token-falso-de-meta" not in caplog.text  # el access_token obtenido
+    assert "Authorization" not in caplog.text
+    assert "Bearer" not in caplog.text
+    assert "code-de-meta-sintetico-secreto" not in caplog.text  # el code de intercambio
+    assert "app-secret-sintetico" not in caplog.text  # META_APP_SECRET
+
+
+async def test_log_error_intercambio_code_tampoco_expone_secretos(monkeypatch, caplog):
+    """Mismo chequeo, disparando el fallo en el punto de intercambio de code
+    (antes de obtener access_token), con un cuerpo de error NO-JSON para
+    ejercitar la ruta de truncamiento — nunca debe filtrarse el app_secret
+    ni el code de la request, sin importar qué devuelva Meta en el cuerpo."""
+    negocio = await _negocio("g57-q")
+
+    async def _get_fake(url, **kwargs):
+        return _RespuestaFalsa(400, texto="Bad Request: the authorization code has expired or is invalid.")
+
+    monkeypatch.setattr(dashboard, "get_con_reintentos", _get_fake)
+    payload = _payload_base("", es_coexistencia=True)
+    payload["code"] = "code-de-meta-sintetico-secreto"
+
+    with caplog.at_level(logging.ERROR):
+        resultado = await dashboard.conectar_whatsapp_embedded_signup(
+            request=_RequestFalso(payload), usuario={"negocio_id": negocio["id"]}, _csrf=None,
+        )
+
+    assert resultado.status_code == 400
+    assert "code-de-meta-sintetico-secreto" not in caplog.text
+    assert "app-secret-sintetico" not in caplog.text
+    assert "Authorization" not in caplog.text
+    assert "Bearer" not in caplog.text
+
+
+async def test_log_error_no_json_se_trunca_a_un_tamano_razonable(monkeypatch, caplog):
+    negocio = await _negocio("g57-r")
+    texto_enorme = "x" * 5000
+
+    async def _get_fake(url, **kwargs):
+        if "/phone_numbers" in url:
+            return _RespuestaFalsa(400, texto=texto_enorme)
+        return _RespuestaFalsa(200, {"access_token": "token-falso-de-meta"})
+
+    monkeypatch.setattr(dashboard, "get_con_reintentos", _get_fake)
+    payload = _payload_base("", es_coexistencia=True)
+
+    with caplog.at_level(logging.ERROR):
+        resultado = await dashboard.conectar_whatsapp_embedded_signup(
+            request=_RequestFalso(payload), usuario={"negocio_id": negocio["id"]}, _csrf=None,
+        )
+
+    assert resultado.status_code == 400
+    assert texto_enorme not in caplog.text  # nunca el cuerpo completo sin límite
+    mensajes = [r.getMessage() for r in caplog.records if "resolver phone_number_id" in r.getMessage()]
+    assert len(mensajes) == 1
+    assert len(mensajes[0]) < len(texto_enorme)
+    assert dashboard._LIMITE_TRUNCADO_LOG_META == 300
+
+
+async def test_resolucion_phone_number_id_comportamiento_sin_cambios_tras_hardening(monkeypatch):
+    """Confirma explícitamente, más allá de la suite ya existente, que el
+    hardening de logging no alteró el comportamiento funcional de
+    _resolver_phone_number_id_desde_waba en el camino exitoso."""
+    async def _get_fake(url, **kwargs):
+        assert "/phone_numbers" in url
+        return _RespuestaFalsa(200, {"data": [{"id": "80000000014"}]})
+
+    monkeypatch.setattr(dashboard, "get_con_reintentos", _get_fake)
+
+    resultado, error = await dashboard._resolver_phone_number_id_desde_waba(
+        "waba-x", {"Authorization": "Bearer x"}, "v21.0",
+    )
+
+    assert resultado == "80000000014"
+    assert error is None

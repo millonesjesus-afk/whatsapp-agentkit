@@ -6732,7 +6732,11 @@ async def gestionar_canales_whatsapp(request: Request, usuario: dict = Depends(s
                         config_id: configId,
                         response_type: 'code',
                         override_default_response_type: true,
-                        extras: {{ setup: {{}} }},
+                        extras: {{
+                            setup: {{}},
+                            featureType: 'whatsapp_business_app_onboarding',
+                            sessionInfoVersion: '3',
+                        }},
                     }});
                 }});
             }}
@@ -6910,6 +6914,72 @@ async def crear_canal_whatsapp_nuevo(
     return RedirectResponse(url="/dashboard/canales-whatsapp", status_code=303)
 
 
+_LIMITE_TRUNCADO_LOG_META = 300
+
+
+def _resumen_seguro_error_meta(r) -> str:
+    """Hardening de logging (auditoría Coexistence Gap Analysis, hallazgo
+    §6): nunca volcar `r.text` completo de una respuesta de error de Graph
+    API al logger — podría en teoría reflejar datos sensibles de la
+    request. Allowlist, no blocklist: si el cuerpo es JSON con forma de
+    error de Meta, solo se toman los campos documentados
+    (`type`/`code`/`message`/`fbtrace_id`) — nada fuera de esa lista sale al
+    log jamás, así que `access_token`, `Authorization` o `code` no pueden
+    aparecer aunque el cuerpo los contuviera. Si no es JSON o no tiene esa
+    forma, se cae a una representación truncada del texto (nunca sin
+    límite) — mismo criterio que pidió el usuario para ese caso."""
+    try:
+        cuerpo = r.json()
+    except Exception:
+        cuerpo = None
+
+    if isinstance(cuerpo, dict) and isinstance(cuerpo.get("error"), dict):
+        error = cuerpo["error"]
+        campos = {
+            campo: error[campo]
+            for campo in ("type", "code", "message", "fbtrace_id")
+            if campo in error
+        }
+        return f"status={r.status_code} error={campos}"
+
+    texto = (r.text or "")[:_LIMITE_TRUNCADO_LOG_META]
+    return f"status={r.status_code} body(truncado a {_LIMITE_TRUNCADO_LOG_META}c)={texto!r}"
+
+
+async def _resolver_phone_number_id_desde_waba(waba_id: str, headers: dict, api_version: str) -> tuple[str | None, str | None]:
+    """Corrección de gap confirmado (Coexistence Gap Analysis): el evento
+    `FINISH_WHATSAPP_BUSINESS_APP_ONBOARDING` de Meta solo entrega `waba_id`
+    en su payload — a diferencia de `FINISH` (Cloud API estándar), NUNCA
+    trae `phone_number_id`, confirmado contra la documentación oficial de
+    Meta (`.../embedded-signup/onboarding-business-app-users/`). Se resuelve
+    acá vía `GET /{waba_id}/phone_numbers` con el mismo token del intercambio
+    de `code` — ese token ya demuestra tener alcance a nivel de esa WABA (el
+    mismo se usa para `/{waba_id}/subscribed_apps` más abajo, ya en
+    producción).
+
+    Devuelve `(phone_number_id, None)` en éxito, o `(None, detalle_error)`
+    si no se puede resolver de forma inequívoca. Fail-closed deliberado: 0
+    números o más de uno son ambos errores — nunca se elige un número al
+    azar entre varios."""
+    r = await get_con_reintentos(
+        f"https://graph.facebook.com/{api_version}/{waba_id}/phone_numbers",
+        headers=headers,
+    )
+    if r.status_code != 200:
+        logger.error(f"Embedded Signup (Coexistencia): fallo al resolver phone_number_id desde waba_id={waba_id} — {_resumen_seguro_error_meta(r)}")
+        return None, "No se pudo obtener el número de teléfono desde Meta. Intenta de nuevo."
+    numeros = r.json().get("data", [])
+    if len(numeros) == 0:
+        return None, "La cuenta de WhatsApp Business no tiene ningún número de teléfono asociado."
+    if len(numeros) > 1:
+        logger.warning(f"Embedded Signup (Coexistencia): waba_id={waba_id} tiene {len(numeros)} números — no se elige automáticamente.")
+        return None, "La cuenta de WhatsApp Business tiene más de un número — contacta a soporte para completar la conexión manualmente."
+    phone_number_id = (numeros[0].get("id") or "").strip()
+    if not phone_number_id:
+        return None, "Meta no devolvió un identificador de número válido."
+    return phone_number_id, None
+
+
 @router.post("/canales-whatsapp/embedded-signup/callback")
 async def conectar_whatsapp_embedded_signup(
     request: Request,
@@ -6941,7 +7011,14 @@ async def conectar_whatsapp_embedded_signup(
     nombre = (datos.get("nombre") or "").strip()
     es_coexistencia = bool(datos.get("es_coexistencia"))
 
-    if not code or not waba_id or not phone_number_id or not nombre or len(pin) != 6:
+    if not code or not waba_id or not nombre or len(pin) != 6:
+        return JSONResponse({"ok": False, "detail": "Faltan datos para completar la conexión."}, status_code=400)
+    # Coexistencia: Meta NO entrega phone_number_id en el evento
+    # FINISH_WHATSAPP_BUSINESS_APP_ONBOARDING (documentación oficial: el
+    # payload de ese evento solo trae waba_id) — se resuelve server-side más
+    # abajo. Para el flujo estándar (FINISH) sí lo entrega y sigue siendo
+    # obligatorio acá, sin cambios.
+    if not es_coexistencia and not phone_number_id:
         return JSONResponse({"ok": False, "detail": "Faltan datos para completar la conexión."}, status_code=400)
 
     app_id = os.getenv("META_APP_ID", "")
@@ -6959,7 +7036,7 @@ async def conectar_whatsapp_embedded_signup(
         params={"client_id": app_id, "client_secret": app_secret, "code": code},
     )
     if r.status_code != 200:
-        logger.error(f"Embedded Signup: fallo al intercambiar code — {r.status_code} {r.text}")
+        logger.error(f"Embedded Signup: fallo al intercambiar code — {_resumen_seguro_error_meta(r)}")
         return JSONResponse({"ok": False, "detail": "Meta rechazó el código de conexión. Intenta de nuevo."}, status_code=400)
     access_token = r.json().get("access_token", "")
     if not access_token:
@@ -6967,13 +7044,18 @@ async def conectar_whatsapp_embedded_signup(
 
     headers = {"Authorization": f"Bearer {access_token}"}
 
+    if es_coexistencia:
+        phone_number_id, error_resolucion = await _resolver_phone_number_id_desde_waba(waba_id, headers, api_version)
+        if error_resolucion:
+            return JSONResponse({"ok": False, "detail": error_resolucion}, status_code=400)
+
     if not es_coexistencia:
         r = await post_con_reintentos(
             f"https://graph.facebook.com/{api_version}/{phone_number_id}/register",
             headers=headers, json={"messaging_product": "whatsapp", "pin": pin},
         )
         if r.status_code != 200:
-            logger.error(f"Embedded Signup: fallo al registrar el número — {r.status_code} {r.text}")
+            logger.error(f"Embedded Signup: fallo al registrar el número — {_resumen_seguro_error_meta(r)}")
             return JSONResponse(
                 {"ok": False, "detail": "No se pudo registrar el número en Cloud API. Verifica el PIN e intenta de nuevo."},
                 status_code=400,
