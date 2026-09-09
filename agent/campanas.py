@@ -27,7 +27,7 @@ import urllib.parse
 
 from agent.memory import (
     listar_campanas, asignar_campana_origen, obtener_campana_por_nombre,
-    obtener_lead, actualizar_lead,
+    obtener_lead, actualizar_lead, registrar_attribution_event,
 )
 from agent.tools import obtener_producto_por_codigo, obtener_familia_producto, formatear_producto
 
@@ -148,9 +148,20 @@ async def detectar_y_asignar_campana(
         return None
     campanas = await listar_campanas(negocio_id, solo_activas=True)
     if not campanas:
+        # Attribution V2 — Fase 1: aunque no haya campañas configuradas
+        # todavía, si Meta mandó evidencia de un anuncio no se descarta en
+        # silencio — se persiste como "no resuelta" (nunca como orgánica).
+        if referral:
+            await registrar_attribution_event(telefono, "meta_ads_no_resuelto", referral=referral)
         return None
 
     texto_normalizado = _normalizar(texto_mensaje)
+    # Attribution V2 — Fase 1 (aprobación Opción B): si hubo referral de Meta
+    # Ads sin resolver, ya se registró UN evento de evidencia abajo — el
+    # bloque de texto_saludo puede seguir asignando campana_origen (esa
+    # lógica no cambia), pero no debe generar un SEGUNDO AttributionEvent
+    # mezclando la evidencia cruda de Meta con una interpretación de texto.
+    referral_sin_resolver = False
 
     # 1. Anuncios de Meta (Click-to-WhatsApp) — más específico y confiable
     if referral:
@@ -161,14 +172,28 @@ async def detectar_y_asignar_campana(
             if campana["tipo_deteccion"] == "referral_meta" and _normalizar(campana["patron"]) in fuente_meta:
                 await asignar_campana_origen(telefono, campana["nombre"])
                 logger.info(f"Campaña detectada (Meta Ads) para {telefono}: {campana['nombre']}")
+                # Attribution V2 — Fase 1: evidencia adicional, no reemplaza
+                # la asignación de campana_origen de la línea de arriba.
+                await registrar_attribution_event(telefono, "meta_ads", referral=referral, campana_nombre=campana["nombre"])
                 return campana
+        # Hubo referral de Meta Ads pero ninguna campaña configurada lo
+        # resolvió — regla crítica de Attribution V2: NUNCA se descarta como
+        # orgánico, queda registrada como evidencia sin resolver. Un solo
+        # evento por mensaje: sin nombre de campaña textual (AttributionEvent
+        # = evidencia recibida, Lead.campana_origen = lógica comercial).
+        await registrar_attribution_event(telefono, "meta_ads_no_resuelto", referral=referral)
+        referral_sin_resolver = True
 
-    # 2. Saludo pre-armado de wa.link (SMS, catálogo web, CrediChat, etc.)
+    # 2. Saludo pre-armado de wa.link (SMS, catálogo web, CrediChat, etc.) —
+    # Lead.campana_origen sigue funcionando exactamente igual que antes de
+    # Attribution V2, incluso si ya hubo un referral sin resolver arriba.
     if texto_normalizado:
         for campana in campanas:
             if campana["tipo_deteccion"] == "texto_saludo" and _normalizar(campana["patron"]) in texto_normalizado:
                 await asignar_campana_origen(telefono, campana["nombre"])
                 logger.info(f"Campaña detectada (saludo) para {telefono}: {campana['nombre']}")
+                if not referral_sin_resolver:
+                    await registrar_attribution_event(telefono, "wa_link", campana_nombre=campana["nombre"])
                 return campana
 
     return None

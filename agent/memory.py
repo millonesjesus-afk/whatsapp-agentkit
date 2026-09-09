@@ -592,6 +592,124 @@ async def listar_eventos_lead(telefono: str, limite: int | None = None) -> list[
         ]
 
 
+class AttributionEvent(Base):
+    """Attribution V2 — Fase 1 (evidencia de atribución de campañas). Append-
+    only, mismo criterio que EventoLead: nunca se actualiza ni se borra una
+    fila existente. Conserva la evidencia CRUDA que Meta entrega en
+    `messages[].referral` de un anuncio de Click-to-WhatsApp, incluso cuando
+    no logra resolverse contra ninguna campaña configurada
+    (`tipo_origen="meta_ads_no_resuelto"`) — la ausencia de resolución NUNCA
+    debe convertirse en "orgánico", que era la limitación que esta fase vino
+    a cerrar (ver memoria del proyecto, Attribution V2).
+
+    NO reemplaza `Lead.campana_origen` — esa sigue siendo la fuente que usan
+    Pipeline/Lead Detail/Ventas/CSV sin ningún cambio. Esta tabla es
+    evidencia adicional, de solo lectura para el resto del sistema en esta
+    fase (sin UI ni endpoints propios todavía)."""
+    __tablename__ = "attribution_events"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    negocio_id: Mapped[str] = mapped_column(String(36), ForeignKey("negocios.id"), nullable=False, index=True)
+    conversation_id: Mapped[str] = mapped_column(String(36), ForeignKey("conversations.id"), nullable=False, index=True)
+    lead_telefono: Mapped[str] = mapped_column(String(50), ForeignKey("leads.telefono"), nullable=False, index=True)
+    # "meta_ads" | "meta_ads_no_resuelto" | "wa_link" | "organico" | "otro"
+    tipo_origen: Mapped[str] = mapped_column(String(30))
+    # Objeto `referral` tal cual lo entrega Meta, sin procesar — resiliencia
+    # ante campos nuevos/distintos que hoy no sabemos si serán útiles.
+    referral_raw: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    source_id: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    headline: Mapped[str | None] = mapped_column(Text, nullable=True)
+    body: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # No confirmado que Meta lo entregue en este payload — se persiste si
+    # aparece, nunca se asume su presencia (ver checkpoint de diseño).
+    ctwa_clid: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    # Nombre de campaña ya resuelta (copia del match de
+    # detectar_y_asignar_campana, si lo hubo) — evidencia de qué generó ese
+    # match, no reemplaza Lead.campana_origen.
+    campana_nombre: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    first_touch: Mapped[bool] = mapped_column(Boolean, default=False)
+    creado: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+
+    __table_args__ = (
+        Index("ix_attribution_negocio_lead_creado", "negocio_id", "lead_telefono", "creado"),
+        Index("ix_attribution_negocio_tipo", "negocio_id", "tipo_origen"),
+    )
+
+
+async def registrar_attribution_event(
+    telefono: str, tipo_origen: str, referral: dict | None = None,
+    campana_nombre: str | None = None,
+) -> dict | None:
+    """Attribution V2 — Fase 1. Persiste evidencia de atribución (append-only)
+    para el hilo activo de `telefono`, sin tocar ni reemplazar
+    `Lead.campana_origen`. Mismo patrón fail-closed que
+    `registrar_evento_lead`: si todavía no existe una Conversation activa
+    para este teléfono, no inventa ninguna — retorna None (en el webhook
+    esto no debería pasar nunca, porque `resolver_conversation_activa` ya
+    corrió antes de llegar al punto donde se llama a esta función).
+
+    `first_touch` se calcula acá mismo, consultando si ya existe un evento
+    previo para este lead — así la función queda correcta aunque en el
+    futuro se la llame más de una vez para el mismo lead (multi-touch,
+    fuera de alcance de esta fase, pero sin romper el contrato del campo)."""
+    async with async_session() as session:
+        conversation = await _obtener_conversation_activa_por_telefono(session, telefono)
+        if conversation is None:
+            logger.warning(
+                f"registrar_attribution_event(): no existe una Conversation activa para "
+                f"telefono={telefono} — evento de atribución descartado."
+            )
+            return None
+        ya_existe = await session.execute(
+            select(AttributionEvent.id)
+            .where(AttributionEvent.negocio_id == conversation.negocio_id, AttributionEvent.lead_telefono == telefono)
+            .limit(1)
+        )
+        es_first_touch = ya_existe.scalar_one_or_none() is None
+        evento = AttributionEvent(
+            negocio_id=conversation.negocio_id, conversation_id=conversation.id, lead_telefono=telefono,
+            tipo_origen=tipo_origen,
+            referral_raw=referral,
+            source_id=(referral or {}).get("source_id"),
+            headline=(referral or {}).get("headline"),
+            body=(referral or {}).get("body"),
+            ctwa_clid=(referral or {}).get("ctwa_clid"),
+            campana_nombre=campana_nombre,
+            first_touch=es_first_touch,
+        )
+        session.add(evento)
+        await session.commit()
+        return {
+            "id": evento.id, "negocio_id": evento.negocio_id, "conversation_id": evento.conversation_id,
+            "lead_telefono": evento.lead_telefono, "tipo_origen": evento.tipo_origen,
+            "source_id": evento.source_id, "headline": evento.headline, "body": evento.body,
+            "ctwa_clid": evento.ctwa_clid, "campana_nombre": evento.campana_nombre,
+            "first_touch": evento.first_touch, "creado": evento.creado,
+        }
+
+
+async def listar_attribution_events(telefono: str, negocio_id: str | None = None) -> list[dict]:
+    """Del más reciente al más antiguo. `negocio_id` opcional pero
+    recomendado como candado explícito cuando quien llama ya lo tiene
+    resuelto (mismo criterio de doble candado que `listar_eventos_lead`)."""
+    async with async_session() as session:
+        query = select(AttributionEvent).where(AttributionEvent.lead_telefono == telefono)
+        if negocio_id:
+            query = query.where(AttributionEvent.negocio_id == negocio_id)
+        query = query.order_by(AttributionEvent.creado.desc())
+        result = await session.execute(query)
+        return [
+            {
+                "id": e.id, "negocio_id": e.negocio_id, "conversation_id": e.conversation_id,
+                "lead_telefono": e.lead_telefono, "tipo_origen": e.tipo_origen,
+                "referral_raw": e.referral_raw, "source_id": e.source_id, "headline": e.headline,
+                "body": e.body, "ctwa_clid": e.ctwa_clid, "campana_nombre": e.campana_nombre,
+                "first_touch": e.first_touch, "creado": e.creado,
+            }
+            for e in result.scalars().all()
+        ]
+
+
 async def intentar_avanzar_version(telefono: str, version_esperada: int) -> bool:
     """Concurrencia optimista (MAIEK_AI_PRODUCT_PATTERNS.md, Cap. 6 —
     conflicto de edición): avanza la versión del lead en +1 SOLO si sigue en
