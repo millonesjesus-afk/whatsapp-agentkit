@@ -41,7 +41,7 @@ from agent.tiempo_real import gestor_conexiones
 from agent.rate_limit import limitador_login, bloqueo_login, ip_cliente
 from agent.memory import (
     listar_leads, obtener_lead, actualizar_lead,
-    obtener_usuario, listar_asesores, crear_usuario,
+    obtener_usuario, listar_asesores, listar_equipo, crear_usuario,
     asignar_asesor_a_lead, marcar_lead_visto, limpiar_revision_prioritaria, actualizar_disponibilidad, actualizar_nivel_asesor,
     listar_campanas, crear_campana, actualizar_campana, contar_opportunities_por_campana, eliminar_campana,
     obtener_campana, obtener_canal_whatsapp,
@@ -5760,6 +5760,13 @@ async def _pagina_gestionar_asesores(usuario: dict, request: Request | None = No
     umbral_senior = await obtener_configuracion("umbral_senior", str(UMBRAL_SENIOR_DEFAULT))
     umbral_intermedio = await obtener_configuracion("umbral_intermedio", str(UMBRAL_INTERMEDIO_DEFAULT))
 
+    # Gate UX Equipo (Decisión 5) — el backend ya exige admin para
+    # nivel/resetear (ver `actualizar_nivel`/`resetear_password_asesor`);
+    # acá se oculta la acción para quien de todos modos recibiría un 403
+    # al enviarla (hoy Supervisor, que sigue viendo la tabla — MPA §9,
+    # "Solo lectura de carga/disponibilidad") en vez de mostrar un botón
+    # que siempre falla.
+    es_admin_viendo = usuario["rol"] == "admin"
     filas = "".join(
         f"""<tr>
             <td class="ps-3">
@@ -5769,21 +5776,17 @@ async def _pagina_gestionar_asesores(usuario: dict, request: Request | None = No
                 </div>
             </td>
             <td>{'<span class="badge rounded-pill text-bg-success">Disponible</span>' if a.get('disponible') else '<span class="badge rounded-pill text-bg-secondary">No disponible</span>'}</td>
-            <td>
-                <form method="post" action="/dashboard/asesores/{html.escape(a['username'])}/nivel" class="d-flex gap-2">
+            <td>{f'''<form method="post" action="/dashboard/asesores/{html.escape(a["username"])}/nivel" class="d-flex gap-2">
                     {_csrf_campo(request)}
                     <select name="nivel" class="form-select form-select-sm" style="width:auto">
-                        {''.join(f'<option value="{n}" {"selected" if a.get("nivel") == n else ""}>{n.capitalize()}</option>' for n in NIVELES_ASESOR)}
+                        {"".join(f'<option value="{n}" {"selected" if a.get("nivel") == n else ""}>{n.capitalize()}</option>' for n in NIVELES_ASESOR)}
                     </select>
                     <button type="submit" class="btn btn-sm btn-outline-primary">Guardar</button>
-                </form>
-            </td>
-            <td class="pe-3">
-                <form method="post" action="/dashboard/asesores/{html.escape(a['username'])}/resetear" onsubmit="return confirm('¿Generar una contraseña nueva para {html.escape(a['nombre'])}? La contraseña actual dejará de funcionar.')">
+                </form>''' if es_admin_viendo else html.escape((a.get('nivel') or 'sin nivel').capitalize())}</td>
+            <td class="pe-3">{f'''<form method="post" action="/dashboard/asesores/{html.escape(a["username"])}/resetear" onsubmit="return confirm('¿Generar una contraseña nueva para {html.escape(a["nombre"])}? La contraseña actual dejará de funcionar.')">
                     {_csrf_campo(request)}
                     <button type="submit" class="btn btn-sm btn-outline-secondary">Resetear contraseña</button>
-                </form>
-            </td>
+                </form>''' if es_admin_viendo else ''}</td>
         </tr>"""
         for a in asesores
     )
@@ -5882,19 +5885,28 @@ async def gestionar_asesores(request: Request, usuario: dict = Depends(servicio_
 async def resetear_password_asesor(
     username: str,
     request: Request,
-    usuario: dict = Depends(servicio_identidad.requiere_rol(*ROLES_CON_VISION_TOTAL)),
+    usuario: dict = Depends(servicio_identidad.requiere_rol("admin")),
     _csrf: None = Depends(verificar_csrf),
 ):
-    """Genera una contraseña temporal nueva para un asesor — para cuando pide
-    recuperar acceso. Se muestra una sola vez aquí; el admin debe pasársela
-    por su canal habitual, y el asesor puede cambiarla luego desde su perfil.
+    """Genera una contraseña temporal nueva para una cuenta — para cuando
+    pide recuperar acceso. Se muestra una sola vez aquí; el admin debe
+    pasársela por su canal habitual, y la cuenta puede cambiarla luego desde
+    su perfil.
+
+    Gate UX Equipo (Decisión 5) — MPA §9 ("Permisos de alto nivel") no le da
+    a Supervisor ninguna acción administrativa de cuenta, solo "Solo lectura
+    de carga/disponibilidad": el reset de contraseña es admin-únicamente.
+    Antes de esta corrección, `requiere_rol(*ROLES_CON_VISION_TOTAL)`
+    permitía a un Supervisor resetear la contraseña de cualquier cuenta de
+    su Negocio — una desviación de la arquitectura aprobada, no una decisión
+    deliberada (ver `MAIEK_AI_PRODUCT_ARCHITECTURE.md:224-234`).
 
     Gate 5.4 (T3) — hallazgo real corregido: antes NO verificaba que
-    `username` perteneciera al mismo Negocio del admin/supervisor que
-    ejecuta la acción — toma de cuenta cross-tenant real (reset de
-    contraseña ajena, visible en texto plano abajo). `negocio_id` de la
-    sesión es ahora el candado: `obtener_usuario`/`cambiar_password` fallan
-    (devuelven None / no aplican nada) si `username` es de otro Negocio."""
+    `username` perteneciera al mismo Negocio del admin que ejecuta la
+    acción — toma de cuenta cross-tenant real (reset de contraseña ajena,
+    visible en texto plano abajo). `negocio_id` de la sesión es ahora el
+    candado: `obtener_usuario`/`cambiar_password` fallan (devuelven None /
+    no aplican nada) si `username` es de otro Negocio."""
     objetivo = await obtener_usuario(username, negocio_id=usuario["negocio_id"])
     if objetivo is None:
         raise HTTPException(status_code=404, detail="Usuario no encontrado")
@@ -5969,9 +5981,11 @@ async def crear_usuario_nuevo(
 async def actualizar_nivel(
     username: str,
     nivel: str = Form(...),
-    usuario: dict = Depends(servicio_identidad.requiere_rol(*ROLES_CON_VISION_TOTAL)),
+    usuario: dict = Depends(servicio_identidad.requiere_rol("admin")),
     _csrf: None = Depends(verificar_csrf),
 ):
+    """Gate UX Equipo (Decisión 5) — edición de nivel es admin-únicamente,
+    mismo criterio y misma evidencia que `resetear_password_asesor` arriba."""
     if nivel not in NIVELES_ASESOR:
         raise HTTPException(status_code=400, detail="Nivel inválido")
     await actualizar_nivel_asesor(username, usuario["negocio_id"], nivel)
@@ -5982,9 +5996,12 @@ async def actualizar_nivel(
 async def actualizar_umbrales_asignacion(
     umbral_intermedio: str = Form(...),
     umbral_senior: str = Form(...),
-    usuario: dict = Depends(servicio_identidad.requiere_rol(*ROLES_CON_VISION_TOTAL)),
+    usuario: dict = Depends(servicio_identidad.requiere_rol("admin")),
     _csrf: None = Depends(verificar_csrf),
 ):
+    """Gate UX Equipo (Decisión 5) — umbrales de asignación automática son
+    una acción administrativa de cuenta/configuración, admin-únicamente,
+    mismo criterio que las dos rutas anteriores."""
     try:
         valor_intermedio = float(umbral_intermedio)
         valor_senior = float(umbral_senior)
@@ -5998,6 +6015,75 @@ async def actualizar_umbrales_asignacion(
     await guardar_configuracion("umbral_intermedio", str(valor_intermedio))
     await guardar_configuracion("umbral_senior", str(valor_senior))
     return RedirectResponse(url="/dashboard/asesores", status_code=303)
+
+
+# ── Equipo (Nueva Experiencia — Gate UX Equipo) ─────────────────────────
+#
+# Deliberadamente separado de `/dashboard/asesores` (arriba): esa ruta sigue
+# siendo el panel legacy HTML + el listado asesor-únicamente que ya
+# consumen los selectores de asignación de leads (`listar_asesores`, sin
+# tocar — ver `app/api/asesores/route.ts` en maiek-frontend, que documenta
+# ese contrato). Estas rutas nuevas son JSON puro, para la pantalla Equipo
+# de la Nueva Experiencia, y sí exponen TODAS las cuentas (Decisión 6).
+
+
+@router.get("/equipo")
+async def listar_equipo_json(usuario: dict = Depends(_usuario_actual)):
+    """Listado de cuentas para la pantalla Equipo — MPA §9: Admin y
+    Supervisor ven TODAS las cuentas del Negocio (Decisión 6 del Gate UX
+    Equipo); un Asesor ve únicamente su propia fila (MPA §9: "Solo su
+    propia disponibilidad" — CDS Cap. 7.C, "Errores comunes": nunca la
+    disponibilidad/carga de otro asesor). Solo JSON, mismo patrón que
+    `/dashboard/sesion` — sin negociación de contenido porque no hay un
+    render HTML equivalente que conservar."""
+    if usuario["rol"] in ROLES_CON_VISION_TOTAL:
+        miembros = await listar_equipo(usuario["negocio_id"])
+    else:
+        miembros = [{
+            "username": usuario["username"], "nombre": usuario["nombre"], "rol": usuario["rol"],
+            "nivel": usuario.get("nivel"), "disponible": usuario.get("disponible"),
+        }]
+
+    usernames_asesor = [m["username"] for m in miembros if m["rol"] == "asesor"]
+    conteos_carga = (
+        await contar_conversations_activas_por_asesor(usuario["negocio_id"], usernames_asesor)
+        if usernames_asesor else {}
+    )
+    return JSONResponse({
+        "miembros": [
+            # "carga" (leads activos) solo tiene sentido para asesores — Admin/
+            # Supervisor nunca reciben asignación directa. `None` acá es lo que
+            # la pantalla Equipo traduce a "—" (Decisión aprobada: nunca
+            # inventar una métrica de disponibilidad/carga para esos roles).
+            {**m, "carga": conteos_carga.get(m["username"]) if m["rol"] == "asesor" else None}
+            for m in miembros
+        ],
+    })
+
+
+@router.post("/equipo/{username}/resetear")
+async def resetear_password_equipo(
+    username: str,
+    usuario: dict = Depends(servicio_identidad.requiere_rol("admin")),
+    _csrf: None = Depends(verificar_csrf),
+):
+    """Versión JSON de `resetear_password_asesor` (arriba), para el flujo de
+    Confirm Dialog de la pantalla Equipo: el frontend confirma con el
+    usuario ANTES de llamar esta ruta (nunca al revés — Human Decision
+    Gate), y esta ruta ejecuta y devuelve la contraseña temporal una sola
+    vez — el frontend no vuelve a poder pedirla, no queda guardada en
+    ningún estado que sobreviva al cierre del diálogo."""
+    objetivo = await obtener_usuario(username, negocio_id=usuario["negocio_id"])
+    if objetivo is None:
+        raise HTTPException(status_code=404, detail="Cuenta no encontrada")
+
+    nueva_password = secrets.token_urlsafe(9)
+    await cambiar_password(username, usuario["negocio_id"], nueva_password)
+    return JSONResponse({
+        "username": username,
+        "nombre": objetivo["nombre"],
+        "password_temporal": nueva_password,
+    })
 
 
 # ── Gestión de campañas ────────────────────────────────────────────────
@@ -7298,6 +7384,15 @@ def _capacidades_de(rol: str) -> list[str]:
             # "modulo:accion" que ya usan productos:*/pipeline:ver/leads:*, no
             # una tabla de permisos aparte.
             "configuracion:ver",
+            # Gate UX Equipo (Decisión 5): distinta de "asesores.gestionar"
+            # (arriba, vision_total = admin+supervisor, que solo cubre VER el
+            # equipo completo — Supervisor: "Solo lectura de carga/
+            # disponibilidad", MPA §9). Resetear contraseña / editar nivel
+            # son acciones administrativas de cuenta, admin-únicamente — se
+            # necesita una capacidad propia porque ninguna existente
+            # significaba exactamente esto ("usuarios.crear" es solo alta de
+            # cuentas nuevas, no cubre acciones sobre cuentas existentes).
+            "equipo:administrar",
         ]
     if rol == "asesor":
         capacidades.append("disponibilidad.toggle")

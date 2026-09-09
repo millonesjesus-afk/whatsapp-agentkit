@@ -3515,6 +3515,37 @@ async def listar_asesores(negocio_id: str) -> list[dict]:
         ]
 
 
+async def listar_equipo(negocio_id: str) -> list[dict]:
+    """Recupera TODAS las cuentas del panel (admin+supervisor+asesor) de un
+    Negocio, para la pantalla Equipo (MPA §3 — "dueño de usuarios, roles,
+    disponibilidad y reglas de asignación").
+
+    A diferencia de `listar_asesores()` (que sigue existiendo tal cual, sin
+    tocar, para los selectores de asignación de leads — disponibilidad/nivel
+    son conceptos que solo aplican a asesores), acá se listan los 3 roles.
+    `nivel`/`disponible` viajan tal cual del modelo (`None`/`True` por
+    default en admin/supervisor, que nunca los usa) — es la pantalla Equipo
+    quien decide mostrar "—" para esas columnas quien no sea asesor, no esta
+    función."""
+    async with async_session() as session:
+        query = (
+            select(Usuario)
+            .where(Usuario.negocio_id == negocio_id)
+            .order_by(Usuario.rol, Usuario.nombre)
+        )
+        result = await session.execute(query)
+        return [
+            {
+                "username": u.username,
+                "nombre": u.nombre,
+                "rol": u.rol,
+                "nivel": u.nivel if u.rol == "asesor" else None,
+                "disponible": u.disponible if u.rol == "asesor" else None,
+            }
+            for u in result.scalars().all()
+        ]
+
+
 async def actualizar_disponibilidad(username: str, negocio_id: str, disponible: bool):
     """El propio asesor togglea si está disponible para recibir leads nuevos
     — siempre self-service (su propio `negocio_id` de sesión), pero
