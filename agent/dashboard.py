@@ -7293,6 +7293,11 @@ def _capacidades_de(rol: str) -> list[str]:
         capacidades += [
             "usuarios.crear", "campanas.gestionar", "canales.gestionar", "catalogo.gestionar", "prompt.promover",
             "productos:crear", "productos:editar", "productos:activar", "productos:importar",
+            # Gate de unificación de permisos (Nueva Experiencia): visibilidad
+            # del módulo "Configuración" en el sidebar — mismo patrón namespace
+            # "modulo:accion" que ya usan productos:*/pipeline:ver/leads:*, no
+            # una tabla de permisos aparte.
+            "configuracion:ver",
         ]
     if rol == "asesor":
         capacidades.append("disponibilidad.toggle")
