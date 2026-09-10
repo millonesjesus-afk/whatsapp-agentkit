@@ -193,21 +193,45 @@ def _dividir_en_parrafos(contenido: str, min_len: int = 20) -> list[str]:
     return [linea.strip() for linea in contenido.split("\n") if len(linea.strip()) >= min_len]
 
 
-def buscar_en_knowledge(mensaje: str, limite: int = 7) -> str:
+def buscar_en_knowledge(mensaje: str, negocio_codigo: str | None, limite: int = 7) -> str:
     """
-    Busca, a nivel de párrafo, los fragmentos de /knowledge (base de
-    conocimiento, contrato, speech, resumen del programa) que compartan más
-    palabras clave con el mensaje del cliente. Trabajar por párrafo evita
-    que la cláusula relevante de un documento largo (ej. el contrato de
-    financiamiento) quede fuera por estar más allá de los primeros caracteres.
+    Busca, a nivel de párrafo, los fragmentos de /knowledge/<negocio_codigo>
+    (base de conocimiento, contrato, speech, resumen del programa) que
+    compartan más palabras clave con el mensaje del cliente. Trabajar por
+    párrafo evita que la cláusula relevante de un documento largo (ej. el
+    contrato de financiamiento) quede fuera por estar más allá de los
+    primeros caracteres.
+
+    Auditoría puntual (post Gate 4.3, hallazgo de la validación de
+    activación de Gabi): antes de esto, `/knowledge/` era UNA carpeta
+    compartida por todo el proceso, sin relación con `negocio_id` — un
+    segundo Negocio real habría recibido, sin darse cuenta, contexto de la
+    base de conocimiento de Cálidda (contratos, políticas comerciales,
+    speech de televentas) en sus propias conversaciones. Ahora cada
+    Negocio tiene su propia subcarpeta (`knowledge/<codigo>/`, ej.
+    `knowledge/calidda/`) — se usa `codigo` (el slug estable, "calidda"),
+    no `negocio_id` (un UUID generado por entorno, distinto en cada base
+    de datos) para que el nombre de carpeta sea portable entre dev/prod.
+
+    Fail-safe a propósito, mismo criterio que ya usa `_armar_bloques_contexto`
+    para campañas ("nunca se listan campañas de cualquier Negocio"):
+    `negocio_codigo=None` o una carpeta que no existe → sin contexto, NUNCA
+    se cae a buscar en la raíz de /knowledge/ ni en la carpeta de otro
+    Negocio.
     """
+    if not negocio_codigo:
+        return ""
+    directorio = os.path.join(KNOWLEDGE_DIR, negocio_codigo)
+    if not os.path.isdir(directorio):
+        return ""
+
     palabras = {p for p in re.findall(r"\w+", mensaje.lower()) if len(p) >= 4}
     if not palabras:
         return ""
 
     candidatos = []
     for patron in ("*.md", "*.txt"):
-        for ruta in glob.glob(os.path.join(KNOWLEDGE_DIR, patron)):
+        for ruta in glob.glob(os.path.join(directorio, patron)):
             try:
                 with open(ruta, "r", encoding="utf-8") as f:
                     contenido = f.read()
@@ -273,11 +297,22 @@ async def obtener_estado_horario_atencion(negocio_id: str | None) -> dict:
     }
 
 
-async def obtener_contexto_relevante(mensaje: str, excluir_codigos: set[str] | None = None) -> str:
+async def obtener_contexto_relevante(
+    mensaje: str, negocio_codigo: str | None = None, excluir_codigos: set[str] | None = None,
+) -> str:
     """
     Punto de entrada usado por brain.py: combina resultados del catálogo de
     productos y de la base de conocimiento relacionados al mensaje del cliente.
-    """
+
+    `negocio_codigo` solo se propaga hacia `buscar_en_knowledge` — el
+    catálogo de productos (`buscar_productos`) NO tiene todavía aislamiento
+    por Negocio (`Producto` no tiene columna `negocio_id`, es deuda
+    arquitectónica real pero de un alcance mucho mayor: migración de
+    esquema + backfill + todas las rutas del panel de Catálogo — queda
+    documentada como Gate propio, deliberadamente fuera de esta corrección
+    puntual). Hoy Cálidda es el único Negocio con productos reales, así
+    que esto no contamina ninguna conversación real todavía — ver el
+    análisis dedicado en el informe de este Gate."""
     secciones = []
 
     productos = await buscar_productos(mensaje, excluir_codigos=excluir_codigos)
@@ -292,7 +327,7 @@ async def obtener_contexto_relevante(mensaje: str, excluir_codigos: set[str] | N
             f"[opción 1] o \"la segunda más barata\" [opción 2]):\n{productos_texto}"
         )
 
-    conocimiento = buscar_en_knowledge(mensaje)
+    conocimiento = buscar_en_knowledge(mensaje, negocio_codigo)
     if conocimiento:
         secciones.append(f"Información de la base de conocimiento:\n{conocimiento}")
 

@@ -25,7 +25,7 @@ from anthropic import AsyncAnthropic
 from dotenv import load_dotenv
 
 from agent.tools import obtener_contexto_relevante, obtener_estado_horario_atencion, formatear_producto
-from agent.memory import obtener_campana_por_nombre, obtener_configuracion, obtener_identidad_agente
+from agent.memory import obtener_campana_por_nombre, obtener_configuracion, obtener_identidad_agente, obtener_negocio
 from agent.campanas import resolver_promo, resolver_familia_promo, obtener_codigos_promocionales_activos
 
 load_dotenv()
@@ -411,8 +411,15 @@ async def _armar_bloques_contexto(
     # recientes — lead.interes persiste el tema durante toda la conversación.
     mensajes_previos = [m["content"] for m in historial if m["role"] == "user"][-2:]
     interes_lead = [lead["interes"]] if lead and lead.get("interes") else []
+    # Auditoría puntual post Gate 4.3: `negocio_codigo` (el slug estable,
+    # ej. "calidda" — no el `negocio_id` UUID, que difiere por entorno)
+    # aísla la base de conocimiento de este Negocio
+    # (`knowledge/<codigo>/`) de la de cualquier otro. `None` si el canal
+    # no resolvió Negocio — fail-safe, sin contexto en vez de adivinar.
+    negocio = await obtener_negocio(negocio_id) if negocio_id is not None else None
+    negocio_codigo = negocio["codigo"] if negocio else None
     contexto = await obtener_contexto_relevante(
-        " ".join(interes_lead + mensajes_previos + [mensaje]), excluir_codigos=codigos_a_excluir
+        " ".join(interes_lead + mensajes_previos + [mensaje]), negocio_codigo, excluir_codigos=codigos_a_excluir
     )
     if contexto:
         bloques.append(f"Contexto relevante del catálogo/base de conocimiento:\n{contexto}")
