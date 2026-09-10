@@ -145,26 +145,60 @@ async def obtener_system_prompt(modo: str, negocio_id: str | None = None) -> str
 
 
 # -- GATE 4.3 (Decision Pendiente 2 de Gate 4.1, migracion controlada) --
+# -- CORREGIDO tras revision del usuario (dos hallazgos, ver mas abajo) --
 #
 # Patron estructural de Gabi, reutilizable por cualquier Negocio sobre
 # MAIEK AI Platform -- vive en CODIGO (Gate 4.2 instruccion 2: "ESTRUCTURAL:
 # debe permanecer controlado por codigo/patron de producto", no editable via
-# panel). Extraido TEXTUALMENTE (sin reescribir una palabra) de las 3
-# secciones del prompt de Calidda que la clasificacion de Gate 4.2 marco
-# 100% estructurales: ['## Reglas de estilo (síguelas siempre)', '## Uso del contexto que se te proporciona', '## Reglas de comportamiento'].
+# panel).
+#
+# v1 (primera pasada de Gate 4.3) extraia 3 secciones TEXTUALMENTE sin
+# reescribir nada -- pero eso dejo dos problemas reales, encontrados en
+# revision del usuario:
+#
+#   1. "Uso del contexto" mencionaba "Gaso+" por nombre -- informacion
+#      especifica de Calidda colada en lo que debia ser 100% generico.
+#      CORREGIDO: "de la base de conocimiento de Gaso+." -> "de la base
+#      de conocimiento del negocio." -- sustitucion minima, el mismo
+#      significado exacto (de que fuente sacar el contexto), sin el
+#      nombre de marca. Esta SI es una edicion de texto (no solo
+#      extraccion) -- ocurre UNICAMENTE en esta constante (arquitectura
+#      paralela/inactiva), nunca en config/prompts.yaml ni en
+#      IdentidadAgente.configuracion_negocio de Calidda.
+#
+#   2. El horario literal de Calidda vivia dentro de "Cuando derivar a
+#      un asesor humano" -- una seccion que YA se clasificaba como
+#      configuracion-de-negocio (nunca estuvo en esta constante), pero
+#      mezclaba dos cosas de naturaleza distinta: el DATO (el rango de
+#      horas, especifico de Calidda, ya representado estructuralmente
+#      en HorarioAtencion desde Gate 4.2) y el PRINCIPIO (que decirle
+#      al cliente segun si es dentro/fuera de horario -- generico,
+#      valido para cualquier Negocio con cualquier horario). CORREGIDO:
+#      se separaron. El DATO literal ("Horario de atencion... Lunes a
+#      Sabado de 8:00am a 7:00pm.") se QUEDA en la configuracion de
+#      negocio de Calidda, sin tocar -- sigue siendo necesario para que
+#      Gabi pueda responder directamente si un cliente pregunta el
+#      horario (el contexto dinamico de HorarioAtencion, inyectado cada
+#      turno via agent/tools.py, solo dice si AHORA esta dentro/fuera,
+#      no el rango completo -- perderlo seria una perdida real de
+#      funcionalidad, no solo una reorganizacion). El PRINCIPIO (las 2
+#      reglas "si estas dentro/fuera, di X/Y") se movio, TEXTUALMENTE
+#      sin reescribir una palabra, a esta constante, bajo un titulo
+#      nuevo ("## Disponibilidad del asesor humano segun horario") --
+#      titulo que no existia en el original, necesario para que el
+#      fragmento reubicado sea una seccion valida y no quede huerfano.
+#
+# Verificacion exhaustiva de la separacion (ver tests/test_gate43_separacion_prompt.py):
+# el multiset de caracteres NO-whitespace de (config-de-negocio +
+# patron-estructural) es IDENTICO al de (baseline + las 2 sustituciones
+# documentadas arriba) -- ninguna otra diferencia, ni una letra.
 #
 # INACTIVO A PROPOSITO: obtener_system_prompt() (mas abajo) NO usa esta
 # constante todavia -- Calidda sigue sirviendose desde su
 # IdentidadAgente.configuracion_negocio tal cual, sin pasar por
 # ensamblar_system_prompt(). Activarlo es una decision separada, posterior
-# a este Gate (ver informe de cierre de Gate 4.3, seccion "Activacion").
-#
-# Hallazgo documentado, NO corregido en este Gate (ver informe): la seccion
-# "Uso del contexto" menciona "Gaso+" por nombre -- no es perfectamente
-# generico. Inofensivo para la reconstruccion de Calidda (sigue siendo
-# contenido correcto para Calidda sin importar en que bloque viva), pero es
-# un ajuste pendiente para cuando un segundo Negocio real use este patron.
-PATRON_ESTRUCTURAL_AGENTE = '## Reglas de estilo (síguelas siempre)\n- Mensajes cortos: máximo 2 o 3 párrafos por respuesta.\n- Nunca envíes bloques largos de texto.\n- Haz UNA SOLA pregunta por mensaje — nunca combines dos preguntas distintas\n  en la misma respuesta (ej. nombre + necesidad), aunque te parezcan\n  relacionadas. Espera la respuesta a la primera antes de hacer la segunda.\n- Antes de preguntar algo, revisa el historial de la conversación: si ya\n  hiciste esa pregunta antes y el cliente respondió otra cosa (sin\n  contestarla), retómala de forma natural en vez de repetirla con las\n  mismas palabras — nunca hagas la misma pregunta dos veces seguidas.\n- Usa emojis con moderación (👋😊✅), solo cuando aporten cercanía.\n- Llama al cliente por su nombre en cuanto lo conozcas por la conversación.\n- Nunca inventes promociones, precios o políticas que no estén en tu información.\n- Si no conoces una respuesta, dilo con honestidad y deriva al asesor.\n\n## Uso del contexto que se te proporciona\nAntes del mensaje del cliente puede incluirse una sección "Contexto relevante" con\ninformación del catálogo de productos o de la base de conocimiento de Gaso+. Básate\nÚNICAMENTE en ese contexto para dar precios, cuotas o condiciones específicas. Si el\ncontexto no incluye lo que el cliente pregunta, no inventes: dilo y deriva al asesor si\ncorresponde.\n\n## Reglas de comportamiento\n- SIEMPRE responde en español.\n- Mantén las respuestas concisas pero útiles.\n- Si el cliente parece frustrado, muestra empatía antes de resolver.\n'
+# a este Gate.
+PATRON_ESTRUCTURAL_AGENTE = '## Reglas de estilo (síguelas siempre)\n- Mensajes cortos: máximo 2 o 3 párrafos por respuesta.\n- Nunca envíes bloques largos de texto.\n- Haz UNA SOLA pregunta por mensaje — nunca combines dos preguntas distintas\n  en la misma respuesta (ej. nombre + necesidad), aunque te parezcan\n  relacionadas. Espera la respuesta a la primera antes de hacer la segunda.\n- Antes de preguntar algo, revisa el historial de la conversación: si ya\n  hiciste esa pregunta antes y el cliente respondió otra cosa (sin\n  contestarla), retómala de forma natural en vez de repetirla con las\n  mismas palabras — nunca hagas la misma pregunta dos veces seguidas.\n- Usa emojis con moderación (👋😊✅), solo cuando aporten cercanía.\n- Llama al cliente por su nombre en cuanto lo conozcas por la conversación.\n- Nunca inventes promociones, precios o políticas que no estén en tu información.\n- Si no conoces una respuesta, dilo con honestidad y deriva al asesor.\n\n## Uso del contexto que se te proporciona\nAntes del mensaje del cliente puede incluirse una sección "Contexto relevante" con\ninformación del catálogo de productos o de la base de conocimiento del negocio. Básate\nÚNICAMENTE en ese contexto para dar precios, cuotas o condiciones específicas. Si el\ncontexto no incluye lo que el cliente pregunta, no inventes: dilo y deriva al asesor si\ncorresponde.\n\n## Disponibilidad del asesor humano segun horario\n- Si estás dentro de ese horario, indica que un asesor continuará la conversación en breve.\n- Si estás fuera de ese horario, dilo con claridad e indica que un asesor te contactará\n  apenas se reinicie el horario de atención.\n\n## Reglas de comportamiento\n- SIEMPRE responde en español.\n- Mantén las respuestas concisas pero útiles.\n- Si el cliente parece frustrado, muestra empatía antes de resolver.\n'
 
 
 def ensamblar_system_prompt(configuracion_negocio: str) -> str:
@@ -186,34 +220,63 @@ def ensamblar_system_prompt(configuracion_negocio: str) -> str:
     return f"{configuracion_negocio.rstrip()}\n\n{PATRON_ESTRUCTURAL_AGENTE.strip()}"
 
 
+# Fragmento reubicado (Gate 4.3, correccion) -- el PRINCIPIO de que decir
+# segun el horario, extraido de "Cuando derivar a un asesor humano". Vive
+# como constante propia (no solo inline en la funcion de abajo) para que
+# el test de equivalencia pueda verificarlo por separado del resto del
+# patron estructural.
+_FRAGMENTO_PRINCIPIO_HORARIO = (
+    "- Si est\u00e1s dentro de ese horario, indica que un asesor continuar\u00e1 la conversaci\u00f3n en breve.\n"
+    "- Si est\u00e1s fuera de ese horario, dilo con claridad e indica que un asesor te contactar\u00e1\n"
+    "  apenas se reinicie el horario de atenci\u00f3n.\n"
+)
+# Version ORIGINAL de 'Uso del contexto' (con 'Gaso+'), usada SOLO como
+# clave de busqueda/remocion en _reducir_texto_legacy_calidda -- nunca se
+# muestra a Gabi asi, la version generica (sin 'Gaso+') es la que vive en
+# PATRON_ESTRUCTURAL_AGENTE arriba.
+_USO_DEL_CONTEXTO_ORIGINAL_CALIDDA = '## Uso del contexto que se te proporciona\nAntes del mensaje del cliente puede incluirse una sección "Contexto relevante" con\ninformación del catálogo de productos o de la base de conocimiento de Gaso+. Básate\nÚNICAMENTE en ese contexto para dar precios, cuotas o condiciones específicas. Si el\ncontexto no incluye lo que el cliente pregunta, no inventes: dilo y deriva al asesor si\ncorresponde.\n\n'
+
+
 def _reducir_texto_legacy_calidda(texto_completo: str) -> str:
     """SOLO para la migracion de Gate 4.3: reconstruye la configuracion-de-
     negocio de Calidda a partir de su prompt monolitico actual, quitando
-    (textualmente, sin reescribir nada) los 3 bloques que pasaron a
-    PATRON_ESTRUCTURAL_AGENTE. Un Negocio nuevo NUNCA necesita esta
-    funcion -- su `configuracion_negocio` se escribe desde el principio
-    sin estos bloques adentro."""
+    (textualmente) los 2 bloques completos que pasaron a
+    PATRON_ESTRUCTURAL_AGENTE sin cambios ("Reglas de estilo", "Reglas de
+    comportamiento"), el bloque "Uso del contexto" en su forma ORIGINAL
+    (con "Gaso+" -- la version generica solo existe en
+    PATRON_ESTRUCTURAL_AGENTE, nunca en el texto legacy de Calidda), MAS
+    el fragmento de principio de horario extraido de "Cuando derivar"
+    (correccion tras revision del usuario). Conserva intacta la oracion
+    literal del horario -- es informacion especifica de Calidda, no
+    estructural. Un Negocio nuevo NUNCA necesita esta funcion."""
     import re as _re
+
+    bloques_verbatim = {"## Reglas de estilo (s\u00edguelas siempre)", "## Reglas de comportamiento"}
     partes = _re.split(r"(?=^## )", texto_completo, flags=_re.MULTILINE)
-    # `re.split` deja un elemento vacío al principio cuando el texto EMPIEZA
-    # justo con el patrón (caso de PATRON_ESTRUCTURAL_AGENTE, que arranca
-    # con "## ") — se descarta, no es un bloque real.
-    bloques_estructurales = {
-        b.strip() for b in _re.split(r"(?=^## )", PATRON_ESTRUCTURAL_AGENTE.strip(), flags=_re.MULTILINE) if b.strip()
-    }
-    encontrados = {p.strip() for p in partes if p.strip() in bloques_estructurales}
-    faltantes = bloques_estructurales - encontrados
-    if faltantes:
-        # Fail-loud a propósito: mejor romper la migración que reconstruir
-        # un prompt con un bloque estructural duplicado en silencio (si
-        # `texto_completo` y `PATRON_ESTRUCTURAL_AGENTE` alguna vez
-        # divergen sin que esta función se actualice).
+
+    encontrados_verbatim = {p.strip() for p in partes if p.strip().split("\n")[0] in {b.split("\n")[0] for b in bloques_verbatim}}
+    if len(encontrados_verbatim) != len(bloques_verbatim):
         raise ValueError(
-            f"_reducir_texto_legacy_calidda: {len(faltantes)} bloque(s) estructural(es) "
-            f"no se encontraron en el texto — no se puede reconstruir de forma segura."
+            "_reducir_texto_legacy_calidda: no se encontraron los 2 bloques verbatim "
+            "esperados -- no se puede reconstruir de forma segura."
         )
-    restantes = [p for p in partes if p.strip() not in bloques_estructurales]
-    return "".join(restantes).strip() + "\n"
+    if _USO_DEL_CONTEXTO_ORIGINAL_CALIDDA not in texto_completo:
+        raise ValueError(
+            "_reducir_texto_legacy_calidda: 'Uso del contexto' (version original con "
+            "'Gaso+') no se encontro en el texto -- no se puede reconstruir de forma segura."
+        )
+    if _FRAGMENTO_PRINCIPIO_HORARIO not in texto_completo:
+        raise ValueError(
+            "_reducir_texto_legacy_calidda: el fragmento de principio de horario "
+            "no se encontro en el texto -- no se puede reconstruir de forma segura."
+        )
+
+    titulos_a_remover = {b.split("\n")[0] for b in bloques_verbatim}
+    restantes = [p for p in partes if p.strip().split("\n")[0] not in titulos_a_remover]
+    reducido = "".join(restantes)
+    reducido = reducido.replace(_USO_DEL_CONTEXTO_ORIGINAL_CALIDDA, "")
+    reducido = reducido.replace(_FRAGMENTO_PRINCIPIO_HORARIO, "")
+    return reducido.strip() + "\n"
 
 
 def obtener_mensaje_error() -> str:

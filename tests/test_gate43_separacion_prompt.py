@@ -2,17 +2,22 @@
 # de la Decisión Pendiente 2 de Gate 4.1 (separación física del prompt en
 # "patrón estructural" + "configuración del negocio").
 #
-# Disciplina explícita pedida por el usuario: NO aceptar diferencias
-# textuales en silencio — cada una se identifica, se explica y se prueba
-# que es consecuencia necesaria de la nueva arquitectura (reordenamiento),
-# nunca pérdida ni invención de contenido. Validación a nivel de
-# CONTENIDO/texto (determinista) — no se llama a la API real de Claude,
-# tal como se acordó explícitamente para este Gate.
+# CORREGIDO tras revisión del usuario: la v1 de este Gate dejaba dos
+# problemas — "Gaso+" mencionado dentro del patrón estructural, y el
+# horario literal de Cálidda mezclado con un principio genérico dentro de
+# "Cuándo derivar". Ambos corregidos en `agent/brain.py` (ver el comentario
+# largo sobre `PATRON_ESTRUCTURAL_AGENTE`) — este archivo prueba el
+# resultado corregido.
 #
-# INACTIVO A PROPÓSITO: ninguno de estos tests ejercita el flujo real de
-# WhatsApp con el ensamblado nuevo — `obtener_system_prompt()` para
-# Cálidda sigue devolviendo el baseline verbatim (ver el test dedicado más
-# abajo que lo prueba explícitamente).
+# Disciplina: NO aceptar diferencias textuales en silencio — cada una se
+# identifica, se explica y se prueba que es consecuencia necesaria de la
+# nueva arquitectura, nunca pérdida ni invención de contenido no
+# documentada. Validación a nivel de CONTENIDO/texto (determinista) — sin
+# llamadas a la API real de Claude.
+#
+# INACTIVO A PROPÓSITO: ningún test ejercita el flujo real de WhatsApp con
+# el ensamblado nuevo — `obtener_system_prompt()` para Cálidda sigue
+# devolviendo el baseline verbatim (test dedicado al final).
 
 import re
 
@@ -31,109 +36,120 @@ def _baseline_real() -> str:
 def _normalizar(texto: str) -> str:
     """Colapsa runs de whitespace a un solo espacio — para comparar
     CONTENIDO sin que diferencias de saltos de línea en los empalmes
-    (esperadas al remover secciones del medio de un documento) cuenten
-    como una diferencia real."""
+    (esperadas al remover/mover fragmentos) cuenten como diferencia real."""
     return re.sub(r"\s+", " ", texto).strip()
 
 
-def _secciones_normalizadas(texto: str) -> set[str]:
-    return {_normalizar(s) for s in re.split(r"(?=^## )", texto, flags=re.MULTILINE) if s.strip()}
+def _sin_espacios(texto: str) -> list[str]:
+    """Multiset de caracteres NO-whitespace, ordenado — la prueba más
+    fuerte de "ningún contenido perdido ni inventado más allá de lo
+    documentado explícitamente"."""
+    return sorted(c for c in texto if not c.isspace())
 
 
-# ---------------------------------------------------------------------------
-# Baseline congelado
-# ---------------------------------------------------------------------------
+FRASE_ORIGINAL_GASO_MAS = "de la base de conocimiento de Gaso+."
+FRASE_GENERICA_NEGOCIO = "de la base de conocimiento del negocio."
+TITULO_NUEVO_DISPONIBILIDAD = "## Disponibilidad del asesor humano segun horario"
 
-def test_baseline_coincide_con_lo_ya_congelado_en_gate_42():
-    """El baseline de este Gate es el MISMO que Gate 4.2 ya guardó verbatim
-    en IdentidadAgente para Cálidda — no se inventa uno nuevo."""
+
+def _baseline_mas_los_2_cambios_documentados() -> str:
+    """El baseline real, con ÚNICAMENTE las 2 ediciones explícitamente
+    autorizadas por el usuario aplicadas — el "resultado esperado" contra
+    el que se compara el ensamblado corregido."""
     baseline = _baseline_real()
-    assert len(baseline) == 8198
+    con_frase_generica = baseline.replace(FRASE_ORIGINAL_GASO_MAS, FRASE_GENERICA_NEGOCIO)
+    return con_frase_generica + "\n" + TITULO_NUEVO_DISPONIBILIDAD + "\n"
 
 
 # ---------------------------------------------------------------------------
-# Separación física — nada se pierde, nada se inventa
+# A. "Gaso+" — confirmado y corregido
 # ---------------------------------------------------------------------------
 
-def test_patron_estructural_son_exactamente_las_3_secciones_clasificadas_en_gate_42():
-    titulos = [s.strip().split("\n")[0] for s in re.split(r"(?=^## )", brain.PATRON_ESTRUCTURAL_AGENTE.strip(), flags=re.MULTILINE) if s.strip()]
-    assert titulos == [
-        "## Reglas de estilo (síguelas siempre)",
-        "## Uso del contexto que se te proporciona",
-        "## Reglas de comportamiento",
-    ]
+def test_gaso_mas_ya_no_esta_en_el_patron_estructural():
+    assert "Gaso+" not in brain.PATRON_ESTRUCTURAL_AGENTE
 
 
-def test_reduccion_legacy_extrae_exactamente_el_patron_estructural_sin_tocar_el_resto():
+def test_patron_estructural_usa_la_frase_generica():
+    assert FRASE_GENERICA_NEGOCIO in brain.PATRON_ESTRUCTURAL_AGENTE
+
+
+def test_la_regla_de_uso_de_contexto_sigue_intacta_solo_cambio_la_frase():
+    """El resto de "Uso del contexto" (la instrucción real: usar SOLO el
+    contexto dado, no inventar) no se tocó — solo la mención de marca."""
+    assert "Básate" in brain.PATRON_ESTRUCTURAL_AGENTE
+    assert "ÚNICAMENTE en ese contexto" in brain.PATRON_ESTRUCTURAL_AGENTE
+    assert "no inventes" in brain.PATRON_ESTRUCTURAL_AGENTE
+
+
+# ---------------------------------------------------------------------------
+# B. Horario — principio movido a estructural, dato se queda en negocio
+# ---------------------------------------------------------------------------
+
+def test_dato_literal_de_horario_se_queda_en_configuracion_de_negocio():
     baseline = _baseline_real()
     reducido = brain._reducir_texto_legacy_calidda(baseline)
-    # Ninguno de los 3 títulos estructurales sigue en el texto reducido.
-    for titulo in ("## Reglas de estilo", "## Uso del contexto", "## Reglas de comportamiento"):
-        assert titulo not in reducido
-    # Todo lo demás SÍ sigue — algunos anclajes de cada sección restante.
-    for fragmento in (
-        "Eres Gabi, la asesora virtual",
-        "## Sobre el negocio",
-        "## Validación para financiamiento",
-        "## Cuándo derivar a un asesor humano",
-        "## Restricciones",
-        "## Filosofía comercial",
+    assert "Lunes a Sábado de 8:00am a 7:00pm" in reducido
+
+
+def test_dato_literal_de_horario_no_esta_en_el_patron_estructural():
+    assert "Lunes a Sábado" not in brain.PATRON_ESTRUCTURAL_AGENTE
+    assert "8:00am" not in brain.PATRON_ESTRUCTURAL_AGENTE
+
+
+def test_principio_de_disponibilidad_esta_en_el_patron_estructural():
+    assert "Si estás dentro de ese horario" in brain.PATRON_ESTRUCTURAL_AGENTE
+    assert "Si estás fuera de ese horario" in brain.PATRON_ESTRUCTURAL_AGENTE
+
+
+def test_principio_de_disponibilidad_ya_no_esta_en_configuracion_de_negocio():
+    baseline = _baseline_real()
+    reducido = brain._reducir_texto_legacy_calidda(baseline)
+    assert "Si estás dentro de ese horario" not in reducido
+    assert "Si estás fuera de ese horario" not in reducido
+
+
+def test_cuando_derivar_conserva_su_lista_de_triggers_especificos():
+    """Los triggers de escalamiento (DNI dado, cotización, visita técnica,
+    reclamo, condiciones especiales) son información de negocio real —
+    ninguno se tocó."""
+    baseline = _baseline_real()
+    reducido = brain._reducir_texto_legacy_calidda(baseline)
+    for trigger in (
+        "Pida una cotización personalizada",
+        "Necesite una visita técnica o instalación",
+        "Tenga un reclamo",
+        "Pida condiciones comerciales especiales",
     ):
-        assert fragmento in reducido
+        assert trigger in reducido
 
 
-def test_ensamblado_conserva_exactamente_el_mismo_set_de_secciones_que_el_baseline():
-    """La prueba central de equivalencia de CONTENIDO (condición 6/7 del
-    usuario): mismas 13 secciones (línea de apertura + 12 "##"), mismo
-    texto normalizado en cada una — ninguna perdida, ninguna inventada,
-    ninguna duplicada. El ORDEN se prueba aparte (test siguiente) porque
-    ESE sí cambia, a propósito."""
+# ---------------------------------------------------------------------------
+# Equivalencia exhaustiva — ningún contenido perdido ni inventado más allá
+# de los 2 cambios documentados en A y B
+# ---------------------------------------------------------------------------
+
+def test_multiset_no_whitespace_identico_salvo_los_2_cambios_documentados():
+    """La prueba central: (configuración-de-negocio + patrón-estructural),
+    como multiset de caracteres NO-whitespace, es IDÉNTICO a (baseline +
+    las 2 ediciones documentadas) — ninguna otra diferencia, ni una letra
+    de más ni de menos."""
     baseline = _baseline_real()
     reducido = brain._reducir_texto_legacy_calidda(baseline)
     ensamblado = brain.ensamblar_system_prompt(reducido)
 
-    secciones_base = _secciones_normalizadas(baseline)
-    secciones_ens = _secciones_normalizadas(ensamblado)
-    assert secciones_ens == secciones_base
-    assert len(secciones_base) == 13
+    esperado = _baseline_mas_los_2_cambios_documentados()
+    assert _sin_espacios(ensamblado) == _sin_espacios(esperado)
 
 
-def test_diferencia_de_orden_es_la_unica_diferencia_real_y_esta_documentada():
-    """Condición 8 del usuario: si el orden cambia, prueba de regresión
-    explícita + documentación. La diferencia real (no de whitespace): en
-    el baseline, "Reglas de estilo" aparece justo después de "Validación
-    para financiamiento"; en el ensamblado, aparece al final (después de
-    "Filosofía comercial"), como parte del patrón estructural."""
+def test_ensamblado_conserva_14_secciones_normalizadas():
+    """13 del original + 1 nueva ("Disponibilidad...", necesaria para que
+    el fragmento reubicado sea una sección válida) = 14."""
     baseline = _baseline_real()
     reducido = brain._reducir_texto_legacy_calidda(baseline)
     ensamblado = brain.ensamblar_system_prompt(reducido)
 
-    assert baseline != ensamblado  # el orden SÍ difiere — esperado, no un bug
-    assert ensamblado.rstrip().endswith("muestra empatía antes de resolver.")  # termina con el patrón estructural
-    assert baseline.index("## Reglas de estilo") < baseline.index("## Filosofía comercial")
-    assert ensamblado.index("## Reglas de estilo") > ensamblado.index("## Filosofía comercial")
-
-
-def test_longitud_normalizada_identica_solo_difiere_por_whitespace_de_empalme():
-    """Condición 6 (longitud/caracteres): la longitud CRUDA difiere en un
-    puñado de caracteres (runs de salto de línea distintos en los puntos
-    de empalme, inevitable al remover secciones del medio de un
-    documento) — pero la longitud NORMALIZADA (whitespace colapsado) es
-    IDÉNTICA, prueba de que no se perdió ni se agregó contenido real."""
-    baseline = _baseline_real()
-    reducido = brain._reducir_texto_legacy_calidda(baseline)
-    ensamblado = brain.ensamblar_system_prompt(reducido)
-
-    assert len(_normalizar(baseline)) == len(_normalizar(ensamblado))
-
-
-def test_hallazgo_documentado_gaso_mas_en_bloque_estructural_no_es_perdida_de_contenido():
-    """Hallazgo de este Gate, NO corregido a propósito (ver comentario en
-    brain.py): "Uso del contexto" menciona "Gaso+" por nombre — el texto
-    sigue siendo válido para Cálidda (no es un error de contenido), pero
-    el patrón no es 100% genérico todavía. Se deja documentado con un
-    test explícito, no oculto."""
-    assert "Gaso+" in brain.PATRON_ESTRUCTURAL_AGENTE
+    secciones = {_normalizar(s) for s in re.split(r"(?=^## )", ensamblado, flags=re.MULTILINE) if s.strip()}
+    assert len(secciones) == 14
 
 
 def test_ensamblado_es_determinista():
@@ -144,26 +160,24 @@ def test_ensamblado_es_determinista():
     assert a == b
 
 
-def test_doble_ciclo_reduccion_y_ensamblado_es_idempotente():
+def test_reduccion_es_idempotente_dado_el_mismo_baseline():
     baseline = _baseline_real()
-    primera_vuelta = brain.ensamblar_system_prompt(brain._reducir_texto_legacy_calidda(baseline))
-    segunda_vuelta = brain.ensamblar_system_prompt(brain._reducir_texto_legacy_calidda(baseline))
-    assert primera_vuelta == segunda_vuelta
+    r1 = brain._reducir_texto_legacy_calidda(baseline)
+    r2 = brain._reducir_texto_legacy_calidda(baseline)
+    assert r1 == r2
 
 
-def test_reduccion_falla_ruidosamente_si_falta_un_bloque_estructural():
-    """Fail-loud a propósito: mejor romper la migración que reconstruir un
-    prompt con un bloque duplicado en silencio si el texto y el patrón
-    estructural alguna vez divergen."""
+def test_reduccion_falla_ruidosamente_si_falta_el_fragmento_de_horario():
+    baseline = _baseline_real()
+    ya_reducido = brain._reducir_texto_legacy_calidda(baseline)  # ya no tiene el fragmento
     import pytest
-    texto_sin_reglas_de_estilo = brain._reducir_texto_legacy_calidda(_baseline_real())  # ya no tiene los 3 bloques
-    with pytest.raises(ValueError, match="no se encontraron en el texto"):
-        brain._reducir_texto_legacy_calidda(texto_sin_reglas_de_estilo)
+    with pytest.raises(ValueError, match="no se encontr"):
+        brain._reducir_texto_legacy_calidda(ya_reducido)
 
 
 # ---------------------------------------------------------------------------
-# Validación de contenido crítico (condición 9 del usuario) — presencia
-# textual de cada área exigida, en el prompt YA ENSAMBLADO.
+# Validación de contenido crítico (condición 9 del Gate 4.3 original) —
+# presencia textual de cada área exigida, en el prompt YA ENSAMBLADO.
 # ---------------------------------------------------------------------------
 
 def _prompt_ensamblado_calidda() -> str:
@@ -199,6 +213,8 @@ def test_validacion_derivacion():
     e = _prompt_ensamblado_calidda()
     assert "Pida una cotización personalizada" in e
     assert "Necesite una visita técnica o instalación" in e
+    assert "Lunes a Sábado de 8:00am a 7:00pm" in e  # el dato sigue disponible
+    assert "Si estás dentro de ese horario" in e  # y el principio también, aunque en otra posición
 
 
 def test_validacion_comportamiento_de_financiamiento():
@@ -208,18 +224,27 @@ def test_validacion_comportamiento_de_financiamiento():
 
 
 def test_validacion_sin_informacion_de_otro_negocio():
-    """Mismo criterio de aislamiento que Gate 4.2 — ensamblar para un
-    Negocio sintético con configuración distinta y confirmar que el
-    resultado de Cálidda nunca aparece ahí, y viceversa."""
     prompt_calidda = _prompt_ensamblado_calidda()
     prompt_otro = brain.ensamblar_system_prompt("Eres Nova, la asistente de Ferretería Central. Vendemos herramientas.")
 
     assert "Ferretería Central" not in prompt_calidda
     assert "Cálidda" not in prompt_otro
     assert "gasodoméstico" not in prompt_otro
+    assert "Lunes a Sábado de 8:00am a 7:00pm" not in prompt_otro  # el dato de Cálidda no se filtra
     # el patrón estructural SÍ es compartido a propósito — no es contaminación
     assert "SIEMPRE responde en español" in prompt_calidda
     assert "SIEMPRE responde en español" in prompt_otro
+    assert "Si estás dentro de ese horario" in prompt_otro  # el PRINCIPIO sí aplica a cualquier negocio
+
+
+def test_patron_estructural_es_verdaderamente_agnostico_al_negocio():
+    """Criterio de éxito actualizado del usuario, verificado directamente:
+    ninguna referencia a Cálidda, Gaso+, ni a ningún dato específico de
+    negocio (horario literal incluido) dentro de PATRON_ESTRUCTURAL_AGENTE."""
+    for referencia_prohibida in ("Cálidda", "Gaso+", "gasodoméstico", "8:00am", "Lunes a Sábado", "financiamiento"):
+        assert referencia_prohibida not in brain.PATRON_ESTRUCTURAL_AGENTE, (
+            f"'{referencia_prohibida}' no debería aparecer en el patrón estructural"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -228,10 +253,8 @@ def test_validacion_sin_informacion_de_otro_negocio():
 
 async def test_obtener_system_prompt_para_calidda_sigue_sirviendo_el_baseline_verbatim():
     """La prueba más importante de este Gate: confirma que la migración
-    queda en paralelo/inactiva. Si este test alguna vez falla, significa
-    que algo activó el ensamblado sin la aprobación separada que este
-    Gate dejó pendiente."""
-    negocio = await mem.crear_negocio("Cálidda (simulada)", "g43-calidda-sim")
+    queda en paralelo/inactiva."""
+    negocio = await mem.crear_negocio("Cálidda (simulada)", "g43b-calidda-sim")
     baseline = _baseline_real()
     await mem.crear_o_actualizar_identidad_agente(
         negocio["id"], nombre="Gabi", tono="Cercano, profesional y resolutivo",
