@@ -1820,6 +1820,106 @@ class CanalWhatsApp(Base):
     unidad_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("unidades_de_negocio.id"), nullable=True)
 
 
+class IdentidadAgente(Base):
+    """Identidad y comportamiento de Gabi (u otro agente futuro) PARA UN
+    NEGOCIO — GATE 4.2, cierre de la Decisión Pendiente 1 de Gate 4.1.
+
+    Decisión (evidencia, no preferencia): tabla propia, NO claves
+    namespaced en `Configuracion`. Tres motivos, todos verificados contra
+    el código real:
+    1. `Configuracion.valor` es `String(200)` — el system prompt real de
+       Cálidda mide ~5.400 caracteres. Reusar `Configuracion` exigía
+       ensanchar esa columna igual (mismo tipo de bug ya visto una vez:
+       `fe7af0de58f1_ampliar_productos_combo_a_text.py`, "SQLite no aplica
+       el límite de VARCHAR, Postgres sí, descubierto contra Postgres
+       real") — a partir de ahí, las dos opciones requieren migración por
+       igual, y deja de ser el criterio decisivo.
+    2. Gabi es un módulo de producto de primera clase (MPA §7, "Agentes
+       IA" es una fila propia del mapa de 9 módulos, separada de "Canales
+       & Configuración") — no una "config puntual" como `umbral_senior`.
+    3. Evolución a múltiples agentes por negocio (pedido explícito del
+       Gate): con claves de texto (`gabi.tono`) un segundo agente exige
+       inventar un prefijo dentro del string (`gabi_soporte.tono`),
+       frágil y sin tipar. Acá alcanza con una fila más — `codigo`
+       distingue agentes del mismo Negocio sin tocar el esquema.
+
+    `configuracion_negocio` contiene, VERBATIM, el bloque de identidad +
+    conocimiento propio del negocio (ver `agent/brain.py`,
+    `obtener_system_prompt`) — hoy, para Cálidda, es exactamente el
+    `system_prompt` completo de `config/prompts.yaml` al momento de este
+    Gate, sin recortar ni reordenar ni una palabra (verificado con test de
+    igualdad exacta, `tests/test_gate42_identidad_agente.py`). La
+    separación real entre "patrón estructural" (reglas que hoy ya viven
+    inline en ese mismo texto: uso del contexto, no inventar, idioma,
+    tono de respuesta) y "configuración del negocio" queda documentada en
+    el informe de este Gate, pero NO se ejecuta todavía como una edición
+    quirúrgica del texto en producción — mover esas reglas fuera del
+    bloque cambiaría lo que Gabi recibe hoy, y eso es exactamente el tipo
+    de "comportamiento productivo sensible" que Gate 4.2 §11 pide
+    detener y preguntar, no decidir en silencio con una reorganización de
+    texto ya afinado en producción."""
+    __tablename__ = "identidades_agente"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    negocio_id: Mapped[str] = mapped_column(String(36), ForeignKey("negocios.id"), nullable=False, index=True)
+    # Dos agentes del mismo Negocio no pueden compartir código — hoy
+    # siempre "gabi", pero la fila ya lo deja resuelto para cuando un
+    # Negocio tenga más de un agente (soporte, cobranza, etc.).
+    codigo: Mapped[str] = mapped_column(String(30), default="gabi")
+    nombre: Mapped[str] = mapped_column(String(50))
+    tono: Mapped[str] = mapped_column(String(200))
+    configuracion_negocio: Mapped[str] = mapped_column(Text)
+    creado: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    actualizado: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    __table_args__ = (
+        Index("ix_identidad_agente_negocio_codigo", "negocio_id", "codigo", unique=True),
+    )
+
+
+class HorarioAtencion(Base):
+    """Horario de atención de asesores humanos, POR NEGOCIO — Gate 4.2,
+    cierre de la Decisión Pendiente 5 de Gate 4.1.
+
+    Hallazgo del propio Gate 4.2 (no identificado en Gate 4.1): el
+    horario NO vivía solo como texto muerto en `business.yaml` — hay un
+    cálculo real y activo en `agent/tools.py::obtener_estado_horario_atencion()`,
+    llamado en cada turno desde `agent/brain.py::_armar_bloques_contexto`
+    (`:186`), con el rango HARDCODEADO en Python (`time(8,0)`/`time(19,0)`,
+    lunes a sábado) — cero relación con `negocio_id`. Esta tabla reemplaza
+    esa constante; ver la migración de backfill para la carga de los 7
+    días de Cálidda con el mismo rango que ya estaba hardcodeado (mismo
+    resultado, ninguna diferencia de comportamiento para el negocio_id
+    existente).
+
+    Una fila por día de la semana por Negocio — no un intervalo libre: no
+    hay evidencia hoy (ni en el texto de Cálidda ni en ningún otro lugar)
+    de más de un rango por día, de días especiales ni de excepciones de
+    fecha — construir eso ahora sería sobre-construir sin evidencia (Gate
+    4.2 §5, explícito). `hora_apertura`/`hora_cierre` son `None` cuando
+    `habilitado=False` (día cerrado, ej. domingo)."""
+    __tablename__ = "horarios_atencion"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    negocio_id: Mapped[str] = mapped_column(String(36), ForeignKey("negocios.id"), nullable=False, index=True)
+    # 0=lunes … 6=domingo — mismo criterio que datetime.weekday(), para no
+    # traducir entre convenciones en cada lectura/escritura.
+    dia_semana: Mapped[int] = mapped_column(Integer)
+    habilitado: Mapped[bool] = mapped_column(Boolean, default=True)
+    # "HH:MM", 24h — texto y no `Time` porque es exactamente el formato
+    # que ya usa datetime.time(...).strftime, sin zona (la zona la aplica
+    # quien consulta, ver obtener_estado_horario_atencion, siempre
+    # America/Lima hoy — un negocio en otra zona horaria es un gap
+    # explícitamente fuera del alcance de este Gate, sin evidencia de
+    # necesitarse todavía).
+    hora_apertura: Mapped[str | None] = mapped_column(String(5), nullable=True)
+    hora_cierre: Mapped[str | None] = mapped_column(String(5), nullable=True)
+
+    __table_args__ = (
+        Index("ix_horario_negocio_dia", "negocio_id", "dia_semana", unique=True),
+    )
+
+
 class Usuario(Base):
     """Cuenta de acceso al panel interno (/dashboard). Roles: admin, supervisor, asesor.
 
@@ -2022,6 +2122,101 @@ async def guardar_configuracion(clave: str, valor: str, negocio_id: str | None =
             session.add(config)
         config.valor = valor
         await session.commit()
+
+
+def _identidad_a_dict(identidad: "IdentidadAgente") -> dict:
+    return {
+        "id": identidad.id,
+        "negocio_id": identidad.negocio_id,
+        "codigo": identidad.codigo,
+        "nombre": identidad.nombre,
+        "tono": identidad.tono,
+        "configuracion_negocio": identidad.configuracion_negocio,
+        "creado": identidad.creado,
+        "actualizado": identidad.actualizado,
+    }
+
+
+async def obtener_identidad_agente(negocio_id: str, codigo: str = "gabi") -> dict | None:
+    """Identidad del agente de ESTE Negocio — Gate 4.2. `None` si el
+    Negocio todavía no tiene una migrada (mismo criterio fail-safe que el
+    resto del sistema: quien llama decide el fallback, nunca se inventa
+    acá)."""
+    async with async_session() as session:
+        query = select(IdentidadAgente).where(
+            IdentidadAgente.negocio_id == negocio_id, IdentidadAgente.codigo == codigo,
+        )
+        identidad = (await session.execute(query)).scalar_one_or_none()
+        return _identidad_a_dict(identidad) if identidad else None
+
+
+async def crear_o_actualizar_identidad_agente(
+    negocio_id: str, nombre: str, tono: str, configuracion_negocio: str, codigo: str = "gabi",
+) -> dict:
+    """Alta o edición de la identidad de un agente — Gate 4.2. Mismo
+    criterio idempotente que `guardar_configuracion`: si ya existe una fila
+    para (negocio_id, codigo), la actualiza; si no, la crea."""
+    async with async_session() as session:
+        query = select(IdentidadAgente).where(
+            IdentidadAgente.negocio_id == negocio_id, IdentidadAgente.codigo == codigo,
+        )
+        identidad = (await session.execute(query)).scalar_one_or_none()
+        if identidad is None:
+            identidad = IdentidadAgente(negocio_id=negocio_id, codigo=codigo)
+            session.add(identidad)
+        identidad.nombre = nombre
+        identidad.tono = tono
+        identidad.configuracion_negocio = configuracion_negocio
+        identidad.actualizado = datetime.utcnow()
+        await session.commit()
+        await session.refresh(identidad)
+        return _identidad_a_dict(identidad)
+
+
+def _horario_a_dict(horario: "HorarioAtencion") -> dict:
+    return {
+        "id": horario.id,
+        "negocio_id": horario.negocio_id,
+        "dia_semana": horario.dia_semana,
+        "habilitado": horario.habilitado,
+        "hora_apertura": horario.hora_apertura,
+        "hora_cierre": horario.hora_cierre,
+    }
+
+
+async def listar_horarios_atencion(negocio_id: str) -> list[dict]:
+    """Los 7 días de la semana de ESTE Negocio (Gate 4.2) — puede devolver
+    menos de 7 si el Negocio todavía no fue backfilleado; quien llama
+    decide el fallback (mismo criterio que el resto del sistema)."""
+    async with async_session() as session:
+        query = (
+            select(HorarioAtencion)
+            .where(HorarioAtencion.negocio_id == negocio_id)
+            .order_by(HorarioAtencion.dia_semana.asc())
+        )
+        resultado = await session.execute(query)
+        return [_horario_a_dict(h) for h in resultado.scalars().all()]
+
+
+async def guardar_horario_atencion(
+    negocio_id: str, dia_semana: int, habilitado: bool,
+    hora_apertura: str | None, hora_cierre: str | None,
+) -> dict:
+    """Alta o edición del horario de UN día de UN Negocio — Gate 4.2."""
+    async with async_session() as session:
+        query = select(HorarioAtencion).where(
+            HorarioAtencion.negocio_id == negocio_id, HorarioAtencion.dia_semana == dia_semana,
+        )
+        horario = (await session.execute(query)).scalar_one_or_none()
+        if horario is None:
+            horario = HorarioAtencion(negocio_id=negocio_id, dia_semana=dia_semana)
+            session.add(horario)
+        horario.habilitado = habilitado
+        horario.hora_apertura = hora_apertura if habilitado else None
+        horario.hora_cierre = hora_cierre if habilitado else None
+        await session.commit()
+        await session.refresh(horario)
+        return _horario_a_dict(horario)
 
 
 async def marcar_mensaje_procesado(mensaje_id: str) -> bool:

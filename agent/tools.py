@@ -14,7 +14,7 @@ import logging
 from datetime import datetime, time
 from zoneinfo import ZoneInfo
 
-from agent.memory import listar_productos_activos, obtener_producto_por_codigo_hana
+from agent.memory import listar_productos_activos, obtener_producto_por_codigo_hana, listar_horarios_atencion
 
 logger = logging.getLogger("agentkit")
 
@@ -224,21 +224,48 @@ def buscar_en_knowledge(mensaje: str, limite: int = 7) -> str:
     return "\n---\n".join(secciones)
 
 
-def obtener_estado_horario_atencion() -> dict:
+# Gate 4.2 (Decisión 5, Gate 4.1) — rango que corría hardcodeado acá mismo
+# antes de este Gate, sin relación con negocio_id. Se conserva SOLO como
+# fallback para un negocio_id que todavía no tiene HorarioAtencion
+# backfilleado (nunca debería pasar para un Negocio real, ver migración de
+# backfill) — nunca como la fuente de verdad.
+_FALLBACK_DIAS_HABILITADOS = range(0, 6)  # lunes a sábado
+_FALLBACK_HORA_APERTURA = time(8, 0)
+_FALLBACK_HORA_CIERRE = time(19, 0)
+
+
+async def obtener_estado_horario_atencion(negocio_id: str | None) -> dict:
     """
     Calcula si AHORA MISMO (hora real de Lima) se está dentro del horario de
-    atención de los asesores humanos. Un modelo de lenguaje no tiene reloj
-    propio — sin esto, no hay forma de que Gabi sepa si un asesor está
-    disponible en este momento o no.
+    atención de los asesores humanos DE ESTE NEGOCIO. Un modelo de lenguaje
+    no tiene reloj propio — sin esto, no hay forma de que Gabi sepa si un
+    asesor está disponible en este momento o no.
+
+    Gate 4.2 — antes de este Gate, el rango estaba hardcodeado acá mismo
+    (lunes a sábado, 8:00-19:00) sin relación con `negocio_id`: un segundo
+    Negocio con otro horario recibía la respuesta de Cálidda. Ahora resuelve
+    `HorarioAtencion` por `negocio_id`; si el Negocio no tiene fila para el
+    día de hoy (no backfilleado todavía), cae al mismo rango que estaba
+    hardcodeado — comportamiento sin cambios para quien no fue migrado.
     """
     ahora = datetime.now(TZ_LIMA)
     dia_semana = ahora.weekday()  # 0=lunes … 6=domingo
     hora_actual = ahora.time()
 
-    if dia_semana <= 5:  # lunes a sábado
-        dentro = time(8, 0) <= hora_actual < time(19, 0)
-    else:  # domingo
-        dentro = False
+    horario_hoy = None
+    if negocio_id is not None:
+        horarios = await listar_horarios_atencion(negocio_id)
+        horario_hoy = next((h for h in horarios if h["dia_semana"] == dia_semana), None)
+
+    if horario_hoy is not None:
+        dentro = (
+            horario_hoy["habilitado"]
+            and horario_hoy["hora_apertura"] is not None
+            and horario_hoy["hora_cierre"] is not None
+            and time.fromisoformat(horario_hoy["hora_apertura"]) <= hora_actual < time.fromisoformat(horario_hoy["hora_cierre"])
+        )
+    else:
+        dentro = dia_semana in _FALLBACK_DIAS_HABILITADOS and _FALLBACK_HORA_APERTURA <= hora_actual < _FALLBACK_HORA_CIERRE
 
     return {
         "dentro_de_horario": dentro,

@@ -25,7 +25,7 @@ from anthropic import AsyncAnthropic
 from dotenv import load_dotenv
 
 from agent.tools import obtener_contexto_relevante, obtener_estado_horario_atencion, formatear_producto
-from agent.memory import obtener_campana_por_nombre, obtener_configuracion
+from agent.memory import obtener_campana_por_nombre, obtener_configuracion, obtener_identidad_agente
 from agent.campanas import resolver_promo, resolver_familia_promo, obtener_codigos_promocionales_activos
 
 load_dotenv()
@@ -117,19 +117,30 @@ def cargar_system_prompt() -> str:
     return config.get("system_prompt", "Eres un asistente útil. Responde en español.")
 
 
-async def obtener_system_prompt(modo: str) -> str:
-    """Resuelve qué system prompt usar según el modo del canal:
+async def obtener_system_prompt(modo: str, negocio_id: str | None = None) -> str:
+    """Resuelve qué system prompt usar según el modo del canal Y el Negocio
+    de ese canal:
     - "pruebas": siempre el de config/prompts.yaml, tal cual está desplegado
       — así se puede probar un cambio de Gabi en el número de pruebas apenas
-      se hace un deploy, sin esperar nada más.
-    - "produccion": el prompt PROMOVIDO manualmente desde el panel (guardado
-      en la tabla Configuracion, clave "system_prompt_produccion") — no
-      cambia solo con un deploy. Si todavía no se promovió nada (instalación
-      nueva, o nadie usó el botón de promover aún), cae de vuelta al del
-      archivo, para que producción nunca quede con un prompt vacío."""
+      se hace un deploy, sin esperar nada más. Sin cambios de Gate 4.2: es
+      un mecanismo de staging pre-deploy, no de identidad por Negocio, y no
+      había evidencia de que debiera cambiar.
+    - "produccion": Gate 4.2 (cierre de la Decisión Pendiente 1/P0 de Gate
+      4.1) — si el Negocio de este canal ya tiene una `IdentidadAgente`
+      migrada (`codigo="gabi"`), usa su `configuracion_negocio` (hoy, para
+      Cálidda, el mismo texto que ya corría en producción — ver
+      `tests/test_gate42_identidad_agente.py`, comparación de igualdad
+      exacta). Si el Negocio todavía no tiene identidad migrada, cae al
+      mecanismo anterior (`Configuracion["system_prompt_produccion"]`,
+      global de plataforma, con el archivo como último fallback) — ningún
+      Negocio sin migrar cambia de comportamiento por este Gate."""
     prompt_archivo = cargar_system_prompt()
     if modo == "pruebas":
         return prompt_archivo
+    if negocio_id is not None:
+        identidad = await obtener_identidad_agente(negocio_id)
+        if identidad is not None:
+            return identidad["configuracion_negocio"]
     return await obtener_configuracion("system_prompt_produccion", prompt_archivo)
 
 
@@ -183,7 +194,9 @@ async def _armar_bloques_contexto(
 
     # Un modelo de lenguaje no tiene reloj propio: hay que decirle la hora
     # real para que sepa si un asesor está disponible ahora mismo o no.
-    estado_horario = obtener_estado_horario_atencion()
+    # Gate 4.2: horario resuelto por negocio_id (antes hardcodeado, sin
+    # relación con el Negocio del canal por el que llegó el mensaje).
+    estado_horario = await obtener_estado_horario_atencion(negocio_id)
     disponibilidad = "DENTRO del horario de atención" if estado_horario["dentro_de_horario"] else "FUERA del horario de atención"
     bloques.append(f"Ahora mismo es {estado_horario['fecha_hora_lima']} — estás {disponibilidad} de los asesores humanos.")
 
@@ -373,7 +386,7 @@ async def generar_respuesta(
     if not mensaje or not mensaje.strip():
         return obtener_mensaje_fallback(), False, None, None
 
-    system_prompt = await obtener_system_prompt(modo)
+    system_prompt = await obtener_system_prompt(modo, negocio_id)
     bloques_contexto = await _armar_bloques_contexto(mensaje, historial, lead, negocio_id)
 
     # Construir mensajes para la API. Claude solo acepta los roles "user" y

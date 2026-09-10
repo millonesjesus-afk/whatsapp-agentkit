@@ -61,6 +61,7 @@ from agent.memory import (
     iso_utc, ROLES_CON_VISION_TOTAL, tiene_acceso_a_lead, liberar_asignacion,
     obtener_conversation_realtime, obtener_conversation_activa_de_telefono,
     resolver_conversation_ids_por_telefono,
+    obtener_negocio, obtener_identidad_agente, listar_horarios_atencion,
 )
 from agent.services.servicio_conversacion import servicio_conversacion
 from agent.http_utils import get_con_reintentos, post_con_reintentos
@@ -6719,11 +6720,25 @@ def _enmascarar_token(token: str | None) -> str:
     return "••••" + token[-6:]
 
 
-async def _bloque_promover_prompt(request: Request | None = None) -> str:
+async def _bloque_promover_prompt(request: Request | None = None, negocio_id: str | None = None) -> str:
     """Compara el prompt del archivo (config/prompts.yaml, lo que ya corre en
     los canales de prueba) contra el promovido a producción, y ofrece el
     botón para igualarlos — así no hace falta un deploy para que producción
-    reciba un cambio ya probado."""
+    reciba un cambio ya probado.
+
+    GATE 4.2 — desde que este Negocio tiene una `IdentidadAgente` migrada,
+    `obtener_system_prompt("produccion", negocio_id)` deja de leer
+    `Configuracion["system_prompt_produccion"]` (ver `agent/brain.py`): este
+    botón, para ese Negocio, dejaría de tener efecto real. Se avisa acá en
+    vez de dejarlo silenciosamente inerte — Legacy no se elimina (todavía
+    sirve para cualquier Negocio sin identidad migrada), solo se aclara."""
+    if negocio_id is not None and await obtener_identidad_agente(negocio_id) is not None:
+        return (
+            '<div class="alert alert-info py-2 px-3 small mb-0">'
+            '<i class="bi bi-info-circle-fill"></i> Este negocio ya tiene una Identidad de Agente '
+            'propia (Gate 4.2) — el prompt de producción se administra ahí, este botón ya no '
+            'tiene efecto para este negocio.</div>'
+        )
     prompt_archivo = cargar_system_prompt()
     prompt_produccion = await obtener_configuracion("system_prompt_produccion", prompt_archivo)
     sincronizados = prompt_archivo == prompt_produccion
@@ -6811,6 +6826,42 @@ def _estado_token_canal(canal: dict) -> str:
         f'<i class="bi bi-exclamation-triangle-fill"></i> El token vence en {dias_restantes} día(s) '
         f'— renueva desde "Editar canal".</div>'
     )
+
+
+@router.get("/configuracion.json")
+async def configuracion_json(usuario: dict = Depends(servicio_identidad.requiere_rol("admin"))):
+    """GATE 4.2 — Decisión 6 de Gate 4.1: estructura base de Configuración
+    (Negocio / Gabi / Canales), la misma que valida el informe de este
+    Gate contra MPA §7 + MSA Cap. 9. Backend-únicamente a propósito —
+    ninguna pantalla de Nueva Experiencia la consume todavía (eso es
+    Gate 4.4-4.6, "no avanzar funcionalidades de Gates posteriores"); esta
+    ruta prueba que la separación es real y consultable, no construye la UI.
+
+    `gabi` no expone `configuracion_negocio` completo (el texto del
+    prompt) — solo confirma que existe y su tamaño, para no comprometerse
+    todavía con un contrato de API que Gate 4.4-4.6 puede necesitar
+    rediseñar al construir la pantalla real de edición."""
+    negocio = await obtener_negocio(usuario["negocio_id"])
+    identidad = await obtener_identidad_agente(usuario["negocio_id"])
+    horarios = await listar_horarios_atencion(usuario["negocio_id"])
+    canales = await listar_canales_whatsapp(negocio_id=usuario["negocio_id"])
+
+    negocio_json = None
+    if negocio:
+        negocio_json = {**negocio, "creado": iso_utc(negocio["creado"]), "actualizado": iso_utc(negocio["actualizado"])}
+
+    return JSONResponse({
+        "negocio": negocio_json,
+        "gabi": {
+            "nombre": identidad["nombre"], "tono": identidad["tono"],
+            "prompt_configurado": True, "prompt_longitud": len(identidad["configuracion_negocio"]),
+        } if identidad else None,
+        "horarios": horarios,
+        "canales": [
+            {"id": c["id"], "nombre": c["nombre"], "modo": c.get("modo", "produccion"), "activo": c["activo"]}
+            for c in canales
+        ],
+    })
 
 
 @router.get("/canales-whatsapp", response_class=HTMLResponse)
@@ -7128,7 +7179,7 @@ async def gestionar_canales_whatsapp(request: Request, usuario: dict = Depends(s
         El prompt recién desplegado corre de inmediato en los canales marcados "Pruebas". Los
         canales en "Producción" usan la última versión promovida acá — no cambia sola con un deploy.
     </p>
-    {await _bloque_promover_prompt(request)}
+    {await _bloque_promover_prompt(request, usuario["negocio_id"])}
     """
     cuerpo = f"""<div class="shell d-flex">{sidebar}<div class="main-pane flex-grow-1 p-4">{panel}</div></div>"""
     return _pagina("Canales de WhatsApp", usuario, cuerpo, request=request)
@@ -7539,6 +7590,18 @@ def _capacidades_de(rol: str) -> list[str]:
             # del módulo "Configuración" en el sidebar — mismo patrón namespace
             # "modulo:accion" que ya usan productos:*/pipeline:ver/leads:*, no
             # una tabla de permisos aparte.
+            #
+            # GATE 4.2 (Decisión 4 de Gate 4.1, cerrada): esta sigue siendo la
+            # ÚNICA capacidad de todo el módulo Configuración — se evaluaron
+            # `negocio:editar`/`gabi:editar`/`canales:editar` y NO se crearon.
+            # MPA §9 hace de Configuración un módulo binario (Admin: Completo
+            # · Supervisor/Asesor: Sin acceso, sin ningún nivel de lectura
+            # intermedio) — a diferencia de Catálogo/Campañas, donde SÍ hace
+            # falta separar `:ver` de `:editar` porque un rol ve y otro edita.
+            # Acá no existe ese caso: quien puede ver, siempre puede editar, y
+            # quien no puede ver, tampoco necesita un candado de edición
+            # aparte. Agregar capacidades ahí sería exactamente lo que Gate
+            # 4.2 §4 pide no hacer: "no crear permisos redundantes".
             "configuracion:ver",
             # Gate UX Equipo (Decisión 5): distinta de "asesores.gestionar"
             # (arriba, vision_total = admin+supervisor, que solo cubre VER el
