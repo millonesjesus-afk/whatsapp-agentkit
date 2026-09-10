@@ -2674,6 +2674,36 @@ COLUMNAS_ORDEN_PIPELINE = {
 }
 
 
+async def _conversation_ids_por_telefono(session, negocio_id: str, telefonos: list[str]) -> dict[str, str]:
+    """Resuelve en bloque (no N+1) el `conversation_id` ACTIVO de cada
+    teléfono, doblemente candado por `negocio_id` — GATE 3.1 (Inicio):
+    extraída tal cual del bloque que ya usaba `listar_leads_pipeline` (Gate
+    5.3 cutover real §8) para que Inicio use la MISMA lógica en vez de
+    reimplementarla. Un teléfono sin Conversation todavía (no backfilleado
+    / no pasó por el webhook) simplemente no aparece en el dict — quien
+    llama decide el fallback (mismo criterio que `_dto_lead_pipeline`)."""
+    if not telefonos:
+        return {}
+    filas = (await session.execute(
+        select(Contact.telefono, Conversation.id)
+        .join(Conversation, Conversation.contact_id == Contact.id)
+        .where(
+            Contact.negocio_id == negocio_id, Contact.telefono.in_(telefonos),
+            Conversation.negocio_id == negocio_id, Conversation.estado == "activa",
+        )
+    )).all()
+    return {telefono: conversation_id for telefono, conversation_id in filas}
+
+
+async def resolver_conversation_ids_por_telefono(negocio_id: str, telefonos: list[str]) -> dict[str, str]:
+    """Envoltorio público de `_conversation_ids_por_telefono` (arriba) — abre
+    su propia sesión, para llamadores que no tienen una ya abierta (GATE 3.1:
+    `agent/dashboard.py`, Inicio). `listar_leads_pipeline` sigue usando la
+    versión privada directo, porque ya tiene la sesión abierta."""
+    async with async_session() as session:
+        return await _conversation_ids_por_telefono(session, negocio_id, telefonos)
+
+
 async def listar_leads_pipeline(
     negocio_id: str,
     asesor_asignado: str | None = None,
@@ -2733,19 +2763,11 @@ async def listar_leads_pipeline(
         # cada telefono, doblemente candado por negocio_id. Un lead sin
         # Conversation todavía (no backfilleado / no pasó por el webhook) no
         # se inventa ninguna — su fila sigue navegando por telefono como
-        # fallback (ver _dto_lead_pipeline).
+        # fallback (ver _dto_lead_pipeline). Gate 3.1: extraído a
+        # _conversation_ids_por_telefono() para que Inicio reuse la misma
+        # lógica — este call site queda con el mismo resultado de siempre.
         telefonos = [l["telefono"] for l in leads]
-        conversation_id_por_telefono: dict[str, str] = {}
-        if telefonos:
-            filas = (await session.execute(
-                select(Contact.telefono, Conversation.id)
-                .join(Conversation, Conversation.contact_id == Contact.id)
-                .where(
-                    Contact.negocio_id == negocio_id, Contact.telefono.in_(telefonos),
-                    Conversation.negocio_id == negocio_id, Conversation.estado == "activa",
-                )
-            )).all()
-            conversation_id_por_telefono = {telefono: conversation_id for telefono, conversation_id in filas}
+        conversation_id_por_telefono = await _conversation_ids_por_telefono(session, negocio_id, telefonos)
 
         for l in leads:
             l["conversation_id"] = conversation_id_por_telefono.get(l["telefono"])

@@ -60,6 +60,7 @@ from agent.memory import (
     CAMPOS_NEGOCIO_PRODUCTO, PLAZOS_CUOTAS_CATALOGO,
     iso_utc, ROLES_CON_VISION_TOTAL, tiene_acceso_a_lead, liberar_asignacion,
     obtener_conversation_realtime, obtener_conversation_activa_de_telefono,
+    resolver_conversation_ids_por_telefono,
 )
 from agent.services.servicio_conversacion import servicio_conversacion
 from agent.http_utils import get_con_reintentos, post_con_reintentos
@@ -3054,6 +3055,104 @@ def _zona_accion_vacia(mensaje: str) -> str:
     return f'<div class="zona-accion-vacio">{html.escape(mensaje)}</div>'
 
 
+# ── Inicio (Nueva Experiencia — GATE 3.1) ───────────────────────────────
+#
+# Las funciones de abajo (`_zona_accion_*_datos`, `_zona_indicadores_*_datos`)
+# son la versión estructurada (JSON, sin HTML) de las funciones de arriba
+# (`_zona_accion_asesor`, `_zona_accion_admin`, `_zona_indicadores_asesor`,
+# `_zona_indicadores_admin`) — MISMA lógica de negocio (mismo orden, mismos
+# límites 5+3, mismos filtros), deliberadamente NO refactorizadas para
+# compartir código con esas: el legacy HTML queda intacto, byte a byte, sin
+# ningún riesgo de regresión (Gate 3.0 §Q, "garantiza que Legacy conserve
+# exactamente su comportamiento actual"). Único agregado real: resuelven
+# `conversation_id` en bloque (mismo patrón que `listar_leads_pipeline`,
+# Gate 5.3 §8) para que cada ítem pueda navegar a la Nueva Experiencia, no
+# solo al panel legacy.
+
+
+async def _zona_accion_asesor_datos(usuario: dict, datos: dict) -> dict:
+    """Estructura de datos de la Zona de acción — Asesor (Product Patterns
+    Cap. 3 §3: lista priorizada de conversaciones/oportunidades propias)."""
+    esperando = sorted(
+        (l for l in datos["leads_todos"] if l.get("pausado_manual")),
+        key=lambda l: l.get("actualizado") or datetime.min,
+    )
+    agendados = await listar_leads_agendados(usuario["negocio_id"], asesor_asignado=usuario["username"])
+
+    pares = [(l, "Esperando tu respuesta") for l in esperando[:5]]
+    for l in agendados[:3]:
+        fecha = l["fecha_agendada"].strftime("%d/%m %H:%M") if l.get("fecha_agendada") else "sin hora"
+        pares.append((l, f"Cita agendada — {fecha}"))
+
+    if not pares:
+        return {"vacio": True, "mensaje_vacio": "No tenés conversaciones que requieran tu atención ahora mismo.", "items": []}
+
+    conversation_ids = await resolver_conversation_ids_por_telefono(
+        usuario["negocio_id"], [l["telefono"] for l, _ in pares],
+    )
+    items = [
+        {
+            "telefono": l["telefono"], "conversation_id": conversation_ids.get(l["telefono"]),
+            "nombre": l.get("nombre"), "motivo": motivo,
+        }
+        for l, motivo in pares
+    ]
+    return {"vacio": False, "mensaje_vacio": None, "items": items}
+
+
+async def _zona_accion_admin_datos(datos: dict, negocio_id: str) -> dict:
+    """Estructura de datos de la Zona de acción — Administrador/Supervisor
+    (Product Patterns Cap. 3 §3: qué requiere intervención hoy, alcance del
+    Negocio)."""
+    esperando_asignar = await listar_leads_esperando_asesor(negocio_id)
+    esperando_respuesta = sorted(
+        (l for l in datos["leads_todos"] if l.get("pausado_manual")),
+        key=lambda l: l.get("actualizado") or datetime.min,
+    )
+    agendados = await listar_leads_agendados(negocio_id)
+
+    pares = [(l, "Sin asesor asignado") for l in esperando_asignar[:5]]
+    for l in esperando_respuesta[:5]:
+        asesor_nombre = l.get("asesor_asignado") or "sin asesor"
+        pares.append((l, f"Esperando respuesta — {asesor_nombre}"))
+    for l in agendados[:3]:
+        fecha = l["fecha_agendada"].strftime("%d/%m %H:%M") if l.get("fecha_agendada") else "sin hora"
+        pares.append((l, f"Cita agendada — {fecha}"))
+
+    if not pares:
+        return {"vacio": True, "mensaje_vacio": "El equipo no tiene conversaciones que requieran tu intervención ahora mismo.", "items": []}
+
+    conversation_ids = await resolver_conversation_ids_por_telefono(
+        negocio_id, [l["telefono"] for l, _ in pares],
+    )
+    items = [
+        {
+            "telefono": l["telefono"], "conversation_id": conversation_ids.get(l["telefono"]),
+            "nombre": l.get("nombre"), "motivo": motivo,
+        }
+        for l, motivo in pares
+    ]
+    return {"vacio": False, "mensaje_vacio": None, "items": items}
+
+
+def _zona_indicadores_asesor_datos(datos: dict) -> list[dict]:
+    activas = len(datos["leads_derivados"]) + len(datos["leads_con_gabi"])
+    return [
+        {"valor": activas, "etiqueta": "Conversaciones activas"},
+        {"valor": len(datos["leads_todos"]), "etiqueta": "Leads asignados"},
+    ]
+
+
+def _zona_indicadores_admin_datos(datos: dict, asesores: list[dict]) -> list[dict]:
+    disponibles = sum(1 for a in asesores if a.get("disponible"))
+    activas = len(datos["leads_derivados"]) + len(datos["leads_con_gabi"])
+    return [
+        {"valor": activas, "etiqueta": "Conversaciones activas"},
+        {"valor": len(datos["leads_todos"]), "etiqueta": "Leads en curso"},
+        {"valor": f"{disponibles}/{len(asesores)}", "etiqueta": "Asesores disponibles"},
+    ]
+
+
 async def _zona_accion_asesor(usuario: dict, datos: dict) -> str:
     """Deterministica, sin depender del Copiloto IA ni de ninguna señal de
     protocolo de confianza (Cap. 3 de Product Patterns) — reglas sobre datos
@@ -3145,6 +3244,30 @@ async def _vista_inicio(request: Request, usuario: dict) -> HTMLResponse:
     </div>
     """
     return _pagina("Inicio", usuario, cuerpo, request=request)
+
+
+@router.get("/inicio.json")
+async def inicio_json(usuario: dict = Depends(_usuario_actual)):
+    """GATE 3.1 — Inicio para la Nueva Experiencia (Product Patterns Cap. 3).
+    Misma fuente de datos que `_vista_inicio` (arriba, panel legacy) — ver
+    el bloque de comentario sobre `_zona_accion_*_datos` para por qué son
+    funciones separadas de las que arman el HTML legacy, no una reutilizando
+    a la otra."""
+    datos = await _datos_bandeja(usuario, "todos", "", "")
+
+    if datos["vision_total"]:
+        zona_accion = await _zona_accion_admin_datos(datos, usuario["negocio_id"])
+        asesores = await listar_asesores(usuario["negocio_id"])
+        zona_indicadores = _zona_indicadores_admin_datos(datos, asesores)
+    else:
+        zona_accion = await _zona_accion_asesor_datos(usuario, datos)
+        zona_indicadores = _zona_indicadores_asesor_datos(datos)
+
+    return JSONResponse({
+        "vision_total": datos["vision_total"],
+        "zona_accion": zona_accion,
+        "zona_indicadores": zona_indicadores,
+    })
 
 
 @router.get("", response_class=HTMLResponse)
