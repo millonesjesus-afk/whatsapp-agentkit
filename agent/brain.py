@@ -144,6 +144,78 @@ async def obtener_system_prompt(modo: str, negocio_id: str | None = None) -> str
     return await obtener_configuracion("system_prompt_produccion", prompt_archivo)
 
 
+# -- GATE 4.3 (Decision Pendiente 2 de Gate 4.1, migracion controlada) --
+#
+# Patron estructural de Gabi, reutilizable por cualquier Negocio sobre
+# MAIEK AI Platform -- vive en CODIGO (Gate 4.2 instruccion 2: "ESTRUCTURAL:
+# debe permanecer controlado por codigo/patron de producto", no editable via
+# panel). Extraido TEXTUALMENTE (sin reescribir una palabra) de las 3
+# secciones del prompt de Calidda que la clasificacion de Gate 4.2 marco
+# 100% estructurales: ['## Reglas de estilo (síguelas siempre)', '## Uso del contexto que se te proporciona', '## Reglas de comportamiento'].
+#
+# INACTIVO A PROPOSITO: obtener_system_prompt() (mas abajo) NO usa esta
+# constante todavia -- Calidda sigue sirviendose desde su
+# IdentidadAgente.configuracion_negocio tal cual, sin pasar por
+# ensamblar_system_prompt(). Activarlo es una decision separada, posterior
+# a este Gate (ver informe de cierre de Gate 4.3, seccion "Activacion").
+#
+# Hallazgo documentado, NO corregido en este Gate (ver informe): la seccion
+# "Uso del contexto" menciona "Gaso+" por nombre -- no es perfectamente
+# generico. Inofensivo para la reconstruccion de Calidda (sigue siendo
+# contenido correcto para Calidda sin importar en que bloque viva), pero es
+# un ajuste pendiente para cuando un segundo Negocio real use este patron.
+PATRON_ESTRUCTURAL_AGENTE = '## Reglas de estilo (síguelas siempre)\n- Mensajes cortos: máximo 2 o 3 párrafos por respuesta.\n- Nunca envíes bloques largos de texto.\n- Haz UNA SOLA pregunta por mensaje — nunca combines dos preguntas distintas\n  en la misma respuesta (ej. nombre + necesidad), aunque te parezcan\n  relacionadas. Espera la respuesta a la primera antes de hacer la segunda.\n- Antes de preguntar algo, revisa el historial de la conversación: si ya\n  hiciste esa pregunta antes y el cliente respondió otra cosa (sin\n  contestarla), retómala de forma natural en vez de repetirla con las\n  mismas palabras — nunca hagas la misma pregunta dos veces seguidas.\n- Usa emojis con moderación (👋😊✅), solo cuando aporten cercanía.\n- Llama al cliente por su nombre en cuanto lo conozcas por la conversación.\n- Nunca inventes promociones, precios o políticas que no estén en tu información.\n- Si no conoces una respuesta, dilo con honestidad y deriva al asesor.\n\n## Uso del contexto que se te proporciona\nAntes del mensaje del cliente puede incluirse una sección "Contexto relevante" con\ninformación del catálogo de productos o de la base de conocimiento de Gaso+. Básate\nÚNICAMENTE en ese contexto para dar precios, cuotas o condiciones específicas. Si el\ncontexto no incluye lo que el cliente pregunta, no inventes: dilo y deriva al asesor si\ncorresponde.\n\n## Reglas de comportamiento\n- SIEMPRE responde en español.\n- Mantén las respuestas concisas pero útiles.\n- Si el cliente parece frustrado, muestra empatía antes de resolver.\n'
+
+
+def ensamblar_system_prompt(configuracion_negocio: str) -> str:
+    """Ensamblador determinista (Gate 4.3): configuracion especifica del
+    Negocio + patron estructural compartido. Misma entrada -> misma salida
+    siempre, sin aleatoriedad ni dependencia de tiempo.
+
+    El patron estructural va AL FINAL, no intercalado como en el prompt
+    monolitico original -- es la unica forma de separar fisicamente sin
+    inventar una posicion distinta para cada regla. Justificacion: son
+    reglas de comportamiento/estilo que un LLM sigue independientemente de
+    su posicion en el prompt (a diferencia de una narrativa paso a paso,
+    que si depende del orden) -- y colocarlas al final las deja como
+    refuerzo final, un patron de prompting razonable, no arbitrario.
+
+    NO se usa todavia en el flujo real (ver obtener_system_prompt arriba,
+    que sigue leyendo `IdentidadAgente.configuracion_negocio` directo) --
+    activacion pendiente de aprobacion separada, post Gate 4.3."""
+    return f"{configuracion_negocio.rstrip()}\n\n{PATRON_ESTRUCTURAL_AGENTE.strip()}"
+
+
+def _reducir_texto_legacy_calidda(texto_completo: str) -> str:
+    """SOLO para la migracion de Gate 4.3: reconstruye la configuracion-de-
+    negocio de Calidda a partir de su prompt monolitico actual, quitando
+    (textualmente, sin reescribir nada) los 3 bloques que pasaron a
+    PATRON_ESTRUCTURAL_AGENTE. Un Negocio nuevo NUNCA necesita esta
+    funcion -- su `configuracion_negocio` se escribe desde el principio
+    sin estos bloques adentro."""
+    import re as _re
+    partes = _re.split(r"(?=^## )", texto_completo, flags=_re.MULTILINE)
+    # `re.split` deja un elemento vacío al principio cuando el texto EMPIEZA
+    # justo con el patrón (caso de PATRON_ESTRUCTURAL_AGENTE, que arranca
+    # con "## ") — se descarta, no es un bloque real.
+    bloques_estructurales = {
+        b.strip() for b in _re.split(r"(?=^## )", PATRON_ESTRUCTURAL_AGENTE.strip(), flags=_re.MULTILINE) if b.strip()
+    }
+    encontrados = {p.strip() for p in partes if p.strip() in bloques_estructurales}
+    faltantes = bloques_estructurales - encontrados
+    if faltantes:
+        # Fail-loud a propósito: mejor romper la migración que reconstruir
+        # un prompt con un bloque estructural duplicado en silencio (si
+        # `texto_completo` y `PATRON_ESTRUCTURAL_AGENTE` alguna vez
+        # divergen sin que esta función se actualice).
+        raise ValueError(
+            f"_reducir_texto_legacy_calidda: {len(faltantes)} bloque(s) estructural(es) "
+            f"no se encontraron en el texto — no se puede reconstruir de forma segura."
+        )
+    restantes = [p for p in partes if p.strip() not in bloques_estructurales]
+    return "".join(restantes).strip() + "\n"
+
+
 def obtener_mensaje_error() -> str:
     """Retorna el mensaje de error configurado en prompts.yaml."""
     config = cargar_config_prompts()
