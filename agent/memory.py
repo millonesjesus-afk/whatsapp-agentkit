@@ -1869,6 +1869,14 @@ class IdentidadAgente(Base):
     nombre: Mapped[str] = mapped_column(String(50))
     tono: Mapped[str] = mapped_column(String(200))
     configuracion_negocio: Mapped[str] = mapped_column(Text)
+    # GATE 4.3 — activación controlada y reversible del ensamblador
+    # (patrón estructural + configuración de negocio) en vez del texto
+    # verbatim de `configuracion_negocio` tal cual. Default False a
+    # propósito: ningún Negocio existente cambia de comportamiento solo
+    # por agregarse esta columna — el fallback al texto verbatim es
+    # automático mientras esto sea False. Ver
+    # `agent/brain.py::obtener_system_prompt`.
+    usa_patron_estructural: Mapped[bool] = mapped_column(Boolean, default=False)
     creado: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     actualizado: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -2132,6 +2140,7 @@ def _identidad_a_dict(identidad: "IdentidadAgente") -> dict:
         "nombre": identidad.nombre,
         "tono": identidad.tono,
         "configuracion_negocio": identidad.configuracion_negocio,
+        "usa_patron_estructural": identidad.usa_patron_estructural,
         "creado": identidad.creado,
         "actualizado": identidad.actualizado,
     }
@@ -2167,6 +2176,28 @@ async def crear_o_actualizar_identidad_agente(
         identidad.nombre = nombre
         identidad.tono = tono
         identidad.configuracion_negocio = configuracion_negocio
+        identidad.actualizado = datetime.utcnow()
+        await session.commit()
+        await session.refresh(identidad)
+        return _identidad_a_dict(identidad)
+
+
+async def activar_patron_estructural(negocio_id: str, activo: bool, codigo: str = "gabi") -> dict | None:
+    """Prende/apaga el ensamblador (patrón estructural + configuración de
+    negocio) para ESTE Negocio — Gate 4.3, activación controlada y
+    reversible. Función de una sola responsabilidad, separada de
+    `crear_o_actualizar_identidad_agente`, para que activar/revertir sea
+    un solo campo tocado, auditable, sin tener que re-enviar
+    nombre/tono/configuracion_negocio cada vez. `None` si el Negocio no
+    tiene identidad migrada — no se crea una a ciegas."""
+    async with async_session() as session:
+        query = select(IdentidadAgente).where(
+            IdentidadAgente.negocio_id == negocio_id, IdentidadAgente.codigo == codigo,
+        )
+        identidad = (await session.execute(query)).scalar_one_or_none()
+        if identidad is None:
+            return None
+        identidad.usa_patron_estructural = activo
         identidad.actualizado = datetime.utcnow()
         await session.commit()
         await session.refresh(identidad)

@@ -133,13 +133,24 @@ async def obtener_system_prompt(modo: str, negocio_id: str | None = None) -> str
       exacta). Si el Negocio todavía no tiene identidad migrada, cae al
       mecanismo anterior (`Configuracion["system_prompt_produccion"]`,
       global de plataforma, con el archivo como último fallback) — ningún
-      Negocio sin migrar cambia de comportamiento por este Gate."""
+      Negocio sin migrar cambia de comportamiento por este Gate.
+
+      Gate 4.3 — activación controlada: si `identidad.usa_patron_estructural`
+      es True, en vez de devolver `configuracion_negocio` verbatim, devuelve
+      `ensamblar_system_prompt(_reducir_texto_legacy_calidda(configuracion_negocio))`
+      — patrón estructural + configuración de negocio ensamblados. Default
+      `False` (columna nueva, ver `IdentidadAgente`): ningún Negocio existente
+      cambia de comportamiento solo por esta migración de esquema. Revertir
+      es un solo campo (`activar_patron_estructural(negocio_id, False)`),
+      nunca requiere tocar `configuracion_negocio` ni ningún otro dato."""
     prompt_archivo = cargar_system_prompt()
     if modo == "pruebas":
         return prompt_archivo
     if negocio_id is not None:
         identidad = await obtener_identidad_agente(negocio_id)
         if identidad is not None:
+            if identidad.get("usa_patron_estructural"):
+                return ensamblar_system_prompt(_reducir_texto_legacy_calidda(identidad["configuracion_negocio"]))
             return identidad["configuracion_negocio"]
     return await obtener_configuracion("system_prompt_produccion", prompt_archivo)
 
@@ -238,8 +249,9 @@ _USO_DEL_CONTEXTO_ORIGINAL_CALIDDA = '## Uso del contexto que se te proporciona\
 
 
 def _reducir_texto_legacy_calidda(texto_completo: str) -> str:
-    """SOLO para la migracion de Gate 4.3: reconstruye la configuracion-de-
-    negocio de Calidda a partir de su prompt monolitico actual, quitando
+    """Reconstruye la configuracion-de-negocio de Calidda a partir de su
+    prompt monolitico actual (`IdentidadAgente.configuracion_negocio`,
+    intacto desde Gate 4.2), quitando
     (textualmente) los 2 bloques completos que pasaron a
     PATRON_ESTRUCTURAL_AGENTE sin cambios ("Reglas de estilo", "Reglas de
     comportamiento"), el bloque "Uso del contexto" en su forma ORIGINAL
@@ -248,7 +260,14 @@ def _reducir_texto_legacy_calidda(texto_completo: str) -> str:
     el fragmento de principio de horario extraido de "Cuando derivar"
     (correccion tras revision del usuario). Conserva intacta la oracion
     literal del horario -- es informacion especifica de Calidda, no
-    estructural. Un Negocio nuevo NUNCA necesita esta funcion."""
+    estructural.
+
+    Llamada en vivo desde `obtener_system_prompt` (Gate 4.3, activacion
+    controlada) cuando `usa_patron_estructural=True` -- ya NO es solo un
+    helper de migracion. Especifica del formato legacy de Calidda (busca
+    los bloques EXACTOS que su prompt monolitico contenia); un Negocio
+    nuevo, cuya `configuracion_negocio` se escribe desde el principio sin
+    esos bloques adentro, nunca pasa por esta funcion."""
     import re as _re
 
     bloques_verbatim = {"## Reglas de estilo (s\u00edguelas siempre)", "## Reglas de comportamiento"}
