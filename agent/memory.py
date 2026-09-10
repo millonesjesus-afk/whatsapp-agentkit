@@ -2486,6 +2486,67 @@ def _extracto_cita(content: str) -> str:
     return content[:LARGO_EXTRACTO_CITA].rstrip() + "…"
 
 
+async def obtener_historial_de_conversation(conversation_id: str, negocio_id: str, limite: int = 20) -> list[dict]:
+    """GATE 2.2 (Conversation ID Cutover) — equivalente de `obtener_historial`
+    pero filtrado por `Mensaje.conversation_id` en vez de `Mensaje.telefono`.
+
+    `obtener_historial(telefono)` NO se toca ni se llama desde acá — sigue
+    existiendo tal cual para el panel legacy. El problema que resuelve esta
+    función nueva: un mismo Contact puede tener varias Conversation
+    SUCESIVAS (DR-4, Gate 5.3) que comparten el mismo `telefono` — filtrar
+    por `telefono` mezcla el historial de una Conversation ya cerrada con el
+    de la nueva. `Mensaje.conversation_id` ya se graba correctamente en cada
+    mensaje desde Gate 5.5 (`guardar_mensaje`), así que alcanza con filtrar
+    por la columna correcta — no hace falta backfill (Gate 2.1, validado
+    contra producción: 103/103 mensajes con conversation_id, 0 NULL).
+
+    `negocio_id` es obligatorio y viene YA resuelto por quien llama (la
+    ruta HTTP, desde la sesión) — nunca se infiere de `Lead` ni de ningún
+    otro bridge, a diferencia de `obtener_historial` (que todavía depende
+    de `Lead.telefono` para resolverlo)."""
+    async with async_session() as session:
+        query = (
+            select(Mensaje)
+            .where(Mensaje.conversation_id == conversation_id, Mensaje.negocio_id == negocio_id)
+            .order_by(Mensaje.timestamp.desc())
+            .limit(limite)
+        )
+        result = await session.execute(query)
+        mensajes = result.scalars().all()
+        mensajes.reverse()
+
+        archivo_ids = {m.archivo_id for m in mensajes if m.archivo_id}
+        content_types: dict[int, str] = {}
+        if archivo_ids:
+            query_archivos = select(ArchivoAdjunto.id, ArchivoAdjunto.content_type).where(ArchivoAdjunto.id.in_(archivo_ids))
+            result_archivos = await session.execute(query_archivos)
+            content_types = dict(result_archivos.all())
+
+        citado_ids = {m.respondido_a_id for m in mensajes if m.respondido_a_id}
+        citados: dict[int, tuple[str, str]] = {}
+        if citado_ids:
+            query_citados = select(Mensaje.id, Mensaje.role, Mensaje.content).where(Mensaje.id.in_(citado_ids))
+            result_citados = await session.execute(query_citados)
+            citados = {fila.id: (fila.role, fila.content) for fila in result_citados}
+
+        return [
+            {
+                "id": msg.id,
+                "role": msg.role, "content": msg.content, "archivo_id": msg.archivo_id,
+                "archivo_tipo": content_types.get(msg.archivo_id), "via_app": msg.via_app,
+                "mensaje_id_meta": msg.mensaje_id_meta,
+                "estado_envio": msg.estado_envio,
+                "timestamp": iso_utc(msg.timestamp),
+                "mensaje_citado": (
+                    {"autor": citados[msg.respondido_a_id][0], "extracto": _extracto_cita(citados[msg.respondido_a_id][1])}
+                    if msg.respondido_a_id and msg.respondido_a_id in citados
+                    else None
+                ),
+            }
+            for msg in mensajes
+        ]
+
+
 async def obtener_ultimos_mensajes(telefonos: list[str], negocio_id: str) -> dict[str, dict]:
     """Último mensaje de cada teléfono (para la vista previa en la bandeja),
     en una sola consulta para toda la lista visible — no una por lead en un

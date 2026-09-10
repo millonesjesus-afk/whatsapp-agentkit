@@ -4823,6 +4823,39 @@ async def mensajes_json(telefono: str, usuario: dict = Depends(_usuario_actual))
     return JSONResponse(historial)
 
 
+@router.get("/conversation/{conversation_id}/mensajes.json")
+async def conversation_mensajes_json(conversation_id: str, usuario: dict = Depends(_usuario_actual)):
+    """GATE 2.2 (Conversation ID Cutover) — equivalente de `mensajes_json`
+    (arriba) para la Nueva Experiencia: historial de UNA Conversation
+    puntual, identificada por `conversation_id`, no por `telefono`. Corrige
+    el hallazgo del Gate 2: `/lead/{telefono}/mensajes.json` devuelve el
+    historial mezclado de TODAS las Conversation sucesivas de un mismo
+    Contact (DR-4) porque filtra por teléfono; esta ruta filtra por la
+    Conversation exacta que se pide.
+
+    Mismo criterio de acceso de dos capas que el resto de las rutas
+    `/conversation/{id}...` (Gate 5.3): `obtener_conversation_detalle` da
+    404 cross-tenant, `_verificar_acceso_conversation` da 403 si es del
+    mismo Negocio pero no es la propia cartera del Asesor.
+
+    `/lead/{telefono}/mensajes.json` NO se toca ni se elimina — sigue
+    siendo la ruta del panel legacy, sin cambios de comportamiento."""
+    conversation = await obtener_conversation_detalle(conversation_id, usuario["negocio_id"])
+    if conversation is None:
+        raise HTTPException(status_code=404, detail="Conversación no encontrada")
+    _verificar_acceso_conversation(usuario, conversation["asesor_asignado"])
+    # Misma señal de actividad real para el idle timeout de conexiones WS
+    # que ya usa `mensajes_json` (Gate 4.1) — este endpoint reemplaza a ese
+    # para la Nueva Experiencia, así que tiene que conservar el mismo golpe
+    # de "el navegador sigue ahí" o el WS se cerraría por inactividad
+    # mientras la conversación sigue abierta en pantalla.
+    gestor_conexiones.tocar_actividad(usuario["username"], conversation_id)
+    historial = await servicio_conversacion.obtener_historial_de_conversation(
+        conversation_id, usuario["negocio_id"], limite=200,
+    )
+    return JSONResponse(historial)
+
+
 @router.post("/lead/{telefono}/resumen-ia")
 async def generar_resumen_ia(telefono: str, usuario: dict = Depends(_usuario_actual), _csrf: None = Depends(verificar_csrf)):
     """Resumen IA bajo demanda (Copiloto — Cap. 5, primera capacidad activa)
