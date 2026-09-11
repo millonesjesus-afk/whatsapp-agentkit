@@ -243,6 +243,24 @@ async def obtener_negocio(negocio_id: str) -> dict | None:
         return _negocio_a_dict(negocio) if negocio else None
 
 
+async def actualizar_negocio(negocio_id: str, nombre: str) -> dict | None:
+    """Edición administrativa del Negocio — Gate 4.5. Solo `nombre`: `codigo`
+    es el slug estable ya usado como identidad de aislamiento (ej.
+    `knowledge/<codigo>/`) y no se expone como editable acá para no romper
+    esas referencias; `activo` es administración de plataforma (alta/baja
+    de un Negocio entero), no una preferencia de configuración del propio
+    negocio. `None` si el Negocio no existe — no se crea uno a ciegas."""
+    async with async_session() as session:
+        negocio = await session.get(Negocio, negocio_id)
+        if negocio is None:
+            return None
+        negocio.nombre = nombre
+        negocio.actualizado = datetime.utcnow()
+        await session.commit()
+        await session.refresh(negocio)
+        return _negocio_a_dict(negocio)
+
+
 async def obtener_negocio_por_codigo(codigo: str) -> dict | None:
     async with async_session() as session:
         query = select(Negocio).where(Negocio.codigo == codigo)

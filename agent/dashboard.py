@@ -62,6 +62,7 @@ from agent.memory import (
     obtener_conversation_realtime, obtener_conversation_activa_de_telefono,
     resolver_conversation_ids_por_telefono,
     obtener_negocio, obtener_identidad_agente, listar_horarios_atencion,
+    actualizar_negocio, crear_o_actualizar_identidad_agente, guardar_horario_atencion,
 )
 from agent.services.servicio_conversacion import servicio_conversacion
 from agent.http_utils import get_con_reintentos, post_con_reintentos
@@ -6840,7 +6841,15 @@ async def configuracion_json(usuario: dict = Depends(servicio_identidad.requiere
     `gabi` no expone `configuracion_negocio` completo (el texto del
     prompt) — solo confirma que existe y su tamaño, para no comprometerse
     todavía con un contrato de API que Gate 4.4-4.6 puede necesitar
-    rediseñar al construir la pantalla real de edición."""
+    rediseñar al construir la pantalla real de edición.
+
+    GATE 4.5: esta es la ruta que consume la pantalla real de Configuración
+    de Nueva Experiencia — el contrato de arriba se mantiene sin romper
+    (mismos campos), y `canales` gana `token_renovado_en` (fecha, no
+    secreto — ya es información de "estado de conexión" permitida) para
+    poder mostrar el mismo aviso de vencimiento que ya existe en el panel
+    Legacy. `access_token`/`app_secret`/`page_access_token`/`phone_number_id`/
+    `waba_id` siguen sin exponerse acá."""
     negocio = await obtener_negocio(usuario["negocio_id"])
     identidad = await obtener_identidad_agente(usuario["negocio_id"])
     horarios = await listar_horarios_atencion(usuario["negocio_id"])
@@ -6858,10 +6867,118 @@ async def configuracion_json(usuario: dict = Depends(servicio_identidad.requiere
         } if identidad else None,
         "horarios": horarios,
         "canales": [
-            {"id": c["id"], "nombre": c["nombre"], "modo": c.get("modo", "produccion"), "activo": c["activo"]}
+            {
+                "id": c["id"], "nombre": c["nombre"], "modo": c.get("modo", "produccion"), "activo": c["activo"],
+                "token_renovado_en": iso_utc(c["token_renovado_en"]) if c.get("token_renovado_en") else None,
+            }
             for c in canales
         ],
     })
+
+
+# ── Configuración — escritura (Gate 4.5) ────────────────────────────────
+#
+# Mismo criterio que Productos: body JSON (no form-encoded), body de la API
+# pensada para el BFF de Nueva Experiencia. admin-únicamente + CSRF, mismo
+# patrón que las rutas de Canales de arriba. negocio_id SIEMPRE resuelto de
+# la sesión (usuario["negocio_id"]) — nunca aceptado del body.
+
+
+@router.post("/configuracion/negocio")
+async def actualizar_negocio_ruta(
+    request: Request,
+    usuario: dict = Depends(servicio_identidad.requiere_rol("admin")),
+    _csrf: None = Depends(verificar_csrf),
+):
+    """Edita el nombre del Negocio — único campo editable (ver
+    actualizar_negocio en memory.py para por qué codigo/activo no lo son)."""
+    body = await request.json()
+    nombre = (body.get("nombre") or "").strip()
+    if not nombre:
+        raise HTTPException(status_code=400, detail="El nombre es obligatorio")
+    if len(nombre) > 150:
+        raise HTTPException(status_code=400, detail="El nombre no puede superar los 150 caracteres")
+    negocio = await actualizar_negocio(usuario["negocio_id"], nombre)
+    if negocio is None:
+        raise HTTPException(status_code=404, detail="Negocio no encontrado")
+    return JSONResponse({
+        "ok": True,
+        "negocio": {**negocio, "creado": iso_utc(negocio["creado"]), "actualizado": iso_utc(negocio["actualizado"])},
+    })
+
+
+@router.post("/configuracion/gabi")
+async def actualizar_gabi_ruta(
+    request: Request,
+    usuario: dict = Depends(servicio_identidad.requiere_rol("admin")),
+    _csrf: None = Depends(verificar_csrf),
+):
+    """Edita SOLO nombre/tono de la identidad de Gabi — nunca
+    `configuracion_negocio` (el texto del prompt) ni `usa_patron_estructural`
+    (mecanismo interno, no expuesto como opción de producto, Gate 4.5 §10).
+    Lee la identidad actual y reenvía su `configuracion_negocio` intacto a
+    `crear_o_actualizar_identidad_agente` — esa función hace upsert
+    completo, así que omitir este paso borraría el prompt real sin
+    querer."""
+    body = await request.json()
+    nombre = (body.get("nombre") or "").strip()
+    tono = (body.get("tono") or "").strip()
+    if not nombre or not tono:
+        raise HTTPException(status_code=400, detail="Nombre y tono son obligatorios")
+    if len(nombre) > 50:
+        raise HTTPException(status_code=400, detail="El nombre no puede superar los 50 caracteres")
+    if len(tono) > 200:
+        raise HTTPException(status_code=400, detail="El tono no puede superar los 200 caracteres")
+    identidad_actual = await obtener_identidad_agente(usuario["negocio_id"])
+    if identidad_actual is None:
+        raise HTTPException(status_code=404, detail="Este negocio todavía no tiene una identidad de Gabi configurada")
+    identidad = await crear_o_actualizar_identidad_agente(
+        usuario["negocio_id"], nombre, tono, identidad_actual["configuracion_negocio"],
+    )
+    return JSONResponse({
+        "ok": True,
+        "gabi": {
+            "nombre": identidad["nombre"], "tono": identidad["tono"],
+            "prompt_configurado": True, "prompt_longitud": len(identidad["configuracion_negocio"]),
+        },
+    })
+
+
+def _validar_hora(valor: str, etiqueta: str) -> None:
+    try:
+        datetime.strptime(valor, "%H:%M")
+    except ValueError:
+        raise HTTPException(status_code=400, detail=f"{etiqueta} debe tener formato HH:MM (ej. 08:00)")
+
+
+@router.post("/configuracion/horario")
+async def guardar_horario_ruta(
+    request: Request,
+    usuario: dict = Depends(servicio_identidad.requiere_rol("admin")),
+    _csrf: None = Depends(verificar_csrf),
+):
+    """Guarda el horario de UN día — el frontend llama esta ruta una vez por
+    día editado, mismo contrato que `guardar_horario_atencion`. Validación
+    de formato/rango server-side (Gate 4.5 §8): nunca confiar solo en el
+    input type=time del navegador."""
+    body = await request.json()
+    dia_semana = body.get("dia_semana")
+    if not isinstance(dia_semana, int) or not (0 <= dia_semana <= 6):
+        raise HTTPException(status_code=400, detail="dia_semana debe ser un entero entre 0 (lunes) y 6 (domingo)")
+    habilitado = bool(body.get("habilitado"))
+    hora_apertura = (body.get("hora_apertura") or "").strip() or None
+    hora_cierre = (body.get("hora_cierre") or "").strip() or None
+
+    if habilitado:
+        if not hora_apertura or not hora_cierre:
+            raise HTTPException(status_code=400, detail="Selecciona hora de apertura y de cierre para un día habilitado")
+        _validar_hora(hora_apertura, "La hora de apertura")
+        _validar_hora(hora_cierre, "La hora de cierre")
+        if hora_apertura >= hora_cierre:
+            raise HTTPException(status_code=400, detail="La hora de apertura debe ser anterior a la hora de cierre")
+
+    horario = await guardar_horario_atencion(usuario["negocio_id"], dia_semana, habilitado, hora_apertura, hora_cierre)
+    return JSONResponse({"ok": True, "horario": horario})
 
 
 @router.get("/canales-whatsapp", response_class=HTMLResponse)
