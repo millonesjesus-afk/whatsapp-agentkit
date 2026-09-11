@@ -4816,6 +4816,12 @@ def _dto_lead_detalle(lead: dict, lineas: list[dict], eventos: list[dict]) -> di
         "telefono": lead["telefono"],
         "nombre": lead.get("nombre"),
         "interes": lead.get("interes"),
+        # Gate Campañas P0 — SCR-03: valor histórico inmutable capturado en el
+        # primer contacto (ver `Lead.campana_origen`, first-touch, nunca se
+        # sobreescribe). Nunca se resuelve en vivo contra la tabla `Campana`
+        # actual — evita mostrar una atribución desincronizada si la campaña
+        # cambió de nombre o se desactivó después.
+        "campana_origen": lead.get("campana_origen"),
         "resultado": lead.get("resultado"),
         "fecha_agendada": _iso(lead.get("fecha_agendada")),
         # `fecha_cierre` SÍ lleva `Z` (a diferencia de fecha_agendada, justo
@@ -6251,6 +6257,135 @@ TIPOS_DETECCION = {
     "referral_meta": "Anuncio de Meta (referral)",
     "leadgen_meta": "Formulario de Meta (Lead Ads)",
 }
+
+
+def _campana_a_json(c: dict) -> dict:
+    """Forma JSON de una Campana para la Nueva Experiencia (Gate Campañas P0)
+    — nunca incluye `negocio_id`/`unidad_id` (internos, ya implícitos en la
+    sesión). Compartida entre listado/crear/editar/toggle para que las 4
+    rutas `.json` nunca describan la misma campaña de dos formas distintas."""
+    return {
+        "id": c["id"],
+        "nombre": c["nombre"],
+        "tipo_deteccion": c["tipo_deteccion"],
+        "patron": c["patron"],
+        "codigo_material": c["codigo_material"],
+        "producto_promocional": c["producto_promocional"],
+        "precio_promocional": c["precio_promocional"],
+        "texto_saludo": c["texto_saludo"],
+        "activa": c["activa"],
+        "creado": iso_utc(c["creado"]),
+    }
+
+
+@router.get("/campanas.json")
+async def campanas_json(usuario: dict = Depends(servicio_identidad.requiere_rol("admin", "supervisor"))):
+    """Listado de campañas para la Nueva Experiencia (Gate Campañas P0) —
+    mismo dato que ya sirve `gestionar_campanas` en HTML (`listar_campanas` +
+    `contar_opportunities_por_campana`, sin tocar ninguna), sin el HTML.
+    `puede_gestionar` replica el mismo criterio que `puede_escribir` en la
+    pantalla Legacy: el Supervisor ve todo, ningún botón de escritura."""
+    campanas = await listar_campanas(usuario["negocio_id"])
+    conteos = {c["campana"]: c for c in await contar_opportunities_por_campana(usuario["negocio_id"])}
+    return JSONResponse({
+        "campanas": [
+            {
+                **_campana_a_json(c),
+                "conteo": {
+                    "total": conteos.get(c["nombre"], {}).get("total", 0),
+                    "vendidos": conteos.get(c["nombre"], {}).get("vendidos", 0),
+                },
+            }
+            for c in campanas
+        ],
+        "puede_gestionar": usuario["rol"] == "admin",
+    })
+
+
+@router.post("/campanas/nueva.json")
+async def crear_campana_nueva_json(
+    request: Request,
+    usuario: dict = Depends(servicio_identidad.requiere_rol("admin")),
+    _csrf: None = Depends(verificar_csrf),
+):
+    """Variante JSON de `crear_campana_nueva` para la Nueva Experiencia (Gate
+    Campañas P0) — path `.json` distinto del Legacy (`POST /campanas/nueva`,
+    que sigue esperando `Form(...)` sin ningún cambio) para no colisionar;
+    misma validación y la misma `crear_campana` de `memory.py`, sin duplicar
+    lógica."""
+    body = await request.json()
+    nombre = (body.get("nombre") or "").strip()
+    tipo_deteccion = (body.get("tipo_deteccion") or "").strip()
+    patron = (body.get("patron") or "").strip()
+    texto_saludo = (body.get("texto_saludo") or "").strip()
+    codigo_material = (body.get("codigo_material") or "").strip()
+    producto_promocional = (body.get("producto_promocional") or "").strip()
+    precio_promocional = (body.get("precio_promocional") or "").strip()
+
+    if not nombre:
+        raise HTTPException(status_code=400, detail="El nombre es obligatorio")
+    if tipo_deteccion not in TIPOS_DETECCION:
+        raise HTTPException(status_code=400, detail="Tipo de detección inválido")
+    if not patron:
+        raise HTTPException(status_code=400, detail="El patrón de detección es obligatorio")
+    if codigo_material and await obtener_producto_por_codigo(codigo_material, usuario["negocio_id"]) is None:
+        raise HTTPException(status_code=400, detail=f"El código de material '{codigo_material}' no existe en la lista de precios vigente")
+    if tipo_deteccion == "texto_saludo" and texto_saludo:
+        if patron.lower() not in texto_saludo.lower():
+            raise HTTPException(
+                status_code=400,
+                detail="El patrón no aparece dentro del mensaje de saludo — así nunca se detectaría esta campaña. Usa un fragmento que sí esté en el saludo.",
+            )
+
+    campana_creada = await crear_campana(
+        nombre=nombre, tipo_deteccion=tipo_deteccion, patron=patron.lower(),
+        texto_saludo=texto_saludo, codigo_material=codigo_material,
+        producto_promocional=producto_promocional, precio_promocional=precio_promocional,
+        negocio_id=usuario["negocio_id"],
+    )
+    return JSONResponse({"ok": True, "campana": {**_campana_a_json(campana_creada), "conteo": {"total": 0, "vendidos": 0}}})
+
+
+@router.post("/campanas/{campana_id}/editar.json")
+async def editar_promo_campana_json(
+    campana_id: int,
+    request: Request,
+    usuario: dict = Depends(servicio_identidad.requiere_rol("admin")),
+    _csrf: None = Depends(verificar_csrf),
+):
+    """Variante JSON de `editar_promo_campana` (Gate Campañas P0) — mismos
+    campos editables que el Legacy (producto/precio/código de material), sin
+    ampliar la capacidad de edición: `nombre`/`patron`/`tipo_deteccion` no
+    viajan porque `actualizar_campana` nunca los recibe desde esta ruta."""
+    await _verificar_ownership_campana(usuario, campana_id)
+    body = await request.json()
+    codigo_material = (body.get("codigo_material") or "").strip()
+    producto_promocional = (body.get("producto_promocional") or "").strip()
+    precio_promocional = (body.get("precio_promocional") or "").strip()
+    if codigo_material and await obtener_producto_por_codigo(codigo_material, usuario["negocio_id"]) is None:
+        raise HTTPException(status_code=400, detail=f"El código de material '{codigo_material}' no existe en la lista de precios vigente")
+    await actualizar_campana(
+        campana_id,
+        codigo_material=codigo_material or None,
+        producto_promocional=producto_promocional,
+        precio_promocional=precio_promocional,
+    )
+    campana_actualizada = await obtener_campana(campana_id)
+    return JSONResponse({"ok": True, "campana": _campana_a_json(campana_actualizada)})
+
+
+@router.post("/campanas/{campana_id}/toggle.json")
+async def toggle_campana_json(
+    campana_id: int,
+    usuario: dict = Depends(servicio_identidad.requiere_rol("admin")),
+    _csrf: None = Depends(verificar_csrf),
+):
+    """Variante JSON de `toggle_campana` (Gate Campañas P0) — mismo candado
+    de ownership y misma `actualizar_campana`, sin duplicar lógica."""
+    actual = await _verificar_ownership_campana(usuario, campana_id)
+    await actualizar_campana(campana_id, activa=not actual["activa"])
+    campana_actualizada = await obtener_campana(campana_id)
+    return JSONResponse({"ok": True, "campana": _campana_a_json(campana_actualizada)})
 
 
 @router.get("/campanas", response_class=HTMLResponse)
