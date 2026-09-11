@@ -4,28 +4,37 @@
 # Negocio? ¿Ese riesgo bloquea la activación de Gabi/ensamblado para
 # Cálidda?
 #
-# Este archivo NO implementa ninguna corrección de `Producto` — eso queda
-# documentado como Gate propio (migración de esquema real, fuera del
-# alcance de "cambio mínimo y seguro"). Su único objetivo es dejar
-# evidencia verificable de la determinación, no una opinión.
+# Este archivo documentó originalmente (Gate 4.3) que `Producto` NO tenía
+# `negocio_id` — deuda real pero ORTOGONAL a la activación de Gabi, y por
+# eso no bloqueante. Gate 4.4 cerró esa deuda (ver
+# tests/test_gate44_catalogo_multitenant.py para la cobertura completa de
+# aislamiento). Las secciones 1 y 2 de abajo se actualizaron para afirmar
+# el estado POST-Gate 4.4 (la corrección se aplicó) en vez de dejar
+# aserciones que ahora serían falsas — la sección 3 (determinación de que
+# `usa_patron_estructural` es independiente del catálogo) sigue siendo
+# válida tal cual y no se tocó.
 
 from agent import brain, memory as mem
 
 
 # ---------------------------------------------------------------------------
-# 1. Confirmación estructural — Producto no tiene negocio_id
+# 1. Confirmación estructural — Producto SÍ tiene negocio_id (Gate 4.4)
 # ---------------------------------------------------------------------------
 
-def test_producto_no_tiene_columna_negocio_id():
+def test_producto_tiene_columna_negocio_id():
+    """Invierte test_producto_no_tiene_columna_negocio_id de Gate 4.3 — la
+    deuda que ese test documentaba ya se cerró."""
     columnas = {c.name for c in mem.Producto.__table__.columns}
-    assert "negocio_id" not in columnas
+    assert "negocio_id" in columnas
 
 
-def test_crear_producto_no_acepta_negocio_id():
-    """`CAMPOS_NEGOCIO_PRODUCTO` es el nombre histórico de los campos
-    COMERCIALES del producto (canal, proveedor, marca, precio...) — NO
-    tiene relación con la entidad `Negocio` (tenant). Confirmado leyendo
-    su contenido real, para no asumir por el nombre."""
+def test_crear_producto_no_acepta_negocio_id_en_campos_de_negocio():
+    """`CAMPOS_NEGOCIO_PRODUCTO` sigue siendo el nombre histórico de los
+    campos COMERCIALES del producto (canal, proveedor, marca, precio...) —
+    NO tiene relación con la entidad `Negocio` (tenant); `negocio_id` se
+    pasa a crear_producto()/editar_producto() como parámetro aparte, nunca
+    mezclado en este set. Confirmado leyendo su contenido real, para no
+    asumir por el nombre."""
     assert "negocio_id" not in mem.CAMPOS_NEGOCIO_PRODUCTO
     assert set(mem.CAMPOS_NEGOCIO_PRODUCTO) == {
         "canal", "proveedor", "marca", "tipo", "sub_tipo", "codigo_hana",
@@ -34,56 +43,57 @@ def test_crear_producto_no_acepta_negocio_id():
 
 
 # ---------------------------------------------------------------------------
-# 2. El riesgo es REAL y demostrable (no hipotético) — sin ningún filtro,
-# listar_productos_activos() mezcla productos de cualquier origen.
+# 2. El riesgo documentado en Gate 4.3 ya NO es reproducible (Gate 4.4) —
+# buscar_productos ahora exige negocio_id y filtra en el WHERE.
 # ---------------------------------------------------------------------------
 
-async def test_buscar_productos_no_filtra_por_ningun_concepto_de_negocio():
-    """Demuestra la vulnerabilidad: dos "orígenes" de producto conviven en
-    la misma tabla sin ningún campo que los separe — `buscar_productos`
-    los devuelve juntos, indistinguibles, a cualquier llamador."""
+async def test_buscar_productos_ya_filtra_por_negocio():
+    """Invierte test_buscar_productos_no_filtra_por_ningun_concepto_de_negocio
+    de Gate 4.3 — antes demostraba que dos "orígenes" de producto se
+    mezclaban; ahora demuestra que, dados dos Negocios reales, cada
+    búsqueda solo ve el suyo."""
+    negocio_a = await mem.crear_negocio("Negocio Origen A", "g44origena")
+    negocio_b = await mem.crear_negocio("Negocio Origen B", "g44origenb")
     await mem.crear_producto(
         {"tipo": "terma", "sub_tipo": "a gas", "marca": "MarcaOrigenA", "descripcion": "Terma Origen A",
          "codigo_hana": "TEST-A-001", "precio": "500"},
-        autor="test",
+        autor="test", negocio_id=negocio_a["id"],
     )
     await mem.crear_producto(
         {"tipo": "terma", "sub_tipo": "a gas", "marca": "MarcaOrigenB", "descripcion": "Terma Origen B",
          "codigo_hana": "TEST-B-001", "precio": "600"},
-        autor="test",
+        autor="test", negocio_id=negocio_b["id"],
     )
 
     from agent.tools import buscar_productos
-    resultados = await buscar_productos("terma a gas")
-    marcas_encontradas = {p.get("MARCA") for p in resultados}
+    resultados_a = await buscar_productos("terma a gas", negocio_a["id"])
+    marcas_a = {p.get("MARCA") for p in resultados_a}
 
-    # Ambos orígenes aparecen juntos — no hay forma, hoy, de pedir "solo
-    # los de MI negocio": la función ni siquiera tiene el parámetro.
-    assert "MarcaOrigenA" in marcas_encontradas
-    assert "MarcaOrigenB" in marcas_encontradas
+    assert "MarcaOrigenA" in marcas_a
+    assert "MarcaOrigenB" not in marcas_a
 
 
-async def test_no_existe_ningun_parametro_de_negocio_en_toda_la_cadena():
-    """Confirma que NINGUNA función de la cadena
+def test_existe_negocio_id_en_toda_la_cadena():
+    """Invierte test_no_existe_ningun_parametro_de_negocio_en_toda_la_cadena
+    de Gate 4.3 — confirma que TODA la cadena
     obtener_contexto_relevante -> buscar_productos -> listar_productos_activos
-    -> obtener_producto_por_codigo_hana acepta siquiera un negocio_id -- no
-    es que se ignore, es que no existe el parámetro."""
+    -> obtener_producto_por_codigo_hana ahora exige negocio_id."""
     import inspect
     from agent import tools as herramientas
 
     for funcion in (herramientas.buscar_productos, mem.listar_productos_activos, mem.obtener_producto_por_codigo_hana):
         parametros = inspect.signature(funcion).parameters
-        assert "negocio_id" not in parametros, f"{funcion.__name__} inesperadamente ya tiene negocio_id"
+        assert "negocio_id" in parametros, f"{funcion.__name__} debería exigir negocio_id tras Gate 4.4"
 
 
 # ---------------------------------------------------------------------------
-# 3. Determinación — el riesgo NO afecta a Gabi/Cálidda HOY, y es
-# ORTOGONAL a la decisión de activación (usa_patron_estructural)
+# 3. Determinación — el flag de Gabi (usa_patron_estructural) sigue siendo
+# ORTOGONAL al catálogo, ahora con negocio_id real de por medio.
 # ---------------------------------------------------------------------------
 
 async def test_activar_o_revertir_gabi_no_cambia_en_nada_el_resultado_del_catalogo(tmp_path, monkeypatch):
-    """La pregunta específica del usuario: ¿la activación de Gabi
-    (usa_patron_estructural) puede hacer que Gabi consulte/reciba
+    """La pregunta específica del usuario en Gate 4.3: ¿la activación de
+    Gabi (usa_patron_estructural) puede hacer que Gabi consulte/reciba
     productos de otro Negocio? Respuesta demostrada: NO — el flag de Gabi
     solo cambia qué devuelve `obtener_system_prompt()` (identidad/reglas
     de texto). La búsqueda de productos (`buscar_productos`, llamada
@@ -91,17 +101,16 @@ async def test_activar_o_revertir_gabi_no_cambia_en_nada_el_resultado_del_catalo
     el system prompt) es exactamente la MISMA función, con el MISMO
     resultado, actives o no el ensamblador — porque son dos piezas de
     código completamente distintas que ni se tocan ni se conocen entre
-    sí."""
+    sí. Sigue siendo cierto tras Gate 4.4 (negocio_id real de por medio)."""
     from agent import tools as herramientas
     monkeypatch.setattr(herramientas, "KNOWLEDGE_DIR", str(tmp_path))  # sin conocimiento de por medio, foco en catálogo
 
+    negocio = await mem.crear_negocio("Negocio Determinación", "g43det")
     await mem.crear_producto(
         {"tipo": "cocina", "sub_tipo": "empotrable", "marca": "MarcaDeterminacion",
          "descripcion": "Cocina Determinación", "codigo_hana": "TEST-DET-001", "precio": "800"},
-        autor="test",
+        autor="test", negocio_id=negocio["id"],
     )
-
-    negocio = await mem.crear_negocio("Negocio Determinación", "g43det")
     await mem.crear_o_actualizar_identidad_agente(
         negocio["id"], nombre="Gabi", tono="Cercano",
         configuracion_negocio="Eres Gabi.\n\n## Tu identidad\n- Te llamas Gabi.\n",

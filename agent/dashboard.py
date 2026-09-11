@@ -2859,7 +2859,7 @@ async def opportunity_venta(
 
     try:
         venta = servicio_comercial.validar_venta(lineas_venta, modalidad_pago, cuotas, medio_pago)
-        await servicio_comercial.validar_productos_de_venta(venta)
+        await servicio_comercial.validar_productos_de_venta(venta, usuario["negocio_id"])
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -5649,7 +5649,7 @@ async def buscar_producto_venta(telefono: str, q: str = "", usuario: dict = Depe
     de precios vigente en vez de que el asesor los tipee a mano."""
     if len(q.strip()) < 2:
         return JSONResponse([])
-    productos = await buscar_productos(q, limite=8)
+    productos = await buscar_productos(q, usuario["negocio_id"], limite=8)
     return JSONResponse([
         {
             # `id` real del producto: es lo que el carrito devuelve como
@@ -5697,7 +5697,7 @@ async def registrar_venta(
         # mismo tramo "antes de tocar la versión" y por el mismo motivo: un id
         # que ya no existe es un 400, y un 400 no puede consumir la versión del
         # lead ni provocarle un conflicto falso a otra sesión.
-        await servicio_comercial.validar_productos_de_venta(venta)
+        await servicio_comercial.validar_productos_de_venta(venta, usuario["negocio_id"])
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -6292,7 +6292,7 @@ async def gestionar_campanas(request: Request, usuario: dict = Depends(servicio_
 
     filas = []
     for c in campanas:
-        promo = await servicio_canales.resolver_promo(c)
+        promo = await servicio_canales.resolver_promo(c, usuario["negocio_id"])
         if promo and promo["fuente"] == "catalogo":
             promo_html = (
                 f'<div><span class="badge text-bg-success-subtle text-success-emphasis">Catálogo</span> '
@@ -6601,7 +6601,7 @@ async def buscar_producto_campana(q: str = "", usuario: dict = Depends(servicio_
     siempre salga de la lista de precios vigente en vez de tipearla a mano."""
     if len(q.strip()) < 2:
         return JSONResponse([])
-    productos = await buscar_productos(q, limite=8)
+    productos = await buscar_productos(q, usuario["negocio_id"], limite=8)
     return JSONResponse([
         {
             "codigo": p.get("CODIGO HANA", ""),
@@ -6629,7 +6629,7 @@ async def crear_campana_nueva(
     if tipo_deteccion not in TIPOS_DETECCION:
         raise HTTPException(status_code=400, detail="Tipo de detección inválido")
     codigo_material = codigo_material.strip()
-    if codigo_material and await obtener_producto_por_codigo(codigo_material) is None:
+    if codigo_material and await obtener_producto_por_codigo(codigo_material, usuario["negocio_id"]) is None:
         raise HTTPException(status_code=400, detail=f"El código de material '{codigo_material}' no existe en la lista de precios vigente")
     # El patrón se compara contra el mensaje real que manda el cliente (que
     # es texto_saludo, tal cual) — si no aparece ahí, la campaña nunca se va
@@ -6678,7 +6678,7 @@ async def editar_promo_campana(
 ):
     await _verificar_ownership_campana(usuario, campana_id)
     codigo_material = codigo_material.strip()
-    if codigo_material and await obtener_producto_por_codigo(codigo_material) is None:
+    if codigo_material and await obtener_producto_por_codigo(codigo_material, usuario["negocio_id"]) is None:
         raise HTTPException(status_code=400, detail=f"El código de material '{codigo_material}' no existe en la lista de precios vigente")
     await actualizar_campana(
         campana_id,
@@ -7685,7 +7685,7 @@ async def listar_productos_ruta(
     por_pagina = min(max(1, por_pagina), 200)  # tope para que un cliente no pida el catálogo entero por accidente
     productos, total = await listar_productos(
         {"q": q, "canal": canal, "marca": marca, "tipo": tipo, "activo": activo_filtro},
-        pagina=pagina, por_pagina=por_pagina,
+        pagina=pagina, por_pagina=por_pagina, negocio_id=usuario["negocio_id"],
     )
     return JSONResponse({
         "productos": productos, "total": total,
@@ -7695,7 +7695,7 @@ async def listar_productos_ruta(
 
 @router.get("/productos/{id}")
 async def obtener_producto_ruta(id: int, usuario: dict = Depends(_usuario_actual)):
-    producto = await obtener_producto(id)
+    producto = await obtener_producto(id, usuario["negocio_id"])
     if producto is None:
         raise HTTPException(status_code=404, detail="Producto no encontrado")
     return JSONResponse(producto)
@@ -7707,7 +7707,7 @@ async def historial_producto_ruta(id: int, usuario: dict = Depends(_usuario_actu
     los roles a propósito: un asesor que ve un precio distinto al de ayer
     necesita poder confirmar que cambió de verdad y no es un error suyo
     (Explainability First)."""
-    if await obtener_producto(id) is None:
+    if await obtener_producto(id, usuario["negocio_id"]) is None:
         raise HTTPException(status_code=404, detail="Producto no encontrado")
     return JSONResponse({"historial": await listar_historial_producto(id)})
 
@@ -7736,7 +7736,7 @@ async def crear_producto_ruta(
     if not descripcion:
         raise HTTPException(status_code=400, detail="La descripción es obligatoria")
     datos = _datos_producto_del_form(body)
-    producto = await crear_producto(datos, autor=usuario["nombre"])
+    producto = await crear_producto(datos, autor=usuario["nombre"], negocio_id=usuario["negocio_id"])
     return JSONResponse({"ok": True, "producto": producto}, status_code=201)
 
 
@@ -7754,11 +7754,14 @@ async def editar_producto_ruta(
     body = await request.json()
     version = _version_del_body(body)
     datos = _datos_producto_del_form({k: v for k, v in body.items() if k != "version"})
-    producto = await editar_producto(id, datos, version_esperada=version, autor=usuario["nombre"])
+    producto = await editar_producto(
+        id, datos, version_esperada=version, autor=usuario["nombre"], negocio_id=usuario["negocio_id"],
+    )
     if producto is None:
-        # None cubre dos casos distintos (no existe / conflicto de versión);
-        # se separan acá para no devolver un 409 por un producto inexistente.
-        actual = await obtener_producto(id)
+        # None cubre tres casos distintos (no existe / de otro Negocio /
+        # conflicto de versión); se separan acá para no devolver un 409 por
+        # un producto inexistente o ajeno.
+        actual = await obtener_producto(id, usuario["negocio_id"])
         if actual is None:
             raise HTTPException(status_code=404, detail="Producto no encontrado")
         return JSONResponse(
@@ -7782,9 +7785,11 @@ async def toggle_producto_ruta(
     """Activa/desactiva — nunca borra. Mismo manejo de versión/409 que editar."""
     body = await request.json()
     version = _version_del_body(body)
-    producto = await toggle_producto(id, version_esperada=version, autor=usuario["nombre"])
+    producto = await toggle_producto(
+        id, version_esperada=version, autor=usuario["nombre"], negocio_id=usuario["negocio_id"],
+    )
     if producto is None:
-        actual = await obtener_producto(id)
+        actual = await obtener_producto(id, usuario["negocio_id"])
         if actual is None:
             raise HTTPException(status_code=404, detail="Producto no encontrado")
         return JSONResponse(
@@ -7828,7 +7833,7 @@ async def importar_productos_ruta(
         tmp.write(contenido)
         ruta_tmp = tmp.name
     try:
-        resumen = await importar_catalogo_desde_csv(ruta_tmp, autor=usuario["nombre"])
+        resumen = await importar_catalogo_desde_csv(ruta_tmp, negocio_id=usuario["negocio_id"], autor=usuario["nombre"])
     finally:
         os.unlink(ruta_tmp)
 

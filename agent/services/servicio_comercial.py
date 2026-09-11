@@ -118,9 +118,10 @@ class ServicioComercial:
             "medio_pago": medio_pago,
         }
 
-    async def validar_productos_de_venta(self, venta: dict) -> None:
-        """Comprueba contra el catálogo real que cada `producto_id` de la venta
-        exista. Lanza `ValueError` si alguno no existe.
+    async def validar_productos_de_venta(self, venta: dict, negocio_id: str) -> None:
+        """Comprueba contra el catálogo real DE ESTE NEGOCIO que cada
+        `producto_id` de la venta exista. Lanza `ValueError` si alguno no
+        existe o pertenece a otro Negocio (Gate 4.4).
 
         Está separada de `validar_venta` porque necesita consultar la base y
         aquella es deliberadamente sincronizada y sin efectos. Quien llama debe
@@ -133,7 +134,7 @@ class ServicioComercial:
         ids = {l["producto_id"] for l in venta["lineas"] if l.get("producto_id")}
         if not ids:
             return
-        existentes = await ids_de_productos_existentes(ids)
+        existentes = await ids_de_productos_existentes(ids, negocio_id)
         faltantes = sorted(ids - existentes)
         if faltantes:
             raise ValueError(
@@ -179,12 +180,13 @@ class ServicioComercial:
 
     async def registrar_venta(
         self, telefono: str, lineas_venta_json: str, modalidad_pago: str, cuotas: str, medio_pago: str,
+        negocio_id: str,
     ) -> None:
         """Valida y persiste las líneas de venta de un lead, en un solo paso.
         Conveniencia para quien no necesita separar las dos fases; el handler
         de ruta sí las separa (ver validar_venta)."""
         venta = self.validar_venta(lineas_venta_json, modalidad_pago, cuotas, medio_pago)
-        await self.validar_productos_de_venta(venta)
+        await self.validar_productos_de_venta(venta, negocio_id)
         await self.persistir_venta(telefono, venta)
 
 

@@ -36,11 +36,14 @@ async def _umbrales() -> tuple[float, float]:
         return float(UMBRAL_SENIOR_DEFAULT), float(UMBRAL_INTERMEDIO_DEFAULT)
 
 
-async def _nivel_requerido(interes: str) -> str:
-    """Estima el nivel de experiencia necesario según el precio del producto de interés."""
+async def _nivel_requerido(interes: str, negocio_id: str | None) -> str:
+    """Estima el nivel de experiencia necesario según el precio del producto
+    de interés. `negocio_id` (Gate 4.4): buscar_productos falla cerrado
+    (lista vacía) si es None, así que un Negocio no resuelto cae al nivel
+    "intermedio" por defecto, igual que un interés vacío."""
     if not interes:
         return "intermedio"
-    productos = await buscar_productos(interes, limite=1)
+    productos = await buscar_productos(interes, negocio_id, limite=1)
     if not productos:
         return "intermedio"
     try:
@@ -71,7 +74,7 @@ async def elegir_asesor_automatico(interes: str, negocio_id: str | None) -> str 
     if not disponibles:
         return None
 
-    nivel_req = await _nivel_requerido(interes)
+    nivel_req = await _nivel_requerido(interes, negocio_id)
     idx_req = NIVELES.index(nivel_req)
 
     def nivel_idx(asesor: dict) -> int:
@@ -121,7 +124,7 @@ async def asignar_lead_pendiente_a_asesor(username: str, nivel_asesor: str | Non
     idx_asesor = NIVELES.index(nivel_asesor) if nivel_asesor in NIVELES else NIVELES.index("intermedio")
 
     for lead in pendientes:
-        nivel_req = await _nivel_requerido(lead.get("interes") or "")
+        nivel_req = await _nivel_requerido(lead.get("interes") or "", negocio_id)
         if idx_asesor >= NIVELES.index(nivel_req):
             await asignar_asesor_a_lead(lead["telefono"], username, automatico=True)
             logger.info(f"Lead {lead['telefono']} (en espera) asignado a {username} al ponerse disponible")

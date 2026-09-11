@@ -366,7 +366,7 @@ async def _armar_bloques_contexto(
         # cliente vio en el anuncio/SMS antes de escribir.
         if lead.get("campana_origen") and negocio_id is not None:
             campana = await obtener_campana_por_nombre(lead["campana_origen"], negocio_id)
-            promo = await resolver_promo(campana) if campana else None
+            promo = await resolver_promo(campana, negocio_id) if campana else None
             if promo:
                 detalle = f"Producto: {promo['producto']}"
                 if promo.get("precio"):
@@ -381,7 +381,7 @@ async def _armar_bloques_contexto(
                 # promocionado (ej. sin combo, +conexión, +conexión+combo) —
                 # también son parte de la promo de esta campaña, por si el
                 # cliente pide una combinación distinta a la del SMS/anuncio.
-                familia = await resolver_familia_promo(campana)
+                familia = await resolver_familia_promo(campana, negocio_id)
                 codigos_propios = {p.get("CODIGO HANA", "") for p in familia}
                 otras_variantes = [p for p in familia if p.get("CODIGO HANA") != campana.get("codigo_material")]
                 if otras_variantes:
@@ -419,7 +419,8 @@ async def _armar_bloques_contexto(
     negocio = await obtener_negocio(negocio_id) if negocio_id is not None else None
     negocio_codigo = negocio["codigo"] if negocio else None
     contexto = await obtener_contexto_relevante(
-        " ".join(interes_lead + mensajes_previos + [mensaje]), negocio_codigo, excluir_codigos=codigos_a_excluir
+        " ".join(interes_lead + mensajes_previos + [mensaje]), negocio_id, negocio_codigo,
+        excluir_codigos=codigos_a_excluir,
     )
     if contexto:
         bloques.append(f"Contexto relevante del catálogo/base de conocimiento:\n{contexto}")

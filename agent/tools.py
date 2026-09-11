@@ -42,19 +42,26 @@ def _precio_float(producto: dict) -> float:
         return float("inf")
 
 
-async def buscar_productos(mensaje: str, limite: int = 8, excluir_codigos: set[str] | None = None) -> list[dict]:
+async def buscar_productos(
+    mensaje: str, negocio_id: str | None, limite: int = 8, excluir_codigos: set[str] | None = None,
+) -> list[dict]:
     """
-    Busca productos del catálogo cuyo tipo, sub tipo o marca aparezcan
-    mencionados en el mensaje del cliente. Prioriza coincidencias de marca
-    (señal más específica) por sobre coincidencias genéricas de tipo, para
-    que mencionar una marca puntual (ej. "Rheem") no quede opacado por
-    productos de otras marcas que solo comparten el tipo (ej. "terma").
-    Dentro de un mismo nivel de relevancia, ordena de menor a mayor precio,
-    para que preguntas como "la más barata" o "la segunda más barata" se
-    puedan responder de forma consistente por posición.
+    Busca productos del catálogo DE UN NEGOCIO cuyo tipo, sub tipo o marca
+    aparezcan mencionados en el mensaje del cliente. Prioriza coincidencias
+    de marca (señal más específica) por sobre coincidencias genéricas de
+    tipo, para que mencionar una marca puntual (ej. "Rheem") no quede
+    opacado por productos de otras marcas que solo comparten el tipo (ej.
+    "terma"). Dentro de un mismo nivel de relevancia, ordena de menor a
+    mayor precio, para que preguntas como "la más barata" o "la segunda más
+    barata" se puedan responder de forma consistente por posición.
 
     Args:
         mensaje: mensaje del cliente (ej: "quiero una terma a gas Rheem")
+        negocio_id: Negocio cuyo catálogo se busca (Gate 4.4). `None` —
+            Negocio no resuelto todavía— falla cerrado devolviendo lista
+            vacía, mismo criterio que `obtener_codigos_promocionales_activos`/
+            `elegir_asesor_automatico`: nunca se cae a buscar en el
+            catálogo de cualquier Negocio.
         limite: máximo de resultados a retornar
         excluir_codigos: códigos de material (CODIGO HANA) a excluir de la
             búsqueda general — se usa para que un precio promocional
@@ -67,10 +74,12 @@ async def buscar_productos(mensaje: str, limite: int = 8, excluir_codigos: set[s
         ordenados de mayor a menor relevancia y, dentro de eso, de menor a
         mayor precio.
     """
+    if negocio_id is None:
+        return []
     mensaje = mensaje.lower()
     excluir_codigos = excluir_codigos or set()
     candidatos = []
-    for producto in await listar_productos_activos():
+    for producto in await listar_productos_activos(negocio_id):
         if producto.get("CODIGO HANA", "") in excluir_codigos:
             continue
 
@@ -93,18 +102,20 @@ async def buscar_productos(mensaje: str, limite: int = 8, excluir_codigos: set[s
     return [producto for _, producto in candidatos[:limite]]
 
 
-async def obtener_producto_por_codigo(codigo: str) -> dict | None:
+async def obtener_producto_por_codigo(codigo: str, negocio_id: str | None) -> dict | None:
     """
-    Busca un producto del catálogo por su código único de material (CODIGO
-    HANA), la lista de precios oficial. Se usa para que las campañas
-    (agent/campanas.py) referencien un producto real por código en vez de
-    texto libre — así el precio de la promo nunca queda desincronizado de
-    la lista de precios vigente.
+    Busca un producto del catálogo DE UN NEGOCIO por su código único de
+    material (CODIGO HANA), la lista de precios oficial. Se usa para que
+    las campañas (agent/campanas.py) referencien un producto real por
+    código en vez de texto libre — así el precio de la promo nunca queda
+    desincronizado de la lista de precios vigente. `negocio_id=None`
+    (Gate 4.4) falla cerrado devolviendo None, mismo criterio que
+    buscar_productos.
     """
     codigo = (codigo or "").strip()
-    if not codigo:
+    if not codigo or negocio_id is None:
         return None
-    return await obtener_producto_por_codigo_hana(codigo)
+    return await obtener_producto_por_codigo_hana(codigo, negocio_id)
 
 
 _PATRON_SUFIJOS_COMBO = re.compile(
@@ -121,13 +132,14 @@ def _modelo_base(descripcion: str) -> str:
     return re.sub(r"\s+", " ", sin_sufijos).strip()
 
 
-async def obtener_familia_producto(codigo_material: str) -> list[dict]:
+async def obtener_familia_producto(codigo_material: str, negocio_id: str | None) -> list[dict]:
     """
-    Dado el código de un producto, retorna todas las variantes de combo/
-    instalación del MISMO modelo base (misma marca, mismo proveedor, misma
-    descripción sin contar +CONEXIÓN/+COMBO/+DUCTERÍA/etc.) Y el mismo nivel
-    de fee (FEE PRV/FEE CLDA), ordenadas de menor a mayor precio, incluyendo
-    el producto original.
+    Dado el código de un producto DE UN NEGOCIO, retorna todas las variantes
+    de combo/instalación del MISMO modelo base (misma marca, mismo
+    proveedor, misma descripción sin contar +CONEXIÓN/+COMBO/+DUCTERÍA/etc.)
+    Y el mismo nivel de fee (FEE PRV/FEE CLDA), ordenadas de menor a mayor
+    precio, incluyendo el producto original. `negocio_id=None` (Gate 4.4)
+    falla cerrado devolviendo lista vacía.
 
     El filtro por fee es clave: en varios modelos (ej. Secadora Rinnai 10Kg)
     el catálogo trae DOS listas de precio paralelas para las mismas
@@ -145,7 +157,7 @@ async def obtener_familia_producto(codigo_material: str) -> list[dict]:
     distinta — sin tocar la línea de precio regular, que queda visible para
     el resto de clientes.
     """
-    ancla = await obtener_producto_por_codigo(codigo_material)
+    ancla = await obtener_producto_por_codigo(codigo_material, negocio_id)
     if ancla is None:
         return []
 
@@ -156,7 +168,7 @@ async def obtener_familia_producto(codigo_material: str) -> list[dict]:
     fee_clda = ancla.get("FEE CLDA", "").strip()
 
     familia = [
-        p for p in await listar_productos_activos()
+        p for p in await listar_productos_activos(negocio_id)
         if p.get("MARCA", "").strip().upper() == marca
         and p.get("PROVEEDOR", "").strip().upper() == proveedor
         and _modelo_base(p.get("DESCRIPCIÓN", "")) == base
@@ -298,24 +310,24 @@ async def obtener_estado_horario_atencion(negocio_id: str | None) -> dict:
 
 
 async def obtener_contexto_relevante(
-    mensaje: str, negocio_codigo: str | None = None, excluir_codigos: set[str] | None = None,
+    mensaje: str, negocio_id: str | None = None, negocio_codigo: str | None = None,
+    excluir_codigos: set[str] | None = None,
 ) -> str:
     """
     Punto de entrada usado por brain.py: combina resultados del catálogo de
     productos y de la base de conocimiento relacionados al mensaje del cliente.
 
-    `negocio_codigo` solo se propaga hacia `buscar_en_knowledge` — el
-    catálogo de productos (`buscar_productos`) NO tiene todavía aislamiento
-    por Negocio (`Producto` no tiene columna `negocio_id`, es deuda
-    arquitectónica real pero de un alcance mucho mayor: migración de
-    esquema + backfill + todas las rutas del panel de Catálogo — queda
-    documentada como Gate propio, deliberadamente fuera de esta corrección
-    puntual). Hoy Cálidda es el único Negocio con productos reales, así
-    que esto no contamina ninguna conversación real todavía — ver el
-    análisis dedicado en el informe de este Gate."""
+    `negocio_codigo` (el slug estable, ej. "calidda") se propaga hacia
+    `buscar_en_knowledge`, que aísla por carpeta (`knowledge/<codigo>/`).
+    `negocio_id` (el FK real, Gate 4.4) se propaga hacia `buscar_productos`,
+    que aísla por columna. Son dos identificadores distintos del MISMO
+    Negocio porque cada aislamiento se resolvió en su propio Gate contra un
+    mecanismo distinto (carpetas vs. filas de base de datos) — ambos
+    `None` cuando el Canal no resolvió Negocio todavía, y ambos fallan
+    cerrado (sin contexto/catálogo) en vez de adivinar."""
     secciones = []
 
-    productos = await buscar_productos(mensaje, excluir_codigos=excluir_codigos)
+    productos = await buscar_productos(mensaje, negocio_id, excluir_codigos=excluir_codigos)
     if productos:
         productos_texto = "\n\n".join(
             f"{i}. {formatear_producto(p)}" for i, p in enumerate(productos, 1)

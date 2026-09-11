@@ -50,8 +50,8 @@ class ServicioCanales:
     async def procesar_leads_formulario(self, body: dict, proveedor) -> None:
         return await campanas.procesar_leads_formulario(body, proveedor)
 
-    async def resolver_promo(self, campana: dict) -> dict | None:
-        return await campanas.resolver_promo(campana)
+    async def resolver_promo(self, campana: dict, negocio_id: str | None) -> dict | None:
+        return await campanas.resolver_promo(campana, negocio_id)
 
     def generar_link_whatsapp(self, texto_saludo: str) -> str:
         return campanas.generar_link_whatsapp(texto_saludo)

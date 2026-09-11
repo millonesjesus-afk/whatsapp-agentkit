@@ -2033,10 +2033,19 @@ class Producto(Base):
 
     `id` autoincremental es la clave primaria, NO `codigo_hana` — el
     catálogo real tiene productos "EN CREACIÓN" sin código HANA asignado
-    todavía, así que ese campo no es único (confirmado en el CSV vigente)."""
+    todavía, así que ese campo no es único (confirmado en el CSV vigente).
+
+    `negocio_id` (Gate 4.4): cada producto pertenece a un Negocio — antes
+    de este Gate la tabla no tenía ningún concepto de tenant y todas las
+    consultas mezclaban productos de cualquier origen (ver auditoría en
+    tests/test_gate43_analisis_catalogo_riesgo.py). `codigo_hana` NO pasa a
+    ser UNIQUE(negocio_id, codigo_hana) porque nunca fue único siquiera
+    dentro de un solo negocio (ver arriba) — no hay ninguna restricción de
+    unicidad que migrar."""
     __tablename__ = "productos"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    negocio_id: Mapped[str] = mapped_column(String(36), ForeignKey("negocios.id"), nullable=False, index=True)
     canal: Mapped[str | None] = mapped_column(String(100), nullable=True)
     proveedor: Mapped[str | None] = mapped_column(String(150), nullable=True)
     marca: Mapped[str | None] = mapped_column(String(100), nullable=True)
@@ -3287,19 +3296,22 @@ async def listar_lineas_venta_de_muchos(telefonos: list[str], negocio_id: str) -
         }
 
 
-async def ids_de_productos_existentes(ids: set[int]) -> set[int]:
-    """De los `id` de Producto que le pasan, cuáles existen realmente. Se usa
-    para validar el `producto_id` que manda el carrito del cierre de venta
-    antes de persistirlo.
+async def ids_de_productos_existentes(ids: set[int], negocio_id: str) -> set[int]:
+    """De los `id` de Producto que le pasan, cuáles existen realmente EN ESTE
+    NEGOCIO. Se usa para validar el `producto_id` que manda el carrito del
+    cierre de venta antes de persistirlo — un id real pero de otro Negocio
+    debe rechazarse igual que un id inexistente (Gate 4.4).
 
     A propósito NO filtra por `activo`: un producto puede desactivarse del
     catálogo después de haberse vendido, y editar esa venta vieja no debería
     volverse imposible por eso. La pregunta acá es "¿este id es un producto
-    real?", no "¿se puede vender hoy?"."""
+    real de este Negocio?", no "¿se puede vender hoy?"."""
     if not ids:
         return set()
     async with async_session() as session:
-        result = await session.execute(select(Producto.id).where(Producto.id.in_(ids)))
+        result = await session.execute(
+            select(Producto.id).where(Producto.id.in_(ids), Producto.negocio_id == negocio_id)
+        )
         return {fila[0] for fila in result.all()}
 
 
@@ -4259,25 +4271,35 @@ def _producto_a_dict(p: Producto) -> dict:
     return fila
 
 
-async def listar_productos_activos() -> list[dict]:
-    """Catálogo completo (solo filas activas) para búsqueda/scoring en
-    Python — ~360 filas es trivial de traer entero en cada consulta, igual
-    que ya se hacía con el CSV cacheado en memoria de proceso (sin la
-    desventaja de esa variable global: acá cada request ve el dato real)."""
+async def listar_productos_activos(negocio_id: str) -> list[dict]:
+    """Catálogo completo (solo filas activas) DE UN NEGOCIO para
+    búsqueda/scoring en Python — ~360 filas es trivial de traer entero en
+    cada consulta, igual que ya se hacía con el CSV cacheado en memoria de
+    proceso (sin la desventaja de esa variable global: acá cada request ve
+    el dato real).
+
+    `negocio_id` (Gate 4.4) es obligatorio y se filtra en el WHERE, mismo
+    criterio que `listar_leads` — ninguna llamada a esta función puede
+    devolver productos de un Negocio distinto al pedido."""
     async with async_session() as session:
-        query = select(Producto).where(Producto.activo.is_(True)).order_by(Producto.id.asc())
+        query = (
+            select(Producto)
+            .where(Producto.negocio_id == negocio_id, Producto.activo.is_(True))
+            .order_by(Producto.id.asc())
+        )
         result = await session.execute(query)
         return [_producto_a_dict(p) for p in result.scalars().all()]
 
 
-async def obtener_producto_por_codigo_hana(codigo: str) -> dict | None:
-    """Primer producto activo con este CODIGO HANA, ordenado por id (mismo
-    criterio de "primera fila que matchea" que ya usaba el CSV — CODIGO
-    HANA no es único, ver Producto)."""
+async def obtener_producto_por_codigo_hana(codigo: str, negocio_id: str) -> dict | None:
+    """Primer producto activo DE ESTE NEGOCIO con este CODIGO HANA, ordenado
+    por id (mismo criterio de "primera fila que matchea" que ya usaba el
+    CSV — CODIGO HANA no es único, ver Producto). `negocio_id` obligatorio,
+    filtrado en el WHERE (Gate 4.4)."""
     async with async_session() as session:
         query = (
             select(Producto)
-            .where(Producto.codigo_hana == codigo, Producto.activo.is_(True))
+            .where(Producto.codigo_hana == codigo, Producto.negocio_id == negocio_id, Producto.activo.is_(True))
             .order_by(Producto.id.asc())
             .limit(1)
         )
@@ -4511,7 +4533,7 @@ def _activo_segun_csv(datos: dict) -> bool:
     return clave not in FILAS_CATALOGO_EXCLUIDAS
 
 
-async def importar_catalogo_desde_csv(ruta_csv: str, autor: str | None = None) -> dict:
+async def importar_catalogo_desde_csv(ruta_csv: str, negocio_id: str, autor: str | None = None) -> dict:
     """Sincroniza el catálogo con un CSV del mismo formato de
     knowledge/lista_precios_canales_propios.csv, por DIFERENCIAS.
 
@@ -4566,6 +4588,11 @@ async def importar_catalogo_desde_csv(ruta_csv: str, autor: str | None = None) -
     código (de ambos lados) que NO tuvieron correspondencia exacta y por eso
     se resolvieron por el camino conservador de alta/baja — es el número que
     una persona debería revisar a mano después de importar.
+
+    `negocio_id` (Gate 4.4) es obligatorio: la sincronización por
+    diferencias corre SOLO contra el catálogo de ESTE Negocio (no ve, no
+    modifica ni desactiva productos de otro Negocio), y cada producto nuevo
+    nace con este `negocio_id`.
     """
     with open(ruta_csv, "r", encoding="utf-8-sig") as f:
         filas_csv = [_fila_csv_a_datos(fila) for fila in csv.DictReader(f)]
@@ -4576,7 +4603,7 @@ async def importar_catalogo_desde_csv(ruta_csv: str, autor: str | None = None) -
     }
 
     async with async_session() as session:
-        result = await session.execute(select(Producto))
+        result = await session.execute(select(Producto).where(Producto.negocio_id == negocio_id))
         productos_bd = list(result.scalars().all())
 
         # Partición por identidad: código real de un lado, placeholder del otro.
@@ -4650,6 +4677,7 @@ async def importar_catalogo_desde_csv(ruta_csv: str, autor: str | None = None) -
 
         for datos in a_crear:
             producto = Producto(
+                negocio_id=negocio_id,
                 **{campo: _normalizar_texto_producto(datos.get(campo)) for campo in CAMPOS_NEGOCIO_PRODUCTO},
                 cuotas=datos.get("cuotas") or {},
                 activo=_activo_segun_csv(datos),
@@ -4674,13 +4702,15 @@ async def importar_catalogo_desde_csv(ruta_csv: str, autor: str | None = None) -
     return resumen
 
 
-async def listar_productos(filtros: dict, pagina: int, por_pagina: int = 20) -> tuple[list[dict], int]:
-    """Página de productos + total de coincidencias (para la paginación de la
-    pantalla de catálogo). Filtros soportados: `q` (texto libre sobre marca y
-    descripción), `canal`, `marca`, `tipo` (coincidencia exacta) y `activo`
-    (bool; si no viene, devuelve activos e inactivos)."""
+async def listar_productos(filtros: dict, pagina: int, por_pagina: int, negocio_id: str) -> tuple[list[dict], int]:
+    """Página de productos DE UN NEGOCIO + total de coincidencias (para la
+    paginación de la pantalla de catálogo). Filtros soportados: `q` (texto
+    libre sobre marca y descripción), `canal`, `marca`, `tipo` (coincidencia
+    exacta) y `activo` (bool; si no viene, devuelve activos e inactivos).
+
+    `negocio_id` (Gate 4.4) es obligatorio y se filtra en el WHERE."""
     filtros = filtros or {}
-    condiciones = []
+    condiciones = [Producto.negocio_id == negocio_id]
 
     texto = (filtros.get("q") or "").strip()
     if texto:
@@ -4707,17 +4737,25 @@ async def listar_productos(filtros: dict, pagina: int, por_pagina: int = 20) -> 
         return [_producto_a_dict_panel(p) for p in result.scalars().all()], int(total or 0)
 
 
-async def obtener_producto(id: int) -> dict | None:
+async def obtener_producto(id: int, negocio_id: str) -> dict | None:
+    """Candado de ownership por PK (Gate 4.4) — mismo criterio que
+    `obtener_lead`: trae la fila por id y, si pertenece a otro Negocio,
+    devuelve None (404, nunca 403 — no confirma la existencia del recurso a
+    quien no tiene acceso)."""
     async with async_session() as session:
         p = await session.get(Producto, id)
-        return _producto_a_dict_panel(p) if p else None
+        if p is None or p.negocio_id != negocio_id:
+            return None
+        return _producto_a_dict_panel(p)
 
 
-async def crear_producto(datos: dict, autor: str) -> dict:
+async def crear_producto(datos: dict, autor: str, negocio_id: str) -> dict:
     """Alta manual desde el panel. Arranca en version=0 (igual que los leads)
-    y deja constancia de la creación en la bitácora."""
+    y deja constancia de la creación en la bitácora. `negocio_id` (Gate 4.4)
+    obligatorio — el producto nace ligado al Negocio de quien lo crea."""
     async with async_session() as session:
         producto = Producto(
+            negocio_id=negocio_id,
             **{campo: _normalizar_texto_producto(datos.get(campo)) for campo in CAMPOS_NEGOCIO_PRODUCTO},
             cuotas=datos.get("cuotas") or {},
             activo=bool(datos.get("activo", True)),
@@ -4730,7 +4768,7 @@ async def crear_producto(datos: dict, autor: str) -> dict:
         return _producto_a_dict_panel(producto)
 
 
-async def editar_producto(id: int, cambios: dict, version_esperada: int, autor: str) -> dict | None:
+async def editar_producto(id: int, cambios: dict, version_esperada: int, autor: str, negocio_id: str) -> dict | None:
     """Edición manual con concurrencia optimista — MISMO criterio que
     intentar_avanzar_version() para leads: solo se aplica si el producto sigue
     en la versión que tenía cuando se abrió el formulario; si alguien más
@@ -4740,9 +4778,16 @@ async def editar_producto(id: int, cambios: dict, version_esperada: int, autor: 
     la escritura viven en la misma sesión/transacción, porque hay campos que
     escribir en el mismo acto.
 
-    Devuelve el producto actualizado, o None si la versión no coincide (o si
-    el producto no existe — quien llama distingue los dos casos consultando
-    obtener_producto()).
+    `negocio_id` (Gate 4.4): candado de ownership, mismo criterio que
+    obtener_producto — un producto de otro Negocio se trata igual que un
+    producto inexistente (None), tanto en la lectura previa como en el
+    WHERE del propio UPDATE (defensa en profundidad: aunque alguien
+    llamara a esta función saltándose el chequeo de arriba, el UPDATE
+    tampoco tocaría una fila de otro Negocio).
+
+    Devuelve el producto actualizado, o None si la versión no coincide, si
+    el producto no existe, o si pertenece a otro Negocio (quien llama
+    distingue los casos consultando obtener_producto()).
 
     El chequeo de versión NO alcanza con comparar en Python y después
     escribir: entre esa comparación y el COMMIT hay una ventana en la que
@@ -4757,7 +4802,7 @@ async def editar_producto(id: int, cambios: dict, version_esperada: int, autor: 
     """
     async with async_session() as session:
         producto = await session.get(Producto, id)
-        if producto is None or producto.version != version_esperada:
+        if producto is None or producto.negocio_id != negocio_id or producto.version != version_esperada:
             return None
         cambios_reales = _diferencias_producto(producto, cambios)
         if not cambios_reales:
@@ -4772,7 +4817,7 @@ async def editar_producto(id: int, cambios: dict, version_esperada: int, autor: 
     async with async_session() as session:
         resultado = await session.execute(
             update(Producto)
-            .where(Producto.id == id, Producto.version == version_esperada)
+            .where(Producto.id == id, Producto.negocio_id == negocio_id, Producto.version == version_esperada)
             .values(**valores, version=version_esperada + 1)
         )
         if resultado.rowcount == 0:
@@ -4782,24 +4827,25 @@ async def editar_producto(id: int, cambios: dict, version_esperada: int, autor: 
 
     for campo, anterior, nuevo in cambios_reales:
         await registrar_cambio_precio_producto(id, campo, anterior, nuevo, autor)
-    return await obtener_producto(id)
+    return await obtener_producto(id, negocio_id)
 
 
-async def toggle_producto(id: int, version_esperada: int, autor: str) -> dict | None:
+async def toggle_producto(id: int, version_esperada: int, autor: str, negocio_id: str) -> dict | None:
     """Activa/desactiva un producto — nunca se borra físicamente. Mismo manejo
     de concurrencia que editar_producto(), incluida la condición de versión
     dentro del UPDATE (dos toggles simultáneos con la misma versión daban 200
-    los dos y dejaban una sola bitácora, ver editar_producto)."""
+    los dos y dejaban una sola bitácora, ver editar_producto). `negocio_id`
+    (Gate 4.4): mismo candado de ownership que editar_producto."""
     async with async_session() as session:
         producto = await session.get(Producto, id)
-        if producto is None or producto.version != version_esperada:
+        if producto is None or producto.negocio_id != negocio_id or producto.version != version_esperada:
             return None
         anterior = producto.activo
 
     async with async_session() as session:
         resultado = await session.execute(
             update(Producto)
-            .where(Producto.id == id, Producto.version == version_esperada)
+            .where(Producto.id == id, Producto.negocio_id == negocio_id, Producto.version == version_esperada)
             .values(activo=not anterior, version=version_esperada + 1)
         )
         if resultado.rowcount == 0:
@@ -4810,7 +4856,7 @@ async def toggle_producto(id: int, version_esperada: int, autor: str) -> dict | 
     await registrar_cambio_precio_producto(
         id, CAMPO_AUDITORIA_ACTIVO, str(anterior).lower(), str(not anterior).lower(), autor,
     )
-    return await obtener_producto(id)
+    return await obtener_producto(id, negocio_id)
 
 
 async def listar_historial_producto(producto_id: int) -> list[dict]:

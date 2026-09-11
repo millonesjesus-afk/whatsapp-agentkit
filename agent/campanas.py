@@ -43,7 +43,7 @@ def _normalizar(texto: str) -> str:
     return (texto or "").strip().lower()
 
 
-async def resolver_promo(campana: dict) -> dict | None:
+async def resolver_promo(campana: dict, negocio_id: str | None) -> dict | None:
     """
     Resuelve el producto/precio efectivo de una campaña:
     - Si tiene codigo_material, lo busca EN VIVO en la lista de precios
@@ -51,9 +51,15 @@ async def resolver_promo(campana: dict) -> dict | None:
     - Si no, usa el producto/precio de texto libre guardados en la campaña
       (para promociones fuera de catálogo).
     Retorna None si la campaña no tiene ninguna promo asociada.
+
+    `negocio_id` (Gate 4.4): la campaña ya pertenece a un Negocio (su propio
+    `negocio_id`), pero el catálogo se consulta por separado — se pasa
+    explícitamente en vez de leerlo de `campana` para que quien llama nunca
+    pueda resolver la promo de una campaña contra el catálogo de OTRO
+    Negocio por error.
     """
     if campana.get("codigo_material"):
-        producto = await obtener_producto_por_codigo(campana["codigo_material"])
+        producto = await obtener_producto_por_codigo(campana["codigo_material"], negocio_id)
         if producto:
             return {
                 "producto": f"{producto.get('MARCA', '')} — {producto.get('DESCRIPCIÓN', '')}".strip(" —"),
@@ -104,23 +110,23 @@ async def obtener_codigos_promocionales_activos(negocio_id: str | None) -> set[s
         if not c.get("codigo_material"):
             continue
         codigos.add(c["codigo_material"])
-        familia = await obtener_familia_producto(c["codigo_material"])
+        familia = await obtener_familia_producto(c["codigo_material"], negocio_id)
         codigos.update(p.get("CODIGO HANA", "") for p in familia)
     codigos.discard("")
     return codigos
 
 
-async def resolver_familia_promo(campana: dict) -> list[dict]:
+async def resolver_familia_promo(campana: dict, negocio_id: str | None) -> list[dict]:
     """
     Retorna todas las variantes de combo/instalación del producto de una
     campaña (ej. Secadora Rinnai 10Kg: sin combo, +conexión, +combo,
     +conexión+combo), para que Gabi pueda cotizar bien si el cliente de esa
     campaña pide una variante distinta a la anunciada en el SMS/anuncio.
-    Vacío si la campaña no tiene código de material.
-    """
+    Vacío si la campaña no tiene código de material. `negocio_id`, mismo
+    criterio que resolver_promo (Gate 4.4)."""
     if not campana.get("codigo_material"):
         return []
-    return await obtener_familia_producto(campana["codigo_material"])
+    return await obtener_familia_producto(campana["codigo_material"], negocio_id)
 
 
 def generar_link_whatsapp(texto_saludo: str) -> str:
