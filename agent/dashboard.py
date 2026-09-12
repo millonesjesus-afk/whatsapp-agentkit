@@ -45,6 +45,8 @@ from agent.memory import (
     asignar_asesor_a_lead, marcar_lead_visto, limpiar_revision_prioritaria, actualizar_disponibilidad, actualizar_nivel_asesor,
     listar_campanas, crear_campana, actualizar_campana, contar_opportunities_por_campana, eliminar_campana,
     obtener_campana, obtener_canal_whatsapp,
+    rango_periodo_utc, contar_flujo_periodo, calcular_embudo_comercial, contar_oportunidades_por_asesor,
+    distribucion_resultados_periodo, resumen_ventas_periodo, productos_vendidos_periodo,
     cambiar_password, contar_conversations_activas_por_asesor, RESULTADOS_CERRADOS, listar_leads_agendados,
     listar_leads_esperando_asesor, listar_leads_pipeline, COLUMNAS_ORDEN_PIPELINE,
     listar_conversaciones_activas, obtener_contact_detalle, obtener_conversation_detalle, listar_eventos_de_conversation,
@@ -6842,6 +6844,153 @@ async def eliminar_campana_ruta(campana_id: int, usuario: dict = Depends(servici
             detail="Esta campaña ya tiene leads asociados — no se puede eliminar, desactívala en su lugar.",
         )
     return RedirectResponse(url="/dashboard/campanas", status_code=303)
+
+
+# ── Analítica (Nueva Experiencia — Gate Analítica P0) ───────────────────
+#
+# Product Patterns Cap. 4: KPI Cards + Zona de siguiente mejor acción +
+# Zona de detalle comparativo + Zona de configuración (admin-only, no
+# construida en P0 — no hay nada que configurar todavía). Sin restricción
+# de rol vía `requiere_rol` (mismo criterio que `inicio_json`): el alcance
+# se resuelve adentro del handler porque Admin/Supervisor/Asesor comparten
+# el mismo contrato JSON con distintos datos, no rutas separadas.
+
+
+def _mes_actual_lima() -> tuple[str, str]:
+    """Período por defecto de Analítica P0 cuando no llegan `desde`/`hasta`
+    por query string: el mes calendario en curso, en Lima (UTC-5 fijo, sin
+    horario de verano) — mismo offset que `rango_periodo_utc`, nunca el mes
+    calendario en UTC (que a partir de las 19:00 hora Lima ya adelantaría
+    un día)."""
+    ahora_lima = datetime.utcnow() - timedelta(hours=5)
+    inicio_mes = ahora_lima.replace(day=1)
+    return inicio_mes.strftime("%Y-%m-%d"), ahora_lima.strftime("%Y-%m-%d")
+
+
+def _senales_analitica_p0(flujo_periodo: dict, valor_vendido: dict) -> list[dict]:
+    """Máximo 3 señales deterministas — reglas fijas sobre números ya
+    calculados arriba, sin ningún umbral de negocio inventado (ej. "tasa de
+    cierre baja si < X%") porque ese tipo de definición requiere la misma
+    decisión explícita que ya cerró el umbral de "estancado" en rondas
+    anteriores del Gate, y no fue parte de lo aprobado para este cierre.
+    Nunca lenguaje causal ni de IA — Copiloto es un módulo aparte, sin
+    integración con Analítica en P0.
+
+    `brecha_periodo` (`oportunidades - ventas` del período) se evaluó y se
+    descartó como señal (Gate Analítica P0, revisión final): compara
+    universos temporales distintos (creado vs. fecha_cierre) y por eso es
+    positiva de forma habitual — como señal binaria no discrimina una
+    situación problemática de una normal, solo generaría ruido. El dato
+    sigue disponible en `fugas.sin_cierre` ("Brecha del período"), fuera de
+    `senales`."""
+    senales = []
+    if flujo_periodo["oportunidades"] == 0:
+        senales.append({
+            "tipo": "sin_oportunidades",
+            "texto": "No se registraron oportunidades en este período.",
+        })
+    if valor_vendido["ventas_excluidas"] > 0:
+        senales.append({
+            "tipo": "ventas_excluidas",
+            "texto": f"{valor_vendido['ventas_excluidas']} venta(s) del período con un precio no numérico — excluidas del monto total.",
+        })
+    return senales[:3]
+
+
+@router.get("/analitica.json")
+async def analitica_json(
+    usuario: dict = Depends(_usuario_actual),
+    desde: str = "",
+    hasta: str = "",
+    asesor: str = "",
+    campana_id: int | None = None,
+):
+    """GATE ANALÍTICA P0 — Analítica para la Nueva Experiencia.
+
+    Alcance por rol (Product Patterns Cap. 4 §4, aplica a TODA la
+    pantalla, no solo al bloque Equipo): un Asesor NUNCA ve indicadores de
+    otro asesor — el `asesor` que llega por query string se ignora por
+    completo para ese rol y se reemplaza server-side por su propio
+    username. Admin/Supervisor sí pueden usarlo para acotar a un asesor
+    puntual; no existe una partición más fina de "mi equipo" (ver
+    `ROLES_CON_VISION_TOTAL`), así que Supervisor ve el mismo universo de
+    asesores que Admin.
+
+    `equipo` está AUSENTE del JSON (no `null`) para rol asesor — nunca
+    tiene sentido mostrarle "el equipo" a quien no puede ver a nadie más.
+    """
+    vision_total = usuario["rol"] in ROLES_CON_VISION_TOTAL
+    asesor_scope = asesor if (vision_total and asesor) else (None if vision_total else usuario["username"])
+
+    if not desde or not hasta:
+        desde, hasta = _mes_actual_lima()
+    inicio, fin = rango_periodo_utc(desde, hasta)
+
+    # "estado_actual" es una FOTO del momento (nunca filtrada por período) —
+    # misma fuente que Inicio (Pulso: "leads en curso"/"conversaciones con
+    # Gabi"), reutilizada sin cambios.
+    datos_bandeja = await _datos_bandeja(usuario, "todos", "", "")
+    estado_actual = {
+        "leads_en_curso": len(datos_bandeja["leads_derivados"]) + len(datos_bandeja["leads_con_gabi"]),
+        "conversaciones_con_gabi": len(datos_bandeja["leads_con_gabi"]),
+    }
+
+    flujo_periodo = await contar_flujo_periodo(usuario["negocio_id"], inicio, fin, asesor=asesor_scope, campana_id=campana_id)
+    embudo = await calcular_embudo_comercial(usuario["negocio_id"], inicio, fin, asesor=asesor_scope, campana_id=campana_id)
+    distribucion = await distribucion_resultados_periodo(usuario["negocio_id"], inicio, fin, asesor=asesor_scope, campana_id=campana_id)
+    valor_vendido = await resumen_ventas_periodo(usuario["negocio_id"], inicio, fin, asesor=asesor_scope, campana_id=campana_id)
+    productos = await productos_vendidos_periodo(usuario["negocio_id"], inicio, fin, asesor=asesor_scope, campana_id=campana_id)
+    campanas = await contar_opportunities_por_campana(usuario["negocio_id"], desde=inicio, hasta=fin, asesor=asesor_scope)
+
+    # "Brecha del período" / "Brecha oportunidad → venta" (Gate Analítica
+    # P0, Decisión Opción C + refinamiento de terminología posterior):
+    # NUNCA "oportunidades pendientes actuales" — es una diferencia agregada
+    # del período entre dos conjuntos de Opportunity potencialmente
+    # distintos (uno filtrado por `creado`, el otro por `fecha_cierre`), así
+    # que puede no corresponder 1:1 a ninguna oportunidad puntual todavía
+    # abierta. `max(0, ...)` documentado: un cruce de cohortes que diera un
+    # resultado negativo nunca se presenta como un hueco negativo.
+    brecha = max(0, embudo["oportunidades"] - embudo["ventas"])
+    fugas = {
+        "sin_cierre": brecha,
+        "sin_cierre_descripcion": (
+            "Diferencia entre oportunidades creadas y ventas cerradas durante el "
+            "período; no representa oportunidades actualmente pendientes."
+        ),
+        "distribucion_resultados": distribucion,
+    }
+
+    respuesta = {
+        "periodo": {"desde": desde, "hasta": hasta},
+        "estado_actual": estado_actual,
+        "flujo_periodo": flujo_periodo,
+        "embudo": embudo,
+        "fugas": fugas,
+        "campanas": campanas,
+        "productos": productos,
+        "valor_vendido": valor_vendido,
+        "puede_ver_equipo": vision_total,
+        "senales": _senales_analitica_p0(flujo_periodo, valor_vendido),
+    }
+
+    if vision_total:
+        asesores = await listar_asesores(usuario["negocio_id"])
+        usernames = [a["username"] for a in asesores]
+        carga = await contar_conversations_activas_por_asesor(usuario["negocio_id"], usernames) if usernames else {}
+        resultados_asesor = (
+            await contar_oportunidades_por_asesor(usuario["negocio_id"], usernames, inicio, fin, campana_id=campana_id)
+            if usernames else {}
+        )
+        respuesta["equipo"] = [
+            {
+                **a,
+                "carga": carga.get(a["username"]),
+                **resultados_asesor.get(a["username"], {"oportunidades": 0, "ventas": 0, "tasa_cierre": None}),
+            }
+            for a in asesores
+        ]
+
+    return JSONResponse(respuesta)
 
 
 # ── Canales de WhatsApp (admin) ─────────────────────────────────────
