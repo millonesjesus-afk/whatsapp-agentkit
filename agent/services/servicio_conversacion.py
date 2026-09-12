@@ -62,20 +62,21 @@ class ServicioConversacion:
     async def crear_archivo_adjunto(
         self, nombre_original: str, ruta_disco: str, content_type: str, tamano_bytes: int,
         subido_por: str, reutilizable: bool = False, etiqueta: str | None = None,
+        negocio_id: str | None = None,
     ) -> dict:
         return await crear_archivo_adjunto(
             nombre_original, ruta_disco, content_type, tamano_bytes,
-            subido_por, reutilizable=reutilizable, etiqueta=etiqueta,
+            subido_por, reutilizable=reutilizable, etiqueta=etiqueta, negocio_id=negocio_id,
         )
 
     async def obtener_archivo_adjunto(self, archivo_id: int) -> dict | None:
         return await obtener_archivo_adjunto(archivo_id)
 
-    async def listar_archivos_reutilizables(self) -> list[dict]:
-        return await listar_archivos_reutilizables()
+    async def listar_archivos_reutilizables(self, negocio_id: str) -> list[dict]:
+        return await listar_archivos_reutilizables(negocio_id)
 
-    async def eliminar_archivo_reutilizable(self, archivo_id: int):
-        return await eliminar_archivo_reutilizable(archivo_id)
+    async def eliminar_archivo_reutilizable(self, archivo_id: int, negocio_id: str) -> bool:
+        return await eliminar_archivo_reutilizable(archivo_id, negocio_id)
 
     async def obtener_telefono_de_archivo(self, archivo_id: int) -> str | None:
         return await obtener_telefono_de_archivo(archivo_id)

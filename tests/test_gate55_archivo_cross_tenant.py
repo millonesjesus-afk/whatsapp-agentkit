@@ -51,9 +51,15 @@ async def test_archivo_del_propio_negocio_respeta_el_criterio_de_rol():
 
 async def test_archivo_reutilizable_sin_lead_asociado_no_requiere_candado():
     negocio_a = await _negocio("arch-d")
+    # negocio_id ahora es obligatorio para reutilizable=True (Gate de
+    # aislamiento multi-tenant de ArchivoAdjunto) — se agrega acá solo para
+    # respetar el nuevo esquema, sin cambiar lo que este test verifica:
+    # `_verificar_acceso_archivo` (el candado de Lead) sigue sin aplicar a
+    # reutilizables, aunque ahora exista un candado DISTINTO de negocio_id
+    # (ver test_gate_archivo_reutilizable_aislamiento.py) para ese mismo caso.
     archivo = await mem.crear_archivo_adjunto(
         "catalogo.pdf", "/tmp/catalogo.pdf", "application/pdf", 2048,
-        subido_por="admin_a", reutilizable=True,
+        subido_por="admin_a", reutilizable=True, negocio_id=negocio_a["id"],
     )
     admin_otro = {"username": "admin_x", "rol": "admin", "negocio_id": negocio_a["id"]}
     # Sin mensaje que lo referencie, obtener_telefono_de_archivo devuelve

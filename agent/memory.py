@@ -385,7 +385,18 @@ class ArchivoAdjunto(Base):
     librería reutilizable (reutilizable=True, se puede mandar en cualquier
     conversación sin volver a subirlo). El contenido vive en el volumen
     persistente de Railway (ver ARCHIVOS_DIR en dashboard.py) — acá solo se
-    guardan los metadatos y la ruta en disco."""
+    guardan los metadatos y la ruta en disco.
+
+    `negocio_id` es el dueño tenant de un catálogo reutilizable — nunca
+    compartido entre negocios (hallazgo de aislamiento cerrado en este
+    Gate). Nullable a nivel de tabla porque las proformas (reutilizable=
+    False) siguen aisladas de forma indirecta vía
+    Mensaje.archivo_id → Mensaje.telefono → Lead.negocio_id
+    (test_gate55_archivo_cross_tenant.py) y no reciben negocio_id directo.
+    La garantía real ("todo reutilizable tiene negocio_id") la impone el
+    CHECK constraint `ck_archivos_adjuntos_reutilizable_negocio`, no un
+    NOT NULL de columna completa. `subido_por` sigue siendo solo metadato
+    de auditoría — nunca el mecanismo de aislamiento."""
     __tablename__ = "archivos_adjuntos"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
@@ -397,6 +408,9 @@ class ArchivoAdjunto(Base):
     # Nombre visible en la librería de catálogos — solo aplica si reutilizable
     etiqueta: Mapped[str | None] = mapped_column(String(150), nullable=True)
     subido_por: Mapped[str] = mapped_column(String(50))
+    negocio_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("negocios.id"), nullable=True, index=True
+    )
     creado: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
@@ -4503,20 +4517,28 @@ def _archivo_a_dict(a: ArchivoAdjunto) -> dict:
         "id": a.id, "nombre_original": a.nombre_original, "ruta_disco": a.ruta_disco,
         "content_type": a.content_type, "tamano_bytes": a.tamano_bytes,
         "reutilizable": a.reutilizable, "etiqueta": a.etiqueta,
-        "subido_por": a.subido_por, "creado": a.creado,
+        "subido_por": a.subido_por, "creado": a.creado, "negocio_id": a.negocio_id,
     }
 
 
 async def crear_archivo_adjunto(
     nombre_original: str, ruta_disco: str, content_type: str, tamano_bytes: int,
     subido_por: str, reutilizable: bool = False, etiqueta: str | None = None,
+    negocio_id: str | None = None,
 ) -> dict:
     """Registra un archivo ya guardado en disco (proforma puntual o catálogo
-    reutilizable) — ver ARCHIVOS_DIR en dashboard.py para dónde vive el archivo."""
+    reutilizable) — ver ARCHIVOS_DIR en dashboard.py para dónde vive el
+    archivo. negocio_id es obligatorio para reutilizable=True (dueño tenant
+    del catálogo, nunca compartido entre negocios); las proformas no lo
+    necesitan y quedan en None — siguen aisladas de forma indirecta vía
+    Mensaje.archivo_id → Mensaje.telefono → Lead.negocio_id."""
+    if reutilizable and not negocio_id:
+        raise ValueError("negocio_id es obligatorio para crear un archivo reutilizable")
     async with async_session() as session:
         archivo = ArchivoAdjunto(
             nombre_original=nombre_original, ruta_disco=ruta_disco, content_type=content_type,
             tamano_bytes=tamano_bytes, reutilizable=reutilizable, etiqueta=etiqueta, subido_por=subido_por,
+            negocio_id=negocio_id,
         )
         session.add(archivo)
         await session.commit()
@@ -4530,29 +4552,39 @@ async def obtener_archivo_adjunto(archivo_id: int) -> dict | None:
         return _archivo_a_dict(archivo) if archivo else None
 
 
-async def listar_archivos_reutilizables() -> list[dict]:
-    """Librería de catálogos ya subidos, listos para enviar en cualquier
-    conversación sin volver a subirlos — más recientes primero."""
+async def listar_archivos_reutilizables(negocio_id: str) -> list[dict]:
+    """Librería de catálogos ya subidos por ESTE negocio, listos para
+    enviar en cualquier conversación sin volver a subirlos — más recientes
+    primero. `negocio_id` es obligatorio: nunca devuelve catálogos de otro
+    negocio (hallazgo de aislamiento cerrado en este Gate — antes esta
+    consulta no tenía ningún predicado de tenant)."""
     async with async_session() as session:
         query = (
             select(ArchivoAdjunto)
-            .where(ArchivoAdjunto.reutilizable.is_(True))
+            .where(
+                ArchivoAdjunto.reutilizable.is_(True),
+                ArchivoAdjunto.negocio_id == negocio_id,
+            )
             .order_by(ArchivoAdjunto.creado.desc())
         )
         result = await session.execute(query)
         return [_archivo_a_dict(a) for a in result.scalars().all()]
 
 
-async def eliminar_archivo_reutilizable(archivo_id: int):
+async def eliminar_archivo_reutilizable(archivo_id: int, negocio_id: str) -> bool:
     """Quita un catálogo de la librería (no borra el archivo físico del disco,
     por si algún mensaje viejo todavía lo referencia — solo dejar de ofrecerlo
-    para envíos nuevos)."""
+    para envíos nuevos). Exige negocio_id: nunca desactiva un catálogo de
+    otro negocio, aunque el id exista y sea válido. Retorna False si el
+    archivo no existe o pertenece a otro negocio — el caller (ruta) decide
+    si eso es un 404 o un 403."""
     async with async_session() as session:
         archivo = await session.get(ArchivoAdjunto, archivo_id)
-        if archivo is None:
-            return
+        if archivo is None or archivo.negocio_id != negocio_id:
+            return False
         archivo.reutilizable = False
         await session.commit()
+        return True
 
 
 async def obtener_telefono_de_archivo(archivo_id: int) -> str | None:

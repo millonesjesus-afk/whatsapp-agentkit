@@ -3411,7 +3411,7 @@ async def _bloque_respuesta(telefono: str, lead: dict) -> str:
             '<i class="bi bi-info-circle"></i> Asigna este lead a un asesor para poder responder '
             'manualmente (mientras tanto, Gabi sigue atendiendo automáticamente).</p>'
         )
-    catalogos = await servicio_conversacion.listar_archivos_reutilizables()
+    catalogos = await servicio_conversacion.listar_archivos_reutilizables(lead["negocio_id"])
     opciones_catalogos = "".join(
         f'<li><button type="button" class="dropdown-item small catalogo-item" data-archivo-id="{c["id"]}">'
         f'<i class="bi bi-file-earmark-fill me-1"></i>{html.escape(c["etiqueta"] or c["nombre_original"])}</button></li>'
@@ -5360,6 +5360,7 @@ async def enviar_catalogo_chat(telefono: str, archivo_id: int, usuario: dict = D
     archivo = await servicio_conversacion.obtener_archivo_adjunto(archivo_id)
     if archivo is None or not archivo["reutilizable"]:
         raise HTTPException(status_code=404, detail="Catálogo no encontrado")
+    _verificar_acceso_archivo_reutilizable(archivo, usuario)
     if not os.path.exists(archivo["ruta_disco"]):
         raise HTTPException(status_code=404, detail="Este catálogo ya no está disponible en el servidor — vuelve a subirlo desde Catálogo.")
 
@@ -5405,16 +5406,34 @@ async def _verificar_acceso_archivo(archivo_id: int, usuario: dict) -> None:
     _verificar_acceso_lead(usuario, lead)
 
 
+def _verificar_acceso_archivo_reutilizable(archivo: dict, usuario: dict) -> None:
+    """Candado de acceso a un catálogo reutilizable — negocio_id de la
+    sesión autenticada contra negocio_id del archivo, nunca `subido_por`
+    ni ningún valor recibido del cliente.
+
+    Cierra el hallazgo de la Auditoría Maestra: antes de este Gate, un
+    archivo reutilizable no tenía NINGÚN chequeo de tenant — cualquier
+    usuario autenticado de cualquier negocio podía descargarlo. Un
+    `negocio_id` ausente en el archivo (no debería ocurrir tras la
+    migración, salvo un dato huérfano no resuelto) también se rechaza —
+    nunca se trata `None == None` como acceso válido."""
+    if not usuario["negocio_id"] or archivo["negocio_id"] != usuario["negocio_id"]:
+        raise HTTPException(status_code=403, detail="No tienes acceso a este catálogo")
+
+
 @router.get("/archivo/{archivo_id}")
 async def descargar_archivo(archivo_id: int, usuario: dict = Depends(_usuario_actual)):
     """Sirve un archivo adjunto ya enviado — si es una proforma puntual (no
     reutilizable), verifica que el usuario tenga acceso al lead al que se le
-    mandó, igual que para ver la conversación misma."""
+    mandó, igual que para ver la conversación misma; si es un catálogo
+    reutilizable, verifica que pertenezca a su propio negocio."""
     archivo = await servicio_conversacion.obtener_archivo_adjunto(archivo_id)
     if archivo is None:
         raise HTTPException(status_code=404, detail="Archivo no encontrado")
     if not archivo["reutilizable"]:
         await _verificar_acceso_archivo(archivo_id, usuario)
+    else:
+        _verificar_acceso_archivo_reutilizable(archivo, usuario)
     if not os.path.exists(archivo["ruta_disco"]):
         raise HTTPException(status_code=404, detail="El archivo ya no está disponible")
     return FileResponse(archivo["ruta_disco"], filename=archivo["nombre_original"], media_type=archivo["content_type"])
@@ -5429,7 +5448,7 @@ async def gestionar_catalogos(request: Request, usuario: dict = Depends(_usuario
     Supervisor y Asesor tienen alcance de solo lectura, para citar en la
     conversación."""
     sidebar = await _renderizar_sidebar(usuario, telefono_activo=None)
-    archivos = await servicio_conversacion.listar_archivos_reutilizables()
+    archivos = await servicio_conversacion.listar_archivos_reutilizables(usuario["negocio_id"])
     es_admin = usuario["rol"] == "admin"
 
     mensaje_html = ""
@@ -5521,14 +5540,16 @@ async def subir_catalogo(
         nombre_original=archivo.filename, ruta_disco=ruta_disco,
         content_type=archivo.content_type or "application/octet-stream",
         tamano_bytes=len(contenido), subido_por=usuario["username"],
-        reutilizable=True, etiqueta=etiqueta.strip(),
+        reutilizable=True, etiqueta=etiqueta.strip(), negocio_id=usuario["negocio_id"],
     )
     return RedirectResponse(url="/dashboard/catalogos?subido=1", status_code=303)
 
 
 @router.post("/catalogos/{archivo_id}/eliminar")
 async def quitar_catalogo(archivo_id: int, usuario: dict = Depends(servicio_identidad.requiere_rol("admin")), _csrf: None = Depends(verificar_csrf)):
-    await servicio_conversacion.eliminar_archivo_reutilizable(archivo_id)
+    eliminado = await servicio_conversacion.eliminar_archivo_reutilizable(archivo_id, usuario["negocio_id"])
+    if not eliminado:
+        raise HTTPException(status_code=404, detail="Catálogo no encontrado")
     return RedirectResponse(url="/dashboard/catalogos", status_code=303)
 
 
