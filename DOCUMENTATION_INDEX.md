@@ -11,7 +11,7 @@
 | Fecha de creación | 2026-07-26 |
 | Autor | Claude, a pedido de Jesús Millones |
 | Fecha de aprobación | 2026-07-28 |
-| Última actualización | 2026-08-09 (registrado `MAIEK_AI_EXPERIENCE_FLOWS.md` — repositorio de Product Design con el Inventario Maestro histórico, Journey Maestro y las tablas EXP/UF/SCR recuperadas; Draft, no sigue el ciclo In Review/Approved por ser un artefacto funcional de trabajo, no de gobernanza — ver sección 7) |
+| Última actualización | 2026-09-12 (ADR-0003 — identidad de marca única de plataforma MAIEK; ver narrativa al final de esta sección y `MAIEK_AI_ADR_INDEX.md`) |
 
 ## Dependencias
 
@@ -263,6 +263,17 @@ proyecto. Agregado como sección propia del Roadmap (documento puente entre arqu
 implementación, lugar natural para un proceso de ejecución) y referenciado desde `CLAUDE.md` —
 auto-cargado en cada sesión — para que cualquier agente que trabaje en este repo lo siga sin
 depender de haber leído esta conversación.
+
+**ADR-0003 — Identidad de marca única de plataforma MAIEK (2026-09-12).** Retira la Decisión
+local de `MAIEK_AI_FRONTEND_ARCHITECTURE.md` sobre identidad de marca resoluble por negocio —
+la decisión de producto vigente, confirmada explícitamente por el usuario, establece que Maiek
+AI mantiene una identidad de plataforma propia (nombre, colores, lenguaje visual, experiencia
+UX), independiente de `negocio_id`: ningún tenant reemplaza el branding de Maiek, la plataforma
+no es white-label. `MAIEK_AI_IMPLEMENTATION_ROADMAP.md` (Fase 3, secciones 4 y 8) se actualiza
+en el mismo cambio, retirando ese ítem de su alcance. Lo que sigue siendo tenant-scoped, sin
+cambio: nombre del negocio, Gabi/agente configurable, productos, campañas, canales, permisos.
+Ver `MAIEK_AI_ADR_INDEX.md` y `adr/0003-identidad-marca-unica-plataforma.md` para el detalle
+completo.
 
 ---
 

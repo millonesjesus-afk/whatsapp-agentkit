@@ -11,7 +11,7 @@
 | Fecha de creación | 2026-07-28 |
 | Autor | Claude, a pedido de Jesús Millones |
 | Fecha de aprobación | 2026-07-28 |
-| Última actualización | 2026-07-28 |
+| Última actualización | 2026-09-12 (ADR-0003 — retiro de la Decisión local "Identidad de marca resoluble por negocio", ver Control de versiones) |
 
 ## Dependencias
 
@@ -34,6 +34,7 @@ Ninguno todavía — es el octavo y último documento técnico derivado del MSA.
 |---|---|---|---|
 | 1.0 (borrador) | 2026-07-28 | Claude | Primera versión — arquitectura objetivo de Frontend, construida sobre el CSA-Frontend aprobado. Resuelve la unificación del manejo de errores y la pantalla de error propia (P1 del CSA) sin construir todavía la representación de IA ni de estado operativo — ambas quedan como principio dependiente de que AI Architecture y Operations Architecture entreguen el dato real primero. No incorpora accesibilidad ni consistencia de interacción — registradas como mejora futura del CSA, no de este documento. Pendiente de revisión y aprobación. |
 | 1.0 | 2026-07-28 | Claude | Aprobado sin reapertura del contenido. Con esta aprobación se cierra el corpus arquitectónico principal de Maiek AI (8 dominios técnicos derivados del MSA). El usuario registró 2 mejoras futuras no bloqueantes, a incorporar en una versión posterior: (1) principio de **descubribilidad** — toda nueva funcionalidad debe ser accesible desde la navegación existente, sin depender de accesos ocultos como mecanismo principal de uso; (2) declarar explícitamente que la **consistencia visual global prevalece sobre preferencias particulares de cada módulo**, reforzando el rol de MDL como fuente única de identidad visual — refuerza la sección 10, que hoy establece la adopción incremental pero no declara esta jerarquía de forma explícita. |
+| 1.0 | 2026-09-12 | Claude | **[ADR-0003](adr/0003-identidad-marca-unica-plataforma.md) — retiro de la Decisión local "Identidad de marca resoluble por negocio, no hardcodeada" (§11, tabla Decisiones locales).** Decisión de producto confirmada explícitamente por el usuario: Maiek AI mantiene una identidad única de plataforma (nombre, colores, lenguaje visual, experiencia UX), independiente de `negocio_id` — ningún tenant reemplaza el branding de Maiek, la plataforma no es white-label. La Decisión local original queda `Superseded`, conservada en el documento (§11 y tabla) sin editar, por trazabilidad histórica. Cero impacto en código — no existía ninguna implementación de branding-por-tenant que revertir (auditado en esta sesión: 100% del branding sigue hardcodeado a Maiek/Gaso+, sin ninguna referencia a `negocio_id` en la capa visual). Lo que sí sigue siendo tenant-scoped, sin cambio: `Negocio.nombre`, `IdentidadAgente`/Gabi, productos, campañas, canales, permisos. |
 
 ## Alcance y regla de no-duplicación
 
@@ -93,6 +94,8 @@ Se reduce, de forma progresiva, el uso de ajustes de estilo puntuales a favor de
 
 Se hereda, sin diseñar el mecanismo, el mismo principio ya declarado en los siete documentos anteriores: cuando `negocio_id` exista (Data Architecture Fase 3), la identidad de marca (nombre, colores) debe poder resolverse por negocio, no quedar fija en el código como ocurre hoy. Este documento no resuelve el mecanismo técnico — solo dejaría, en una futura revisión, de nombrar variables de color con el nombre del negocio actual, para no seguir acoplando ambas cosas innecesariamente.
 
+**Nota (2026-09-12, [ADR-0003](adr/0003-identidad-marca-unica-plataforma.md)): el párrafo anterior queda Superseded.** La decisión de producto vigente establece que Maiek AI mantiene una identidad única de plataforma (nombre, colores, lenguaje visual), independiente de `negocio_id` — ningún tenant reemplaza el branding de Maiek; la plataforma no es, ni será bajo esta decisión, white-label. `negocio_id` sigue siendo relevante para datos y configuración del negocio (ver Data Architecture, Multi-Tenant por fila), nunca para la identidad visual de la plataforma. El párrafo original se conserva arriba, sin editar, por trazabilidad histórica — ver ADR-0003 para el detalle completo de esta decisión.
+
 ## 12. Principios para incorporación de nuevos módulos objetivo
 
 **Se documenta como regla explícita la convención ya usada informalmente**: el nombre de la función que renderiza una pantalla coincide con el nombre de esa pantalla, y cada pantalla nueva se marca con un comentario de sección — sin excepciones, a diferencia de la aplicación inconsistente de hoy (CSA, sección 12). No se reestructura el archivo único en esta versión — es una decisión de implementación proporcional al tamaño actual del equipo, no una decisión de esta arquitectura.
@@ -122,7 +125,7 @@ Se hereda, sin diseñar el mecanismo, el mismo principio ya declarado en los sie
 | Documentar la convención de nombres/organización de pantallas como regla explícita | Objetivo | P3 del CSA | — |
 | Principio de representación de confianza/explicación (vocabulario de MPX, Explainability First) | Objetivo, dependiente de AI Architecture | Evita construir la UI antes de que el dato exista | Cuando AI Architecture implemente el protocolo de confianza |
 | Principio de señal visible de estado operativo | Objetivo, dependiente de Operations Architecture | Mismo criterio que la decisión anterior | Cuando el marco de incidentes se implemente |
-| Identidad de marca resoluble por negocio, no hardcodeada | Objetivo, dependiente de Data Architecture Fase 3 | Cierra el bloqueante transversal ya señalado en los 7 documentos anteriores | Cuando exista un segundo negocio real |
+| ~~Identidad de marca resoluble por negocio, no hardcodeada~~ | **Superseded por [ADR-0003](adr/0003-identidad-marca-unica-plataforma.md)** (2026-09-12) | Decisión de producto vigente: Maiek mantiene identidad única de plataforma, independiente de `negocio_id` — no white-label. Ver ADR-0003 | — |
 
 ## Brechas conocidas
 

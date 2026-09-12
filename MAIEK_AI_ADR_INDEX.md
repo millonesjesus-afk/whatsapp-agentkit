@@ -61,6 +61,7 @@ Secuencial, sin huecos, nunca reutilizada — un ADR reemplazado conserva su nú
 |---|---|---|---|---|---|
 | [0001](adr/0001-backup-postgres-pg-dump-s3.md) | Backups de Postgres vía pg_dump + almacenamiento S3-compatible, no vía Railway nativo | Aceptada | 2026-07-28 | DevOps Architecture | Fase 0 |
 | [0002](adr/0002-independencia-proveedor-backups.md) | Independencia de proveedor como motivo principal de la estrategia de backups | Aceptada — complementa a 0001 | 2026-07-28 | DevOps Architecture | Fase 0 |
+| [0003](adr/0003-identidad-marca-unica-plataforma.md) | Identidad de marca única de plataforma MAIEK, independiente de `negocio_id` | Propuesta | 2026-09-12 | Frontend Architecture | Fase 3 |
 
 ---
 
