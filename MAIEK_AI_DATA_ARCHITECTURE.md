@@ -31,6 +31,7 @@ Backend Architecture, AI Architecture, API Architecture, Security Architecture, 
 |---|---|---|---|
 | 1.0 (borrador) | 2026-07-28 | Claude | Primera versión — arquitectura objetivo del dominio de datos y plan de evolución desde el estado real diagnosticado en el CSA-Data. Pendiente de revisión y aprobación. |
 | 1.0 (Approved) | 2026-07-28 | Claude | Revisión final de largo plazo: soft delete rediseñado (`eliminado_en`/`eliminado_por`, separado del estado de negocio `activo`, con capacidad de restauración auditable — Reversibilidad, MPX Cap. 1); estrategia de claves resuelta explícitamente a UUID como estándar para claves sustitutas nuevas, sin migrar retroactivamente las 5 PK autoincrement existentes; se agrega clasificación explícita de tipos de datos (Master Data/Transactional/Configuration/AI Knowledge/Audit) con implicancias para Security, DevOps y Operations; `RegistroAuditoria` declarado append-only, sin `UPDATE`/`DELETE`; se agrega sección de Data Ownership (propietario de escritura por categoría); se resuelve la ambigüedad `Configuracion` global vs. por Negocio (clave compuesta con cascada). Documento congelado como **Approved** — línea base técnica del dominio de datos. |
+| 1.0 | 2026-09-12 | Claude | **Reconciliación — [ADR-0004](adr/0004-secuencia-data-fase2-vs-multitenant.md) precisa la dependencia de §6, Fase 3** ("Depende de: Fase 1 y Fase 2"). La implementación real de Multi-Tenant (`negocio_id`) avanzó sin esperar a que el resto de Fase 2 esté activo, por no existir dependencia técnica real entre `negocio_id` y `MemoriaPersistente`/`SugerenciaIA` (evidencia y análisis completos en ADR-0004). Esta Decisión (Multi-Tenant por fila, sección 4) no se modifica ni se redecide — se aclara únicamente que el resto pendiente de Fase 2 no bloquea el trabajo de Fase 3 ya en curso. El principio "Multi-Tenant by Design" (sección 2) permanece sin excepción: cuando `MemoriaPersistente`/`SugerenciaIA` se construyan, deberán nacer con `negocio_id` desde su creación. Data Architecture Fase 2 **no** se declara completa por este cambio — `MemoriaPersistente` y `SugerenciaIA` siguen sin implementar. Ninguna otra decisión de este documento se modifica. |
 
 ## Alcance y regla de no-duplicación
 
@@ -252,6 +253,8 @@ Tres fases, en orden de dependencia estricta — cada una depende de que la ante
 
 ### Fase 3 — Multi-Tenant
 **Depende de:** Fase 1 y Fase 2 (necesita integridad de datos ya resuelta y migraciones seguras antes de particionar por tenant).
+
+*Nota de reconciliación ([ADR-0004](adr/0004-secuencia-data-fase2-vs-multitenant.md), 2026-09-12, Aceptada): esta dependencia con Fase 2 rige para que `MemoriaPersistente`/`SugerenciaIA` nazcan con `negocio_id` desde su creación (Multi-Tenant by Design, sección 2) — no bloquea el trabajo de esta Fase 3 ya en curso, que no tiene dependencia técnica real con esas dos entidades ni con el resto de Fase 2 (FKs legacy, `Numeric`, soft delete). Data Architecture Fase 2 permanece incompleta — `MemoriaPersistente` y `SugerenciaIA` siguen sin implementar.*
 - Crear tabla `Negocio`.
 - Agregar `negocio_id` a las 8 tablas existentes + las 3 nuevas de Fase 2.
 - Migrar `Configuracion` a clave compuesta `(clave, negocio_id)` con resolución en cascada (global → override).

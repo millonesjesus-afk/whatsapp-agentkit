@@ -31,6 +31,7 @@ AI Architecture, API Architecture, Frontend Architecture, Security Architecture,
 |---|---|---|---|
 | 1.0 (borrador) | 2026-07-28 | Claude | Primera versión — arquitectura objetivo del backend y plan de evolución desde el estado real diagnosticado en el CSA-Backend. Pendiente de revisión y aprobación. |
 | 1.0 (Approved) | 2026-07-28 | Claude | Revisión final: se agrega **Architectural Constraints** (sección 2, nueva sección permanente del ADS v1.3) con 5 restricciones reales del backend; se refuerza explícitamente el **límite de responsabilidad del protocolo de confianza de IA** — la confianza es emitida únicamente por el AI Engine, Backend la consume sin recalcularla ni reinterpretarla, con fail-safe a `Baja` si el modelo no la emite; se marca **`BackgroundTasks` explícitamente como mecanismo transitorio** de Event-Driven, no su estado final, con la migración a cola externa reservada a este mismo documento. Documento congelado como **Approved**. |
+| 1.0 | 2026-09-12 | Claude | **Reconciliación — [ADR-0004](adr/0004-secuencia-data-fase2-vs-multitenant.md) (Aceptada) precisa §5, Fase 3, sobre la activación de escritura en `SugerenciaIA`/`MemoriaPersistente`.** El texto agrupaba esa activación a que "Data Architecture Fase 2" completa esté activa; se precisa que depende únicamente de que esas dos entidades existan, no del resto de Fase 2 (FKs legacy, `Numeric`, soft delete), sin dependencia técnica real entre ambos (evidencia en ADR-0004). No se modifica ninguna otra decisión de este documento — la escritura sigue diferida hoy, sin cambio de código. |
 
 ## Alcance y regla de no-duplicación
 
@@ -177,7 +178,7 @@ Tres fases, dependencia estricta:
 ### Fase 3 — Sincronización con Data Architecture
 **Depende de:** Fase 1 y Fase 2, **y** de que Data Architecture ejecute sus propias fases en código (dependencia cruzada entre documentos, no solo interna a este roadmap).
 - Cuando Data Architecture Fase 1 (Alembic) esté activa: ningún cambio de esquema propio de Backend se hace fuera de esa migración.
-- Cuando Data Architecture Fase 2 (FKs, `MemoriaPersistente`, `SugerenciaIA`) esté activa: `ServicioConversacion` e `ServicioInteligencia` empiezan a escribir en las entidades nuevas.
+- Cuando `MemoriaPersistente` y `SugerenciaIA` existan (no necesariamente el resto de Data Architecture Fase 2 — [ADR-0004](adr/0004-secuencia-data-fase2-vs-multitenant.md), 2026-09-12, Aceptada, reconcilia que no hay dependencia técnica real con FKs legacy/`Numeric`/soft delete): `ServicioConversacion` e `ServicioInteligencia` empiezan a escribir en esas entidades.
 - Cuando Data Architecture Fase 3 (Multi-Tenant) esté activa: `ServicioIdentidad` propaga `negocio_id` en la sesión, y todas las rutas del panel quedan scopeadas por tenant.
 
 ## 6. Architecture Success Criteria

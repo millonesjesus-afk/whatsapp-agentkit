@@ -120,5 +120,8 @@ Ninguno de estos documentos se modifica en este cambio.
   (`MAIEK_AI_DATA_ARCHITECTURE.md` §6) y algo que otro documento
   (`MAIEK_AI_IMPLEMENTATION_ROADMAP.md`, §3/§4/§8) ya cita como dependencia.
 
-Si es sustancial: fecha en que se actualizó el documento de origen — **pendiente**,
-deliberadamente diferida a un Gate futuro (no autorizado en este cambio).
+Si es sustancial: fecha en que se actualizó el documento de origen — **2026-09-12**
+(`MAIEK_AI_DATA_ARCHITECTURE.md`, `MAIEK_AI_IMPLEMENTATION_ROADMAP.md` y
+`MAIEK_AI_BACKEND_ARCHITECTURE.md` reconciliados en un Gate documental posterior y
+separado a la aceptación de este ADR; `MAIEK_AI_ADR_INDEX.md` actualizado en el mismo
+cambio).
