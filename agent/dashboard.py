@@ -5944,8 +5944,8 @@ async def toggle_disponibilidad(usuario: dict = Depends(servicio_identidad.requi
 async def _pagina_gestionar_asesores(usuario: dict, request: Request | None = None, mensaje_html: str = "") -> str:
     sidebar = await _renderizar_sidebar(usuario, telefono_activo=None)
     asesores = await listar_asesores(usuario["negocio_id"])
-    umbral_senior = await obtener_configuracion("umbral_senior", str(UMBRAL_SENIOR_DEFAULT))
-    umbral_intermedio = await obtener_configuracion("umbral_intermedio", str(UMBRAL_INTERMEDIO_DEFAULT))
+    umbral_senior = await obtener_configuracion("umbral_senior", str(UMBRAL_SENIOR_DEFAULT), negocio_id=usuario["negocio_id"])
+    umbral_intermedio = await obtener_configuracion("umbral_intermedio", str(UMBRAL_INTERMEDIO_DEFAULT), negocio_id=usuario["negocio_id"])
 
     # Gate UX Equipo (Decisión 5) — el backend ya exige admin para
     # nivel/resetear (ver `actualizar_nivel`/`resetear_password_asesor`);
@@ -6188,7 +6188,12 @@ async def actualizar_umbrales_asignacion(
 ):
     """Gate UX Equipo (Decisión 5) — umbrales de asignación automática son
     una acción administrativa de cuenta/configuración, admin-únicamente,
-    mismo criterio que las dos rutas anteriores."""
+    mismo criterio que las dos rutas anteriores.
+
+    Tenant-scoped (auditoría H3): negocio_id sale siempre de usuario["negocio_id"]
+    (sesión), nunca del cliente — cierra el hallazgo de que estos umbrales
+    escribían siempre la fila global de Configuracion, afectando a
+    cualquier otro negocio que llegara a existir."""
     try:
         valor_intermedio = float(umbral_intermedio)
         valor_senior = float(umbral_senior)
@@ -6199,8 +6204,8 @@ async def actualizar_umbrales_asignacion(
     if valor_senior < valor_intermedio:
         raise HTTPException(status_code=400, detail="El umbral Senior no puede ser menor que el de Intermedio")
 
-    await guardar_configuracion("umbral_intermedio", str(valor_intermedio))
-    await guardar_configuracion("umbral_senior", str(valor_senior))
+    await guardar_configuracion("umbral_intermedio", str(valor_intermedio), negocio_id=usuario["negocio_id"])
+    await guardar_configuracion("umbral_senior", str(valor_senior), negocio_id=usuario["negocio_id"])
     return RedirectResponse(url="/dashboard/asesores", status_code=303)
 
 

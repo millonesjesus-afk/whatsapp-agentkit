@@ -25,11 +25,16 @@ UMBRAL_SENIOR_DEFAULT = 1500   # S/ — leads de este valor o más requieren ase
 UMBRAL_INTERMEDIO_DEFAULT = 500  # S/ — leads de este valor o más requieren al menos intermedio
 
 
-async def _umbrales() -> tuple[float, float]:
-    """Lee los umbrales configurados desde el panel (o los valores por
-    defecto si nunca se ajustaron)."""
-    umbral_senior = await obtener_configuracion("umbral_senior", str(UMBRAL_SENIOR_DEFAULT))
-    umbral_intermedio = await obtener_configuracion("umbral_intermedio", str(UMBRAL_INTERMEDIO_DEFAULT))
+async def _umbrales(negocio_id: str | None = None) -> tuple[float, float]:
+    """Lee los umbrales configurados desde el panel para ESTE negocio (o los
+    valores por defecto si ese negocio nunca los ajustó). `negocio_id=None`
+    conserva el comportamiento anterior (fila global) para cualquier
+    llamador que no lo pase — mismo criterio de compatibilidad que el resto
+    de `Configuracion` (ver `obtener_configuracion`, Gate 5.2). Sin
+    override propio, NUNCA hereda el valor global de otro negocio ni de la
+    fila global — cae directo al default de este módulo."""
+    umbral_senior = await obtener_configuracion("umbral_senior", str(UMBRAL_SENIOR_DEFAULT), negocio_id=negocio_id)
+    umbral_intermedio = await obtener_configuracion("umbral_intermedio", str(UMBRAL_INTERMEDIO_DEFAULT), negocio_id=negocio_id)
     try:
         return float(umbral_senior), float(umbral_intermedio)
     except ValueError:
@@ -50,7 +55,7 @@ async def _nivel_requerido(interes: str, negocio_id: str | None) -> str:
         precio = float(productos[0].get("PRECIO", ""))
     except (TypeError, ValueError):
         return "intermedio"
-    umbral_senior, umbral_intermedio = await _umbrales()
+    umbral_senior, umbral_intermedio = await _umbrales(negocio_id)
     if precio >= umbral_senior:
         return "senior"
     if precio >= umbral_intermedio:
