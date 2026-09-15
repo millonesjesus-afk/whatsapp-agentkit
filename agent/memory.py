@@ -16,7 +16,7 @@ from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sess
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, aliased
 from sqlalchemy import (
     String, Text, DateTime, select, Integer, Boolean, func, case, delete, update, JSON,
-    ForeignKey, Index, text, and_ as sa_and,
+    ForeignKey, Index, text, and_ as sa_and, or_ as sa_or,
 )
 from sqlalchemy.exc import IntegrityError
 from dotenv import load_dotenv
@@ -1548,9 +1548,69 @@ async def listar_conversaciones_activas(
         orden_columna = columna.asc() if direccion == "asc" else columna.desc()
         query = query.order_by(orden_columna).offset((pagina - 1) * por_pagina).limit(por_pagina)
         result = await session.execute(query)
+        filas_crudas = result.all()
+
+        # Bandeja — "bolita" con pendientes + último mensaje (QA, 2026-09-15):
+        # dos consultas EN LOTE (no una por fila — la página trae como mucho
+        # `por_pagina` conversaciones, así que se resuelven las dos de una
+        # sola vez para todo el lote, nunca N+1).
+        ids_conversacion = [c.id for c, _, _ in filas_crudas]
+        pendientes_por_conv: dict[str, int] = {}
+        ultimo_mensaje_por_conv: dict[str, str] = {}
+        if ids_conversacion:
+            # "Pendiente" = mensaje del CLIENTE posterior al último mensaje
+            # que NO es del cliente (Gabi o asesor) en esa Conversation — el
+            # mismo criterio que usaría un humano leyendo el hilo: cuántos
+            # mensajes seguidos mandó el cliente sin que nadie/nada le
+            # respondiera todavía. Sin esto (agregado por Conversation, no
+            # por Contact) no hay forma de distinguir "sin responder" de
+            # "ya respondido hace rato" solo con `Mensaje.role`.
+            ultimo_no_cliente = (
+                select(
+                    Mensaje.conversation_id.label("conversation_id"),
+                    func.max(Mensaje.timestamp).label("ts"),
+                )
+                .where(Mensaje.conversation_id.in_(ids_conversacion), Mensaje.role != "user")
+                .group_by(Mensaje.conversation_id)
+                .subquery()
+            )
+            pendientes_query = (
+                select(Mensaje.conversation_id, func.count().label("pendientes"))
+                .outerjoin(ultimo_no_cliente, ultimo_no_cliente.c.conversation_id == Mensaje.conversation_id)
+                .where(
+                    Mensaje.conversation_id.in_(ids_conversacion),
+                    Mensaje.role == "user",
+                    sa_or(ultimo_no_cliente.c.ts.is_(None), Mensaje.timestamp > ultimo_no_cliente.c.ts),
+                )
+                .group_by(Mensaje.conversation_id)
+            )
+            for conv_id, pendientes in (await session.execute(pendientes_query)).all():
+                pendientes_por_conv[conv_id] = pendientes
+
+            # Último mensaje de cada Conversation (cualquier rol) — mismo
+            # patrón row_number() ya usado arriba para Opportunity vigente.
+            fila_msg = (
+                func.row_number()
+                .over(partition_by=Mensaje.conversation_id, order_by=Mensaje.timestamp.desc())
+                .label("fila")
+            )
+            subconsulta_msg = (
+                select(Mensaje.conversation_id, Mensaje.content, Mensaje.role)
+                .where(Mensaje.conversation_id.in_(ids_conversacion))
+                .add_columns(fila_msg)
+                .subquery()
+            )
+            ultimos_result = await session.execute(
+                select(subconsulta_msg.c.conversation_id, subconsulta_msg.c.content, subconsulta_msg.c.role)
+                .where(subconsulta_msg.c.fila == 1)
+            )
+            for conv_id, content, role in ultimos_result.all():
+                texto = (content or "").strip() or "Adjunto"
+                prefijo = "Tú: " if role != "user" else ""
+                ultimo_mensaje_por_conv[conv_id] = f"{prefijo}{texto}"[:140]
 
         filas = []
-        for conversation, contact, opportunity in result.all():
+        for conversation, contact, opportunity in filas_crudas:
             filas.append({
                 "id": conversation.id, "telefono": contact.telefono,
                 "version": conversation.version,
@@ -1564,6 +1624,8 @@ async def listar_conversaciones_activas(
                 "creado": iso_utc(conversation.creado),
                 "fecha_agendada": opportunity.fecha_agendada.isoformat() if opportunity and opportunity.fecha_agendada else None,
                 "visto_asesor": conversation.visto_asesor,
+                "mensajes_pendientes": pendientes_por_conv.get(conversation.id, 0),
+                "ultimo_mensaje": ultimo_mensaje_por_conv.get(conversation.id),
             })
         return filas, total
 
