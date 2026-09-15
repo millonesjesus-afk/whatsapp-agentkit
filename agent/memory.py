@@ -1988,6 +1988,11 @@ class Usuario(Base):
     # automática) y si está disponible para recibir leads nuevos ahora mismo.
     nivel: Mapped[str | None] = mapped_column(String(20), nullable=True)  # junior | intermedio | senior
     disponible: Mapped[bool] = mapped_column(Boolean, default=True)
+    # Gate Equipo (toggle/eliminar, 2026-09-14) — apagar/prender una cuenta:
+    # reversible, a diferencia de eliminado_en (abajo). Una cuenta inactiva
+    # no puede iniciar sesión (ver login_submit en dashboard.py) pero sigue
+    # existiendo tal cual — nunca se pierde su historial ni sus asignaciones.
+    activo: Mapped[bool] = mapped_column(Boolean, default=True)
     # Gate 5.2 — Master Data. NOT NULL a nivel de BD tras el backfill (todo
     # usuario existente hoy pertenece a Cálidda, sin ambigüedad — corrección
     # post-auditoría). El RBAC real que CONSUME este campo (ServicioIdentidad,
@@ -1995,6 +2000,13 @@ class Usuario(Base):
     # puebla, y se exige en la creación (crear_usuario, corrección H3), sin
     # tocar autorización.
     negocio_id: Mapped[str] = mapped_column(String(36), ForeignKey("negocios.id"), nullable=False, index=True)
+    # Gate Equipo (toggle/eliminar, 2026-09-14) — soft delete, mismo patrón
+    # que Contact/UnidadDeNegocio: NULL = nunca eliminada. `activo` (arriba)
+    # es distinto y reversible (apagar/prender); esto es la eliminación,
+    # nunca un DELETE real, para no romper referencias sueltas como
+    # Conversation.asesor_asignado_id (String suelto, sin FK).
+    eliminado_en: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    eliminado_por: Mapped[str | None] = mapped_column(String(50), nullable=True)
 
     __table_args__ = (
         Index("ix_usuario_negocio_username", "negocio_id", "username", unique=True),
@@ -3831,12 +3843,15 @@ async def obtener_usuario(username: str, negocio_id: str | None = None) -> dict 
             usuario = await _obtener_usuario_orm(session, negocio_id, username)
         else:
             candidatos = (await session.execute(
-                select(Usuario).where(Usuario.username == username)
+                select(Usuario).where(Usuario.username == username, Usuario.eliminado_en.is_(None))
             )).scalars().all()
             if len(candidatos) != 1:
                 return None
             usuario = candidatos[0]
-        if usuario is None:
+        # Gate Equipo — una cuenta eliminada (soft delete) nunca resuelve acá,
+        # tanto si vino del branch scoped (arriba, _obtener_usuario_orm no
+        # filtra eliminado_en) como del branch de login.
+        if usuario is None or usuario.eliminado_en is not None:
             return None
         return {
             "username": usuario.username,
@@ -3845,6 +3860,7 @@ async def obtener_usuario(username: str, negocio_id: str | None = None) -> dict 
             "rol": usuario.rol,
             "nivel": usuario.nivel,
             "disponible": usuario.disponible,
+            "activo": usuario.activo,
             "negocio_id": usuario.negocio_id,
         }
 
@@ -3883,7 +3899,7 @@ async def listar_equipo(negocio_id: str) -> list[dict]:
     async with async_session() as session:
         query = (
             select(Usuario)
-            .where(Usuario.negocio_id == negocio_id)
+            .where(Usuario.negocio_id == negocio_id, Usuario.eliminado_en.is_(None))
             .order_by(Usuario.rol, Usuario.nombre)
         )
         result = await session.execute(query)
@@ -3894,6 +3910,7 @@ async def listar_equipo(negocio_id: str) -> list[dict]:
                 "rol": u.rol,
                 "nivel": u.nivel if u.rol == "asesor" else None,
                 "disponible": u.disponible if u.rol == "asesor" else None,
+                "activo": u.activo,
             }
             for u in result.scalars().all()
         ]
@@ -3923,6 +3940,49 @@ async def actualizar_nivel_asesor(username: str, negocio_id: str, nivel: str):
         if usuario is not None:
             usuario.nivel = nivel
             await session.commit()
+
+
+async def toggle_usuario_activo(username: str, negocio_id: str) -> bool | None:
+    """Prende/apaga una cuenta del panel (Equipo) — reversible, a diferencia
+    de `eliminar_usuario` (soft delete, abajo). Una cuenta inactiva no puede
+    iniciar sesión (ver `login_submit`, dashboard.py) pero conserva todo su
+    historial/asignaciones tal cual, listo para reactivarla con el mismo
+    botón. Sin restricción de rol a propósito (decisión del usuario, Gate
+    Equipo 2026-09-14): solo `eliminar_usuario` protege al rol admin.
+
+    Retorna el nuevo estado de `activo`, o `None` si la cuenta no existe (o
+    ya fue eliminada) en este Negocio."""
+    async with async_session() as session:
+        usuario = await _obtener_usuario_orm(session, negocio_id, username)
+        if usuario is None or usuario.eliminado_en is not None:
+            return None
+        usuario.activo = not usuario.activo
+        await session.commit()
+        return usuario.activo
+
+
+async def eliminar_usuario(username: str, negocio_id: str, eliminado_por: str) -> str:
+    """Soft delete de una cuenta del panel (Equipo) — mismo patrón que
+    Contact/UnidadDeNegocio (`eliminado_en`/`eliminado_por`, nunca DELETE
+    real): preserva referencias sueltas como Conversation.asesor_asignado_id
+    (String suelto, sin FK — ver docstring de Usuario).
+
+    Decisión del usuario (Gate Equipo, 2026-09-14): el rol admin nunca se
+    puede eliminar — protege contra quedarse sin ninguna cuenta admin en el
+    Negocio. Se aplica acá (capa de datos), no solo en la ruta, para que
+    valga sin importar desde dónde se llame.
+
+    Retorna "eliminado" | "no_encontrado" | "admin_protegido"."""
+    async with async_session() as session:
+        usuario = await _obtener_usuario_orm(session, negocio_id, username)
+        if usuario is None or usuario.eliminado_en is not None:
+            return "no_encontrado"
+        if usuario.rol == "admin":
+            return "admin_protegido"
+        usuario.eliminado_en = datetime.utcnow()
+        usuario.eliminado_por = eliminado_por
+        await session.commit()
+        return "eliminado"
 
 
 async def asignar_campana_origen(telefono: str, nombre_campana: str):

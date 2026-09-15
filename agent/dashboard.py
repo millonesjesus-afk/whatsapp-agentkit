@@ -43,6 +43,7 @@ from agent.memory import (
     listar_leads, obtener_lead, actualizar_lead,
     obtener_usuario, listar_asesores, listar_equipo, crear_usuario,
     asignar_asesor_a_lead, marcar_lead_visto, limpiar_revision_prioritaria, actualizar_disponibilidad, actualizar_nivel_asesor,
+    toggle_usuario_activo, eliminar_usuario,
     listar_campanas, crear_campana, actualizar_campana, contar_opportunities_por_campana, eliminar_campana,
     obtener_campana, obtener_canal_whatsapp,
     rango_periodo_utc, contar_flujo_periodo, calcular_embudo_comercial, contar_oportunidades_por_asesor,
@@ -2079,8 +2080,14 @@ async def login_submit(request: Request, username: str = Form(...), password: st
             status_code=303,
         )
 
-    credenciales_validas = usuario is not None and bcrypt.checkpw(
-        password.encode(), usuario["password_hash"].encode()
+    # Gate Equipo (2026-09-14): una cuenta apagada (`activo=False`) no puede
+    # iniciar sesión — sin esto, "apagar" en la pantalla Equipo sería solo
+    # cosmético. Se trata igual que una credencial inválida a propósito (sin
+    # mensaje distinto "cuenta desactivada"): no revela a quien intenta
+    # loguearse si el username existe pero está apagado.
+    credenciales_validas = (
+        usuario is not None and usuario.get("activo", True)
+        and bcrypt.checkpw(password.encode(), usuario["password_hash"].encode())
     )
     if not credenciales_validas:
         bloqueo_login.registrar_fallo(clave_bloqueo, MAX_INTENTOS_LOGIN, BLOQUEO_LOGIN_SEGUNDOS)
@@ -2557,9 +2564,16 @@ async def crm_pipeline(
         orden=orden, direccion=dir, pagina=pagina, por_pagina=por_pagina,
     )
     if quiere_json:
+        # P1-A (UX-03 Fase 0/1): el frontend ya calculaba y mandaba `alcance`,
+        # pero nunca sabía cuál se aplicó DE VERDAD — para un Asesor,
+        # `_alcance_pipeline` siempre fuerza "mi_pipeline" server-side aunque
+        # el cliente pida "todos", y el selector de la Nueva Experiencia no
+        # tenía forma de reflejarlo. Se expone el valor ya resuelto, no se
+        # cambia ninguna regla de autorización.
         return JSONResponse({
             "leads": [_dto_lead_pipeline(lead) for lead in leads],
             "total": total, "pagina": pagina, "por_pagina": por_pagina,
+            "alcance_aplicado": alcance_aplicado,
         })
 
     asesores = await listar_asesores(usuario["negocio_id"]) if vision_total else []
@@ -6278,6 +6292,38 @@ async def resetear_password_equipo(
     })
 
 
+@router.post("/equipo/{username}/toggle")
+async def toggle_equipo_usuario(
+    username: str,
+    usuario: dict = Depends(servicio_identidad.requiere_rol("admin")),
+    _csrf: None = Depends(verificar_csrf),
+):
+    """Apaga/prende una cuenta del panel (Gate Equipo, 2026-09-14) — mismo
+    patrón que `resetear_password_equipo`: sin cuerpo, la confirmación ya
+    ocurrió en el cliente. Reversible: el mismo botón vuelve a activarla."""
+    nuevo_estado = await toggle_usuario_activo(username, usuario["negocio_id"])
+    if nuevo_estado is None:
+        raise HTTPException(status_code=404, detail="Cuenta no encontrada")
+    return JSONResponse({"ok": True, "activo": nuevo_estado})
+
+
+@router.post("/equipo/{username}/eliminar")
+async def eliminar_equipo_usuario(
+    username: str,
+    usuario: dict = Depends(servicio_identidad.requiere_rol("admin")),
+    _csrf: None = Depends(verificar_csrf),
+):
+    """Elimina (soft delete) una cuenta del panel — el rol admin nunca se
+    puede eliminar (decisión del usuario, Gate Equipo 2026-09-14), reforzado
+    acá con un 403 explícito además del chequeo en la capa de datos."""
+    resultado = await eliminar_usuario(username, usuario["negocio_id"], eliminado_por=usuario["username"])
+    if resultado == "no_encontrado":
+        raise HTTPException(status_code=404, detail="Cuenta no encontrada")
+    if resultado == "admin_protegido":
+        raise HTTPException(status_code=403, detail="No se puede eliminar una cuenta con rol admin.")
+    return JSONResponse({"ok": True})
+
+
 # ── Gestión de campañas ────────────────────────────────────────────────
 
 TIPOS_DETECCION = {
@@ -7169,8 +7215,19 @@ async def configuracion_json(usuario: dict = Depends(servicio_identidad.requiere
     if negocio:
         negocio_json = {**negocio, "creado": iso_utc(negocio["creado"]), "actualizado": iso_utc(negocio["actualizado"])}
 
+    # Nueva Experiencia — botón "Conectar WhatsApp" (Gate Canales, 2026-09-14):
+    # mismos 2 valores que ya vive en texto plano en el HTML del panel Legacy
+    # (`gestionar_canales_whatsapp`, más abajo) — no son secretos (Meta los
+    # trata como IDs públicos de la app/configuración, nunca como
+    # credenciales), así que exponerlos acá no cambia la superficie de riesgo
+    # real. `None` si el servidor todavía no los tiene cargados — la Nueva
+    # Experiencia oculta el botón en ese caso, igual que Legacy.
+    app_id = os.getenv("META_APP_ID", "")
+    config_id = os.getenv("META_EMBEDDED_SIGNUP_CONFIG_ID", "")
+
     return JSONResponse({
         "negocio": negocio_json,
+        "meta": {"app_id": app_id, "config_id": config_id} if app_id and config_id else None,
         "gabi": {
             "nombre": identidad["nombre"], "tono": identidad["tono"],
             "prompt_configurado": True, "prompt_longitud": len(identidad["configuracion_negocio"]),
