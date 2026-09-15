@@ -2164,6 +2164,14 @@ class Producto(Base):
     # SQLite no aplica el límite de VARCHAR y no lo había detectado antes.
     # Es contenido descriptivo, sin razón funcional para un tope artificial.
     combo: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # String, no Boolean (2026-09-15, pedido explícito: el asesor necesita
+    # ver siempre si el producto incluye la conexión de gas o no, para no
+    # guiarse solo por el precio) — mismo criterio que canal/tipo/marca:
+    # texto libre que pasa gratis por el pipeline genérico de
+    # CAMPOS_NEGOCIO_PRODUCTO (diff/auditoría/importación) sin ningún caso
+    # especial. NULL = todavía no se sabe (dato no cargado), distinto de
+    # "no incluye". Valores esperados: "Sí" / "No".
+    incluye_conexion: Mapped[str | None] = mapped_column(String(20), nullable=True)
     comentarios: Mapped[str | None] = mapped_column(Text, nullable=True)
     fee_prv: Mapped[str | None] = mapped_column(String(30), nullable=True)
     fee_clda: Mapped[str | None] = mapped_column(String(30), nullable=True)
@@ -4734,7 +4742,7 @@ PLAZOS_CUOTAS_CATALOGO = ("3", "6", "9", "12", "18", "24", "36", "48", "60")
 # "EN CREACIÓN", (c) la auditoría campo por campo de una edición manual.
 CAMPOS_NEGOCIO_PRODUCTO = (
     "canal", "proveedor", "marca", "tipo", "sub_tipo", "codigo_hana",
-    "descripcion", "combo", "comentarios", "fee_prv", "fee_clda", "precio",
+    "descripcion", "combo", "incluye_conexion", "comentarios", "fee_prv", "fee_clda", "precio",
 )
 
 # Campos que un admin puede editar desde el panel — los de negocio más las
@@ -4784,6 +4792,7 @@ def _producto_a_dict(p: Producto) -> dict:
         "CODIGO HANA": p.codigo_hana or "",
         "DESCRIPCIÓN": p.descripcion or "",
         "COMBO": p.combo or "",
+        "INCLUYE CONEXIÓN": p.incluye_conexion or "",
         "COMENTARIOS": p.comentarios or "",
         "FEE PRV": p.fee_prv or "",
         "FEE CLDA": p.fee_clda or "",
@@ -4850,6 +4859,7 @@ def _producto_a_dict_panel(p: Producto) -> dict:
         "codigo_hana": p.codigo_hana,
         "descripcion": p.descripcion,
         "combo": p.combo,
+        "incluye_conexion": p.incluye_conexion,
         "comentarios": p.comentarios,
         "fee_prv": p.fee_prv,
         "fee_clda": p.fee_clda,
@@ -4903,6 +4913,7 @@ def _fila_csv_a_datos(fila: dict) -> dict:
         "codigo_hana": _normalizar_texto_producto(fila.get("CODIGO HANA")),
         "descripcion": _normalizar_texto_producto(fila.get("DESCRIPCIÓN")),
         "combo": _normalizar_texto_producto(fila.get("COMBO")),
+        "incluye_conexion": _normalizar_texto_producto(fila.get("INCLUYE CONEXIÓN")),
         "comentarios": _normalizar_texto_producto(fila.get("COMENTARIOS")),
         "fee_prv": _normalizar_texto_producto(fila.get("FEE PRV")),
         "fee_clda": _normalizar_texto_producto(fila.get("FEE CLDA")),

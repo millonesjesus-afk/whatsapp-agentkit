@@ -38,7 +38,7 @@ def test_crear_producto_no_acepta_negocio_id_en_campos_de_negocio():
     assert "negocio_id" not in mem.CAMPOS_NEGOCIO_PRODUCTO
     assert set(mem.CAMPOS_NEGOCIO_PRODUCTO) == {
         "canal", "proveedor", "marca", "tipo", "sub_tipo", "codigo_hana",
-        "descripcion", "combo", "comentarios", "fee_prv", "fee_clda", "precio",
+        "descripcion", "combo", "incluye_conexion", "comentarios", "fee_prv", "fee_clda", "precio",
     }
 
 
