@@ -7535,6 +7535,21 @@ async def gestionar_canales_whatsapp(request: Request, usuario: dict = Depends(s
         '<div class="alert alert-success py-2 px-3 mb-3"><i class="bi bi-check-circle-fill"></i> '
         'Canal actualizado.</div>'
     ) if request.query_params.get("editado") else ""
+    registrado_html = ""
+    if request.query_params.get("registrado"):
+        r_register = request.query_params.get("register")
+        r_webhook = request.query_params.get("webhook")
+        detalle_register = (
+            "número ya estaba registrado (no hizo falta)" if r_register == "fallo" else "número registrado"
+        )
+        detalle_webhook = {
+            "ok": "webhooks suscritos", "fallo": "⚠️ no se pudo suscribir los webhooks — revisa los logs",
+            "sin_waba_id": "⚠️ sin WhatsApp Business Account ID, no se pudo suscribir los webhooks",
+        }.get(r_webhook, "")
+        registrado_html = (
+            f'<div class="alert alert-info py-2 px-3 mb-3"><i class="bi bi-info-circle-fill"></i> '
+            f'Registro completado — {detalle_register}, {detalle_webhook}.</div>'
+        )
 
     # Edición de un canal existente — solo nombre/credenciales (Alcance A,
     # aprobado 2026-08-14): phone_number_id queda fuera a propósito, porque es
@@ -7592,6 +7607,7 @@ async def gestionar_canales_whatsapp(request: Request, usuario: dict = Depends(s
     </p>
     {conectado_ok}
     {editado_ok}
+    {registrado_html}
 
     <div class="card leads-card shadow-sm mb-4">
         <div class="barra-acento"></div>
@@ -8009,21 +8025,31 @@ async def registrar_canal_whatsapp_ruta(
     api_version = "v21.0"
     headers = {"Authorization": f"Bearer {access_token}"}
 
+    # `/register` NO aborta si falla (2026-09-16, corrección tras el primer
+    # uso real): un número que Meta ya dejó "Conectado" por su cuenta
+    # (ej. una vez que termina la revisión del nombre) rechaza un segundo
+    # `/register` con "(#100) Invalid parameter" — no es un error real, es
+    # que ya no hace falta. Mismo criterio que ya usa el bloque de
+    # Coexistencia más abajo para `/smb_app_data`: mejor seguir hacia la
+    # suscripción de webhooks (la pieza que de verdad falta comprobar) que
+    # cortar acá por un registro que probablemente ya estaba hecho.
+    resultado_register = "ok"
     r = await post_con_reintentos(
         f"https://graph.facebook.com/{api_version}/{canal['phone_number_id']}/register",
         headers=headers, json={"messaging_product": "whatsapp", "pin": pin_limpio},
     )
     if r.status_code != 200:
-        detalle = _resumen_seguro_error_meta(r)
-        logger.error(f"Registrar canal {canal_id}: fallo en /register — {detalle}")
-        raise HTTPException(status_code=400, detail=f"Meta rechazó el registro del número: {detalle}")
+        resultado_register = "fallo"
+        logger.warning(f"Registrar canal {canal_id}: /register no aplicó (probablemente ya estaba registrado) — {_resumen_seguro_error_meta(r)}")
 
+    resultado_webhook = "sin_waba_id"
     waba_id_final = (waba_id.strip() or canal.get("waba_id") or "").strip()
     if waba_id_final:
         r_webhook = await post_con_reintentos(
             f"https://graph.facebook.com/{api_version}/{waba_id_final}/subscribed_apps",
             headers=headers,
         )
+        resultado_webhook = "ok" if r_webhook.status_code == 200 else "fallo"
         if r_webhook.status_code != 200:
             logger.error(
                 f"Registrar canal {canal_id}: fallo al suscribir webhooks — {_resumen_seguro_error_meta(r_webhook)}"
@@ -8031,7 +8057,10 @@ async def registrar_canal_whatsapp_ruta(
         if waba_id_final != canal.get("waba_id"):
             await actualizar_canal_whatsapp(canal_id, waba_id=waba_id_final)
 
-    return RedirectResponse(url="/dashboard/canales-whatsapp?registrado=1", status_code=303)
+    return RedirectResponse(
+        url=f"/dashboard/canales-whatsapp?registrado=1&register={resultado_register}&webhook={resultado_webhook}",
+        status_code=303,
+    )
 
 
 @router.post("/canales-whatsapp/promover-prompt")
