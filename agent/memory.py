@@ -4800,6 +4800,38 @@ async def obtener_telefono_de_archivo(archivo_id: int) -> str | None:
         return result.scalar_one_or_none()
 
 
+async def listar_archivos_no_reutilizables_antes_de(corte: datetime) -> list[dict]:
+    """Proformas y notas de voz (`reutilizable=False`) subidas antes de
+    `corte` — para el Cron de expiración de adjuntos (2026-09-16, pedido
+    explícito del usuario tras el fix de tamaño de adjuntos: "esos catalogos
+    pesados se queden en la memoria ocupando espacio o lo podemos expirar").
+    Retención acordada: 90 días (más generosa que el límite propio de Meta
+    de 30 días para media de WhatsApp Cloud API, y en línea con referencias
+    de retención de CRMs para datos de alto volumen).
+
+    Los catálogos reutilizables (`reutilizable=True`) NUNCA entran acá — se
+    referencian desde muchos leads a la vez (reenviar el mismo catálogo no
+    sube un archivo nuevo, ver `enviar_catalogo_chat` en dashboard.py), así
+    que expirarlos rompería el historial de CUALQUIER lead al que se le
+    haya mandado, no solo uno. Su borrado sigue siendo una acción manual
+    explícita (`eliminar_archivo_reutilizable`), que además — a propósito —
+    tampoco toca el disco, por la misma razón.
+
+    Solo devuelve metadatos (para que el script que llama esto haga el
+    `os.remove` real) — esta función nunca toca el disco, mismo criterio de
+    capas que el resto de memory.py."""
+    async with async_session() as session:
+        query = select(ArchivoAdjunto).where(
+            ArchivoAdjunto.reutilizable.is_(False),
+            ArchivoAdjunto.creado < corte,
+        )
+        result = await session.execute(query)
+        return [
+            {"id": a.id, "ruta_disco": a.ruta_disco, "nombre_original": a.nombre_original, "creado": a.creado}
+            for a in result.scalars().all()
+        ]
+
+
 # ── Catálogo de productos / lista de precios (Catálogo editable — sub-bloque a) ──
 #
 # CODIGO HANA no es único (filas "EN CREACIÓN" repetidas) — nunca usar como
