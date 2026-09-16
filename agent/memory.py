@@ -3670,17 +3670,75 @@ async def liberar_asignacion(telefono: str, autor: str | None = None, motivo: st
 
         await session.commit()
 
-    descripcion = (
-        "El caso anterior ya estaba cerrado — se liberó la asignación y Gabi retomó la atención"
-        if motivo == "caso_cerrado" else
-        "Devolvió el control de la conversación a Gabi"
-    )
+    descripcion = {
+        "caso_cerrado": "El caso anterior ya estaba cerrado — se liberó la asignación y Gabi retomó la atención",
+        "timeout_inactividad": "El asesor asignado no respondió a tiempo — se liberó la asignación automáticamente y Gabi retomó la atención",
+    }.get(motivo, "Devolvió el control de la conversación a Gabi")
     await registrar_evento_lead(
         telefono, tipo="desasignado_automatico" if autor is None else "desasignado",
         descripcion=descripcion,
         autor=autor,
         payload={"campo": "asesor_asignado", "anterior": anterior, "nuevo": None, "motivo": motivo},
     )
+
+
+async def liberar_asignaciones_inactivas(horas: int = 24) -> list[str]:
+    """Libera en silencio la asignación de todo lead cuyo asesor no
+    respondió en las últimas `horas` — Gabi retoma la atención (2026-09-16,
+    pedido explícito: "no atendió la IA... aplicar un timeout donde se
+    finalice la sesión").
+
+    SIN avisar al cliente a propósito (Opción 1, decisión explícita del
+    usuario): mandarle un mensaje justo cuando se cumple el timeout caería
+    FUERA de la ventana de servicio al cliente de 24h de WhatsApp (que se
+    mide desde el último mensaje DEL CLIENTE) — fuera de esa ventana, Meta
+    solo permite una Plantilla de mensaje aprobada, no texto libre, y
+    todavía no hay ninguna aprobada para este caso (ver pendiente ya
+    anotado del proyecto). Silencio es la única opción viable hoy: cuando
+    el cliente vuelva a escribir, ESE mensaje abre una ventana nueva
+    gratis y Gabi lo atiende como lead nuevo en el flujo regular — sin
+    fricción, sin costo, sin depender de una aprobación de Meta.
+
+    Un lead califica si: tiene `asesor_asignado`, su `resultado` no está
+    en uno de los ya cerrados (mismo criterio que el gate de
+    agent/main.py que calla a Gabi mientras hay un asesor asignado — ver
+    ahí el porqué de la excepción de "vendido") y su mensaje MÁS RECIENTE
+    (de cualquier origen) es del CLIENTE (role="user") y ya pasó el
+    umbral — si el mensaje más reciente es del asesor (o de Gabi, aunque
+    debería estar pausada), significa que sí hubo respuesta después del
+    último mensaje del cliente, así que no aplica.
+
+    Pensado para correr como un Cron Schedule de Railway (mismo patrón que
+    scripts/backup_postgres.py), no dentro del proceso web. Retorna la
+    lista de teléfonos liberados, para que el script que llama esto pueda
+    loguearlo."""
+    corte = datetime.utcnow() - timedelta(hours=horas)
+    liberados: list[str] = []
+    async with async_session() as session:
+        query = select(Lead).where(
+            Lead.asesor_asignado.is_not(None),
+            sa_or(Lead.resultado.is_(None), Lead.resultado.notin_(RESULTADOS_CERRADOS)),
+        )
+        result = await session.execute(query)
+        candidatos = result.scalars().all()
+
+        for lead in candidatos:
+            ultimo = await session.execute(
+                select(Mensaje)
+                .where(Mensaje.telefono == lead.telefono)
+                .order_by(Mensaje.timestamp.desc(), Mensaje.id.desc())
+                .limit(1)
+            )
+            ultimo_mensaje = ultimo.scalar_one_or_none()
+            if ultimo_mensaje is None:
+                continue
+            if ultimo_mensaje.role == "user" and ultimo_mensaje.timestamp < corte:
+                liberados.append(lead.telefono)
+
+    for telefono in liberados:
+        await liberar_asignacion(telefono, motivo="timeout_inactividad")
+
+    return liberados
 
 
 async def liberar_asignacion_via_conversation(conversation_id: str, negocio_id: str, autor: str, motivo: str = "reactivado_manual") -> str | None:
