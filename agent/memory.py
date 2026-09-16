@@ -2503,6 +2503,11 @@ async def actualizar_canal_whatsapp(canal_id: int, **campos):
             canal.nombre = campos["nombre"]
         if "phone_number_id" in campos and campos["phone_number_id"]:
             canal.phone_number_id = campos["phone_number_id"]
+        if campos.get("waba_id"):
+            # Un canal creado a mano con "Nuevo canal" nace sin esto (ver
+            # docstring de CanalWhatsApp) — se completa recién acá, cuando se
+            # registra el número en Meta desde el panel (2026-09-16).
+            canal.waba_id = campos["waba_id"]
         if campos.get("access_token"):
             canal.access_token_cifrado = _cifrar(campos["access_token"])
             # Solo se toca cuando de verdad llega un access_token nuevo — no

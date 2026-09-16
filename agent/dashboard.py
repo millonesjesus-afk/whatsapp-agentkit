@@ -7658,6 +7658,39 @@ async def gestionar_canales_whatsapp(request: Request, usuario: dict = Depends(s
         </div>
     </div>
 
+    {_titulo_seccion('bi-broadcast', 'Completar registro en Meta')}
+    <p class="text-muted small mb-2">
+        Un canal creado con "Nuevo canal" arriba queda guardado en el panel, pero Meta todavía no
+        lo activó para la Cloud API — falta esta llamada aparte (el alta por "Conectar WhatsApp"
+        ya la hace sola). Sin esto el canal se ve "Activo" acá pero no envía ni recibe mensajes de
+        verdad. Usa este formulario una sola vez por canal manual.
+    </p>
+    <div class="card leads-card shadow-sm">
+        <div class="barra-acento"></div>
+        <div class="card-body">
+            <form method="post" action="/dashboard/canales-whatsapp/registrar" class="row g-2">
+                {_csrf_campo(request)}
+                <div class="col-md-4">
+                    <label class="form-label small text-muted mb-0">Canal</label>
+                    <select name="canal_id" class="form-select form-select-sm" required>
+                        {''.join(f'<option value="{c["id"]}">{html.escape(c["nombre"])} ({html.escape(c["phone_number_id"])})</option>' for c in canales)}
+                    </select>
+                </div>
+                <div class="col-md-4">
+                    <label class="form-label small text-muted mb-0">PIN de verificación en dos pasos (6 dígitos)</label>
+                    <input type="text" name="pin" class="form-control form-control-sm" required maxlength="6" placeholder="El que ya tenga, o uno nuevo">
+                </div>
+                <div class="col-md-4">
+                    <label class="form-label small text-muted mb-0">WhatsApp Business Account ID</label>
+                    <input type="text" name="waba_id" class="form-control form-control-sm" placeholder="Ej: 1453263996623875">
+                </div>
+                <div class="col-12">
+                    <button type="submit" class="btn btn-sm btn-primary">Registrar y suscribir webhooks</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
     {_titulo_seccion('bi-chat-square-text-fill', 'Prompt de Gabi')}
     <p class="text-muted small mb-2">
         El prompt recién desplegado corre de inmediato en los canales marcados "Pruebas". Los
@@ -7942,6 +7975,63 @@ async def toggle_modo_canal_whatsapp(canal_id: int, usuario: dict = Depends(serv
     nuevo_modo = "pruebas" if actual.get("modo", "produccion") == "produccion" else "produccion"
     await actualizar_canal_whatsapp(canal_id, modo=nuevo_modo)
     return RedirectResponse(url="/dashboard/canales-whatsapp", status_code=303)
+
+
+@router.post("/canales-whatsapp/registrar")
+async def registrar_canal_whatsapp_ruta(
+    canal_id: int = Form(...),
+    pin: str = Form(...),
+    waba_id: str = Form(""),
+    usuario: dict = Depends(servicio_identidad.requiere_rol("admin")),
+    _csrf: None = Depends(verificar_csrf),
+):
+    """Completa en Meta lo que el alta manual ("Nuevo canal" arriba) no hace
+    sola: `POST /{phone_number_id}/register` (activa el número para la Cloud
+    API — sin esto Meta lo deja "registrado pero mudo": mensajes entrantes
+    se quedan en un solo check, nada llega a nuestro /webhook) y
+    `POST /{waba_id}/subscribed_apps` (suscribe la app a los webhooks de esa
+    WABA — mismo motivo, ver el comentario idéntico en el callback de
+    Embedded Signup más abajo). El alta por "Conectar WhatsApp" (Embedded
+    Signup) hace las dos llamadas sola porque pasa por el popup de Meta; el
+    formulario manual, al no pasar por ahí, se queda sin ellas.
+
+    Hallazgo real (2026-09-16): un canal de Cálidda Hogar creado a mano
+    quedaba "Activo" en el panel pero no enviaba ni recibía mensajes de
+    verdad — este paso faltante era la causa."""
+    canal = await _verificar_ownership_canal(usuario, canal_id)
+    access_token = canal.get("access_token")
+    if not access_token:
+        raise HTTPException(status_code=400, detail="Este canal no tiene un Access Token guardado.")
+    pin_limpio = pin.strip()
+    if not (pin_limpio.isdigit() and len(pin_limpio) == 6):
+        raise HTTPException(status_code=422, detail="El PIN debe tener 6 dígitos.")
+
+    api_version = "v21.0"
+    headers = {"Authorization": f"Bearer {access_token}"}
+
+    r = await post_con_reintentos(
+        f"https://graph.facebook.com/{api_version}/{canal['phone_number_id']}/register",
+        headers=headers, json={"messaging_product": "whatsapp", "pin": pin_limpio},
+    )
+    if r.status_code != 200:
+        detalle = _resumen_seguro_error_meta(r)
+        logger.error(f"Registrar canal {canal_id}: fallo en /register — {detalle}")
+        raise HTTPException(status_code=400, detail=f"Meta rechazó el registro del número: {detalle}")
+
+    waba_id_final = (waba_id.strip() or canal.get("waba_id") or "").strip()
+    if waba_id_final:
+        r_webhook = await post_con_reintentos(
+            f"https://graph.facebook.com/{api_version}/{waba_id_final}/subscribed_apps",
+            headers=headers,
+        )
+        if r_webhook.status_code != 200:
+            logger.error(
+                f"Registrar canal {canal_id}: fallo al suscribir webhooks — {_resumen_seguro_error_meta(r_webhook)}"
+            )
+        if waba_id_final != canal.get("waba_id"):
+            await actualizar_canal_whatsapp(canal_id, waba_id=waba_id_final)
+
+    return RedirectResponse(url="/dashboard/canales-whatsapp?registrado=1", status_code=303)
 
 
 @router.post("/canales-whatsapp/promover-prompt")
