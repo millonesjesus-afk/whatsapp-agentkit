@@ -127,7 +127,24 @@ router = APIRouter(prefix="/dashboard")
 # normal alcanza. Ver ArchivoAdjunto en agent/memory.py para los metadatos.
 ARCHIVOS_DIR = os.getenv("ARCHIVOS_DIR", "data/archivos")
 EXTENSIONES_ARCHIVO_PERMITIDAS = {".pdf", ".jpg", ".jpeg", ".png"}
-TAMANO_MAXIMO_ARCHIVO_MB = 20  # margen conservador bajo los límites de Meta (100MB doc / 5MB imagen)
+TAMANO_MAXIMO_ARCHIVO_MB = 20  # audio / adjunto reutilizable / import CSV — sin cambios, no es el gap reportado
+# 2026-09-16, hallazgo del usuario: un PDF real (catálogo/proforma) de más
+# de 20MB no se podía adjuntar en el chat, aunque Meta acepta documentos
+# hasta 100MB — un solo tope de 20MB para todo (arriba) era innecesariamente
+# conservador para PDFs. Se separa por tipo: documentos con margen bajo el
+# límite real de Meta, imágenes en su límite real (5MB, no negociable — ahí
+# si Meta rechaza más arriba). Solo aplica a `enviar_archivo_chat`.
+TAMANO_MAXIMO_DOCUMENTO_MB = 75
+TAMANO_MAXIMO_IMAGEN_MB = 5
+
+
+def _tamano_maximo_para_extension(extension: str) -> int:
+    """Tope de tamaño en MB para un adjunto de chat, según su extensión —
+    documentos con margen bajo el límite real de Meta (100MB), imágenes en
+    su límite real (5MB). Función separada (no inline en `enviar_archivo_
+    chat`) para poder probar la selección del tope sin tener que armar un
+    UploadFile/lead/canal real."""
+    return TAMANO_MAXIMO_DOCUMENTO_MB if extension == ".pdf" else TAMANO_MAXIMO_IMAGEN_MB
 
 NIVELES_ASESOR = ["junior", "intermedio", "senior"]
 ETAPAS_FUNNEL = ["explorando", "comparando_producto", "evaluando_financiamiento", "derivado_asesor"]
@@ -5261,9 +5278,13 @@ async def enviar_archivo_chat(
     if extension not in EXTENSIONES_ARCHIVO_PERMITIDAS:
         raise HTTPException(status_code=400, detail="Solo se aceptan PDF, JPG o PNG")
 
+    # Tope por tipo (ver constantes arriba) — el frontend ya valida esto
+    # ANTES de subir (`composer-conversacion.tsx`, `validarTamano`), esta es
+    # la defensa de fondo si alguien llama la API directo.
+    tamano_maximo_mb = _tamano_maximo_para_extension(extension)
     contenido = await archivo.read()
-    if len(contenido) > TAMANO_MAXIMO_ARCHIVO_MB * 1024 * 1024:
-        raise HTTPException(status_code=400, detail=f"El archivo supera los {TAMANO_MAXIMO_ARCHIVO_MB}MB permitidos")
+    if len(contenido) > tamano_maximo_mb * 1024 * 1024:
+        raise HTTPException(status_code=400, detail=f"El archivo supera los {tamano_maximo_mb}MB permitidos")
 
     content_type = archivo.content_type or "application/octet-stream"
     canal = await obtener_proveedor().resolver_canal(lead.get("numero_whatsapp_id"))
