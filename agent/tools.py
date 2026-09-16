@@ -180,11 +180,22 @@ async def obtener_familia_producto(codigo_material: str, negocio_id: str | None)
 
 
 def formatear_producto(producto: dict) -> str:
-    """Da formato legible a un producto del catálogo."""
+    """Da formato legible a un producto del catálogo.
+
+    Combo/Incluye conexión (2026-09-16, pedido explícito: "cuando a Gabi le
+    preguntan por un producto no identifica si viene en combo o con
+    conexión y no sabe explicar la diferencia en precio") — antes esta
+    función no los incluía en absoluto, aunque el dato ya existe en el
+    catálogo (ver Producto.combo/incluye_conexion en agent/memory.py): Gabi
+    literalmente no tenía cómo saberlo, porque nunca llegaba a este texto.
+    Es justo la explicación más común de por qué dos filas del mismo modelo
+    tienen precios distintos — sin esto Gabi no podía dar esa razón."""
     marca = producto.get("MARCA", "")
     descripcion = producto.get("DESCRIPCIÓN", "")
     precio = producto.get("PRECIO", "")
     canal = producto.get("CANAL", "")
+    combo = producto.get("COMBO", "")
+    incluye_conexion = producto.get("INCLUYE CONEXIÓN", "")
 
     cuotas = [
         f"{plazo} meses: S/ {producto[plazo]}"
@@ -193,6 +204,10 @@ def formatear_producto(producto: dict) -> str:
     ]
 
     lineas = [f"{marca} — {descripcion}", f"Precio: S/ {precio}", f"Canal: {canal}"]
+    if combo:
+        lineas.append(f"Combo: incluye {combo}")
+    if incluye_conexion:
+        lineas.append(f"Incluye conexión de gas: {incluye_conexion}")
     if cuotas:
         lineas.append("Cuotas: " + " | ".join(cuotas))
     return "\n".join(lineas)
