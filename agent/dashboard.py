@@ -6078,6 +6078,17 @@ async def _pagina_gestionar_asesores(usuario: dict, request: Request | None = No
 
 @router.get("/asesores", response_class=HTMLResponse)
 async def gestionar_asesores(request: Request, usuario: dict = Depends(servicio_identidad.requiere_rol(*ROLES_CON_VISION_TOTAL))):
+    """Devuelve HTML (panel legacy) o JSON (selector de reasignación de la
+    Nueva Experiencia) según el Accept — mismo criterio que `/pipeline`
+    (`_pide_json_explicitamente`). Antes de esto, `app/api/asesores/
+    route.ts` en maiek-frontend no tenía ninguna ruta JSON real que llamar
+    y DERIVABA la lista de los `asesor_asignado` ya presentes en el
+    pipeline — un asesor recién creado o sin cartera nunca aparecía en el
+    selector, aunque estuviera disponible/habilitado (hallazgo del usuario,
+    2026-09-16). `listar_asesores()` ya traía username/nombre/nivel/
+    disponible filtrado por negocio_id — solo faltaba exponerlo acá."""
+    if _pide_json_explicitamente(request):
+        return JSONResponse({"asesores": await listar_asesores(usuario["negocio_id"])})
     cuerpo = await _pagina_gestionar_asesores(usuario, request=request)
     return _pagina("Gestionar asesores", usuario, cuerpo, request=request)
 

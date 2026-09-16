@@ -4003,11 +4003,20 @@ async def listar_asesores(negocio_id: str) -> list[dict]:
 
     `negocio_id` (Gate 5.4, T2) obligatorio — esta consulta nunca filtraba
     por negocio_id, exponiendo asesores de cualquier Negocio al selector de
-    asignación de otro."""
+    asignación de otro.
+
+    `eliminado_en.is_(None)` (2026-09-16, hallazgo del usuario: un asesor ya
+    eliminado seguía saliendo en el selector de reasignación) — esta
+    consulta nunca excluía las cuentas con soft delete (`eliminar_usuario`),
+    a diferencia de `listar_equipo`/`obtener_usuario`/`autenticar`, que sí
+    lo hacen."""
     async with async_session() as session:
         query = (
             select(Usuario)
-            .where(Usuario.rol == "asesor", Usuario.negocio_id == negocio_id)
+            .where(
+                Usuario.rol == "asesor", Usuario.negocio_id == negocio_id,
+                Usuario.eliminado_en.is_(None),
+            )
             .order_by(Usuario.nombre)
         )
         result = await session.execute(query)
