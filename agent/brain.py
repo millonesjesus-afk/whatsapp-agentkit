@@ -565,9 +565,24 @@ async def generar_respuesta(
         mensajes = mensajes_historial + [{"role": "user", "content": mensaje_para_claude}]
         return await _generar_respuesta_protocolo_confianza(system_prompt, mensajes)
 
-    # modo == "produccion": comportamiento sin cambios respecto a antes de
-    # esta sub-etapa — texto libre, sin tools, sin delimitación estructural
-    # ni prompt caching, hasta que se decida promover el protocolo nuevo.
+    # modo == "produccion": texto libre, sin tools, sin delimitación
+    # estructural — comportamiento sin cambios respecto a antes de esta
+    # sub-etapa, hasta que se decida promover el protocolo nuevo.
+    #
+    # Prompt caching (2026-09-17, hallazgo del usuario tras revisar su
+    # consumo real de la API: "por qué se consumió tan rápido") — este
+    # `system_prompt` (la identidad de Gabi + configuración del negocio,
+    # ver obtener_system_prompt) es IDÉNTICO en cada mensaje de cada
+    # conversación de este Negocio; sin cache_control se reenviaba entero a
+    # precio completo en cada turno. `cache_control` acá cachea SOLO ese
+    # bloque (system se renderiza antes que `messages` — ver Anthropic,
+    # "Render order: tools -> system -> messages"); el contexto dinámico
+    # (catálogo/hora/historial, armado en `mensaje_para_claude` más abajo)
+    # sigue sin cachearse, porque cambia en cada turno — cachearlo no
+    # ahorraría nada y solo pagaría la prima de escritura sin ninguna
+    # lectura. Mismo patrón que ya usa `_generar_respuesta_protocolo_
+    # confianza` (modo "pruebas") — acá solo se extiende al modo
+    # "produccion", que es el que corre el canal real.
     mensaje_para_claude = mensaje
     if bloques_contexto:
         mensaje_para_claude = "\n\n".join(bloques_contexto) + f"\n\nMensaje del cliente: {mensaje}"
@@ -577,12 +592,19 @@ async def generar_respuesta(
         response = await client.messages.create(
             model=MODELO_PRINCIPAL,
             max_tokens=1024,
-            system=system_prompt,
+            system=[{"type": "text", "text": system_prompt, "cache_control": {"type": "ephemeral"}}],
             messages=mensajes
         )
 
         respuesta = response.content[0].text
-        logger.info(f"Respuesta generada ({response.usage.input_tokens} in / {response.usage.output_tokens} out)")
+        # cache_read/cache_creation en el log (no solo in/out) — es la única
+        # forma de confirmar que el caching de arriba realmente está
+        # pegando en producción, no solo que el código no rompió nada.
+        logger.info(
+            f"Respuesta generada ({response.usage.input_tokens} in / {response.usage.output_tokens} out"
+            f" / {getattr(response.usage, 'cache_read_input_tokens', None)} cache_read"
+            f" / {getattr(response.usage, 'cache_creation_input_tokens', None)} cache_write)"
+        )
         return respuesta, False, None, None
 
     except Exception as e:
