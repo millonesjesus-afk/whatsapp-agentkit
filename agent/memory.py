@@ -4009,13 +4009,23 @@ async def listar_asesores(negocio_id: str) -> list[dict]:
     eliminado seguía saliendo en el selector de reasignación) — esta
     consulta nunca excluía las cuentas con soft delete (`eliminar_usuario`),
     a diferencia de `listar_equipo`/`obtener_usuario`/`autenticar`, que sí
-    lo hacen."""
+    lo hacen.
+
+    `activo.is_(True)` (2026-09-17, hallazgo del usuario: "gabi asigna a un
+    asesor a pesar que este inactivo, solo debe asignar a los activos") —
+    `toggle_usuario_activo` (Equipo) solo apaga `activo`, nunca toca
+    `disponible`; una cuenta desactivada que quedó con `disponible=True` no
+    puede volver a loguearse para corregirlo ella misma (`activo=False`
+    bloquea el login), así que sin este filtro quedaba elegible para
+    `elegir_asesor_automatico` (asignación de Gabi) y para el selector de
+    reasignación manual PARA SIEMPRE. Distinto de `listar_equipo`, que sí
+    debe seguir mostrando cuentas inactivas (para poder reactivarlas)."""
     async with async_session() as session:
         query = (
             select(Usuario)
             .where(
                 Usuario.rol == "asesor", Usuario.negocio_id == negocio_id,
-                Usuario.eliminado_en.is_(None),
+                Usuario.eliminado_en.is_(None), Usuario.activo.is_(True),
             )
             .order_by(Usuario.nombre)
         )

@@ -2637,6 +2637,13 @@ async def bandeja_conversaciones(
         negocio_id=usuario["negocio_id"], asesor_asignado=asesor_filtro, busqueda=q.strip(),
         orden=orden, direccion=dir, pagina=pagina, por_pagina=por_pagina,
     )
+    # Misma señal de actividad real para el idle timeout de conexiones WS
+    # (Gate 4.1) que ya usan `mensajes_json`/`obtener_mensajes_conversation`
+    # — la conexión de LISTA de `ConversacionesVista` (sin `ver_lead`,
+    # `conversation_id_activo=None`) nunca pasa por esos endpoints, así que
+    # sin este golpe el barrido de inactividad la cerraría cada ~2 min
+    # aunque el navegador siga ahí (ver `tocar_actividad`).
+    gestor_conexiones.tocar_actividad(usuario["username"], None)
     return JSONResponse({"conversaciones": conversaciones, "total": total, "pagina": pagina, "por_pagina": por_pagina})
 
 

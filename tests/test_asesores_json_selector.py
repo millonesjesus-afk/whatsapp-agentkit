@@ -138,3 +138,30 @@ async def test_asesor_eliminado_ya_no_sale_en_el_selector():
     usernames = {a["username"] for a in datos["asesores"]}
     assert "ase_disp_g-json-4" not in usernames
     assert "ase_nodisp_g-json-4" in usernames
+
+
+async def test_asesor_desactivado_ya_no_sale_en_el_selector():
+    """Tercer hallazgo (2026-09-17): "gabi asigna a un asesor a pesar que
+    este inactivo, solo debe asignar a los activos". `toggle_usuario_activo`
+    (Equipo) solo apaga `activo` — nunca toca `disponible` — y una cuenta
+    con `activo=False` no puede volver a loguearse para corregirlo ella
+    misma, así que sin filtrar por `activo` en `listar_asesores` quedaba
+    elegible para siempre, tanto en el selector manual como (más grave) en
+    `elegir_asesor_automatico` (asignación de Gabi) — ver
+    test_asignacion_automatica.py para ese caso específico."""
+    negocio = await _negocio_con_asesores("g-json-5")
+    nuevo_estado = await mem.toggle_usuario_activo(f"ase_disp_g-json-5", negocio["id"])
+    assert nuevo_estado is False
+
+    dependencia = _dependencia_usuario(dashboard.gestionar_asesores)
+    usuario = await dependencia(usuario={
+        "username": "admin_g-json-5", "rol": "admin", "negocio_id": negocio["id"],
+    })
+    respuesta = await dashboard.gestionar_asesores(
+        request=_request_con_accept("application/json"), usuario=usuario,
+    )
+    import json as _json
+    datos = _json.loads(respuesta.body.decode())
+    usernames = {a["username"] for a in datos["asesores"]}
+    assert "ase_disp_g-json-5" not in usernames
+    assert "ase_nodisp_g-json-5" in usernames

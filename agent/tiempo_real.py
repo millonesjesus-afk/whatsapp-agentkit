@@ -162,12 +162,24 @@ class GestorConexiones:
                 pass
             self.desconectar(otro)
 
-    def tocar_actividad(self, username: str, conversation_id: str) -> None:
+    def tocar_actividad(self, username: str, conversation_id: str | None) -> None:
         """Marca a (usuario, conversation_id) como recién visto — llamado
         desde el endpoint de mensajes del panel, que el polling incondicional
         golpea cada 20s SIEMPRE que esa conversación está abierta en pantalla
         (`usePollingIncondicional` en maiek-frontend), sin importar el
         estado del WS/SSE.
+
+        `conversation_id=None` (2026-09-17): además de una conversación
+        puntual, ahora también existen conexiones de LISTA — sin `ver_lead`,
+        `conversation_id_activo` se queda en `None` para siempre (ver
+        `ConversacionesVista` en maiek-frontend, que abre una de estas para
+        mantener la Bandeja al día sin depender de que además haya un
+        `PanelChat` montado). Sin este caso, esas conexiones nunca recibían
+        ningún golpe de actividad y el barrido de inactividad (Gate 4.1,
+        `cerrar_inactivas`) las cerraría cada ~2 min aunque el navegador
+        siguiera ahí de verdad — `None == None` las toca igual que cualquier
+        conversación puntual toca a las suyas, mismo mecanismo, sin caso
+        especial en la comparación de abajo.
 
         Por qué ESTA señal y no el tráfico del propio WS (p. ej. "ver_lead"):
         investigado en vivo (Gate 4.1, hardening de idle timeout) que el
