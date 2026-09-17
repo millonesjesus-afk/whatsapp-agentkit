@@ -2670,6 +2670,21 @@ async def guardar_mensaje(
             respondido_a_id=respondido_a_id,
         )
         session.add(mensaje)
+        if conversation is not None:
+            # 2026-09-17, hallazgo del usuario: en la Bandeja de Conversaciones
+            # (orden = actualizado DESC, paginada) un chat con mensajes nuevos
+            # no se reordenaba al tope — ni mostraba la bolita de pendientes —
+            # hasta abrir esa conversación. `guardar_mensaje` nunca tocaba
+            # `Conversation.actualizado` (solo lo hacen resolver_conversation_
+            # activa al crear/cerrar, o acciones explícitas como asignar/
+            # reactivar); un chat activo que solo recibe mensajes nuevos podía
+            # quedar con un `actualizado` cada vez más viejo, cayendo fuera de
+            # la página 1 en cuanto hubiera suficientes conversaciones más
+            # "recientes" (de verdad) por delante — ahí la fila ni se reordena
+            # ni el badge de pendientes es visible, porque la fila entera deja
+            # de traerse. Cada mensaje (cliente, Gabi o asesor) ahora cuenta
+            # como actividad real de la conversación.
+            conversation.actualizado = datetime.utcnow()
         await session.commit()
         await session.refresh(mensaje)
         return {
