@@ -560,6 +560,36 @@ async def generar_respuesta(
         for m in historial
     ]
 
+    # Prompt caching del historial (2026-09-17, prioridad #1 del usuario tras
+    # revisar su consumo real de la API) — hasta acá solo se cacheaba el
+    # system prompt (~40% de los tokens de entrada); el otro ~60% es
+    # contexto dinámico + HISTORIAL, y el historial se reenviaba entero a
+    # precio completo en cada turno, aunque en una conversación larga la
+    # mayor parte de él es idéntica de una llamada a la siguiente.
+    #
+    # Por qué no se rompe con el turno "actual" (armado más abajo,
+    # decorado con catálogo/hora — SIEMPRE distinto): guardar_mensaje()
+    # nunca persiste esa decoración, solo el texto crudo del cliente — así
+    # que un turno decorado en la llamada N aparece sin decorar en la
+    # llamada N+1 (ya como "historial"). Poner el breakpoint accá, al FINAL
+    # del historial YA GUARDADO (nunca en el turno actual, que se arma
+    # después), evita ese problema: desde la llamada N+2 en adelante ese
+    # turno se renderiza siempre igual (texto crudo), así que esta posición
+    # sí queda estable y cacheable — el "reset" de caché por la decoración
+    # ocurre una sola vez por turno, no en cada llamada.
+    #
+    # Igual que el system prompt: el mínimo cacheable de Sonnet 4.6 es 1024
+    # tokens — en conversaciones cortas esto simplemente no llega a cachear
+    # (sin error, sin costo extra), no hace daño dejarlo puesto siempre.
+    if mensajes_historial:
+        ultimo_historial = mensajes_historial[-1]
+        mensajes_historial[-1] = {
+            "role": ultimo_historial["role"],
+            "content": [
+                {"type": "text", "text": ultimo_historial["content"], "cache_control": {"type": "ephemeral"}}
+            ],
+        }
+
     if modo == "pruebas":
         mensaje_para_claude = _delimitar_contexto_y_mensaje(bloques_contexto, mensaje)
         mensajes = mensajes_historial + [{"role": "user", "content": mensaje_para_claude}]

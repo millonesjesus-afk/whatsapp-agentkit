@@ -342,7 +342,14 @@ async def obtener_contexto_relevante(
     cerrado (sin contexto/catálogo) en vez de adivinar."""
     secciones = []
 
-    productos = await buscar_productos(mensaje, negocio_id, excluir_codigos=excluir_codigos)
+    # limite=5 (2026-09-17, pedido explícito del usuario, revisando su
+    # consumo de la API): el default de buscar_productos (8) es más de lo
+    # que Gabi necesita para orientar a un cliente — 5 opciones ya cubren
+    # el caso real sin inflar el contexto dinámico (no cacheable) que se le
+    # manda en cada turno. Los otros llamadores de buscar_productos (el
+    # buscador del panel, dashboard.py) siguen en 8 — ese límite es propio
+    # de este contexto, no un cambio al default de la función.
+    productos = await buscar_productos(mensaje, negocio_id, limite=5, excluir_codigos=excluir_codigos)
     if productos:
         productos_texto = "\n\n".join(
             f"{i}. {formatear_producto(p)}" for i, p in enumerate(productos, 1)

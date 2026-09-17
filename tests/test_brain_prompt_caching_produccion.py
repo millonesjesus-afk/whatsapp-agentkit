@@ -53,3 +53,52 @@ async def test_modo_produccion_el_texto_del_system_no_cambia():
 
     system_enviado = mock_create.await_args.kwargs["system"]
     assert system_enviado[0]["text"] == esperado
+
+
+async def test_historial_vacio_no_rompe_nada():
+    """Sin historial previo (primer mensaje de una conversación nueva), no
+    debe haber ningún IndexError al intentar marcar "el último mensaje del
+    historial" — simplemente no hay nada que cachear todavía."""
+    with patch.object(brain.client.messages, "create", new=AsyncMock(return_value=_respuesta_falsa())) as mock_create:
+        await brain.generar_respuesta("Hola", historial=[], modo="produccion", negocio_id=None)
+
+    mensajes = mock_create.await_args.kwargs["messages"]
+    assert len(mensajes) == 1  # solo el turno actual, sin historial
+
+
+async def test_solo_el_ultimo_mensaje_del_historial_lleva_cache_control():
+    """2026-09-17, prioridad #1 del usuario (reducir el consumo de la API
+    más allá del system prompt): el historial de la conversación (idéntico
+    de una llamada a la siguiente, salvo el turno que se acaba de agregar)
+    ahora también se cachea — pero SOLO se marca el último bloque del
+    historial YA GUARDADO, nunca el turno actual (que va decorado con
+    catálogo/hora y es distinto en cada llamada por diseño)."""
+    historial = [
+        {"role": "user", "content": "Hola, buenas"},
+        {"role": "assistant", "content": "¡Hola! ¿En qué te ayudo?"},
+        {"role": "user", "content": "Busco una terma"},
+        {"role": "asesor", "content": "Claro, te ayudo con eso"},
+    ]
+    with patch.object(brain.client.messages, "create", new=AsyncMock(return_value=_respuesta_falsa())) as mock_create:
+        await brain.generar_respuesta("¿Cuánto cuesta?", historial=historial, modo="produccion", negocio_id=None)
+
+    mensajes = mock_create.await_args.kwargs["messages"]
+    assert len(mensajes) == 5  # 4 de historial + 1 turno actual
+
+    # Los primeros 3 mensajes del historial quedan tal cual (content plano,
+    # sin cache_control) — solo el ÚLTIMO se marca.
+    for i in range(3):
+        assert isinstance(mensajes[i]["content"], str)
+
+    ultimo_historial = mensajes[3]
+    assert ultimo_historial["role"] == "assistant"  # "asesor" se mapea a "assistant"
+    assert isinstance(ultimo_historial["content"], list)
+    assert ultimo_historial["content"][0]["text"] == "Claro, te ayudo con eso"
+    assert ultimo_historial["content"][0]["cache_control"] == {"type": "ephemeral"}
+
+    # El turno ACTUAL (el que se acaba de recibir) nunca lleva cache_control
+    # — es contenido nuevo en cada llamada, cachearlo no ahorraría nada.
+    turno_actual = mensajes[4]
+    assert turno_actual["role"] == "user"
+    assert isinstance(turno_actual["content"], str)
+    assert "¿Cuánto cuesta?" in turno_actual["content"]
