@@ -476,6 +476,21 @@ async def webhook_handler(request: Request):
                 if campana:
                     lead = await obtener_lead(msg.telefono, negocio_id=canal.get("negocio_id") if canal else None)
 
+            # Cierre automático por inactividad del CLIENTE (2026-09-17,
+            # pedido explícito del usuario) — scripts/procesar_inactividad_
+            # clientes.py marca resultado="sin_respuesta" en un lead SIN
+            # asesor asignado y SIN pausar, así que a diferencia del bloque
+            # de abajo (que solo libera cuando SÍ hay asesor/pausa) Gabi
+            # nunca dejó de responderle a este cliente — si vuelve a
+            # escribir, ese "sin_respuesta" queda desactualizado apenas
+            # este mensaje entra. Se limpia acá, antes de cualquier otro
+            # flujo, para que el pipeline/bandeja no siga mostrando
+            # "Sin respuesta" sobre una conversación que ya está activa de
+            # nuevo.
+            if lead and lead.get("resultado") == "sin_respuesta":
+                await actualizar_lead(msg.telefono, campos_explicitos=("resultado",), resultado=None)
+                lead = await obtener_lead(msg.telefono, negocio_id=canal.get("negocio_id") if canal else None)
+
             # Si ya hay un asesor humano asignado (o alguien le respondió
             # directo desde la app en coexistencia, sin asignación formal),
             # Gabi se pausa: solo se guarda el mensaje para que un humano lo

@@ -94,7 +94,7 @@ async_session = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit
 # para no duplicar la lista ni arriesgar que se desincronicen.
 RESULTADOS_CERRADOS = (
     "vendido", "no_interesado", "no_califica", "no_es_cliente_calidda", "otro", "consulta_atc",
-    "servicio_postventa", "cartera_fnb",
+    "servicio_postventa", "cartera_fnb", "sin_respuesta",
 )
 
 # Roles con visión total del panel (ven/editan cualquier lead, no solo los
@@ -3754,6 +3754,87 @@ async def liberar_asignaciones_inactivas(horas: int = 24) -> list[str]:
         await liberar_asignacion(telefono, motivo="timeout_inactividad")
 
     return liberados
+
+
+async def listar_leads_inactividad_cliente(
+    horas_reenganche: float = 2.0, horas_cierre: float = 15.0,
+) -> tuple[list[dict], list[dict]]:
+    """Candidatos a reenganche/cierre por CLIENTE inactivo — Gabi sigue
+    activa, sin asesor asignado ni pausada, esperando que el cliente
+    responda (2026-09-17, pedido explícito del usuario, investigado el
+    estándar real de seguimiento de leads por WhatsApp: horas, no minutos
+    — un timeout tipo "chat en vivo" de 5-10 min cerraría leads que solo
+    están ocupados, no perdidos).
+
+    Distinto de `liberar_asignaciones_inactivas` (asesor inactivo, siempre
+    silencioso): acá SÍ hay un paso con mensaje — a `horas_reenganche` sin
+    respuesta se manda UN mensaje de reenganche (el script que llama esto
+    es quien lo envía y lo guarda, nunca esta función — memory.py no hace
+    I/O externo); a `horas_cierre` sin respuesta (medidas desde el MISMO
+    último mensaje del cliente, no desde el reenganche) se cierra en
+    silencio con resultado="sin_respuesta", igual de silencioso que el
+    caso del asesor — la puerta queda abierta: Gabi nunca se pausó para
+    estos leads, así que si el cliente escribe en cualquier momento
+    después (aunque sea días), Gabi le responde normal — ver el bloque en
+    main.py que limpia "sin_respuesta" apenas eso pasa.
+
+    Retorna (candidatos_reenganche, candidatos_cierre) — cada fila
+    {telefono, negocio_id, numero_whatsapp_id}, lo mínimo que el script
+    necesita para resolver el Canal y enviar/actualizar. Un lead nunca
+    aparece en las dos listas a la vez (cierre tiene prioridad si por
+    algún motivo ya cruzó ambos umbrales)."""
+    ahora = datetime.utcnow()
+    corte_reenganche = ahora - timedelta(hours=horas_reenganche)
+    corte_cierre = ahora - timedelta(hours=horas_cierre)
+
+    candidatos_reenganche: list[dict] = []
+    candidatos_cierre: list[dict] = []
+
+    async with async_session() as session:
+        query = select(Lead).where(
+            Lead.asesor_asignado.is_(None),
+            Lead.pausado_manual.is_(False),
+            sa_or(Lead.resultado.is_(None), Lead.resultado.notin_(RESULTADOS_CERRADOS)),
+        )
+        candidatos = (await session.execute(query)).scalars().all()
+
+        for lead in candidatos:
+            recientes = (await session.execute(
+                select(Mensaje)
+                .where(Mensaje.telefono == lead.telefono)
+                .order_by(Mensaje.timestamp.desc(), Mensaje.id.desc())
+                .limit(10)
+            )).scalars().all()
+            if not recientes or recientes[0].role != "assistant":
+                # El último mensaje no es de Gabi (es del cliente, o no hay
+                # ninguno) — no hay nada pendiente de nuestro lado, no aplica.
+                continue
+
+            ultimo_cliente = next((m for m in recientes if m.role == "user"), None)
+            if ultimo_cliente is None:
+                continue
+
+            # ¿Ya se mandó el reenganche para ESTE silencio? Gabi solo
+            # responde una vez por mensaje del cliente en el flujo normal —
+            # si hay 2+ mensajes "assistant" seguidos DESPUÉS del último
+            # mensaje del cliente, el segundo (o más) solo pudo haber sido
+            # el reenganche automático (nunca una respuesta real, porque
+            # esa siempre depende de un mensaje nuevo del cliente).
+            asistentes_tras_cliente = sum(
+                1 for m in recientes if m.timestamp > ultimo_cliente.timestamp and m.role == "assistant"
+            )
+            ya_reenganchado = asistentes_tras_cliente >= 2
+
+            fila = {
+                "telefono": lead.telefono, "negocio_id": lead.negocio_id,
+                "numero_whatsapp_id": lead.numero_whatsapp_id,
+            }
+            if ultimo_cliente.timestamp < corte_cierre:
+                candidatos_cierre.append(fila)
+            elif not ya_reenganchado and ultimo_cliente.timestamp < corte_reenganche:
+                candidatos_reenganche.append(fila)
+
+    return candidatos_reenganche, candidatos_cierre
 
 
 async def liberar_asignacion_via_conversation(conversation_id: str, negocio_id: str, autor: str, motivo: str = "reactivado_manual") -> str | None:

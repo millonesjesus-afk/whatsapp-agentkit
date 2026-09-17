@@ -158,7 +158,7 @@ ETIQUETAS_FUNNEL = {
 RESULTADOS = [
     "agendado", "vendido", "no_interesado", "no_califica", "no_es_cliente_calidda",
     "producto_sin_stock", "otro", "consulta_atc", "sin_saldo",
-    "servicio_postventa", "cartera_fnb",
+    "servicio_postventa", "cartera_fnb", "sin_respuesta",
 ]
 # Los que NO están en RESULTADOS_CERRADOS (importado de memory.py) se
 # consideran "en seguimiento" — casos activos, con algo pendiente por
@@ -176,6 +176,7 @@ ETIQUETAS_RESULTADO = {
     "sin_saldo": "Sin saldo",
     "servicio_postventa": "Servicio Postventa",
     "cartera_fnb": "Cartera FNB",
+    "sin_respuesta": "Sin respuesta",
 }
 # ROLES_CON_VISION_TOTAL vive en agent/memory.py (importado arriba) — no acá:
 # agent/tiempo_real.py (el WebSocket) necesita el mismo valor para filtrar a
@@ -195,6 +196,7 @@ COLOR_RESULTADO = {
     "sin_saldo": "#d97706",
     "servicio_postventa": "#0d9488",
     "cartera_fnb": "#4f46e5",
+    "sin_respuesta": "#94a3b8",
 }
 
 # Estados de conversación para las pestañas de filtro del panel — dos grupos:
