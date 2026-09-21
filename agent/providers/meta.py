@@ -218,6 +218,11 @@ class ProveedorMeta(ProveedorWhatsApp):
                         texto = ""
                     else:
                         texto = ""
+                    if not msg.get("from"):
+                        logger.warning(
+                            f"Mensaje entrante sin teléfono (from): id={msg.get('id')} tipo={tipo} "
+                            f"campos={sorted(msg.keys())}"
+                        )
                     mensajes.append(MensajeEntrante(
                         telefono=msg.get("from", ""),
                         texto=texto,
@@ -238,6 +243,11 @@ class ProveedorMeta(ProveedorWhatsApp):
                 for echo in value.get("message_echoes", []):
                     tipo_echo = echo.get("type", "unknown")
                     texto_echo = echo.get("text", {}).get("body", "") if tipo_echo == "text" else ""
+                    if not echo.get("to"):
+                        logger.warning(
+                            f"Eco sin teléfono (to): id={echo.get('id')} tipo={tipo_echo} "
+                            f"campos={sorted(echo.keys())}"
+                        )
                     mensajes.append(MensajeEntrante(
                         telefono=echo.get("to", ""),
                         texto=texto_echo,

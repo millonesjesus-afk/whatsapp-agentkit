@@ -3291,6 +3291,10 @@ async def _mirror_campos_lead_a_conversation_opportunity(session, lead: "Lead", 
     contact = await _obtener_contact(session, lead.negocio_id, lead.telefono)
     if contact is None:
         return
+    # La Bandeja (lista, cabecera del chat y buscador) lee el nombre de
+    # Contact.nombre; Gabi y el panel lo escriben en Lead.nombre.
+    if "nombre" in campos:
+        contact.nombre = campos["nombre"] or None
     conversation = await _obtener_conversation_activa(session, contact.id)
     if conversation is None:
         return

@@ -59,7 +59,11 @@ async def main() -> None:
     proveedor = obtener_proveedor()
     reenganchados: list[str] = []
     fallidos: list[str] = []
+    invalidos: list[str] = []
     for fila in candidatos_reenganche:
+        if not fila["telefono"].isdigit():
+            invalidos.append(repr(fila["telefono"]))
+            continue
         canal = await proveedor.resolver_canal(fila["numero_whatsapp_id"], negocio_id=fila["negocio_id"])
         enviado, wamid = await proveedor.enviar_mensaje(fila["telefono"], MENSAJE_REENGANCHE, canal=canal)
         if not enviado:
@@ -80,6 +84,10 @@ async def main() -> None:
         f"({len(fallidos)} fallo(s) de envío), {len(candidatos_cierre)} cerrado(s) por sin respuesta "
         f"tras {HORAS_CIERRE}h."
     )
+    if fallidos:
+        print(f"  Envíos fallidos a: {', '.join(fallidos)}")
+    if invalidos:
+        print(f"  Omitidos por teléfono inválido: {', '.join(invalidos)}")
 
 
 if __name__ == "__main__":
