@@ -435,7 +435,7 @@ async def webhook_handler(request: Request):
                 enviado, wamid = await proveedor.enviar_mensaje(msg.telefono, respuesta, canal=canal)
                 mensaje_guardado = await servicio_conversacion.guardar_mensaje(
                     msg.telefono, "assistant", respuesta, negocio_id=canal.get("negocio_id") if canal else None,
-                    mensaje_id_meta=wamid,
+                    mensaje_id_meta=wamid, estado_envio=None if enviado else "fallido",
                 )
                 await gestor_conexiones.emitir_mensaje_nuevo(mensaje_guardado["conversation_id"])
                 continue
@@ -452,7 +452,7 @@ async def webhook_handler(request: Request):
                 enviado, wamid = await proveedor.enviar_mensaje(msg.telefono, respuesta, canal=canal)
                 mensaje_guardado = await servicio_conversacion.guardar_mensaje(
                     msg.telefono, "assistant", respuesta, negocio_id=canal.get("negocio_id") if canal else None,
-                    mensaje_id_meta=wamid,
+                    mensaje_id_meta=wamid, estado_envio=None if enviado else "fallido",
                 )
                 await gestor_conexiones.emitir_mensaje_nuevo(mensaje_guardado["conversation_id"])
                 continue
@@ -587,7 +587,7 @@ async def webhook_handler(request: Request):
             enviado, wamid = await proveedor.enviar_mensaje(msg.telefono, respuesta, canal=canal)
             mensaje_guardado = await servicio_conversacion.guardar_mensaje(
                 msg.telefono, "assistant", respuesta, negocio_id=canal.get("negocio_id") if canal else None,
-                mensaje_id_meta=wamid,
+                mensaje_id_meta=wamid, estado_envio=None if enviado else "fallido",
             )
             await gestor_conexiones.emitir_mensaje_nuevo(mensaje_guardado["conversation_id"])
             logger.info(f"Respuesta a {msg.telefono}: {respuesta}")
