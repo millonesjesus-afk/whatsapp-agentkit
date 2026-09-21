@@ -45,7 +45,7 @@ from agent.memory import (
     asignar_asesor_a_lead, marcar_lead_visto, limpiar_revision_prioritaria, actualizar_disponibilidad, actualizar_nivel_asesor,
     toggle_usuario_activo, eliminar_usuario,
     listar_campanas, crear_campana, actualizar_campana, contar_opportunities_por_campana, eliminar_campana,
-    obtener_campana, obtener_canal_whatsapp,
+    obtener_campana, obtener_canal_whatsapp, listar_anuncios_detectados, asignar_anuncio_a_campana,
     rango_periodo_utc, contar_flujo_periodo, calcular_embudo_comercial, contar_oportunidades_por_asesor,
     distribucion_resultados_periodo, resumen_ventas_periodo, productos_vendidos_periodo,
     cambiar_password, contar_conversations_activas_por_asesor, RESULTADOS_CERRADOS, listar_leads_agendados,
@@ -6501,6 +6501,59 @@ async def toggle_campana_json(
     await actualizar_campana(campana_id, activa=not actual["activa"])
     campana_actualizada = await obtener_campana(campana_id)
     return JSONResponse({"ok": True, "campana": _campana_a_json(campana_actualizada)})
+
+
+def _anuncio_a_json(a: dict) -> dict:
+    return {**a, "primero": iso_utc(a["primero"]), "ultimo": iso_utc(a["ultimo"])}
+
+
+@router.get("/anuncios.json")
+async def anuncios_json(usuario: dict = Depends(servicio_identidad.requiere_rol("admin", "supervisor"))):
+    """Anuncios de Meta que trajeron leads, con la campaña a la que pertenecen
+    hoy sus conversaciones — incluidos los que ninguna campaña reconoció.
+    Solo lectura; asignar requiere Admin (`POST /anuncios/asignar.json`)."""
+    anuncios = await listar_anuncios_detectados(usuario["negocio_id"])
+    return JSONResponse({
+        "anuncios": [_anuncio_a_json(a) for a in anuncios],
+        "puede_gestionar": usuario["rol"] == "admin",
+    })
+
+
+@router.post("/anuncios/asignar.json")
+async def asignar_anuncio_json(
+    request: Request,
+    usuario: dict = Depends(servicio_identidad.requiere_rol("admin")),
+    _csrf: None = Depends(verificar_csrf),
+):
+    """Asigna todos los leads de un anuncio a una campaña existente
+    (`campana_id`) o a una NUEVA que se crea para ese anuncio
+    (`nueva_campana: {nombre}`, detectada por el ID del anuncio, así los leads
+    futuros del mismo anuncio caen en ella solos)."""
+    body = await request.json()
+    source_id = (body.get("source_id") or "").strip()
+    campana_id = body.get("campana_id")
+    nombre_nueva = ((body.get("nueva_campana") or {}).get("nombre") or "").strip()
+    if not source_id:
+        raise HTTPException(status_code=400, detail="Falta el anuncio.")
+    if (campana_id is None) == (not nombre_nueva):
+        raise HTTPException(status_code=400, detail="Elige una campaña existente o escribe el nombre de una nueva, no ambas.")
+
+    negocio_id = usuario["negocio_id"]
+    if not any(a["source_id"] == source_id for a in await listar_anuncios_detectados(negocio_id)):
+        raise HTTPException(status_code=404, detail="Ese anuncio no tiene leads registrados.")
+
+    if nombre_nueva:
+        if any(c["nombre"].strip().lower() == nombre_nueva.lower() for c in await listar_campanas(negocio_id)):
+            raise HTTPException(status_code=400, detail="Ya existe una campaña con ese nombre.")
+        campana = await crear_campana(
+            nombre=nombre_nueva, tipo_deteccion="referral_meta", patron=source_id.lower(), negocio_id=negocio_id,
+        )
+        campana_id = campana["id"]
+    try:
+        resumen = await asignar_anuncio_a_campana(negocio_id, source_id, int(campana_id), autor=usuario.get("username"))
+    except LookupError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    return JSONResponse({"ok": True, "campana_id": campana_id, "asignados": resumen})
 
 
 @router.get("/campanas", response_class=HTMLResponse)

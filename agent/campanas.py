@@ -174,14 +174,20 @@ async def detectar_y_asignar_campana(
         fuente_meta = _normalizar(
             f"{referral.get('source_id', '')} {referral.get('headline', '')} {referral.get('body', '')}"
         )
-        for campana in campanas:
-            if campana["tipo_deteccion"] == "referral_meta" and _normalizar(campana["patron"]) in fuente_meta:
-                await asignar_campana_origen(telefono, campana["nombre"])
-                logger.info(f"Campaña detectada (Meta Ads) para {telefono}: {campana['nombre']}")
-                # Attribution V2 — Fase 1: evidencia adicional, no reemplaza
-                # la asignación de campana_origen de la línea de arriba.
-                await registrar_attribution_event(telefono, "meta_ads", referral=referral, campana_nombre=campana["nombre"])
-                return campana
+        # Si coinciden varias (p. ej. "terma" y el ID exacto de un anuncio),
+        # gana la de patrón más largo: la más específica.
+        coincidencias = [
+            c for c in campanas
+            if c["tipo_deteccion"] == "referral_meta" and _normalizar(c["patron"]) and _normalizar(c["patron"]) in fuente_meta
+        ]
+        if coincidencias:
+            campana = max(coincidencias, key=lambda c: len(_normalizar(c["patron"])))
+            await asignar_campana_origen(telefono, campana["nombre"])
+            logger.info(f"Campaña detectada (Meta Ads) para {telefono}: {campana['nombre']}")
+            # Attribution V2 — Fase 1: evidencia adicional, no reemplaza
+            # la asignación de campana_origen de la línea de arriba.
+            await registrar_attribution_event(telefono, "meta_ads", referral=referral, campana_nombre=campana["nombre"])
+            return campana
         # Hubo referral de Meta Ads pero ninguna campaña configurada lo
         # resolvió — regla crítica de Attribution V2: NUNCA se descarta como
         # orgánico, queda registrada como evidencia sin resolver. Un solo

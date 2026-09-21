@@ -742,6 +742,110 @@ async def listar_attribution_events(telefono: str, negocio_id: str | None = None
         ]
 
 
+_TIPOS_ORIGEN_ANUNCIO = ("meta_ads", "meta_ads_no_resuelto")
+
+
+async def listar_anuncios_detectados(negocio_id: str) -> list[dict]:
+    """Anuncios de Meta (Click-to-WhatsApp) que trajeron leads, agrupados por
+    `source_id` (el ID del anuncio), a partir de la evidencia que ya guarda
+    `registrar_attribution_event` — incluidos los que ninguna campaña
+    reconoció. Por cada anuncio, a qué campaña pertenecen HOY sus
+    conversaciones (la fuente que cuenta la Analítica), no la que quedó
+    escrita en la evidencia original (append-only). Más reciente primero."""
+    async with async_session() as session:
+        eventos = (await session.execute(
+            select(AttributionEvent)
+            .where(
+                AttributionEvent.negocio_id == negocio_id,
+                AttributionEvent.tipo_origen.in_(_TIPOS_ORIGEN_ANUNCIO),
+                AttributionEvent.source_id.is_not(None), AttributionEvent.source_id != "",
+            )
+            .order_by(AttributionEvent.creado.asc())
+        )).scalars().all()
+        if not eventos:
+            return []
+        campana_por_conversation = dict((await session.execute(
+            select(Conversation.id, Campana.nombre)
+            .outerjoin(Campana, Campana.id == Conversation.campana_origen_id)
+            .where(Conversation.id.in_({e.conversation_id for e in eventos}))
+        )).all())
+
+    anuncios: dict[str, dict] = {}
+    for e in eventos:
+        a = anuncios.setdefault(e.source_id, {
+            "source_id": e.source_id, "headline": None, "body": None, "url": None,
+            "primero": e.creado, "ultimo": e.creado, "conversaciones": set(), "leads": set(), "campanas": {},
+        })
+        a["headline"] = e.headline or a["headline"]
+        a["body"] = e.body or a["body"]
+        a["url"] = (e.referral_raw or {}).get("source_url") or a["url"]
+        a["ultimo"] = e.creado
+        a["leads"].add(e.lead_telefono)
+        if e.conversation_id not in a["conversaciones"]:
+            a["conversaciones"].add(e.conversation_id)
+            nombre = campana_por_conversation.get(e.conversation_id)
+            a["campanas"][nombre] = a["campanas"].get(nombre, 0) + 1
+
+    resultado = [
+        {
+            "source_id": a["source_id"], "headline": a["headline"], "body": (a["body"] or "")[:300] or None,
+            "url": a["url"], "primero": a["primero"], "ultimo": a["ultimo"],
+            "leads": len(a["leads"]), "conversaciones": len(a["conversaciones"]),
+            "sin_campana": a["campanas"].get(None, 0),
+            "campanas": [
+                {"campana": nombre, "conversaciones": n}
+                for nombre, n in sorted(a["campanas"].items(), key=lambda kv: -kv[1]) if nombre is not None
+            ],
+        }
+        for a in anuncios.values()
+    ]
+    return sorted(resultado, key=lambda a: a["ultimo"], reverse=True)
+
+
+async def asignar_anuncio_a_campana(negocio_id: str, source_id: str, campana_id: int, autor: str | None = None) -> dict:
+    """Decisión humana: asigna TODOS los leads de un anuncio a una campaña,
+    reemplazando la que tuvieran (incluso "sin campaña"). Escribe en los dos
+    lugares que hoy leen las pantallas: `Conversation.campana_origen_id`
+    (Analítica) y `Lead.campana_origen` (Pipeline/Ficha). La evidencia de
+    atribución original no se toca (append-only). Todo scoped por Negocio.
+
+    Levanta `LookupError` si la campaña o el anuncio no existen en el Negocio."""
+    async with async_session() as session:
+        campana = await session.get(Campana, campana_id)
+        if campana is None or campana.negocio_id != negocio_id:
+            raise LookupError("La campaña no existe.")
+        eventos = (await session.execute(
+            select(AttributionEvent).where(
+                AttributionEvent.negocio_id == negocio_id, AttributionEvent.source_id == source_id,
+                AttributionEvent.tipo_origen.in_(_TIPOS_ORIGEN_ANUNCIO),
+            )
+        )).scalars().all()
+        if not eventos:
+            raise LookupError("Ese anuncio no tiene leads registrados.")
+
+        conversaciones = (await session.execute(
+            select(Conversation).where(
+                Conversation.negocio_id == negocio_id, Conversation.id.in_({e.conversation_id for e in eventos}),
+            )
+        )).scalars().all()
+        for conversation in conversaciones:
+            conversation.campana_origen_id = campana.id
+        leads = (await session.execute(
+            select(Lead).where(Lead.negocio_id == negocio_id, Lead.telefono.in_({e.lead_telefono for e in eventos}))
+        )).scalars().all()
+        for lead in leads:
+            lead.campana_origen = campana.nombre
+            lead.actualizado = datetime.utcnow()
+        await session.commit()
+
+    resumen = {"conversaciones": len(conversaciones), "leads": len(leads)}
+    await registrar_auditoria(
+        "anuncio_asignado_a_campana", actor=autor, negocio_id=negocio_id,
+        entidad_tipo="campana", entidad_id=str(campana_id), payload={"source_id": source_id, **resumen},
+    )
+    return resumen
+
+
 async def intentar_avanzar_version(telefono: str, version_esperada: int) -> bool:
     """Concurrencia optimista (MAIEK_AI_PRODUCT_PATTERNS.md, Cap. 6 —
     conflicto de edición): avanza la versión del lead en +1 SOLO si sigue en
