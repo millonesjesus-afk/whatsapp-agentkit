@@ -7070,8 +7070,14 @@ async def analitica_json(
     hasta: str = "",
     asesor: str = "",
     campana_id: int | None = None,
+    red: str = "",
 ):
     """GATE ANALÍTICA P0 — Analítica para la Nueva Experiencia.
+
+    `red` ("facebook" | "instagram" | "otra") acota SOLO la tabla de campañas
+    a las conversaciones de esa red — se deduce del enlace del anuncio de
+    Meta, no es un dato oficial de la plataforma. El resto de los bloques no
+    cambia.
 
     Alcance por rol (Product Patterns Cap. 4 §4, aplica a TODA la
     pantalla, no solo al bloque Equipo): un Asesor NUNCA ve indicadores de
@@ -7087,6 +7093,8 @@ async def analitica_json(
     """
     vision_total = usuario["rol"] in ROLES_CON_VISION_TOTAL
     asesor_scope = asesor if (vision_total and asesor) else (None if vision_total else usuario["username"])
+    if red and red not in ("facebook", "instagram", "otra"):
+        raise HTTPException(status_code=400, detail="Red inválida.")
 
     if not desde or not hasta:
         desde, hasta = _mes_actual_lima()
@@ -7106,7 +7114,9 @@ async def analitica_json(
     distribucion = await distribucion_resultados_periodo(usuario["negocio_id"], inicio, fin, asesor=asesor_scope, campana_id=campana_id)
     valor_vendido = await resumen_ventas_periodo(usuario["negocio_id"], inicio, fin, asesor=asesor_scope, campana_id=campana_id)
     productos = await productos_vendidos_periodo(usuario["negocio_id"], inicio, fin, asesor=asesor_scope, campana_id=campana_id)
-    campanas = await contar_opportunities_por_campana(usuario["negocio_id"], desde=inicio, hasta=fin, asesor=asesor_scope)
+    campanas = await contar_opportunities_por_campana(
+        usuario["negocio_id"], desde=inicio, hasta=fin, asesor=asesor_scope, red=red or None,
+    )
 
     # "Brecha del período" / "Brecha oportunidad → venta" (Gate Analítica
     # P0, Decisión Opción C + refinamiento de terminología posterior):

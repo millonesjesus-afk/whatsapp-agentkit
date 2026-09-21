@@ -760,6 +760,21 @@ def _red_de_referral(referral: dict | None) -> str:
     return "otra"
 
 
+async def _red_por_conversation(session, negocio_id: str) -> dict[str, str]:
+    """Red de cada conversación que llegó desde un anuncio de Meta, según su
+    primer evento de atribución. Las conversaciones sin evento (SMS, wa.link,
+    orgánicas) no aparecen: quien consulta las trata como "otra"."""
+    eventos = (await session.execute(
+        select(AttributionEvent.conversation_id, AttributionEvent.referral_raw)
+        .where(AttributionEvent.negocio_id == negocio_id, AttributionEvent.tipo_origen.in_(_TIPOS_ORIGEN_ANUNCIO))
+        .order_by(AttributionEvent.creado.asc(), AttributionEvent.id.asc())
+    )).all()
+    redes: dict[str, str] = {}
+    for conversation_id, referral in eventos:
+        redes.setdefault(conversation_id, _red_de_referral(referral))
+    return redes
+
+
 async def listar_anuncios_detectados(negocio_id: str) -> list[dict]:
     """Anuncios de Meta (Click-to-WhatsApp) que trajeron leads, agrupados por
     `source_id` (el ID del anuncio), a partir de la evidencia que ya guarda
@@ -4529,10 +4544,16 @@ async def eliminar_campana(campana_id: int, negocio_id: str) -> bool:
 async def contar_opportunities_por_campana(
     negocio_id: str, unidad_id: str | None = None,
     desde: datetime | None = None, hasta: datetime | None = None,
-    asesor: str | None = None,
+    asesor: str | None = None, red: str | None = None,
 ) -> list[dict]:
     """Cuenta Conversation/Opportunity por campaña de origen, scoped por
     Negocio (y opcionalmente Unidad) — para medir conversión por campaña.
+
+    `red` ("facebook" | "instagram" | "otra") acota TODOS los conteos a las
+    conversaciones de esa red, deducida del enlace del anuncio (ver
+    `_red_de_referral`); "otra" incluye SMS/wa.link y anuncios sin enlace
+    reconocible. Cada fila trae además `redes`: cuántas de sus conversaciones
+    son de cada red, con el mismo filtrado.
 
     `desde`/`hasta` (Gate Analítica P0) — opcionales, retrocompatibles con
     los 2 llamadores existentes que no los pasan (dashboard.py:6268 y los
@@ -4584,20 +4605,35 @@ async def contar_opportunities_por_campana(
             .where(Conversation.campana_origen_id.in_(ids_campana), Opportunity.resultado == "vendido")
             .group_by(Conversation.campana_origen_id)
         )
+        redes_de_conversation = await _red_por_conversation(session, negocio_id)
+        filtros = []
         if desde is not None:
-            query_total = query_total.where(Conversation.creado >= desde)
-            query_vendidos = query_vendidos.where(Conversation.creado >= desde)
+            filtros.append(Conversation.creado >= desde)
         if hasta is not None:
-            query_total = query_total.where(Conversation.creado < hasta)
-            query_vendidos = query_vendidos.where(Conversation.creado < hasta)
+            filtros.append(Conversation.creado < hasta)
         if asesor is not None:
             # Responsable ACTUAL (Gate Analítica P0) — mismo criterio ya
             # cerrado en todo el módulo, sin reconstruir historial.
-            query_total = query_total.where(Conversation.asesor_asignado_id == asesor)
-            query_vendidos = query_vendidos.where(Conversation.asesor_asignado_id == asesor)
+            filtros.append(Conversation.asesor_asignado_id == asesor)
+        if red is not None:
+            if red == "otra":
+                filtros.append(Conversation.id.not_in([c for c, r in redes_de_conversation.items() if r != "otra"]))
+            else:
+                filtros.append(Conversation.id.in_([c for c, r in redes_de_conversation.items() if r == red]))
+        if filtros:
+            query_total = query_total.where(*filtros)
+            query_vendidos = query_vendidos.where(*filtros)
 
         totales = dict((await session.execute(query_total)).all())
         vendidos = dict((await session.execute(query_vendidos)).all())
+
+        redes_por_campana: dict[int, dict[str, int]] = {}
+        query_conversaciones = select(Conversation.id, Conversation.campana_origen_id).where(
+            Conversation.campana_origen_id.in_(ids_campana), *filtros,
+        )
+        for conversation_id, campana_id in (await session.execute(query_conversaciones)).all():
+            redes = redes_por_campana.setdefault(campana_id, {"facebook": 0, "instagram": 0, "otra": 0})
+            redes[redes_de_conversation.get(conversation_id, "otra")] += 1
 
         return [
             {
@@ -4607,6 +4643,7 @@ async def contar_opportunities_por_campana(
                 # test_gate_campanas_p0.py y test_gate56_atribucion_scoped.py).
                 "id": c.id, "campana": c.nombre, "activa": c.activa,
                 "total": totales.get(c.id, 0), "vendidos": vendidos.get(c.id, 0),
+                "redes": redes_por_campana.get(c.id, {"facebook": 0, "instagram": 0, "otra": 0}),
             }
             for c in campanas
         ]
