@@ -157,3 +157,35 @@ async def test_el_endpoint_de_lista_devuelve_fechas_y_permiso():
 
     assert supervisor["puede_gestionar"] is False and admin["puede_gestionar"] is True
     assert isinstance(admin["anuncios"][0]["ultimo"], str) and admin["anuncios"][0]["source_id"] == "AD1"
+
+
+async def _lead_con_url(negocio, canal, telefono: str, source_id: str, source_url):
+    await mem.actualizar_lead(telefono, negocio_id=negocio["id"], numero_whatsapp_id="x")
+    await mem.resolver_conversation_activa(telefono, negocio["id"], canal["id"])
+    referral = {"source_id": source_id, "headline": "H", "body": "B"}
+    if source_url is not None:
+        referral["source_url"] = source_url
+    await mem.registrar_attribution_event(telefono, "meta_ads_no_resuelto", referral=referral)
+
+
+async def test_la_lista_cuenta_los_leads_por_red_social():
+    negocio, canal = await _negocio("g-anu-09")
+    await _lead_con_url(negocio, canal, "51901100071", "MIX", "https://fb.me/abc123")
+    await _lead_con_url(negocio, canal, "51901100072", "MIX", "https://www.instagram.com/p/xyz/")
+    await _lead_con_url(negocio, canal, "51901100073", "MIX", "https://l.instagram.com/?u=1")
+    await _lead_con_url(negocio, canal, "51901100074", "MIX", "https://www.facebook.com/ads/x")
+    await _lead_con_url(negocio, canal, "51901100075", "MIX", None)
+    await _lead_con_url(negocio, canal, "51901100076", "MIX", "https://otro-sitio.com/a")
+    await _lead_con_url(negocio, canal, "51901100077", "SOLO-IG", "https://www.instagram.com/p/solo/")
+
+    anuncios = {a["source_id"]: a for a in await mem.listar_anuncios_detectados(negocio["id"])}
+
+    assert anuncios["MIX"]["redes"] == {"facebook": 2, "instagram": 2, "otra": 2}
+    assert anuncios["SOLO-IG"]["redes"] == {"facebook": 0, "instagram": 1, "otra": 0}
+
+
+def test_dominios_parecidos_no_se_confunden_con_instagram_o_facebook():
+    assert mem._red_de_referral({"source_url": "https://notinstagram.com/p/1"}) == "otra"
+    assert mem._red_de_referral({"source_url": "https://instagram.com.evil.io/p/1"}) == "otra"
+    assert mem._red_de_referral({"source_url": "no es una url"}) == "otra"
+    assert mem._red_de_referral(None) == "otra"

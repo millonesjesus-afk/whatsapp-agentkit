@@ -10,6 +10,7 @@ import os
 import csv
 import uuid
 import logging
+from urllib.parse import urlparse
 from datetime import datetime, timedelta
 from cryptography.fernet import Fernet
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
@@ -745,6 +746,20 @@ async def listar_attribution_events(telefono: str, negocio_id: str | None = None
 _TIPOS_ORIGEN_ANUNCIO = ("meta_ads", "meta_ads_no_resuelto")
 
 
+def _red_de_referral(referral: dict | None) -> str:
+    """Red social de un clic en anuncio: "facebook", "instagram" u "otra" (sin
+    enlace o de otro dominio). Meta no manda un campo de plataforma; se
+    deduce del dominio de `source_url`, así que es una señal, no un dato
+    oficial — un anuncio con ubicaciones automáticas podría mostrar siempre
+    el mismo enlace."""
+    host = (urlparse((referral or {}).get("source_url") or "").hostname or "").lower()
+    if host == "instagram.com" or host.endswith(".instagram.com"):
+        return "instagram"
+    if host in ("fb.me", "fb.com", "facebook.com") or host.endswith((".facebook.com", ".fb.com")):
+        return "facebook"
+    return "otra"
+
+
 async def listar_anuncios_detectados(negocio_id: str) -> list[dict]:
     """Anuncios de Meta (Click-to-WhatsApp) que trajeron leads, agrupados por
     `source_id` (el ID del anuncio), a partir de la evidencia que ya guarda
@@ -775,6 +790,7 @@ async def listar_anuncios_detectados(negocio_id: str) -> list[dict]:
         a = anuncios.setdefault(e.source_id, {
             "source_id": e.source_id, "headline": None, "body": None, "url": None,
             "primero": e.creado, "ultimo": e.creado, "conversaciones": set(), "leads": set(), "campanas": {},
+            "redes": {"facebook": 0, "instagram": 0, "otra": 0},
         })
         a["headline"] = e.headline or a["headline"]
         a["body"] = e.body or a["body"]
@@ -785,13 +801,14 @@ async def listar_anuncios_detectados(negocio_id: str) -> list[dict]:
             a["conversaciones"].add(e.conversation_id)
             nombre = campana_por_conversation.get(e.conversation_id)
             a["campanas"][nombre] = a["campanas"].get(nombre, 0) + 1
+            a["redes"][_red_de_referral(e.referral_raw)] += 1
 
     resultado = [
         {
             "source_id": a["source_id"], "headline": a["headline"], "body": (a["body"] or "")[:300] or None,
             "url": a["url"], "primero": a["primero"], "ultimo": a["ultimo"],
             "leads": len(a["leads"]), "conversaciones": len(a["conversaciones"]),
-            "sin_campana": a["campanas"].get(None, 0),
+            "sin_campana": a["campanas"].get(None, 0), "redes": a["redes"],
             "campanas": [
                 {"campana": nombre, "conversaciones": n}
                 for nombre, n in sorted(a["campanas"].items(), key=lambda kv: -kv[1]) if nombre is not None
