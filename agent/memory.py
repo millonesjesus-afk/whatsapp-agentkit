@@ -4245,7 +4245,15 @@ async def asignar_campana_origen(telefono: str, nombre_campana: str):
         if not lead.campana_origen:
             lead.campana_origen = nombre_campana
             lead.actualizado = datetime.utcnow()
-            await session.commit()
+        # La Analítica cuenta por Conversation.campana_origen_id, no por el
+        # nombre en Lead: sin este reflejo toda campaña nueva sale en 0.
+        contact = await _obtener_contact(session, lead.negocio_id, telefono)
+        conversation = await _obtener_conversation_activa(session, contact.id) if contact else None
+        if conversation is not None and conversation.campana_origen_id is None and lead.campana_origen:
+            conversation.campana_origen_id = (await session.execute(
+                select(Campana.id).where(Campana.negocio_id == lead.negocio_id, Campana.nombre == lead.campana_origen)
+            )).scalars().first()
+        await session.commit()
 
 
 def _campana_a_dict(c: Campana) -> dict:
