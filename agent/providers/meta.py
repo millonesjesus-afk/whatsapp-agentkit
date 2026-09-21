@@ -221,7 +221,8 @@ class ProveedorMeta(ProveedorWhatsApp):
                     if not msg.get("from"):
                         logger.warning(
                             f"Mensaje entrante sin teléfono (from): id={msg.get('id')} tipo={tipo} "
-                            f"campos={sorted(msg.keys())}"
+                            f"campos={sorted(msg.keys())} "
+                            f"campos_contacto={[sorted(c.keys()) for c in value.get('contacts', [])]}"
                         )
                     mensajes.append(MensajeEntrante(
                         telefono=msg.get("from", ""),
@@ -246,7 +247,8 @@ class ProveedorMeta(ProveedorWhatsApp):
                     if not echo.get("to"):
                         logger.warning(
                             f"Eco sin teléfono (to): id={echo.get('id')} tipo={tipo_echo} "
-                            f"campos={sorted(echo.keys())}"
+                            f"campos={sorted(echo.keys())} "
+                            f"campos_contacto={[sorted(c.keys()) for c in value.get('contacts', [])]}"
                         )
                     mensajes.append(MensajeEntrante(
                         telefono=echo.get("to", ""),
