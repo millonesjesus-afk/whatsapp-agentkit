@@ -352,10 +352,10 @@ CAMPANAS_INICIALES = [
     {
         "nombre": "SMS Clientes próximos a habilitar gas",
         "tipo_deteccion": "texto_saludo",
-        "patron": "tu gas natural ya está por llegar",
+        "patron": "pronto habilitarán mi servicio de gas natural",
         "texto_saludo": (
-            "¡Tu gas natural ya está por llegar! Equipa tu hogar con termas, cocinas, "
-            "secadoras y más, financiado y sin inicial"
+            "¡Hola! 👋\nPronto habilitarán mi servicio de gas natural 🔥 y quisiera conocer las "
+            "promociones disponibles en cocinas, termas y secadoras 😊"
         ),
     },
     {
@@ -434,7 +434,7 @@ async def sembrar_campanas_iniciales(negocio_id: str | None):
 PATRONES_CORREGIDOS = {
     "SMS Secadora a gas": "secadora a gas rinnai 10kg",
     "SMS Terma a gas": "terma rheem 8l",
-    "SMS Clientes próximos a habilitar gas": "tu gas natural ya está por llegar",
+    "SMS Clientes próximos a habilitar gas": "pronto habilitarán mi servicio de gas natural",
     "SMS Clientes que ya tienen gas": "ya tienes gas natural",
 }
 
