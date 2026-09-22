@@ -935,6 +935,49 @@ async def listar_atribucion_sin_campana_periodo(
     }
 
 
+async def listar_saludos_organicos(negocio_id: str, limite: int = 200) -> list[dict]:
+    """TEMPORAL — investigación puntual (2026-09-22): saludo inicial de las
+    conversaciones que hoy caen en "Orgánicos" en Analítica (sin
+    `campana_origen_id` y sin ningún rastro de Meta Ads), para decidir si
+    conviene ampliar los patrones de campaña reconocidos ANTES de construir
+    el filtro global "Orgánico" (que tocaría 5 funciones del backend). Se
+    retira cuando se cierre esa investigación — no es una función de
+    producto. Todo el histórico, no solo el período de Analítica: el
+    objetivo es ver el máximo de ejemplos posible."""
+    async with async_session() as session:
+        query = (
+            select(Conversation.id, Conversation.creado, Contact.telefono)
+            .select_from(Conversation)
+            .join(Contact, Contact.id == Conversation.contact_id)
+            .where(Conversation.negocio_id == negocio_id, Conversation.campana_origen_id.is_(None))
+            .order_by(Conversation.creado.desc())
+            .limit(limite)
+        )
+        filas = (await session.execute(query)).all()
+        if not filas:
+            return []
+        ids_conversation = [f.id for f in filas]
+        con_anuncio = {row[0] for row in (await session.execute(
+            select(AttributionEvent.conversation_id).where(
+                AttributionEvent.conversation_id.in_(ids_conversation),
+                AttributionEvent.tipo_origen.in_(_TIPOS_ORIGEN_ANUNCIO),
+            )
+        )).all()}
+
+        resultado = []
+        for conversation_id, creado, telefono in filas:
+            if conversation_id in con_anuncio:
+                continue
+            primer_mensaje = (await session.execute(
+                select(Mensaje.content)
+                .where(Mensaje.telefono == telefono, Mensaje.role == "user", Mensaje.timestamp >= creado)
+                .order_by(Mensaje.timestamp.asc())
+                .limit(1)
+            )).scalar_one_or_none()
+            resultado.append({"telefono": telefono, "creado": creado, "primer_mensaje": primer_mensaje})
+        return resultado
+
+
 async def asignar_anuncio_a_campana(negocio_id: str, source_id: str, campana_id: int, autor: str | None = None) -> dict:
     """Decisión humana: asigna TODOS los leads de un anuncio a una campaña,
     reemplazando la que tuvieran (incluso "sin campaña"). Escribe en los dos

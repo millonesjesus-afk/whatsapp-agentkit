@@ -46,7 +46,7 @@ from agent.memory import (
     toggle_usuario_activo, eliminar_usuario,
     listar_campanas, crear_campana, actualizar_campana, contar_opportunities_por_campana, eliminar_campana,
     obtener_campana, obtener_canal_whatsapp, listar_anuncios_detectados, asignar_anuncio_a_campana,
-    listar_atribucion_sin_campana_periodo,
+    listar_atribucion_sin_campana_periodo, listar_saludos_organicos,
     rango_periodo_utc, contar_flujo_periodo, calcular_embudo_comercial, contar_oportunidades_por_asesor,
     distribucion_resultados_periodo, resumen_ventas_periodo, productos_vendidos_periodo,
     cambiar_password, contar_conversations_activas_por_asesor, RESULTADOS_CERRADOS, listar_leads_agendados,
@@ -7177,6 +7177,26 @@ async def analitica_json(
         ]
 
     return JSONResponse(respuesta)
+
+
+@router.get("/debug/organicos-saludos.json")
+async def organicos_saludos_debug(usuario: dict = Depends(servicio_identidad.requiere_rol("admin"))):
+    """TEMPORAL — investigación puntual (2026-09-22, ver
+    `listar_saludos_organicos`): admin-only, solo lectura, mismo dato que ya
+    puede ver el admin abriendo cada chat uno por uno en Bandeja. Se retira
+    cuando se cierre la investigación de si "Orgánicos" es realmente
+    orgánico o si faltan patrones de campaña."""
+    saludos = await listar_saludos_organicos(usuario["negocio_id"])
+    return JSONResponse({
+        "saludos": [
+            {
+                "telefono_parcial": "•••" + s["telefono"][-4:] if s["telefono"] else None,
+                "creado": iso_utc(s["creado"]),
+                "primer_mensaje": s["primer_mensaje"],
+            }
+            for s in saludos
+        ],
+    })
 
 
 # ── Canales de WhatsApp (admin) ─────────────────────────────────────
