@@ -834,6 +834,107 @@ async def listar_anuncios_detectados(negocio_id: str) -> list[dict]:
     return sorted(resultado, key=lambda a: a["ultimo"], reverse=True)
 
 
+async def listar_atribucion_sin_campana_periodo(
+    negocio_id: str, desde: datetime, hasta: datetime,
+    unidad_id: str | None = None, asesor: str | None = None, red: str | None = None,
+) -> dict:
+    """Complementa `contar_opportunities_por_campana` (Gate Analítica P0 —
+    tabla Campañas + Orgánicos): mismo universo y mismos filtros
+    (`Conversation.creado` en `[desde, hasta)`, `unidad_id`/`asesor`
+    opcionales), pero para las conversaciones que NO tienen
+    `campana_origen_id` — las dos funciones juntas cubren el 100% de las
+    conversaciones del período, sin solaparse.
+
+    Esas conversaciones se separan en dos grupos:
+    - `anuncios`: tienen evidencia de un anuncio de Meta (`AttributionEvent`
+      con `tipo_origen` en `_TIPOS_ORIGEN_ANUNCIO`) que ninguna campaña
+      resolvió todavía — agrupadas por `source_id`, mismo criterio que
+      `listar_anuncios_detectados`. Nunca se cuentan como orgánicas: son
+      leads de pauta pendientes de asignar, no espontáneos.
+    - `organico`: sin ningún rastro de Meta Ads (WhatsApp directo, wa.link,
+      SMS sin patrón reconocido). Siempre cae en la red "otra" — no hay
+      enlace de anuncio del que deducir Facebook/Instagram.
+
+    `red`, cuando viene informado, filtra cada grupo por SU PROPIA red (la
+    del anuncio para `anuncios`, siempre "otra" para `organico`) — mismo
+    significado que en `contar_opportunities_por_campana`."""
+    async with async_session() as session:
+        query = select(Conversation.id).where(
+            Conversation.negocio_id == negocio_id,
+            Conversation.campana_origen_id.is_(None),
+            Conversation.creado >= desde, Conversation.creado < hasta,
+        )
+        if unidad_id is not None:
+            query = query.where(Conversation.unidad_id == unidad_id)
+        if asesor is not None:
+            query = query.where(Conversation.asesor_asignado_id == asesor)
+        ids_conversation = [row[0] for row in (await session.execute(query)).all()]
+
+        vacio = {"anuncios": [], "organico": {"total": 0, "vendidos": 0, "redes": {"facebook": 0, "instagram": 0, "otra": 0}}}
+        if not ids_conversation:
+            return vacio
+
+        eventos = (await session.execute(
+            select(
+                AttributionEvent.conversation_id, AttributionEvent.source_id,
+                AttributionEvent.headline, AttributionEvent.body, AttributionEvent.referral_raw,
+            )
+            .where(
+                AttributionEvent.negocio_id == negocio_id,
+                AttributionEvent.conversation_id.in_(ids_conversation),
+                AttributionEvent.tipo_origen.in_(_TIPOS_ORIGEN_ANUNCIO),
+                AttributionEvent.source_id.is_not(None), AttributionEvent.source_id != "",
+            )
+            .order_by(AttributionEvent.creado.asc(), AttributionEvent.id.asc())
+        )).all()
+        # Primer evento de anuncio por conversación decide su anuncio y su
+        # red — mismo criterio que `_red_por_conversation`.
+        anuncio_por_conversation: dict[str, dict] = {}
+        for conversation_id, source_id, headline, body, referral_raw in eventos:
+            anuncio_por_conversation.setdefault(conversation_id, {
+                "source_id": source_id, "headline": headline, "body": body,
+                "red": _red_de_referral(referral_raw),
+            })
+
+        query_vendidos = (
+            select(Conversation.id).select_from(Conversation)
+            .join(Opportunity, Opportunity.conversation_id == Conversation.id)
+            .where(Conversation.id.in_(ids_conversation), Opportunity.resultado == "vendido")
+        )
+        ids_vendidos = {row[0] for row in (await session.execute(query_vendidos)).all()}
+
+    anuncios: dict[str, dict] = {}
+    organico = {"total": 0, "vendidos": 0, "redes": {"facebook": 0, "instagram": 0, "otra": 0}}
+    for conversation_id in ids_conversation:
+        info = anuncio_por_conversation.get(conversation_id)
+        vendido = conversation_id in ids_vendidos
+        if info is None:
+            if red is not None and red != "otra":
+                continue
+            organico["total"] += 1
+            organico["redes"]["otra"] += 1
+            if vendido:
+                organico["vendidos"] += 1
+        else:
+            if red is not None and info["red"] != red:
+                continue
+            a = anuncios.setdefault(info["source_id"], {
+                "source_id": info["source_id"], "headline": None, "body": None,
+                "total": 0, "vendidos": 0, "redes": {"facebook": 0, "instagram": 0, "otra": 0},
+            })
+            a["headline"] = a["headline"] or info["headline"]
+            a["body"] = a["body"] or info["body"]
+            a["total"] += 1
+            a["redes"][info["red"]] += 1
+            if vendido:
+                a["vendidos"] += 1
+
+    return {
+        "anuncios": sorted(anuncios.values(), key=lambda a: -a["total"]),
+        "organico": organico,
+    }
+
+
 async def asignar_anuncio_a_campana(negocio_id: str, source_id: str, campana_id: int, autor: str | None = None) -> dict:
     """Decisión humana: asigna TODOS los leads de un anuncio a una campaña,
     reemplazando la que tuvieran (incluso "sin campaña"). Escribe en los dos

@@ -46,6 +46,7 @@ from agent.memory import (
     toggle_usuario_activo, eliminar_usuario,
     listar_campanas, crear_campana, actualizar_campana, contar_opportunities_por_campana, eliminar_campana,
     obtener_campana, obtener_canal_whatsapp, listar_anuncios_detectados, asignar_anuncio_a_campana,
+    listar_atribucion_sin_campana_periodo,
     rango_periodo_utc, contar_flujo_periodo, calcular_embudo_comercial, contar_oportunidades_por_asesor,
     distribucion_resultados_periodo, resumen_ventas_periodo, productos_vendidos_periodo,
     cambiar_password, contar_conversations_activas_por_asesor, RESULTADOS_CERRADOS, listar_leads_agendados,
@@ -7117,6 +7118,14 @@ async def analitica_json(
     campanas = await contar_opportunities_por_campana(
         usuario["negocio_id"], desde=inicio, hasta=fin, asesor=asesor_scope, red=red or None,
     )
+    # Complementa `campanas`: mismo universo/filtros, para las conversaciones
+    # SIN campana_origen_id — anuncios de Meta pendientes de asignar y
+    # conversaciones genuinamente orgánicas. `campana_id` (el filtro de
+    # arriba de toda la pantalla) tampoco aplica acá, igual que en
+    # `campanas`: la tabla de Campañas siempre muestra el desglose completo.
+    atribucion_sin_campana = await listar_atribucion_sin_campana_periodo(
+        usuario["negocio_id"], desde=inicio, hasta=fin, asesor=asesor_scope, red=red or None,
+    )
 
     # "Brecha del período" / "Brecha oportunidad → venta" (Gate Analítica
     # P0, Decisión Opción C + refinamiento de terminología posterior):
@@ -7143,6 +7152,7 @@ async def analitica_json(
         "embudo": embudo,
         "fugas": fugas,
         "campanas": campanas,
+        "atribucion_sin_campana": atribucion_sin_campana,
         "productos": productos,
         "valor_vendido": valor_vendido,
         "puede_ver_equipo": vision_total,
