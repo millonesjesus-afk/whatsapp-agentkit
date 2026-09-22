@@ -314,7 +314,9 @@ class Mensaje(Base):
     __tablename__ = "mensajes"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    telefono: Mapped[str] = mapped_column(String(50), index=True)
+    # 150, no 50 — un BSUID (Business-Scoped User ID de Meta, Gate 2026-09-22)
+    # puede tener hasta 128 caracteres, más largo que un teléfono real.
+    telefono: Mapped[str] = mapped_column(String(150), index=True)
     role: Mapped[str] = mapped_column(String(20))  # "user" o "assistant"
     content: Mapped[str] = mapped_column(Text)
     timestamp: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
@@ -421,7 +423,8 @@ class Lead(Base):
     se trunque o se pierda contexto entre turnos, estos datos clave persisten."""
     __tablename__ = "leads"
 
-    telefono: Mapped[str] = mapped_column(String(50), primary_key=True)
+    # 150, no 50 — ver Mensaje.telefono (BSUID de Meta, Gate 2026-09-22).
+    telefono: Mapped[str] = mapped_column(String(150), primary_key=True)
     nombre: Mapped[str | None] = mapped_column(String(100), nullable=True)
     interes: Mapped[str | None] = mapped_column(String(200), nullable=True)
     # Desglose estructurado del interés (además del texto libre de arriba,
@@ -644,7 +647,8 @@ class AttributionEvent(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     negocio_id: Mapped[str] = mapped_column(String(36), ForeignKey("negocios.id"), nullable=False, index=True)
     conversation_id: Mapped[str] = mapped_column(String(36), ForeignKey("conversations.id"), nullable=False, index=True)
-    lead_telefono: Mapped[str] = mapped_column(String(50), ForeignKey("leads.telefono"), nullable=False, index=True)
+    # 150, no 50 — ver Mensaje.telefono (BSUID de Meta, Gate 2026-09-22).
+    lead_telefono: Mapped[str] = mapped_column(String(150), ForeignKey("leads.telefono"), nullable=False, index=True)
     # "meta_ads" | "meta_ads_no_resuelto" | "wa_link" | "organico" | "otro"
     tipo_origen: Mapped[str] = mapped_column(String(30))
     # Objeto `referral` tal cual lo entrega Meta, sin procesar — resiliencia
@@ -1077,7 +1081,8 @@ class Contact(Base):
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_generar_uuid)
     negocio_id: Mapped[str] = mapped_column(String(36), ForeignKey("negocios.id"), nullable=False, index=True)
-    telefono: Mapped[str] = mapped_column(String(50), nullable=False)
+    # 150, no 50 — ver Mensaje.telefono (BSUID de Meta, Gate 2026-09-22).
+    telefono: Mapped[str] = mapped_column(String(150), nullable=False)
     nombre: Mapped[str | None] = mapped_column(String(100), nullable=True)
     eliminado_en: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     eliminado_por: Mapped[str | None] = mapped_column(String(50), nullable=True)

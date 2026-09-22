@@ -14,6 +14,25 @@ from agent.http_utils import post_con_reintentos, get_con_reintentos
 logger = logging.getLogger("agentkit")
 
 
+def _es_bsuid(telefono: str) -> bool:
+    """Un BSUID (Business-Scoped User ID) es el identificador opaco que
+    Meta manda en vez del teléfono real cuando el cliente activó Usernames
+    de WhatsApp — no son solo dígitos (ej. "US.13491208655302741918",
+    formato documentado por Meta), a diferencia de un teléfono real. Ver
+    `_destinatario` — el payload de envío a un BSUID es distinto (usa
+    `recipient`, nunca `to`)."""
+    return not telefono.replace("+", "").isdigit()
+
+
+def _destinatario(telefono: str) -> dict:
+    """Arma la clave de destinatario del payload de envío de Meta —
+    `to` para un teléfono real, `recipient` para un BSUID (Business-Scoped
+    User ID). Documentación de Meta: "To send a message using only the
+    user's BSUID [...]: set `recipient` to the user's BSUID [...]; omit
+    the `to` property." — mandar un BSUID en `to` lo rechaza la API."""
+    return {"recipient": telefono} if _es_bsuid(telefono) else {"to": telefono}
+
+
 def _extraer_wamid(respuesta) -> str | None:
     """Extrae el wamid (`id` real del mensaje en WhatsApp) que Meta devuelve
     en el body de una respuesta 200 a un envío — se persiste como
@@ -218,14 +237,24 @@ class ProveedorMeta(ProveedorWhatsApp):
                         texto = ""
                     else:
                         texto = ""
-                    if not msg.get("from"):
+                    # BSUID (Business-Scoped User ID, docs de Meta) — cuando el
+                    # cliente activó Usernames de WhatsApp, Meta oculta el
+                    # teléfono real y manda `from_user_id` en su lugar (el
+                    # contacto trae `user_id` en vez de `wa_id`, mismo patrón).
+                    # `_destinatario()` en los envíos ya sabe distinguir un
+                    # BSUID de un teléfono real y arma el payload correcto.
+                    if not msg.get("from") and not msg.get("from_user_id"):
                         logger.warning(
-                            f"Mensaje entrante sin teléfono (from): id={msg.get('id')} tipo={tipo} "
+                            f"Mensaje entrante sin teléfono (from) ni BSUID (from_user_id): id={msg.get('id')} tipo={tipo} "
                             f"campos={sorted(msg.keys())} "
                             f"campos_contacto={[sorted(c.keys()) for c in value.get('contacts', [])]}"
                         )
+                    elif not msg.get("from"):
+                        logger.info(
+                            f"Mensaje entrante con BSUID en vez de teléfono: id={msg.get('id')} tipo={tipo}"
+                        )
                     mensajes.append(MensajeEntrante(
-                        telefono=msg.get("from", ""),
+                        telefono=msg.get("from") or msg.get("from_user_id", ""),
                         texto=texto,
                         mensaje_id=msg.get("id", ""),
                         es_propio=False,  # Meta solo envía mensajes entrantes
@@ -306,7 +335,7 @@ class ProveedorMeta(ProveedorWhatsApp):
         }
         payload = {
             "messaging_product": "whatsapp",
-            "to": telefono,
+            **_destinatario(telefono),
             "type": "text",
             "text": {"body": mensaje},
         }
@@ -353,7 +382,7 @@ class ProveedorMeta(ProveedorWhatsApp):
             documento["caption"] = caption
         payload = {
             "messaging_product": "whatsapp",
-            "to": telefono,
+            **_destinatario(telefono),
             "type": "document",
             "document": documento,
         }
@@ -379,7 +408,7 @@ class ProveedorMeta(ProveedorWhatsApp):
             imagen["caption"] = caption
         payload = {
             "messaging_product": "whatsapp",
-            "to": telefono,
+            **_destinatario(telefono),
             "type": "image",
             "image": imagen,
         }
@@ -403,7 +432,7 @@ class ProveedorMeta(ProveedorWhatsApp):
         }
         payload = {
             "messaging_product": "whatsapp",
-            "to": telefono,
+            **_destinatario(telefono),
             "type": "audio",
             "audio": {"id": media_id},
         }
@@ -495,7 +524,7 @@ class ProveedorMeta(ProveedorWhatsApp):
             })
         payload = {
             "messaging_product": "whatsapp",
-            "to": telefono,
+            **_destinatario(telefono),
             "type": "template",
             "template": {
                 "name": nombre_plantilla,
