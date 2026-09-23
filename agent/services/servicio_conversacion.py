@@ -18,6 +18,7 @@ archivos, tal como pide la definición del componente.
 
 from agent.memory import (
     guardar_mensaje, obtener_historial, obtener_historial_de_conversation,
+    listar_conversaciones_previas_con_historial,
     obtener_ultimos_mensajes, limpiar_historial,
     crear_archivo_adjunto, obtener_archivo_adjunto, listar_archivos_reutilizables,
     eliminar_archivo_reutilizable, obtener_telefono_de_archivo,
@@ -52,6 +53,9 @@ class ServicioConversacion:
 
     async def obtener_historial_de_conversation(self, conversation_id: str, negocio_id: str, limite: int = 20) -> list[dict]:
         return await obtener_historial_de_conversation(conversation_id, negocio_id, limite=limite)
+
+    async def listar_conversaciones_previas_con_historial(self, conversation_id: str, negocio_id: str) -> list[dict]:
+        return await listar_conversaciones_previas_con_historial(conversation_id, negocio_id)
 
     async def obtener_ultimos_mensajes(self, telefonos: list[str], negocio_id: str) -> dict[str, dict]:
         return await obtener_ultimos_mensajes(telefonos, negocio_id)

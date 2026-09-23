@@ -46,7 +46,7 @@ from agent.memory import (
     toggle_usuario_activo, eliminar_usuario,
     listar_campanas, crear_campana, actualizar_campana, contar_opportunities_por_campana, eliminar_campana,
     obtener_campana, obtener_canal_whatsapp, listar_anuncios_detectados, asignar_anuncio_a_campana,
-    listar_atribucion_sin_campana_periodo,
+    listar_atribucion_sin_campana_periodo, cerrar_lead_definitivamente_via_conversation,
     rango_periodo_utc, contar_flujo_periodo, calcular_embudo_comercial, contar_oportunidades_por_asesor,
     distribucion_resultados_periodo, resumen_ventas_periodo, productos_vendidos_periodo,
     cambiar_password, contar_conversations_activas_por_asesor, RESULTADOS_CERRADOS, listar_leads_agendados,
@@ -2731,6 +2731,7 @@ def _dto_conversation_detalle(conversation: dict, lineas: list[dict], eventos: l
         "fecha_cierre": iso_utc(conversation.get("fecha_cierre")),
         "asesor_asignado": conversation.get("asesor_asignado"),
         "pausado_manual": bool(conversation.get("pausado_manual")),
+        "cerrado_definitivamente_en": iso_utc(conversation.get("cerrado_definitivamente_en")),
         "revision_prioritaria": bool(conversation.get("revision_prioritaria")),
         "conversation_version": conversation.get("conversation_version"),
         "opportunity_version": conversation.get("opportunity_version"),
@@ -2984,6 +2985,36 @@ async def conversation_liberar(
     telefono = await liberar_asignacion_via_conversation(conversation_id, usuario["negocio_id"], autor=usuario["nombre"])
     if telefono is None:
         raise HTTPException(status_code=400, detail="Esta conversación ya está vendida — no se puede reactivar a Gabi desde acá")
+    return await _json_conversation_actualizada(conversation_id, usuario["negocio_id"])
+
+
+@router.post("/conversation/{conversation_id}/cerrar-definitivamente")
+async def conversation_cerrar_definitivamente(
+    conversation_id: str,
+    usuario: dict = Depends(_usuario_actual),
+    _csrf: None = Depends(verificar_csrf),
+):
+    """Cierre EXPLÍCITO manual (Gate 2026-09-23) — separado de `resultado`:
+    marca que este caso NO vuelve, así que si el cliente escribe de nuevo,
+    Gabi retoma sola en vez de quedar mostrando "asignado a X" para
+    siempre sobre un caso que en la práctica ya murió. No hace nada por sí
+    solo más allá de esa marca — ver `agent/main.py` para el efecto real
+    y `agent/memory.py::cerrar_lead_definitivamente` para las
+    validaciones (resultado ya cerrado, nunca "vendido").
+
+    Mismo patrón que `/conversation/{id}/liberar` (Conversation-first, sin
+    chequeo de `version` — un clic, no un formulario)."""
+    conv = await resolver_conversation_operable(conversation_id, usuario["negocio_id"])
+    if conv is None:
+        raise HTTPException(status_code=404, detail="Conversación no encontrada")
+    _verificar_acceso_conversation(usuario, conv["asesor_asignado"])
+
+    telefono = await cerrar_lead_definitivamente_via_conversation(conversation_id, usuario["negocio_id"], usuario["nombre"])
+    if telefono is None:
+        raise HTTPException(
+            status_code=400,
+            detail="Solo se puede cerrar definitivamente un caso con resultado ya cerrado (y nunca uno vendido).",
+        )
     return await _json_conversation_actualizada(conversation_id, usuario["negocio_id"])
 
 
@@ -4873,6 +4904,7 @@ def _dto_lead_detalle(lead: dict, lineas: list[dict], eventos: list[dict]) -> di
         "fecha_cierre": iso_utc(lead.get("fecha_cierre")),
         "asesor_asignado": lead.get("asesor_asignado"),
         "pausado_manual": bool(lead.get("pausado_manual")),
+        "cerrado_definitivamente_en": iso_utc(lead.get("cerrado_definitivamente_en")),
         "revision_prioritaria": bool(lead.get("revision_prioritaria")),
         "version": lead.get("version"),
         "creado": iso_utc(lead.get("creado")),
@@ -5028,6 +5060,28 @@ async def conversation_mensajes_json(conversation_id: str, usuario: dict = Depen
         conversation_id, usuario["negocio_id"], limite=200,
     )
     return JSONResponse(historial)
+
+
+@router.get("/conversation/{conversation_id}/conversaciones-previas.json")
+async def conversation_previas_json(conversation_id: str, usuario: dict = Depends(_usuario_actual)):
+    """Gate 2026-09-23 (punto b del hallazgo DR-4) — Conversation(s)
+    CERRADAS anteriores del mismo Contact, cada una con su propio
+    historial, para que el panel las muestre como contexto por encima de
+    la conversación activa. Endpoint NUEVO y separado de `mensajes.json`
+    a propósito: no cambia esa forma de respuesta (un array plano que ya
+    consume el frontend en producción) — el panel pide esto aparte,
+    solo cuando quiere pintar el contexto previo.
+
+    Mismo control de acceso de dos capas que el resto de rutas
+    `/conversation/{id}...`: 404 cross-tenant, 403 si es de otro Asesor."""
+    conversation = await obtener_conversation_detalle(conversation_id, usuario["negocio_id"])
+    if conversation is None:
+        raise HTTPException(status_code=404, detail="Conversación no encontrada")
+    _verificar_acceso_conversation(usuario, conversation["asesor_asignado"])
+    previas = await servicio_conversacion.listar_conversaciones_previas_con_historial(
+        conversation_id, usuario["negocio_id"],
+    )
+    return JSONResponse(previas)
 
 
 @router.post("/lead/{telefono}/resumen-ia")

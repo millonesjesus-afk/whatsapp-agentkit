@@ -499,6 +499,21 @@ class Lead(Base):
     # activarse, así el caso aparece en listar_leads_esperando_asesor() para
     # que un supervisor lo reclame y lo asigne a una persona real.
     pausado_manual: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Instante (UTC) en que el caso quedó cerrado DE VERDAD — distinto de
+    # `resultado` (que sigue siendo solo el dato de CRM/reporting). Mientras
+    # esto sea None, un `resultado` cerrado NUNCA reactiva a Gabi por sí
+    # solo (Gate 2026-09-23, hallazgo real: un asesor de OTRO tema le
+    # escribía al cliente sobre un caso ya con resultado="consulta_atc", y
+    # el siguiente mensaje del cliente reactivaba a Gabi sin que ese asesor
+    # se enterara). Se setea de dos formas: manual (botón "Cerrar
+    # definitivamente" en la Ficha del Lead — solo visible con resultado ya
+    # cerrado) o automático (scripts/cerrar_leads_definitivamente.py, 7
+    # días sin mensaje del cliente sobre un resultado cerrado). "vendido"
+    # nunca lo setea (Close-Won es indefinido, mismo criterio que
+    # pausado_manual de una venta). Se limpia junto con asesor_asignado y
+    # pausado_manual al liberar la asignación (ver liberar_asignacion) — un
+    # cierre ya consumido no debe seguir marcado.
+    cerrado_definitivamente_en: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     # True cuando la IA respondió con confianza "Requiere validación"
     # (protocolo de confianza, AI Architecture Sec.6) — no transfiere la
     # conversación, solo marca que un asesor debería revisarla con
@@ -1125,6 +1140,12 @@ class Conversation(Base):
     visto_asesor: Mapped[bool] = mapped_column(Boolean, default=True)
     fallos_tecnicos: Mapped[int] = mapped_column(Integer, default=0)
     pausado_manual: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Mirror get-only de Lead.cerrado_definitivamente_en (Gate 2026-09-23,
+    # mismo patrón que pausado_manual/asesor_asignado_id de arriba) — la
+    # Nueva Experiencia (`_dto_conversation_detalle`, dashboard.py) lee
+    # esto, nunca Lead directamente. agent/main.py (webhook) sigue
+    # leyendo/escribiendo Lead como fuente real; acá solo se refleja.
+    cerrado_definitivamente_en: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     revision_prioritaria: Mapped[bool] = mapped_column(Boolean, default=False)
     # Concurrencia optimista propia — separada de Opportunity.version (DR-1,
     # Resolución Arquitectónica Gate 5.3: partir Lead.version en las dos
@@ -1388,24 +1409,27 @@ async def _obtener_opportunity_vigente(session, conversation_id: str) -> "Opport
     return (await session.execute(query)).scalar_one_or_none()
 
 
-def _debe_abrir_conversation_nueva(conversation: "Conversation | None", opportunity_vigente: "Opportunity | None") -> bool:
-    """DR-4 (Resolución Arquitectónica Gate 5.3), traducida a la condición
-    exacta: se abre una Conversation nueva cuando llega un mensaje de un
-    Contact cuya Conversation activa está asignada/pausada Y su Opportunity
-    vigente tiene un resultado cerrado que NO es "vendido" — mismo punto
-    donde hoy corre `liberar_asignacion` (main.py). "vendido" nunca reabre
-    solo (Human Decision Gate) — el mensaje entra a la Conversation existente
-    para revisión humana."""
+def _debe_abrir_conversation_nueva(conversation: "Conversation | None") -> bool:
+    """DR-4 (Resolución Arquitectónica Gate 5.3) — revisado en Gate 2026-09-23
+    para usar la MISMA señal que reactiva a Gabi (`_gabi_debe_pausarse` en
+    main.py): se abre una Conversation nueva únicamente cuando el caso quedó
+    CERRADO DEFINITIVAMENTE (`cerrado_definitivamente_en`, manual desde la
+    Ficha del Lead o automático tras 7 días de silencio del cliente sobre un
+    resultado ya cerrado).
+
+    ANTES el gatillo era "cualquier `resultado` en RESULTADOS_CERRADOS, !=
+    vendido" — eso disparaba una Conversation nueva (vacía, sin asesor) con
+    CUALQUIER cierre, por trivial que fuera, mientras el gate de main.py ya
+    exigía el cierre EXPLÍCITO para reactivar a Gabi. Con las dos señales
+    desalineadas, un mensaje del cliente podía caer en una Conversation
+    huérfana (recién creada, sin asesor) sin que Gabi respondiera tampoco —
+    el mensaje quedaba sin nadie atendiéndolo. `cerrado_definitivamente_en`
+    ya implica "resultado cerrado y no vendido" (única forma de setearlo,
+    ver `cerrar_lead_definitivamente`), así que alcanza con este solo
+    chequeo — nunca se setea sin que haya habido asesor/pausa de por medio."""
     if conversation is None:
         return True
-    if not (conversation.asesor_asignado_id is not None or conversation.pausado_manual):
-        return False
-    if opportunity_vigente is None:
-        return False
-    return (
-        opportunity_vigente.resultado in RESULTADOS_CERRADOS
-        and opportunity_vigente.resultado != "vendido"
-    )
+    return conversation.cerrado_definitivamente_en is not None
 
 
 async def resolver_conversation_activa(
@@ -1432,7 +1456,7 @@ async def resolver_conversation_activa(
         conversation = await _obtener_conversation_activa(session, contact.id)
         opportunity = await _obtener_opportunity_vigente(session, conversation.id) if conversation else None
 
-        if _debe_abrir_conversation_nueva(conversation, opportunity):
+        if _debe_abrir_conversation_nueva(conversation):
             if conversation is not None:
                 # Efecto automático — se cierra, no se borra ni se reescribe.
                 # Sin chequeo de version (mismo criterio que _avanzar_version).
@@ -1938,6 +1962,7 @@ async def obtener_conversation_detalle(conversation_id: str, negocio_id: str) ->
             "medio_pago": opportunity.medio_pago if opportunity else None,
             "asesor_asignado": conversation.asesor_asignado_id,
             "pausado_manual": conversation.pausado_manual,
+            "cerrado_definitivamente_en": conversation.cerrado_definitivamente_en,
             "revision_prioritaria": conversation.revision_prioritaria,
             "conversation_version": conversation.version,
             "opportunity_version": opportunity.version if opportunity else None,
@@ -3097,6 +3122,54 @@ def _extracto_cita(content: str) -> str:
     return content[:LARGO_EXTRACTO_CITA].rstrip() + "…"
 
 
+async def _construir_historial_mensajes(session, conversation_id: str, negocio_id: str, limite: int) -> list[dict]:
+    """Cuerpo de `obtener_historial_de_conversation`, extraído para
+    reusarse DENTRO de una sesión ya abierta (Gate 2026-09-23 —
+    `listar_conversaciones_previas_con_historial` necesita construir el
+    mismo dict para varias Conversation en una sola sesión, sin abrir N
+    sesiones nuevas)."""
+    query = (
+        select(Mensaje)
+        .where(Mensaje.conversation_id == conversation_id, Mensaje.negocio_id == negocio_id)
+        .order_by(Mensaje.timestamp.desc())
+        .limit(limite)
+    )
+    result = await session.execute(query)
+    mensajes = result.scalars().all()
+    mensajes.reverse()
+
+    archivo_ids = {m.archivo_id for m in mensajes if m.archivo_id}
+    content_types: dict[int, str] = {}
+    if archivo_ids:
+        query_archivos = select(ArchivoAdjunto.id, ArchivoAdjunto.content_type).where(ArchivoAdjunto.id.in_(archivo_ids))
+        result_archivos = await session.execute(query_archivos)
+        content_types = dict(result_archivos.all())
+
+    citado_ids = {m.respondido_a_id for m in mensajes if m.respondido_a_id}
+    citados: dict[int, tuple[str, str]] = {}
+    if citado_ids:
+        query_citados = select(Mensaje.id, Mensaje.role, Mensaje.content).where(Mensaje.id.in_(citado_ids))
+        result_citados = await session.execute(query_citados)
+        citados = {fila.id: (fila.role, fila.content) for fila in result_citados}
+
+    return [
+        {
+            "id": msg.id,
+            "role": msg.role, "content": msg.content, "archivo_id": msg.archivo_id,
+            "archivo_tipo": content_types.get(msg.archivo_id), "via_app": msg.via_app,
+            "mensaje_id_meta": msg.mensaje_id_meta,
+            "estado_envio": msg.estado_envio,
+            "timestamp": iso_utc(msg.timestamp),
+            "mensaje_citado": (
+                {"autor": citados[msg.respondido_a_id][0], "extracto": _extracto_cita(citados[msg.respondido_a_id][1])}
+                if msg.respondido_a_id and msg.respondido_a_id in citados
+                else None
+            ),
+        }
+        for msg in mensajes
+    ]
+
+
 async def obtener_historial_de_conversation(conversation_id: str, negocio_id: str, limite: int = 20) -> list[dict]:
     """GATE 2.2 (Conversation ID Cutover) — equivalente de `obtener_historial`
     pero filtrado por `Mensaje.conversation_id` en vez de `Mensaje.telefono`.
@@ -3116,46 +3189,61 @@ async def obtener_historial_de_conversation(conversation_id: str, negocio_id: st
     otro bridge, a diferencia de `obtener_historial` (que todavía depende
     de `Lead.telefono` para resolverlo)."""
     async with async_session() as session:
+        return await _construir_historial_mensajes(session, conversation_id, negocio_id, limite)
+
+
+async def listar_conversaciones_previas_con_historial(
+    conversation_id: str, negocio_id: str, limite_conversaciones: int = 3, limite_mensajes_cada_una: int = 50,
+) -> list[dict]:
+    """Gate 2026-09-23 (punto b del hallazgo DR-4) — Conversation(s) CERRADAS
+    anteriores del mismo Contact que `conversation_id`, cada una con su
+    propio historial, para que el panel de chat las muestre como contexto
+    por ENCIMA de la conversación activa (bloques separados, con su propio
+    divisor visual) — nunca fusionadas dentro del mismo array de mensajes.
+
+    Deliberadamente NO toca nada del modelo de datos: `Opportunity`,
+    atribución de campaña y la Bandeja de Conversaciones (`estado ==
+    "activa"`) siguen exactamente igual que hoy (Gate 2.2/5.3) — esto es
+    solo una vista de LECTURA adicional para que el asesor no pierda el
+    hilo cuando el cliente vuelve tras un cierre definitivo (DR-4).
+
+    Ordenadas de más antigua a más reciente (orden de lectura real).
+    `limite_conversaciones` acota cuántas Conversation previas trae (las
+    más recientes primero, se invierte después) — un Contact con muchos
+    ciclos comerciales no debería inflar la respuesta indefinidamente.
+    Una Conversation previa sin ningún mensaje real (no debería pasar, pero
+    fail-safe) se omite en vez de mandar un bloque vacío."""
+    async with async_session() as session:
+        actual = await session.get(Conversation, conversation_id)
+        if actual is None or actual.negocio_id != negocio_id:
+            return []
+
         query = (
-            select(Mensaje)
-            .where(Mensaje.conversation_id == conversation_id, Mensaje.negocio_id == negocio_id)
-            .order_by(Mensaje.timestamp.desc())
-            .limit(limite)
+            select(Conversation)
+            .where(
+                Conversation.contact_id == actual.contact_id,
+                Conversation.negocio_id == negocio_id,
+                Conversation.id != conversation_id,
+                Conversation.estado == "cerrada",
+            )
+            .order_by(Conversation.creado.desc())
+            .limit(limite_conversaciones)
         )
-        result = await session.execute(query)
-        mensajes = result.scalars().all()
-        mensajes.reverse()
+        previas = (await session.execute(query)).scalars().all()
+        previas = list(reversed(previas))
 
-        archivo_ids = {m.archivo_id for m in mensajes if m.archivo_id}
-        content_types: dict[int, str] = {}
-        if archivo_ids:
-            query_archivos = select(ArchivoAdjunto.id, ArchivoAdjunto.content_type).where(ArchivoAdjunto.id.in_(archivo_ids))
-            result_archivos = await session.execute(query_archivos)
-            content_types = dict(result_archivos.all())
-
-        citado_ids = {m.respondido_a_id for m in mensajes if m.respondido_a_id}
-        citados: dict[int, tuple[str, str]] = {}
-        if citado_ids:
-            query_citados = select(Mensaje.id, Mensaje.role, Mensaje.content).where(Mensaje.id.in_(citado_ids))
-            result_citados = await session.execute(query_citados)
-            citados = {fila.id: (fila.role, fila.content) for fila in result_citados}
-
-        return [
-            {
-                "id": msg.id,
-                "role": msg.role, "content": msg.content, "archivo_id": msg.archivo_id,
-                "archivo_tipo": content_types.get(msg.archivo_id), "via_app": msg.via_app,
-                "mensaje_id_meta": msg.mensaje_id_meta,
-                "estado_envio": msg.estado_envio,
-                "timestamp": iso_utc(msg.timestamp),
-                "mensaje_citado": (
-                    {"autor": citados[msg.respondido_a_id][0], "extracto": _extracto_cita(citados[msg.respondido_a_id][1])}
-                    if msg.respondido_a_id and msg.respondido_a_id in citados
-                    else None
-                ),
-            }
-            for msg in mensajes
-        ]
+        resultado = []
+        for conv in previas:
+            mensajes = await _construir_historial_mensajes(session, conv.id, negocio_id, limite_mensajes_cada_una)
+            if not mensajes:
+                continue
+            resultado.append({
+                "conversation_id": conv.id,
+                "cerrado_definitivamente_en": iso_utc(conv.cerrado_definitivamente_en),
+                "actualizado": iso_utc(conv.actualizado),
+                "mensajes": mensajes,
+            })
+        return resultado
 
 
 async def obtener_ultimos_mensajes(telefonos: list[str], negocio_id: str) -> dict[str, dict]:
@@ -3212,6 +3300,7 @@ def _lead_a_dict(lead: Lead) -> dict:
         "fecha_cierre": lead.fecha_cierre,
         "asesor_asignado": lead.asesor_asignado,
         "pausado_manual": lead.pausado_manual,
+        "cerrado_definitivamente_en": lead.cerrado_definitivamente_en,
         "producto_vendido": lead.producto_vendido,
         "precio_venta": lead.precio_venta,
         "marca_venta": lead.marca_venta,
@@ -3910,6 +3999,7 @@ async def liberar_asignacion(telefono: str, autor: str | None = None, motivo: st
         anterior = lead.asesor_asignado
         lead.asesor_asignado = None
         lead.pausado_manual = False
+        lead.cerrado_definitivamente_en = None
         lead.visto_asesor = True
         _avanzar_version(lead)
         lead.actualizado = datetime.utcnow()
@@ -3925,6 +4015,7 @@ async def liberar_asignacion(telefono: str, autor: str | None = None, motivo: st
             if conversation is not None:
                 conversation.asesor_asignado_id = None
                 conversation.pausado_manual = False
+                conversation.cerrado_definitivamente_en = None
                 conversation.visto_asesor = True
                 conversation.version = Conversation.version + 1
                 conversation.actualizado = datetime.utcnow()
@@ -3934,6 +4025,7 @@ async def liberar_asignacion(telefono: str, autor: str | None = None, motivo: st
     descripcion = {
         "caso_cerrado": "El caso anterior ya estaba cerrado — se liberó la asignación y Gabi retomó la atención",
         "timeout_inactividad": "El asesor asignado no respondió a tiempo — se liberó la asignación automáticamente y Gabi retomó la atención",
+        "cierre_definitivo": "El caso había quedado cerrado definitivamente — el cliente volvió a escribir, se liberó la asignación y Gabi retomó la atención",
     }.get(motivo, "Devolvió el control de la conversación a Gabi")
     await registrar_evento_lead(
         telefono, tipo="desasignado_automatico" if autor is None else "desasignado",
@@ -4000,6 +4092,147 @@ async def liberar_asignaciones_inactivas(horas: int = 24) -> list[str]:
         await liberar_asignacion(telefono, motivo="timeout_inactividad")
 
     return liberados
+
+
+async def cerrar_lead_definitivamente(telefono: str, negocio_id: str, autor: str | None) -> bool:
+    """Cierre EXPLÍCITO (Gate 2026-09-23) — dos orígenes, misma mecánica
+    (mismo patrón dual que `liberar_asignacion`):
+    1. Botón "Cerrar definitivamente" en la Ficha del Lead — `autor` es
+       quien lo apretó.
+    2. `cerrar_leads_definitivamente_inactivos` (el Cron de inactividad
+       del cliente) — llamada automática, `autor=None`.
+
+    No exige ningún umbral de silencio por sí sola (eso lo evalúa quien
+    llama, versión 2 arriba) — un `autor=None` no es "sin validar", es
+    "lo cerró el sistema, no una persona". Rechaza (retorna False, el
+    router en dashboard.py lo traduce a 400) si el lead no existe, no es
+    de este Negocio, el `resultado` todavía no es uno cerrado, o ya está
+    vendido (Close-Won es indefinido — mismo criterio que ya existe para
+    pausado_manual de una venta y para el endpoint "reactivar-gabi").
+
+    Este cierre por sí solo NO reactiva nada ni notifica a nadie — solo
+    deja la puerta abierta para que, cuando el cliente vuelva a escribir,
+    `agent/main.py` reconozca `cerrado_definitivamente_en` y libere la
+    asignación en ese momento (ver el bloque del webhook)."""
+    async with async_session() as session:
+        lead = await session.get(Lead, telefono)
+        if lead is None or lead.negocio_id != negocio_id:
+            return False
+        if lead.resultado not in RESULTADOS_CERRADOS or lead.resultado == "vendido":
+            return False
+        ahora = datetime.utcnow()
+        lead.cerrado_definitivamente_en = ahora
+        lead.actualizado = ahora
+
+        # Mirror get-only hacia Conversation (Gate 5.3, mismo patrón que
+        # liberar_asignacion) — la Nueva Experiencia lee esto, no Lead.
+        contact = await _obtener_contact(session, lead.negocio_id, telefono)
+        if contact is not None:
+            conversation = await _obtener_conversation_activa(session, contact.id)
+            if conversation is not None:
+                conversation.cerrado_definitivamente_en = ahora
+                conversation.actualizado = ahora
+
+        await session.commit()
+
+    descripcion = (
+        "Cerró el caso definitivamente — si el cliente vuelve a escribir, Gabi retomará la atención sin avisarle a quien lo tenía asignado."
+        if autor is not None else
+        "Se cerró el caso automáticamente por inactividad del cliente sobre un resultado ya cerrado — si el cliente vuelve a escribir, Gabi retomará la atención sin avisarle a quien lo tenía asignado."
+    )
+    await registrar_evento_lead(
+        telefono, tipo="cerrado_definitivamente" if autor is not None else "cerrado_definitivamente_automatico",
+        descripcion=descripcion, autor=autor, payload={"resultado": lead.resultado},
+    )
+    return True
+
+
+async def cerrar_lead_definitivamente_via_conversation(conversation_id: str, negocio_id: str, autor: str) -> str | None:
+    """Punto de entrada para el endpoint `/conversation/{id}/cerrar-
+    definitivamente` (mismo patrón que `liberar_asignacion_via_conversation`)
+    — resuelve el teléfono get-only y reusa `cerrar_lead_definitivamente()`
+    tal cual, sin duplicar sus validaciones.
+
+    Retorna None si la Conversation no existe/no es de este Negocio, o si
+    `cerrar_lead_definitivamente` rechazó el cierre (resultado todavía
+    abierto, o vendido) — el router ya resolvió existencia por separado
+    con `resolver_conversation_operable` antes de llamar acá, así que un
+    None de esta función siempre se traduce a 400, nunca a 404. Si puede
+    cerrar, retorna el teléfono (para que el router arme el DTO de
+    respuesta)."""
+    async with async_session() as session:
+        conversation = await session.get(Conversation, conversation_id)
+        if conversation is None or conversation.negocio_id != negocio_id:
+            return None
+        contact = await session.get(Contact, conversation.contact_id)
+        telefono = contact.telefono if contact else None
+    if telefono is None:
+        return None
+    if not await cerrar_lead_definitivamente(telefono, negocio_id, autor):
+        return None
+    return telefono
+
+
+async def cerrar_leads_definitivamente_inactivos(dias: int = 7) -> list[str]:
+    """Cierra definitivamente (ver `Lead.cerrado_definitivamente_en`) todo
+    lead con asesor asignado, `resultado` ya cerrado (nunca "vendido"), que
+    el CLIENTE no respondió en los últimos `dias` días — mismo criterio de
+    "silencio del cliente" que `listar_leads_inactividad_cliente`, pero
+    acá el lead SÍ tiene asesor (esa función es exclusiva de leads que
+    nunca tuvieron uno).
+
+    Complementa, sin solaparse, a los otros 2 Cron Schedule de inactividad
+    ya en producción:
+    - `liberar_asignaciones_inactivas` mide silencio del ASESOR sobre un
+      resultado ABIERTO.
+    - `listar_leads_inactividad_cliente` mide silencio del CLIENTE sobre
+      un lead que NUNCA tuvo asesor.
+    - Esta mide silencio del CLIENTE sobre un resultado YA CERRADO con
+      asesor asignado — el único de los 3 escenarios que faltaba.
+
+    Solo MARCA el cierre (no libera la asignación ni notifica a nadie) —
+    la liberación real pasa recién cuando el cliente vuelve a escribir
+    (ver el bloque de `agent/main.py` que lee `cerrado_definitivamente_en`).
+    Pensado para correr como un Cron Schedule de Railway (mismo patrón que
+    los otros 3), una vez al día — el umbral son días, no horas, así que
+    no necesita la frecuencia de los otros dos. Retorna la lista de
+    teléfonos cerrados, para que el script que llama esto pueda loguearlo."""
+    corte = datetime.utcnow() - timedelta(days=dias)
+    async with async_session() as session:
+        query = select(Lead).where(
+            Lead.asesor_asignado.is_not(None),
+            Lead.resultado.in_(RESULTADOS_CERRADOS),
+            Lead.resultado != "vendido",
+            Lead.cerrado_definitivamente_en.is_(None),
+        )
+        candidatos = (await session.execute(query)).scalars().all()
+
+        elegibles: list[tuple[str, str]] = []
+        for lead in candidatos:
+            ultimo_cliente = await session.execute(
+                select(Mensaje.timestamp)
+                .where(Mensaje.telefono == lead.telefono, Mensaje.role == "user")
+                .order_by(Mensaje.timestamp.desc())
+                .limit(1)
+            )
+            fila = ultimo_cliente.first()
+            # Sin ningún mensaje del cliente todavía (no debería pasar con
+            # asesor ya asignado, pero fail-closed: nunca se cierra sin
+            # evidencia real de silencio) — se salta.
+            if fila is None or fila[0] >= corte:
+                continue
+            elegibles.append((lead.telefono, lead.negocio_id))
+
+    # Fuera de la sesión de arriba: reusa cerrar_lead_definitivamente por
+    # candidato (autor=None → cierre automático) en vez de duplicar el
+    # mirror hacia Conversation y el registro de evento — mismo patrón que
+    # liberar_asignaciones_inactivas ya usa con liberar_asignacion.
+    cerrados: list[str] = []
+    for telefono, negocio_id in elegibles:
+        if await cerrar_lead_definitivamente(telefono, negocio_id, autor=None):
+            cerrados.append(telefono)
+
+    return cerrados
 
 
 async def listar_leads_inactividad_cliente(

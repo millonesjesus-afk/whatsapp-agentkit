@@ -6,13 +6,25 @@ import os
 
 os.environ.setdefault("ANTHROPIC_API_KEY", "test-key")
 os.environ.setdefault("WHATSAPP_PROVIDER", "meta")
+# Gate 2026-09-23 (debounce, fix #3): la respuesta de texto ya no se genera
+# inline dentro de webhook_handler — se programa con una ventana de espera
+# (ver agent/debounce.py). En 0 acá para que este test siga siendo
+# determinístico sin depender de un sleep real; igual hace falta esperar
+# explícitamente la tarea programada (ver `_esperar_debounce` abajo), porque
+# aunque la ventana sea 0 sigue corriendo en un Task aparte.
+os.environ["DEBOUNCE_RESPUESTA_SEGUNDOS"] = "0"
 
 from sqlalchemy import select
 from starlette.requests import Request
 
 from agent import main as app_main
 from agent import memory as mem
+from agent.debounce import gestor_debounce_respuestas
 from agent.providers.base import MensajeEntrante
+
+
+async def _esperar_debounce():
+    await gestor_debounce_respuestas.esperar_pendientes()
 
 
 def _request() -> Request:
@@ -94,6 +106,7 @@ async def test_respuesta_de_texto_rechazada_por_meta_queda_fallida(monkeypatch):
     negocio = await _armar(monkeypatch, "g-fal-01", "51900800001", "text", acepta_envio=False)
 
     await app_main.webhook_handler(_request())
+    await _esperar_debounce()
 
     guardado = await _respuesta_de_gabi_guardada(negocio["id"], "51900800001")
     assert guardado.estado_envio == "fallido" and guardado.mensaje_id_meta is None
@@ -112,6 +125,7 @@ async def test_respuesta_aceptada_por_meta_no_se_marca_fallida(monkeypatch):
     negocio = await _armar(monkeypatch, "g-fal-03", "51900800003", "text", acepta_envio=True)
 
     await app_main.webhook_handler(_request())
+    await _esperar_debounce()
 
     guardado = await _respuesta_de_gabi_guardada(negocio["id"], "51900800003")
     assert guardado.estado_envio is None and guardado.mensaje_id_meta == "wamid.OK"

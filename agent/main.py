@@ -20,7 +20,7 @@ from agent.services.servicio_inteligencia import servicio_inteligencia
 from agent.memory import (
     inicializar_db, obtener_lead, actualizar_lead,
     asignar_asesor_a_lead, marcar_lead_no_visto, liberar_asignacion,
-    registrar_fallo_tecnico, resetear_fallos_tecnicos, RESULTADOS_CERRADOS,
+    registrar_fallo_tecnico, resetear_fallos_tecnicos,
     sembrar_canales_desde_env, pausar_gabi_manual, marcar_revision_prioritaria,
     marcar_mensaje_procesado, obtener_negocio_por_codigo,
     resolver_conversation_activa,
@@ -31,6 +31,7 @@ from agent.dashboard import (
     ARCHIVOS_DIR, EXTENSIONES_ARCHIVO_PERMITIDAS, TAMANO_MAXIMO_ARCHIVO_MB, _guardar_archivo_en_disco,
 )
 from agent.tiempo_real import gestor_conexiones
+from agent.debounce import gestor_debounce_respuestas
 from agent.notificaciones import notificar_lead_derivado
 from agent.services.servicio_comercial import servicio_comercial
 from agent.services.servicio_canales import servicio_canales
@@ -107,6 +108,17 @@ TIPOS_MEDIA_SOPORTADOS = ("image", "document", "audio")
 # valida extensión, solo tamaño) — las notas de voz de WhatsApp son siempre
 # OGG/Opus.
 _MIME_A_EXTENSION_IMAGEN = {"image/jpeg": ".jpg", "image/png": ".png"}
+
+
+def _gabi_debe_pausarse(lead: dict | None) -> bool:
+    """Único criterio de "¿hay un humano atendiendo esto ahora mismo?" —
+    usado por las 3 ramas del webhook que pueden llegar a responder
+    automáticamente (texto, media soportada, tipo no soportado). Antes del
+    Gate 2026-09-23 cada rama repetía esta condición por su cuenta y la de
+    media/no-soportado simplemente NO la tenía — un adjunto de un lead ya
+    asignado hacía que Gabi respondiera igual, aunque un asesor ya
+    estuviera atendiendo (hallazgo real: 2 casos en la misma conversación)."""
+    return bool(lead and (lead.get("asesor_asignado") or lead.get("pausado_manual")))
 
 
 def _extension_permitida_para_media(tipo: str, mime_type: str, filename: str) -> str | None:
@@ -233,6 +245,15 @@ async def lifespan(app: FastAPI):
     logger.info(f"Proveedor de WhatsApp: {proveedor.__class__.__name__}")
     tarea_barrido_ws = asyncio.create_task(_barrer_conexiones_ws_inactivas())
     yield
+    # Gate 2026-09-23 (debounce, fix #3) — le da a las respuestas de Gabi ya
+    # programadas (esperando su ventana, o ya llamando a Claude) una
+    # oportunidad real de terminar antes de que Railway mate el proceso en
+    # un deploy; sin esto, un mensaje que llegó justo antes del redeploy se
+    # quedaría sin respuesta y sin ningún aviso. Con timeout acotado — nunca
+    # bloquea el apagado indefinidamente si algo quedó colgado (ej.
+    # Anthropic caído en ese momento).
+    with contextlib.suppress(asyncio.TimeoutError):
+        await asyncio.wait_for(gestor_debounce_respuestas.esperar_pendientes(), timeout=15.0)
     tarea_barrido_ws.cancel()
     with contextlib.suppress(asyncio.CancelledError):
         await tarea_barrido_ws
@@ -312,6 +333,152 @@ async def webhook_verificacion(request: Request):
     if resultado is not None:
         return PlainTextResponse(str(resultado))
     return {"status": "ok"}
+
+
+async def _generar_y_enviar_respuesta_ia(telefono: str, canal: dict | None) -> None:
+    """Gate 2026-09-23 (fix #3, debounce) — el trabajo REAL que antes corría
+    inline dentro de `webhook_handler` para cada mensaje de texto: arma el
+    contexto, llama a Claude, maneja fallos/confianza, envía la respuesta y
+    actualiza los datos del lead. Ahora corre desacoplado, programado por
+    `agent.debounce.gestor_debounce_respuestas` — el webhook ya devolvió su
+    200 OK a Meta hace rato para cuando esto se ejecuta.
+
+    El mensaje del cliente YA está guardado en la base (se guarda de
+    inmediato al llegar, antes de programar esto — ver `webhook_handler`) así
+    que `obtener_historial` ya lo incluye: se separa el ÚLTIMO turno como
+    `mensaje` (lo que `generar_respuesta` espera recibir aparte, ver su
+    docstring) y el resto queda como `historial` — reproduce exactamente la
+    misma forma de llamada que antes, sin tocar `brain.py`. Si varios
+    mensajes se acumularon en la misma ventana de espera, los intermedios
+    quedan dentro de `historial` (Claude los ve como turnos normales ya
+    escritos) y el más reciente es el que se trata como "el mensaje actual".
+
+    Re-chequea `_gabi_debe_pausarse` con el lead FRESCO (no el que existía
+    cuando se programó esto) — si en el rato que pasó un asesor tomó el
+    caso, esto se cancela solo en vez de que Gabi le pise la respuesta."""
+    lead = await obtener_lead(telefono, negocio_id=canal.get("negocio_id") if canal else None)
+    if _gabi_debe_pausarse(lead):
+        logger.info(f"Respuesta debounced de {telefono} cancelada — un humano tomó el caso mientras se esperaba")
+        return
+
+    historial_completo = await servicio_conversacion.obtener_historial(telefono)
+    if not historial_completo or historial_completo[-1]["role"] != "user":
+        # No debería pasar (esto se programa siempre justo después de
+        # guardar un mensaje "user") — fail-safe, nunca se inventa una
+        # respuesta a algo que no está ahí.
+        logger.warning(f"Respuesta debounced de {telefono} sin un mensaje 'user' al final del historial — se descarta")
+        return
+    mensaje_actual = historial_completo[-1]
+    historial = historial_completo[:-1]
+    texto_actual = mensaje_actual["content"]
+
+    modo_canal = (canal or {}).get("modo", "produccion")
+    respuesta, hubo_error, confianza, razon = await servicio_inteligencia.generar_respuesta(
+        texto_actual, historial, lead, modo=modo_canal,
+        negocio_id=canal.get("negocio_id") if canal else None,
+    )
+
+    # Si Claude falla, se pide reintentar la primera vez. Si vuelve a
+    # fallar (2 veces seguidas), se escala a un asesor en vez de seguir
+    # insistiendo — ver conversación sobre las 3 opciones evaluadas
+    # (esperar / escalar / call center 614002). Sin cambios respecto a
+    # antes: esto cubre fallas de la llamada en sí (API caída), no la
+    # confianza de una respuesta exitosa — ver el bloque de confianza
+    # más abajo.
+    escalado_por_falla = False
+    if hubo_error:
+        fallos = await registrar_fallo_tecnico(telefono)
+        if fallos >= 2:
+            respuesta = servicio_inteligencia.obtener_mensaje_error_escalado()
+            escalado_por_falla = True
+    else:
+        await resetear_fallos_tecnicos(telefono)
+
+    # Protocolo de confianza (solo disponible en modo "pruebas" por ahora —
+    # confianza es None en modo "producción" hasta que se promueva, ver
+    # agent/brain.py). AI Architecture Sec.5: el AI Engine solo emite la
+    # señal, nunca decide la acción — acá es donde Backend la consume
+    # (ServicioInteligencia.resolver_accion_confianza).
+    escalado_por_confianza = False
+    if not hubo_error and confianza is not None:
+        accion_confianza = await servicio_inteligencia.resolver_accion_confianza(confianza)
+        if accion_confianza == "escalar":
+            respuesta = servicio_inteligencia.obtener_mensaje_escalado_por_confianza()
+            escalado_por_confianza = True
+        elif accion_confianza == "revision_prioritaria":
+            await marcar_revision_prioritaria(telefono)
+        logger.info(
+            f"Confianza emitida para {telefono}: {confianza} "
+            f"(acción: {accion_confianza}) — razón: {razon}"
+        )
+
+    # El mensaje del cliente ya se guardó al llegar (ver webhook_handler) —
+    # acá solo falta la respuesta de Gabi.
+    enviado, wamid = await proveedor.enviar_mensaje(telefono, respuesta, canal=canal)
+    mensaje_guardado = await servicio_conversacion.guardar_mensaje(
+        telefono, "assistant", respuesta, negocio_id=canal.get("negocio_id") if canal else None,
+        mensaje_id_meta=wamid, estado_envio=None if enviado else "fallido",
+    )
+    await gestor_conexiones.emitir_mensaje_nuevo(mensaje_guardado["conversation_id"])
+    logger.info(f"Respuesta a {telefono}: {respuesta}")
+
+    if escalado_por_falla:
+        asesor = await servicio_comercial.elegir_asesor_automatico(
+            (lead or {}).get("interes") or "", canal.get("negocio_id") if canal else None,
+        )
+        if asesor:
+            await asignar_asesor_a_lead(telefono, asesor, automatico=True)
+        lead_actualizado = await obtener_lead(telefono, negocio_id=canal.get("negocio_id") if canal else None)
+        await notificar_lead_derivado(
+            telefono, lead_actualizado or {},
+            "[Escalado automáticamente por fallas técnicas repetidas del bot]",
+        )
+        logger.warning(f"Escalado {telefono} a asesor por fallas técnicas repetidas")
+        return
+
+    if escalado_por_confianza:
+        # La IA deja de tomar decisiones sobre esta conversación — mismo
+        # patrón de asignación que el escalado por falla técnica, pero
+        # disparado por la señal de confianza real del modelo.
+        asesor = await servicio_comercial.elegir_asesor_automatico(
+            (lead or {}).get("interes") or "", canal.get("negocio_id") if canal else None,
+        )
+        if asesor:
+            await asignar_asesor_a_lead(telefono, asesor, automatico=True)
+        lead_actualizado = await obtener_lead(telefono, negocio_id=canal.get("negocio_id") if canal else None)
+        await notificar_lead_derivado(
+            telefono, lead_actualizado or {},
+            f"[Escalado automáticamente por baja confianza de la IA — razón: {razon}]",
+        )
+        logger.warning(f"Escalado {telefono} a asesor por baja confianza de la IA")
+        return
+
+    if hubo_error:
+        # Primera falla: solo se pidió reintentar — no hay una respuesta
+        # real de la que extraer datos del lead.
+        return
+
+    # Actualizar datos estructurados del lead (nombre, interés, paso del
+    # flujo) para que no dependan de sobrevivir en el historial crudo
+    datos_lead = await servicio_inteligencia.extraer_datos_lead(texto_actual, respuesta, lead)
+    await actualizar_lead(telefono, **datos_lead)
+
+    # Si el lead recién pasa a "derivado_asesor" (no lo estaba antes): se le
+    # asigna automáticamente un asesor disponible (según nivel de
+    # experiencia y carga actual) y se avisa al equipo por correo. El
+    # supervisor/admin siempre puede reasignar manualmente después.
+    ya_estaba_derivado = bool(lead) and lead.get("paso_flujo") == "derivado_asesor"
+    ahora_derivado = datos_lead.get("paso_flujo") == "derivado_asesor"
+    if ahora_derivado and not ya_estaba_derivado:
+        lead_actualizado = await obtener_lead(telefono, negocio_id=canal.get("negocio_id") if canal else None)
+        if lead_actualizado and not lead_actualizado.get("asesor_asignado"):
+            asesor = await servicio_comercial.elegir_asesor_automatico(
+                lead_actualizado.get("interes") or "", canal.get("negocio_id") if canal else None,
+            )
+            if asesor:
+                await asignar_asesor_a_lead(telefono, asesor, automatico=True)
+                lead_actualizado = await obtener_lead(telefono, negocio_id=canal.get("negocio_id") if canal else None)
+        await notificar_lead_derivado(telefono, lead_actualizado or {}, texto_actual)
 
 
 @app.post("/webhook")
@@ -423,11 +590,32 @@ async def webhook_handler(request: Request):
             # transcripción — fuera de alcance de este Gate): se le sigue
             # avisando al cliente que este tipo de mensaje no se procesa
             # automáticamente, igual que antes.
+            #
+            # Gate 2026-09-23 (hallazgo real: 2 casos en la misma
+            # conversación, lead ya asignado) — ANTES de decidir si Gabi
+            # responde acá, se consulta el lead: si ya hay un asesor
+            # asignado (o pausado_manual), esta rama tiene que comportarse
+            # EXACTAMENTE como la rama de texto de abajo (guardar sin
+            # respuesta automática) — un adjunto nunca debe hacer que Gabi
+            # vuelva a meterse en una conversación que un humano ya está
+            # atendiendo. El asesor SÍ puede escuchar/ver el adjunto desde
+            # el panel (AdjuntoMensaje ya reproduce audio/imagen/documento
+            # real) — lo único que se bloquea es la respuesta AUTOMÁTICA.
             if msg.tipo in TIPOS_MEDIA_SOPORTADOS:
                 logger.info(f"Media entrante ({msg.tipo}) de {msg.telefono}")
-                respuesta = servicio_inteligencia.obtener_mensaje_no_soportado()
                 archivo_id_creado = await _guardar_media_entrante(msg, canal)
                 contenido_usuario = (msg.media or {}).get("caption") or f"[{msg.tipo}]"
+                lead = await obtener_lead(msg.telefono, negocio_id=canal.get("negocio_id") if canal else None)
+                if _gabi_debe_pausarse(lead):
+                    mensaje_guardado = await servicio_conversacion.guardar_mensaje(
+                        msg.telefono, "user", contenido_usuario, negocio_id=canal.get("negocio_id") if canal else None,
+                        archivo_id=archivo_id_creado, mensaje_id_meta=msg.mensaje_id or None,
+                    )
+                    await marcar_lead_no_visto(msg.telefono)
+                    logger.info(f"Media de {msg.telefono} guardada sin respuesta automática (asignado a {lead['asesor_asignado']})")
+                    await gestor_conexiones.emitir_mensaje_nuevo(mensaje_guardado["conversation_id"])
+                    continue
+                respuesta = servicio_inteligencia.obtener_mensaje_no_soportado()
                 await servicio_conversacion.guardar_mensaje(
                     msg.telefono, "user", contenido_usuario, negocio_id=canal.get("negocio_id") if canal else None,
                     archivo_id=archivo_id_creado, mensaje_id_meta=msg.mensaje_id or None,
@@ -441,9 +629,21 @@ async def webhook_handler(request: Request):
                 continue
 
             # Tipos que aún no procesamos (video, sticker, ubicación, etc.):
-            # avisamos al cliente en vez de dejarlo sin respuesta
+            # avisamos al cliente en vez de dejarlo sin respuesta — mismo
+            # chequeo de asignación que la rama de media de arriba (Gate
+            # 2026-09-23).
             if msg.tipo != "text":
                 logger.info(f"Mensaje no soportado ({msg.tipo}) de {msg.telefono}")
+                lead = await obtener_lead(msg.telefono, negocio_id=canal.get("negocio_id") if canal else None)
+                if _gabi_debe_pausarse(lead):
+                    mensaje_guardado = await servicio_conversacion.guardar_mensaje(
+                        msg.telefono, "user", f"[{msg.tipo}]", negocio_id=canal.get("negocio_id") if canal else None,
+                        mensaje_id_meta=msg.mensaje_id or None,
+                    )
+                    await marcar_lead_no_visto(msg.telefono)
+                    logger.info(f"Mensaje de {msg.telefono} guardado sin respuesta automática (asignado a {lead['asesor_asignado']})")
+                    await gestor_conexiones.emitir_mensaje_nuevo(mensaje_guardado["conversation_id"])
+                    continue
                 respuesta = servicio_inteligencia.obtener_mensaje_no_soportado()
                 await servicio_conversacion.guardar_mensaje(
                     msg.telefono, "user", f"[{msg.tipo}]", negocio_id=canal.get("negocio_id") if canal else None,
@@ -495,22 +695,32 @@ async def webhook_handler(request: Request):
             # directo desde la app en coexistencia, sin asignación formal),
             # Gabi se pausa: solo se guarda el mensaje para que un humano lo
             # vea y responda — así no chocan las respuestas del bot y el humano.
-            if lead and (lead.get("asesor_asignado") or lead.get("pausado_manual")):
-                # "vendido" queda excluido a propósito: es un cierre de
-                # negocio real (Close-Won), no solo un estado más de la
-                # cola. Los otros 7 resultados cerrados siguen liberando la
-                # asignación como siempre — ahí sí es razonable asumir que
-                # el cliente escribe por algo nuevo. Acá no: si ya compró,
-                # que Gabi vuelva a venderle solo (o a "atenderlo" sin que
-                # nadie se entere) es exactamente lo que pausado_manual
-                # existe para evitar.
-                if lead.get("resultado") in RESULTADOS_CERRADOS and lead.get("resultado") != "vendido":
-                    # El caso anterior ya se cerró — si el cliente vuelve a
-                    # escribir, probablemente sea por algo nuevo. Se libera
-                    # la asignación y Gabi retoma la atención (el supervisor
-                    # puede reasignar manualmente si hace falta).
-                    await liberar_asignacion(msg.telefono)
-                    logger.info(f"Caso de {msg.telefono} ya estaba cerrado — Gabi retoma la atención")
+            if _gabi_debe_pausarse(lead):
+                # Gate 2026-09-23 — ANTES se usaba "resultado en
+                # RESULTADOS_CERRADOS" como señal de "probablemente algo
+                # nuevo, Gabi retoma" — hallazgo real (Joanna Chuica):
+                # "consulta_atc" es un resultado cerrado, pero un asesor de
+                # OTRO tema (Televentas) le había escrito un minuto antes;
+                # el siguiente mensaje del cliente reactivaba a Gabi de
+                # todas formas, sin que el asesor activo se enterara.
+                # `resultado` sigue siendo el dato de CRM/reporting, sin
+                # tocar — el gatillo de reactivación ahora es un cierre
+                # EXPLÍCITO (manual desde la Ficha del Lead, o automático
+                # por `cerrar_leads_definitivamente.py` tras 7 días de
+                # silencio del cliente), nunca el `resultado` por sí solo.
+                # "vendido" sigue excluido: `cerrado_definitivamente_en`
+                # nunca se setea en un caso vendido (ver Human Decision
+                # Gate ya documentado — Close-Won es indefinido).
+                if lead.get("cerrado_definitivamente_en") is not None:
+                    # El caso quedó cerrado de verdad — DR-4 (resolver_
+                    # conversation_activa, ya corrió arriba con este mismo
+                    # mensaje) ya abrió una Conversation nueva sin asesor;
+                    # acá solo falta liberar el Lead (legacy) para que el
+                    # panel dashboard.py deje de mostrarlo bajo el asesor
+                    # anterior. Gabi retoma como si fuera un lead nuevo — el
+                    # asesor anterior no recibe ningún aviso de esto.
+                    await liberar_asignacion(msg.telefono, motivo="cierre_definitivo")
+                    logger.info(f"Caso de {msg.telefono} estaba cerrado definitivamente — Gabi retoma la atención")
                     lead = await obtener_lead(msg.telefono, negocio_id=canal.get("negocio_id") if canal else None)
                 else:
                     # Caso todavía abierto: se guarda el mensaje y se reactiva
@@ -528,127 +738,35 @@ async def webhook_handler(request: Request):
                     await gestor_conexiones.emitir_mensaje_nuevo(mensaje_guardado["conversation_id"])
                     continue
 
-            # Obtener historial ANTES de guardar el mensaje actual
-            # (brain.py agrega el mensaje actual, evitando duplicados)
-            historial = await servicio_conversacion.obtener_historial(msg.telefono)
-
-            # Le muestra "escribiendo..." en WhatsApp mientras Claude genera
-            # la respuesta (puede tardar unos segundos) — así el cliente sabe
-            # que su mensaje sí se está procesando, no que quedó en el aire.
-            await proveedor.marcar_leido_y_escribiendo(msg.mensaje_id, canal=canal)
-
-            # Generar respuesta con Claude — el modo del canal decide si usa
-            # el prompt "de pruebas" (config/prompts.yaml tal cual) o el
-            # promovido a producción desde el panel.
-            modo_canal = (canal or {}).get("modo", "produccion")
-            respuesta, hubo_error, confianza, razon = await servicio_inteligencia.generar_respuesta(
-                msg.texto, historial, lead, modo=modo_canal,
-                negocio_id=canal.get("negocio_id") if canal else None,
-            )
-
-            # Si Claude falla, se pide reintentar la primera vez. Si vuelve a
-            # fallar (2 veces seguidas), se escala a un asesor en vez de
-            # seguir insistiendo — ver conversación sobre las 3 opciones
-            # evaluadas (esperar / escalar / call center 614002). Sin cambios
-            # respecto a antes de esta sub-etapa: esto cubre fallas de la
-            # llamada en sí (API caída), no la confianza de una respuesta
-            # exitosa — ver el bloque de confianza más abajo.
-            escalado_por_falla = False
-            if hubo_error:
-                fallos = await registrar_fallo_tecnico(msg.telefono)
-                if fallos >= 2:
-                    respuesta = servicio_inteligencia.obtener_mensaje_error_escalado()
-                    escalado_por_falla = True
-            else:
-                await resetear_fallos_tecnicos(msg.telefono)
-
-            # Protocolo de confianza (solo disponible en modo "pruebas" por
-            # ahora — confianza es None en modo "producción" hasta que se
-            # promueva, ver agent/brain.py). AI Architecture Sec.5: el AI
-            # Engine solo emite la señal, nunca decide la acción — acá es
-            # donde Backend la consume (ServicioInteligencia.resolver_accion_confianza).
-            escalado_por_confianza = False
-            if not hubo_error and confianza is not None:
-                accion_confianza = await servicio_inteligencia.resolver_accion_confianza(confianza)
-                if accion_confianza == "escalar":
-                    respuesta = servicio_inteligencia.obtener_mensaje_escalado_por_confianza()
-                    escalado_por_confianza = True
-                elif accion_confianza == "revision_prioritaria":
-                    await marcar_revision_prioritaria(msg.telefono)
-                logger.info(
-                    f"Confianza emitida para {msg.telefono}: {confianza} "
-                    f"(acción: {accion_confianza}) — razón: {razon}"
-                )
-
-            await servicio_conversacion.guardar_mensaje(
+            # Gate 2026-09-23 (fix #3, debounce) — el mensaje se guarda de
+            # inmediato (aparece en el panel en tiempo real apenas llega, un
+            # mensaje por burbuja, igual que en WhatsApp) pero la llamada a
+            # Claude ya NO corre acá inline. En vez de eso se (re)programa una
+            # ventana corta (`DEBOUNCE_RESPUESTA_SEGUNDOS`, 3s por defecto):
+            # si el cliente manda otro mensaje antes de que pase, esta espera
+            # se cancela y se reinicia con el nuevo — recién cuando el
+            # cliente se queda tranquilo un momento se dispara UNA sola
+            # llamada que ya ve todos los mensajes acumulados (ver
+            # `_generar_y_enviar_respuesta_ia` y `agent/debounce.py` para el
+            # razonamiento completo). Esto es lo que de verdad decide el
+            # comportamiento: mandar 3 mensajes seguidos ya no dispara 3
+            # llamadas a Claude ni 3 respuestas separadas.
+            mensaje_guardado = await servicio_conversacion.guardar_mensaje(
                 msg.telefono, "user", msg.texto, negocio_id=canal.get("negocio_id") if canal else None,
                 mensaje_id_meta=msg.mensaje_id or None,
             )
-            enviado, wamid = await proveedor.enviar_mensaje(msg.telefono, respuesta, canal=canal)
-            mensaje_guardado = await servicio_conversacion.guardar_mensaje(
-                msg.telefono, "assistant", respuesta, negocio_id=canal.get("negocio_id") if canal else None,
-                mensaje_id_meta=wamid, estado_envio=None if enviado else "fallido",
-            )
             await gestor_conexiones.emitir_mensaje_nuevo(mensaje_guardado["conversation_id"])
-            logger.info(f"Respuesta a {msg.telefono}: {respuesta}")
 
-            if escalado_por_falla:
-                asesor = await servicio_comercial.elegir_asesor_automatico(
-                    (lead or {}).get("interes") or "", canal.get("negocio_id") if canal else None,
-                )
-                if asesor:
-                    await asignar_asesor_a_lead(msg.telefono, asesor, automatico=True)
-                lead_actualizado = await obtener_lead(msg.telefono, negocio_id=canal.get("negocio_id") if canal else None)
-                await notificar_lead_derivado(
-                    msg.telefono, lead_actualizado or {},
-                    "[Escalado automáticamente por fallas técnicas repetidas del bot]",
-                )
-                logger.warning(f"Escalado {msg.telefono} a asesor por fallas técnicas repetidas")
-                continue
+            # Le muestra "escribiendo..." en WhatsApp de una vez — aunque la
+            # respuesta real todavía no arranca (está en la ventana de
+            # espera), esto ya le confirma al cliente que su mensaje llegó.
+            await proveedor.marcar_leido_y_escribiendo(msg.mensaje_id, canal=canal)
 
-            if escalado_por_confianza:
-                # La IA deja de tomar decisiones sobre esta conversación —
-                # mismo patrón de asignación que el escalado por falla técnica,
-                # pero disparado por la señal de confianza real del modelo.
-                asesor = await servicio_comercial.elegir_asesor_automatico(
-                    (lead or {}).get("interes") or "", canal.get("negocio_id") if canal else None,
-                )
-                if asesor:
-                    await asignar_asesor_a_lead(msg.telefono, asesor, automatico=True)
-                lead_actualizado = await obtener_lead(msg.telefono, negocio_id=canal.get("negocio_id") if canal else None)
-                await notificar_lead_derivado(
-                    msg.telefono, lead_actualizado or {},
-                    f"[Escalado automáticamente por baja confianza de la IA — razón: {razon}]",
-                )
-                logger.warning(f"Escalado {msg.telefono} a asesor por baja confianza de la IA")
-                continue
-
-            if hubo_error:
-                # Primera falla: solo se pidió reintentar — no hay una
-                # respuesta real de la que extraer datos del lead.
-                continue
-
-            # Actualizar datos estructurados del lead (nombre, interés, paso del
-            # flujo) para que no dependan de sobrevivir en el historial crudo
-            datos_lead = await servicio_inteligencia.extraer_datos_lead(msg.texto, respuesta, lead)
-            await actualizar_lead(msg.telefono, **datos_lead)
-
-            # Si el lead recién pasa a "derivado_asesor" (no lo estaba antes):
-            # se le asigna automáticamente un asesor disponible (según nivel
-            # de experiencia y carga actual) y se avisa al equipo por correo.
-            # El supervisor/admin siempre puede reasignar manualmente después.
-            ya_estaba_derivado = bool(lead) and lead.get("paso_flujo") == "derivado_asesor"
-            ahora_derivado = datos_lead.get("paso_flujo") == "derivado_asesor"
-            if ahora_derivado and not ya_estaba_derivado:
-                lead_actualizado = await obtener_lead(msg.telefono, negocio_id=canal.get("negocio_id") if canal else None)
-                if lead_actualizado and not lead_actualizado.get("asesor_asignado"):
-                    asesor = await servicio_comercial.elegir_asesor_automatico(
-                        lead_actualizado.get("interes") or "", canal.get("negocio_id") if canal else None,
-                    )
-                    if asesor:
-                        await asignar_asesor_a_lead(msg.telefono, asesor, automatico=True)
-                        lead_actualizado = await obtener_lead(msg.telefono, negocio_id=canal.get("negocio_id") if canal else None)
-                await notificar_lead_derivado(msg.telefono, lead_actualizado or {}, msg.texto)
+            clave_debounce = f"{canal.get('negocio_id') if canal else None}:{msg.telefono}"
+            gestor_debounce_respuestas.reprogramar(
+                clave_debounce,
+                lambda telefono=msg.telefono, canal=canal: _generar_y_enviar_respuesta_ia(telefono, canal),
+            )
 
         return {"status": "ok"}
 

@@ -4,6 +4,8 @@
 # telefono/negocio hardcodeado como "el correcto" (mismo criterio que
 # test_gate52_correcciones_h1h2h3.py).
 
+from datetime import datetime
+
 import pytest
 
 from agent import memory as mem
@@ -85,16 +87,21 @@ async def test_resolver_conversation_activa_es_idempotente_sin_dr4():
 
 
 async def test_dr4_no_venta_abre_conversation_nueva_y_preserva_la_anterior():
-    """DR-4: Contact recurrente tras cierre NO-venta → nueva Conversation.
-    La Conversation anterior queda intacta (cerrada, no borrada)."""
+    """DR-4: Contact recurrente tras CIERRE DEFINITIVO de un caso no-venta →
+    nueva Conversation. La Conversation anterior queda intacta (cerrada, no
+    borrada). Gate 2026-09-23: el gatillo dejó de ser "cualquier resultado
+    cerrado" — ahora exige `cerrado_definitivamente_en` (mismo criterio que
+    reactiva a Gabi en main.py), ver `_debe_abrir_conversation_nueva`."""
     negocio, canal = await _negocio_con_canal("cve1", "10000000006")
     telefono = "51900100005"
     conv1, opp1 = await _abrir_conversacion(negocio, canal, telefono)
 
     # Simula: asesor asignado + Opportunity cerrada "no_interesado" (no-venta)
+    # + cierre DEFINITIVO (manual o automático) — sin esto último, DR-4 ya no dispara.
     async with mem.async_session() as session:
         c = await session.get(mem.Conversation, conv1.id)
         c.asesor_asignado_id = "asesor1"
+        c.cerrado_definitivamente_en = datetime.utcnow()
         o = await session.get(mem.Opportunity, opp1.id)
         o.resultado = "no_interesado"
         await session.commit()
@@ -110,6 +117,31 @@ async def test_dr4_no_venta_abre_conversation_nueva_y_preserva_la_anterior():
         nueva = await session.get(mem.Conversation, conv2.id)
         assert nueva.estado == "activa"
         assert nueva.asesor_asignado_id is None  # arranca limpia
+
+
+async def test_dr4_resultado_cerrado_sin_cierre_definitivo_no_abre_conversation_nueva():
+    """Gate 2026-09-23 — regresión directa del hallazgo real: un `resultado`
+    cerrado por sí solo (sin `cerrado_definitivamente_en`) YA NO dispara
+    DR-4. Antes, cualquier cierre trivial abría una Conversation nueva sin
+    asesor mientras Gabi tampoco respondía (gate de main.py ya exigía el
+    cierre explícito) — el mensaje del cliente quedaba huérfano, sin nadie
+    atendiéndolo. Ver también test_media_respeta_asignacion.py/
+    test_cierre_definitivo.py para la mitad del fix del lado de main.py."""
+    negocio, canal = await _negocio_con_canal("cve2", "10000000039")
+    telefono = "51900100031"
+    conv1, opp1 = await _abrir_conversacion(negocio, canal, telefono)
+
+    async with mem.async_session() as session:
+        c = await session.get(mem.Conversation, conv1.id)
+        c.asesor_asignado_id = "asesor1"
+        o = await session.get(mem.Opportunity, opp1.id)
+        o.resultado = "no_interesado"  # cerrado, pero NUNCA cerrado_definitivamente_en
+        await session.commit()
+
+    conv2, opp2 = await _abrir_conversacion(negocio, canal, telefono)
+
+    assert conv2.id == conv1.id  # NO se abrió una nueva
+    assert opp2.id == opp1.id
 
 
 async def test_dr4_vendido_no_reabre_automaticamente():
@@ -160,6 +192,7 @@ async def test_opportunity_es_1_a_n_secuencial_por_conversation():
     async with mem.async_session() as session:
         c = await session.get(mem.Conversation, conv1.id)
         c.asesor_asignado_id = "asesor1"
+        c.cerrado_definitivamente_en = datetime.utcnow()
         o = await session.get(mem.Opportunity, opp1.id)
         o.resultado = "no_califica"
         await session.commit()
@@ -469,6 +502,7 @@ async def test_listar_conversaciones_activas_no_duplica_por_multiples_opportunit
     async with mem.async_session() as session:
         c = await session.get(mem.Conversation, conv1.id)
         c.asesor_asignado_id = "asesor1"
+        c.cerrado_definitivamente_en = datetime.utcnow()
         o = await session.get(mem.Opportunity, opp1.id)
         o.resultado = "no_interesado"
         await session.commit()
@@ -559,6 +593,7 @@ async def test_obtener_contact_detalle_lista_conversaciones_activas_y_cerradas()
     async with mem.async_session() as session:
         c = await session.get(mem.Conversation, conv1.id)
         c.asesor_asignado_id = "asesor1"
+        c.cerrado_definitivamente_en = datetime.utcnow()
         o = await session.get(mem.Opportunity, opp1.id)
         o.resultado = "no_interesado"
         await session.commit()
@@ -618,6 +653,7 @@ async def test_listar_eventos_de_conversation_sirve_timeline_de_conversation_cer
     async with mem.async_session() as session:
         c = await session.get(mem.Conversation, conv1.id)
         c.asesor_asignado_id = "asesor1"
+        c.cerrado_definitivamente_en = datetime.utcnow()
         o = await session.get(mem.Opportunity, opp1.id)
         o.resultado = "no_interesado"
         await session.commit()

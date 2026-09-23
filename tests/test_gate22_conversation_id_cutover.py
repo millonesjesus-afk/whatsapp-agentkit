@@ -9,6 +9,8 @@
 # Datos sintéticos únicamente, mismo criterio que
 # test_gate53_contact_conversation_opportunity.py (reutiliza sus helpers).
 
+from datetime import datetime
+
 import pytest
 from fastapi import HTTPException
 
@@ -28,13 +30,15 @@ async def _abrir_conversacion(negocio: dict, canal: dict, telefono: str):
 
 
 async def _cerrar_no_venta_y_asignar(conversation_id: str, opportunity_id: str, asesor: str = "asesor1"):
-    """Fuerza la condición exacta de DR-4 (asignada/pausada + Opportunity
-    cerrada != vendido) escribiendo directo el modelo — mismo patrón que
+    """Fuerza la condición exacta de DR-4 (Gate 2026-09-23: asignada/pausada
+    + Opportunity cerrada != vendido + CIERRE DEFINITIVO) escribiendo
+    directo el modelo — mismo patrón que
     test_dr4_no_venta_abre_conversation_nueva_y_preserva_la_anterior en
     test_gate53_contact_conversation_opportunity.py."""
     async with mem.async_session() as session:
         c = await session.get(mem.Conversation, conversation_id)
         c.asesor_asignado_id = asesor
+        c.cerrado_definitivamente_en = datetime.utcnow()
         o = await session.get(mem.Opportunity, opportunity_id)
         o.resultado = "no_interesado"
         await session.commit()
@@ -201,3 +205,120 @@ async def test_ruta_conversation_mensajes_asesor_dueno_si_puede():
     import json
     respuesta = await dashboard.conversation_mensajes_json(conv.id, usuario=asesor_dueno)
     assert [m["content"] for m in json.loads(respuesta.body)] == ["Hola"]
+
+
+# ---------------------------------------------------------------------------
+# Gate 2026-09-23 (punto b) — listar_conversaciones_previas_con_historial +
+# GET /conversation/{id}/conversaciones-previas.json
+# ---------------------------------------------------------------------------
+
+async def test_previas_vacio_si_nunca_hubo_dr4():
+    negocio, canal = await _negocio_con_canal("g22-l", "20000000012")
+    conv, _ = await _abrir_conversacion(negocio, canal, "51900200010")
+    assert await mem.listar_conversaciones_previas_con_historial(conv.id, negocio["id"]) == []
+
+
+async def test_previas_devuelve_la_conversation_cerrada_anterior_con_su_historial():
+    negocio, canal = await _negocio_con_canal("g22-m", "20000000013")
+    telefono = "51900200011"
+    conv1, opp1 = await _abrir_conversacion(negocio, canal, telefono)
+    await mem.guardar_mensaje(telefono, "user", "A1", negocio_id=negocio["id"])
+    await mem.guardar_mensaje(telefono, "assistant", "A2", negocio_id=negocio["id"])
+    await _cerrar_no_venta_y_asignar(conv1.id, opp1.id)
+    conv2, _ = await _abrir_conversacion(negocio, canal, telefono)
+
+    previas = await mem.listar_conversaciones_previas_con_historial(conv2.id, negocio["id"])
+
+    assert len(previas) == 1
+    assert previas[0]["conversation_id"] == conv1.id
+    assert previas[0]["cerrado_definitivamente_en"] is not None
+    assert [m["content"] for m in previas[0]["mensajes"]] == ["A1", "A2"]
+
+
+async def test_previas_nunca_incluye_la_conversation_activa_misma():
+    negocio, canal = await _negocio_con_canal("g22-n", "20000000014")
+    conv, _ = await _abrir_conversacion(negocio, canal, "51900200012")
+    await mem.guardar_mensaje("51900200012", "user", "Hola", negocio_id=negocio["id"])
+
+    previas = await mem.listar_conversaciones_previas_con_historial(conv.id, negocio["id"])
+    assert previas == []  # la única Conversation que existe es la activa misma
+
+
+async def test_previas_ordenadas_de_mas_antigua_a_mas_reciente():
+    negocio, canal = await _negocio_con_canal("g22-o", "20000000015")
+    telefono = "51900200013"
+    conv1, opp1 = await _abrir_conversacion(negocio, canal, telefono)
+    await mem.guardar_mensaje(telefono, "user", "Ciclo 1", negocio_id=negocio["id"])
+    await _cerrar_no_venta_y_asignar(conv1.id, opp1.id)
+
+    conv2, opp2 = await _abrir_conversacion(negocio, canal, telefono)
+    await mem.guardar_mensaje(telefono, "user", "Ciclo 2", negocio_id=negocio["id"])
+    await _cerrar_no_venta_y_asignar(conv2.id, opp2.id)
+
+    conv3, _ = await _abrir_conversacion(negocio, canal, telefono)
+
+    previas = await mem.listar_conversaciones_previas_con_historial(conv3.id, negocio["id"])
+    assert [p["conversation_id"] for p in previas] == [conv1.id, conv2.id]
+    assert [p["mensajes"][0]["content"] for p in previas] == ["Ciclo 1", "Ciclo 2"]
+
+
+async def test_previas_omite_conversation_cerrada_sin_ningun_mensaje():
+    negocio, canal = await _negocio_con_canal("g22-p", "20000000016")
+    telefono = "51900200014"
+    conv1, opp1 = await _abrir_conversacion(negocio, canal, telefono)
+    # Nunca se guarda ningún mensaje en conv1 — se cierra "vacía".
+    await _cerrar_no_venta_y_asignar(conv1.id, opp1.id)
+    conv2, _ = await _abrir_conversacion(negocio, canal, telefono)
+
+    previas = await mem.listar_conversaciones_previas_con_historial(conv2.id, negocio["id"])
+    assert previas == []
+
+
+async def test_previas_devuelve_vacio_cross_tenant():
+    negocio_a, canal_a = await _negocio_con_canal("g22-q", "20000000017")
+    negocio_b, _ = await _negocio_con_canal("g22-r", "20000000018")
+    conv, _ = await _abrir_conversacion(negocio_a, canal_a, "51900200015")
+    assert await mem.listar_conversaciones_previas_con_historial(conv.id, negocio_b["id"]) == []
+
+
+async def test_ruta_conversaciones_previas_devuelve_bloque_scoped():
+    negocio, canal = await _negocio_con_canal("g22-s", "20000000019")
+    telefono = "51900200016"
+    conv1, opp1 = await _abrir_conversacion(negocio, canal, telefono)
+    await mem.guardar_mensaje(telefono, "user", "A1", negocio_id=negocio["id"])
+    await _cerrar_no_venta_y_asignar(conv1.id, opp1.id)
+    conv2, _ = await _abrir_conversacion(negocio, canal, telefono)
+
+    admin = {"username": "admin1", "rol": "admin", "negocio_id": negocio["id"]}
+    respuesta = await dashboard.conversation_previas_json(conv2.id, usuario=admin)
+
+    import json
+    cuerpo = json.loads(respuesta.body)
+    assert len(cuerpo) == 1
+    assert cuerpo[0]["conversation_id"] == conv1.id
+    assert [m["content"] for m in cuerpo[0]["mensajes"]] == ["A1"]
+
+
+async def test_ruta_conversaciones_previas_404_cross_tenant():
+    negocio_a, canal_a = await _negocio_con_canal("g22-t", "20000000020")
+    negocio_b, _ = await _negocio_con_canal("g22-u", "20000000021")
+    conv_a, _ = await _abrir_conversacion(negocio_a, canal_a, "51900200017")
+
+    admin_b = {"username": "admin_b", "rol": "admin", "negocio_id": negocio_b["id"]}
+    with pytest.raises(HTTPException) as exc:
+        await dashboard.conversation_previas_json(conv_a.id, usuario=admin_b)
+    assert exc.value.status_code == 404
+
+
+async def test_ruta_conversaciones_previas_403_asesor_sin_acceso():
+    negocio, canal = await _negocio_con_canal("g22-v", "20000000022")
+    conv, _ = await _abrir_conversacion(negocio, canal, "51900200018")
+    async with mem.async_session() as session:
+        c = await session.get(mem.Conversation, conv.id)
+        c.asesor_asignado_id = "asesor_dueno"
+        await session.commit()
+
+    asesor_ajeno = {"username": "otro_asesor", "rol": "asesor", "negocio_id": negocio["id"]}
+    with pytest.raises(HTTPException) as exc:
+        await dashboard.conversation_previas_json(conv.id, usuario=asesor_ajeno)
+    assert exc.value.status_code == 403
