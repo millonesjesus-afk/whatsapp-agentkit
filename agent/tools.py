@@ -10,6 +10,7 @@ conocimiento del programa, para dar contexto real a las respuestas de Gabi.
 import os
 import re
 import glob
+import itertools
 import logging
 from datetime import datetime, time
 from zoneinfo import ZoneInfo
@@ -42,6 +43,83 @@ def _precio_float(producto: dict) -> float:
         return float("inf")
 
 
+# Gate 2026-09-23 (hallazgo real: Gabi solo ofrecía termas de 5.5L aunque el
+# cliente necesitaba más capacidad) — la capacidad (litros/min) NUNCA vive en
+# TIPO/SUB TIPO/MARCA (los únicos campos que puntuaba `buscar_productos`),
+# solo aparece en el texto libre de DESCRIPCIÓN (ej. "TERMA SOLE 5.5 LT -
+# BASIC"). Sin este patrón, ninguna búsqueda distinguía productos por
+# capacidad — ni para priorizar un pedido explícito ("terma de 12 litros")
+# ni para variar qué capacidades le llegan a Gabi cuando el cliente solo dice
+# "terma" en general.
+_PATRON_CAPACIDAD = re.compile(r"(\d+(?:[.,]\d+)?)\s*(?:LTS?|LITROS?|L\s*/\s*M[IÍ]N)\b")
+
+
+def _capacidad_de(producto: dict) -> float | None:
+    """Extrae la capacidad (litros/min) de la DESCRIPCIÓN del producto, si
+    tiene una. `None` para productos sin capacidad detectable (accesorios,
+    servicios, combos sin ese dato) — se tratan como su propio grupo, nunca
+    se descartan."""
+    descripcion = (producto.get("DESCRIPCIÓN") or "").upper()
+    m = _PATRON_CAPACIDAD.search(descripcion)
+    return float(m.group(1).replace(",", ".")) if m else None
+
+
+def _capacidad_pedida_en_mensaje(mensaje: str) -> float | None:
+    """Misma extracción que `_capacidad_de`, pero sobre lo que escribió el
+    cliente — exige la unidad (LT/LITROS/L POR MIN) pegada al número a
+    propósito: un mensaje como "somos 5 personas" no debe confundirse con
+    "quiero 5 litros". Sin la unidad explícita, no hay pedido de capacidad
+    que priorizar — se deja que la diversidad de `_seleccionar_diversos_
+    por_capacidad` haga su trabajo en vez de adivinar."""
+    m = _PATRON_CAPACIDAD.search(mensaje.upper())
+    return float(m.group(1).replace(",", ".")) if m else None
+
+
+def _seleccionar_diversos_por_capacidad(candidatos: list[dict], limite: int) -> list[dict]:
+    """Reparte la selección entre las distintas capacidades presentes en
+    `candidatos` (una por una, la más barata de cada capacidad primero, en
+    vueltas) en vez de tomar sencillamente las `limite` más baratas — así una
+    capacidad con muchas variantes de precio (ej. 22 termas de 5.5L) no tapa
+    a las de mayor capacidad, que son más caras y quedarían siempre afuera
+    del corte. Termina reordenando el resultado por precio ascendente, para
+    mantener el contrato ya documentado en `buscar_productos` ("opción 1 = la
+    más barata [de las que se muestran]").
+
+    Si `candidatos` ya entra dentro de `limite`, el resultado es exactamente
+    el mismo conjunto (solo reordenado) — esta función nunca agrega ni quita
+    productos, solo decide CUÁLES quedan cuando hay que recortar."""
+    if len(candidatos) <= limite:
+        return sorted(candidatos, key=_precio_float)
+
+    grupos: dict[float | None, list[dict]] = {}
+    for producto in candidatos:
+        grupos.setdefault(_capacidad_de(producto), []).append(producto)
+    for lista in grupos.values():
+        lista.sort(key=_precio_float)
+
+    # None (sin capacidad detectada) al final — las capacidades reales son
+    # la señal más útil para diversificar; lo sin-capacidad se completa al
+    # final si todavía sobra espacio.
+    claves_ordenadas = sorted(grupos.keys(), key=lambda c: (c is None, c))
+    indices = dict.fromkeys(claves_ordenadas, 0)
+    seleccionados: list[dict] = []
+    while len(seleccionados) < limite:
+        avanzo = False
+        for clave in claves_ordenadas:
+            i = indices[clave]
+            if i < len(grupos[clave]):
+                seleccionados.append(grupos[clave][i])
+                indices[clave] += 1
+                avanzo = True
+                if len(seleccionados) >= limite:
+                    break
+        if not avanzo:
+            break
+
+    seleccionados.sort(key=_precio_float)
+    return seleccionados
+
+
 async def buscar_productos(
     mensaje: str, negocio_id: str | None, limite: int = 8, excluir_codigos: set[str] | None = None,
 ) -> list[dict]:
@@ -72,12 +150,21 @@ async def buscar_productos(
     Returns:
         Lista de productos coincidentes con sus datos de precio y cuotas,
         ordenados de mayor a menor relevancia y, dentro de eso, de menor a
-        mayor precio.
+        mayor precio — salvo que haya que recortar por `limite`: ver
+        `_seleccionar_diversos_por_capacidad` para cómo se decide QUIÉNES
+        quedan cuando sobran candidatos con la misma relevancia (nunca
+        "las más baratas y ya", eso escondía las de mayor capacidad).
     """
     if negocio_id is None:
         return []
     mensaje = mensaje.lower()
     excluir_codigos = excluir_codigos or set()
+    # Gate 2026-09-23 — hallazgo real: un cliente que necesitaba una terma de
+    # mayor capacidad (varios baños/personas) solo recibía opciones de 5.5L,
+    # la capacidad más barata — nunca porque el cliente la haya pedido, sino
+    # porque nada acá distinguía productos por capacidad. Ver el bloque de
+    # abajo y `_seleccionar_diversos_por_capacidad`.
+    capacidad_pedida = _capacidad_pedida_en_mensaje(mensaje)
     candidatos = []
     for producto in await listar_productos_activos(negocio_id):
         if producto.get("CODIGO HANA", "") in excluir_codigos:
@@ -94,12 +181,27 @@ async def buscar_productos(
             score += 1
         if tipo and tipo in mensaje:
             score += 1
+        # Un pedido de capacidad explícito ("terma de 12 litros") es la señal
+        # más específica que un cliente puede dar — se premia por encima de
+        # marca, para que no quede opacada por productos de otra capacidad
+        # que solo comparten tipo/marca. Solo aplica sobre candidatos que ya
+        # matchearon algo (score > 0): nunca mete un producto de otra
+        # categoría solo porque su capacidad coincide por casualidad.
+        if score > 0 and capacidad_pedida is not None and _capacidad_de(producto) == capacidad_pedida:
+            score += 3
 
         if score > 0:
             candidatos.append((score, producto))
 
-    candidatos.sort(key=lambda item: (-item[0], _precio_float(item[1])))
-    return [producto for _, producto in candidatos[:limite]]
+    candidatos.sort(key=lambda item: -item[0])
+    resultado: list[dict] = []
+    for _, grupo in itertools.groupby(candidatos, key=lambda item: item[0]):
+        faltan = limite - len(resultado)
+        if faltan <= 0:
+            break
+        productos_del_grupo = [producto for _, producto in grupo]
+        resultado.extend(_seleccionar_diversos_por_capacidad(productos_del_grupo, faltan))
+    return resultado
 
 
 async def obtener_producto_por_codigo(codigo: str, negocio_id: str | None) -> dict | None:
