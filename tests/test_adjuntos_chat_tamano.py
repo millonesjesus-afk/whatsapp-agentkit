@@ -8,6 +8,7 @@
 # límite real de Meta para imágenes, no un número arbitrario).
 
 from agent.dashboard import (
+    EXTENSIONES_ARCHIVO_PERMITIDAS,
     TAMANO_MAXIMO_DOCUMENTO_MB,
     TAMANO_MAXIMO_IMAGEN_MB,
     _tamano_maximo_para_extension,
@@ -39,3 +40,28 @@ def test_un_pdf_de_80mb_sigue_rechazandose():
     ochenta_mb_en_bytes = 80 * 1024 * 1024
     tope = _tamano_maximo_para_extension(".pdf")
     assert ochenta_mb_en_bytes > tope * 1024 * 1024
+
+
+# ── Gate 2026-09-23: Word/Excel/PowerPoint/texto — mismo set que WhatsApp
+# Cloud API acepta para mensajes de documento (referencia oficial de Meta).
+# Antes de este fix, `_tamano_maximo_para_extension` solo reconocía ".pdf"
+# como documento — cualquier extensión nueva caía por descarte en el tope
+# de 5MB de imagen, mucho más bajo de lo que Meta realmente permite.
+
+def test_word_excel_powerpoint_texto_estan_permitidos():
+    for extension in (".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx", ".txt"):
+        assert extension in EXTENSIONES_ARCHIVO_PERMITIDAS
+
+
+def test_word_excel_powerpoint_texto_usan_el_tope_de_documento_no_el_de_imagen():
+    for extension in (".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx", ".txt"):
+        assert _tamano_maximo_para_extension(extension) == TAMANO_MAXIMO_DOCUMENTO_MB
+
+
+def test_un_docx_de_30mb_pasa_el_tope_hoy_antes_hubiera_fallado_como_imagen():
+    """Antes del fix, un .docx de 30MB se hubiera rechazado por el tope de
+    5MB de imagen (caía por descarte) aunque Meta acepta documentos hasta
+    100MB — mismo tipo de hallazgo real que el del PDF (ver arriba)."""
+    treinta_mb_en_bytes = 30 * 1024 * 1024
+    tope = _tamano_maximo_para_extension(".docx")
+    assert treinta_mb_en_bytes <= tope * 1024 * 1024

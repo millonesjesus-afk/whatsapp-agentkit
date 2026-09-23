@@ -127,7 +127,17 @@ router = APIRouter(prefix="/dashboard")
 # contenedor es efímero — se pierde en cada redeploy); en local, una carpeta
 # normal alcanza. Ver ArchivoAdjunto en agent/memory.py para los metadatos.
 ARCHIVOS_DIR = os.getenv("ARCHIVOS_DIR", "data/archivos")
-EXTENSIONES_ARCHIVO_PERMITIDAS = {".pdf", ".jpg", ".jpeg", ".png"}
+# Gate 2026-09-23 (pedido del usuario: "los asesores también deben poder
+# enviar Word, PPT, imagen o Excel") — el set completo que WhatsApp Cloud
+# API acepta para mensajes de documento (confirmado contra la referencia
+# oficial de Meta: text/plain, Word, Excel, PowerPoint y PDF, todos hasta
+# 100MB — ver "Supported Media Types" en developers.facebook.com/docs/
+# whatsapp/cloud-api/reference/media). No es una elección nuestra: ninguna
+# herramienta que use la API de WhatsApp puede ir más allá de este set,
+# así que "lo que usa el mercado" es exactamente esto.
+EXTENSIONES_DOCUMENTO_PERMITIDAS = {".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx", ".txt"}
+EXTENSIONES_IMAGEN_PERMITIDAS = {".jpg", ".jpeg", ".png"}
+EXTENSIONES_ARCHIVO_PERMITIDAS = EXTENSIONES_DOCUMENTO_PERMITIDAS | EXTENSIONES_IMAGEN_PERMITIDAS
 TAMANO_MAXIMO_ARCHIVO_MB = 20  # audio / adjunto reutilizable / import CSV — sin cambios, no es el gap reportado
 # 2026-09-16, hallazgo del usuario: un PDF real (catálogo/proforma) de más
 # de 20MB no se podía adjuntar en el chat, aunque Meta acepta documentos
@@ -141,11 +151,14 @@ TAMANO_MAXIMO_IMAGEN_MB = 5
 
 def _tamano_maximo_para_extension(extension: str) -> int:
     """Tope de tamaño en MB para un adjunto de chat, según su extensión —
-    documentos con margen bajo el límite real de Meta (100MB), imágenes en
-    su límite real (5MB). Función separada (no inline en `enviar_archivo_
-    chat`) para poder probar la selección del tope sin tener que armar un
-    UploadFile/lead/canal real."""
-    return TAMANO_MAXIMO_DOCUMENTO_MB if extension == ".pdf" else TAMANO_MAXIMO_IMAGEN_MB
+    documentos (PDF/Word/Excel/PowerPoint/texto) con margen bajo el límite
+    real de Meta (100MB), imágenes en su límite real (5MB). Antes solo
+    reconocía ".pdf" como documento — cualquier extensión nueva (Word,
+    Excel, PowerPoint) caía por descarte en el tope de 5MB de imagen, muy
+    por debajo de lo que Meta realmente permite para esos tipos. Función
+    separada (no inline en `enviar_archivo_chat`) para poder probar la
+    selección del tope sin tener que armar un UploadFile/lead/canal real."""
+    return TAMANO_MAXIMO_DOCUMENTO_MB if extension in EXTENSIONES_DOCUMENTO_PERMITIDAS else TAMANO_MAXIMO_IMAGEN_MB
 
 NIVELES_ASESOR = ["junior", "intermedio", "senior"]
 ETAPAS_FUNNEL = ["explorando", "comparando_producto", "evaluando_financiamiento", "derivado_asesor"]
@@ -5340,7 +5353,7 @@ async def enviar_archivo_chat(
 
     extension = os.path.splitext(archivo.filename or "")[1].lower()
     if extension not in EXTENSIONES_ARCHIVO_PERMITIDAS:
-        raise HTTPException(status_code=400, detail="Solo se aceptan PDF, JPG o PNG")
+        raise HTTPException(status_code=400, detail="Solo se aceptan PDF, Word, Excel, PowerPoint, texto (.txt), JPG o PNG")
 
     # Tope por tipo (ver constantes arriba) — el frontend ya valida esto
     # ANTES de subir (`composer-conversacion.tsx`, `validarTamano`), esta es
@@ -5585,8 +5598,8 @@ async def gestionar_catalogos(request: Request, usuario: dict = Depends(_usuario
                     <input type="text" name="etiqueta" class="form-control form-control-sm" required placeholder="Ej: Catálogo general 2026">
                 </div>
                 <div class="col-md-6">
-                    <label class="form-label small text-muted mb-0">Archivo (PDF, JPG o PNG, máx. {TAMANO_MAXIMO_ARCHIVO_MB}MB)</label>
-                    <input type="file" name="archivo" class="form-control form-control-sm" accept=".pdf,.jpg,.jpeg,.png" required>
+                    <label class="form-label small text-muted mb-0">Archivo (PDF, Word, Excel, PowerPoint, texto, JPG o PNG, máx. {TAMANO_MAXIMO_ARCHIVO_MB}MB)</label>
+                    <input type="file" name="archivo" class="form-control form-control-sm" accept=".pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.txt,.jpg,.jpeg,.png" required>
                 </div>
                 <div class="col-md-2 d-flex align-items-end">
                     <button type="submit" class="btn btn-sm btn-primary w-100">Subir</button>
@@ -5599,8 +5612,8 @@ async def gestionar_catalogos(request: Request, usuario: dict = Depends(_usuario
     panel = f"""
     {_titulo_seccion('bi-folder-fill', 'Librería de catálogos')}
     <p class="text-muted small mb-3">
-        Catálogos, listas de precios en PDF o imágenes de referencia disponibles para elegir y
-        enviar desde el chat en cualquier conversación.
+        Catálogos, listas de precios en PDF, Word, Excel, PowerPoint o imágenes de referencia
+        disponibles para elegir y enviar desde el chat en cualquier conversación.
     </p>
     {mensaje_html}
     <div class="card leads-card shadow-sm mb-4">
@@ -5628,7 +5641,7 @@ async def subir_catalogo(
 ):
     extension = os.path.splitext(archivo.filename or "")[1].lower()
     if extension not in EXTENSIONES_ARCHIVO_PERMITIDAS:
-        raise HTTPException(status_code=400, detail="Solo se aceptan PDF, JPG o PNG")
+        raise HTTPException(status_code=400, detail="Solo se aceptan PDF, Word, Excel, PowerPoint, texto (.txt), JPG o PNG")
 
     contenido = await archivo.read()
     if len(contenido) > TAMANO_MAXIMO_ARCHIVO_MB * 1024 * 1024:
