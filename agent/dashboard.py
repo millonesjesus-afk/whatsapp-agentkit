@@ -109,11 +109,15 @@ def _badge_canal(numero_whatsapp_id: str | None, mapa_canales: dict, compacto: b
     return f'<span class="badge-suave" style="{extra}background-color:{bg};color:{texto}">{html.escape(canal["nombre"])}</span>'
 from agent.services.servicio_canales import servicio_canales
 from agent.brain import cargar_system_prompt, generar_resumen_conversacion
-from agent.tools import obtener_producto_por_codigo, buscar_productos
+from agent.tools import (
+    obtener_producto_por_codigo, buscar_productos, CUOTAS_MIN, CUOTAS_MAX,
+    calcular_cuota_producto, obtener_tasas_financiamiento,
+    CLAVE_CONFIG_TEA, CLAVE_CONFIG_IGV,
+)
 from agent.notificaciones import notificar_solicitud_reseteo, notificar_lead_derivado
 from agent.asignacion import UMBRAL_SENIOR_DEFAULT, UMBRAL_INTERMEDIO_DEFAULT
 from agent.services.servicio_comercial import (
-    servicio_comercial, MODALIDADES_PAGO, CUOTAS_DISPONIBLES, MEDIO_PAGO_FINANCIADO, MEDIOS_PAGO_CONTADO,
+    servicio_comercial, MODALIDADES_PAGO, MEDIO_PAGO_FINANCIADO, MEDIOS_PAGO_CONTADO,
 )
 from agent.services.servicio_identidad import servicio_identidad, NoAutenticado
 from agent.providers import obtener_proveedor
@@ -2729,6 +2733,10 @@ def _dto_conversation_detalle(conversation: dict, lineas: list[dict], eventos: l
             ],
             "modalidad_pago": conversation.get("modalidad_pago"),
             "cuotas": conversation.get("cuotas"),
+            "cuota_pactada": conversation.get("cuota_pactada"),
+            "monto_financiado": conversation.get("monto_financiado"),
+            "tea_pactada": conversation.get("tea_pactada"),
+            "igv_pactado": conversation.get("igv_pactado"),
             "medio_pago": conversation.get("medio_pago"),
             "total": _resumen_venta(lineas)["precio_venta"],
         }
@@ -2899,6 +2907,25 @@ async def opportunity_resultado(
     return await _json_conversation_actualizada(opp["conversation_id"], usuario["negocio_id"])
 
 
+@router.get("/financiamiento/cuota")
+async def financiamiento_cuota_preview(
+    monto: float, cuotas: int,
+    usuario: dict = Depends(_usuario_actual),
+):
+    """Gate 2026-09-23 — preview en vivo de la cuota mensual para
+    "Registrar venta": antes de guardar nada, el asesor ve cuánto sería el
+    pago real con la tasa configurada de este Negocio (nunca una de las 9
+    columnas fijas del catálogo, calculada al momento con
+    `calcular_cuota_producto`). Cualquier usuario autenticado puede
+    pedirlo — no expone nada que ya no vea en "Registrar venta"."""
+    if monto <= 0:
+        raise HTTPException(status_code=400, detail="El monto debe ser mayor a cero")
+    calculo = await calcular_cuota_producto(monto, usuario["negocio_id"], cuotas)
+    if calculo is None:
+        raise HTTPException(status_code=400, detail=f"Cuotas debe ser un número entre {CUOTAS_MIN} y {CUOTAS_MAX}")
+    return JSONResponse({"ok": True, **calculo})
+
+
 @router.post("/opportunity/{opportunity_id}/venta")
 async def opportunity_venta(
     opportunity_id: str,
@@ -2921,7 +2948,11 @@ async def opportunity_venta(
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-    campos: dict = {"modalidad_pago": venta["modalidad_pago"], "cuotas": venta["cuotas"], "medio_pago": venta["medio_pago"]}
+    pacto = await servicio_comercial.calcular_pacto_financiamiento(venta, usuario["negocio_id"], previo=opp)
+    campos: dict = {
+        "modalidad_pago": venta["modalidad_pago"], "cuotas": venta["cuotas"], "medio_pago": venta["medio_pago"],
+        **pacto,
+    }
     if venta["lineas"]:
         campos["resultado"] = "vendido"
 
@@ -2932,6 +2963,7 @@ async def opportunity_venta(
         "payload": {
             "lineas_venta": venta["lineas"], "modalidad_pago": venta["modalidad_pago"],
             "cuotas": venta["cuotas"], "medio_pago": venta["medio_pago"],
+            "cuota_pactada": pacto["cuota_pactada"],
         },
     }
     ok = await cerrar_opportunity_con_venta(
@@ -4138,10 +4170,6 @@ async def _bloque_gestion_lead(
         f'<option value="{m}" {"selected" if lead.get("modalidad_pago") == m else ""}>{html.escape(m.capitalize())}</option>'
         for m in MODALIDADES_PAGO
     )
-    opciones_cuotas = "".join(
-        f'<option value="{c}" {"selected" if lead.get("cuotas") == c else ""}>{c} meses</option>'
-        for c in CUOTAS_DISPONIBLES
-    )
     opciones_medio_contado = "".join(
         f'<option value="{html.escape(m)}" {"selected" if lead.get("medio_pago") == m else ""}>{html.escape(m)}</option>'
         for m in MEDIOS_PAGO_CONTADO
@@ -4235,11 +4263,10 @@ async def _bloque_gestion_lead(
                     </select>
                 </div>
                 <div class="mb-2" id="venta-campo-cuotas">
-                    <label class="form-label small text-muted mb-0">Cuotas</label>
-                    <select name="cuotas" id="venta-cuotas" class="form-select form-select-sm">
-                        <option value="">Selecciona...</option>
-                        {opciones_cuotas}
-                    </select>
+                    <label class="form-label small text-muted mb-0">Cuotas ({CUOTAS_MIN} a {CUOTAS_MAX} meses)</label>
+                    <input type="number" name="cuotas" id="venta-cuotas" class="form-control form-control-sm"
+                           min="{CUOTAS_MIN}" max="{CUOTAS_MAX}" step="1"
+                           value="{html.escape(lead.get('cuotas') or '')}" placeholder="Ej: 24">
                 </div>
                 <div class="mb-2">
                     <label class="form-label small text-muted mb-0">Medio de pago</label>
@@ -4887,6 +4914,10 @@ def _dto_lead_detalle(lead: dict, lineas: list[dict], eventos: list[dict]) -> di
             ],
             "modalidad_pago": lead.get("modalidad_pago"),
             "cuotas": lead.get("cuotas"),
+            "cuota_pactada": lead.get("cuota_pactada"),
+            "monto_financiado": lead.get("monto_financiado"),
+            "tea_pactada": lead.get("tea_pactada"),
+            "igv_pactado": lead.get("igv_pactado"),
             "medio_pago": lead.get("medio_pago"),
             # Mismo total que ya muestra la columna "Precio" de la tabla de
             # leads y de la exportación — se reusa _resumen_venta a propósito,
@@ -5859,6 +5890,7 @@ async def registrar_venta(
     # recortadas, la forma de pago ya normalizada), no el crudo del formulario:
     # antes anotaba `medio_pago: ""` en una venta financiada que en la fila
     # quedó como "Recibo de gas".
+    pacto = await servicio_comercial.calcular_pacto_financiamiento(venta, usuario["negocio_id"], previo=lead)
     evento = {
         "tipo": "venta_registrada",
         "descripcion": f"Registró una venta ({len(venta['lineas'])} producto(s), {venta['modalidad_pago'] or 'sin modalidad'})",
@@ -5866,9 +5898,13 @@ async def registrar_venta(
         "payload": {
             "lineas_venta": venta["lineas"], "modalidad_pago": venta["modalidad_pago"],
             "cuotas": venta["cuotas"], "medio_pago": venta["medio_pago"],
+            "cuota_pactada": pacto["cuota_pactada"],
         },
     }
-    campos = {"modalidad_pago": venta["modalidad_pago"], "cuotas": venta["cuotas"], "medio_pago": venta["medio_pago"]}
+    campos = {
+        "modalidad_pago": venta["modalidad_pago"], "cuotas": venta["cuotas"], "medio_pago": venta["medio_pago"],
+        **pacto,
+    }
     if venta["lineas"]:
         campos["resultado"] = "vendido"
 
@@ -5892,7 +5928,7 @@ async def registrar_venta(
     else:
         # Fallback — sin Contact/Conversation/Opportunity todavía para este
         # teléfono; Lead sigue siendo la única fuente hasta que exista.
-        await servicio_comercial.persistir_venta(telefono, venta)
+        await servicio_comercial.persistir_venta(telefono, venta, pacto)
         await registrar_evento_lead(
             telefono, tipo=evento["tipo"], descripcion=evento["descripcion"],
             autor=evento["autor"], payload=evento["payload"],
@@ -7391,6 +7427,7 @@ async def configuracion_json(usuario: dict = Depends(servicio_identidad.requiere
     identidad = await obtener_identidad_agente(usuario["negocio_id"])
     horarios = await listar_horarios_atencion(usuario["negocio_id"])
     canales = await listar_canales_whatsapp(negocio_id=usuario["negocio_id"])
+    tea, igv = await obtener_tasas_financiamiento(usuario["negocio_id"])
 
     negocio_json = None
     if negocio:
@@ -7421,6 +7458,12 @@ async def configuracion_json(usuario: dict = Depends(servicio_identidad.requiere
             }
             for c in canales
         ],
+        # Gate 2026-09-23 — tasa de financiamiento (TEA) e IGV que se usan
+        # para calcular EN VIVO las cuotas que Gabi menciona y las que se
+        # registran al cerrar una venta (ver agent/tools.py::
+        # calcular_cuota_producto). "La tasa puede variar en el tiempo"
+        # (pedido explícito) — por eso es editable acá, nunca hardcodeada.
+        "financiamiento": {"tea": tea, "igv": igv, "cuotas_min": CUOTAS_MIN, "cuotas_max": CUOTAS_MAX},
     })
 
 
@@ -7489,6 +7532,35 @@ async def actualizar_gabi_ruta(
             "nombre": identidad["nombre"], "tono": identidad["tono"],
             "prompt_configurado": True, "prompt_longitud": len(identidad["configuracion_negocio"]),
         },
+    })
+
+
+@router.post("/configuracion/financiamiento")
+async def actualizar_financiamiento_ruta(
+    request: Request,
+    usuario: dict = Depends(servicio_identidad.requiere_rol("admin")),
+    _csrf: None = Depends(verificar_csrf),
+):
+    """Edita la TEA/IGV que usa este Negocio para calcular cuotas en vivo
+    (Gate 2026-09-23) — "la tasa puede variar en el tiempo" (pedido
+    explícito), así que queda editable acá en vez de hardcodeada. Ambas se
+    guardan como fracción (0.40, no 40) — mismo criterio que el resto del
+    catálogo financiero del sistema."""
+    body = await request.json()
+    try:
+        tea = float(body.get("tea"))
+        igv = float(body.get("igv"))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="TEA e IGV deben ser números")
+    if not (0 <= tea <= 5):
+        raise HTTPException(status_code=400, detail="La TEA debe ser un valor entre 0 y 5 (ej. 0.40 = 40%)")
+    if not (0 <= igv <= 1):
+        raise HTTPException(status_code=400, detail="El IGV debe ser un valor entre 0 y 1 (ej. 0.18 = 18%)")
+    await guardar_configuracion(CLAVE_CONFIG_TEA, str(tea), negocio_id=usuario["negocio_id"])
+    await guardar_configuracion(CLAVE_CONFIG_IGV, str(igv), negocio_id=usuario["negocio_id"])
+    return JSONResponse({
+        "ok": True,
+        "financiamiento": {"tea": tea, "igv": igv, "cuotas_min": CUOTAS_MIN, "cuotas_max": CUOTAS_MAX},
     })
 
 

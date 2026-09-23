@@ -15,7 +15,10 @@ import logging
 from datetime import datetime, time
 from zoneinfo import ZoneInfo
 
-from agent.memory import listar_productos_activos, obtener_producto_por_codigo_hana, listar_horarios_atencion
+from agent.memory import (
+    listar_productos_activos, obtener_producto_por_codigo_hana, listar_horarios_atencion,
+    obtener_configuracion,
+)
 
 logger = logging.getLogger("agentkit")
 
@@ -24,6 +27,114 @@ DIAS_ES = ["lunes", "martes", "miércoles", "jueves", "viernes", "sábado", "dom
 
 KNOWLEDGE_DIR = "knowledge"
 PLAZOS_A_MOSTRAR = ("12", "24", "36")
+
+# Gate 2026-09-23 (pedido explícito del usuario, tras compartir la plantilla
+# real de cálculo) — la cuota YA NO viene de 9 columnas fijas y
+# pre-calculadas del catálogo (3/6/9/12/18/24/36/48/60 meses; cualquier otro
+# número, ej. 15, sencillamente no tenía ninguna respuesta posible). Se
+# calcula EN VIVO con una tasa configurable POR NEGOCIO (nunca hardcodeada —
+# "la tasa puede variar en el tiempo", pedido explícito), usando el mismo
+# sistema francés de amortización + IGV sobre el interés que ya usaba la
+# plantilla Excel del negocio — verificado cifra por cifra contra varios
+# productos reales del catálogo antes de construir esto (ver conversación).
+CUOTAS_MIN = 1
+CUOTAS_MAX = 60
+CLAVE_CONFIG_TEA = "tea_financiamiento"
+CLAVE_CONFIG_IGV = "igv_financiamiento"
+# Defaults = los valores reales de la plantilla del usuario al momento de
+# este Gate — nunca se inventan, son el punto de partida real del negocio
+# hasta que un admin los cambie desde Configuración.
+TEA_POR_DEFECTO = "0.40"
+IGV_POR_DEFECTO = "0.18"
+
+
+def _calcular_amortizacion(monto: float, tea: float, igv: float, num_cuotas: int) -> dict:
+    """Sistema francés de amortización (cuota base CONSTANTE en capital+interés)
+    + IGV aplicado solo sobre el interés de cada periodo, nunca sobre el
+    capital — mismo criterio que la plantilla de cálculo real del negocio.
+
+    `cuota_inicial` (el importe del PRIMER periodo) es el número que ya se
+    usaba como "la cuota" en las columnas fijas del catálogo — es el periodo
+    de mayor interés (saldo completo) y por lo tanto el de mayor IGV, así
+    que es también el importe más alto de todo el cronograma. Se replica
+    ese mismo criterio a propósito, no uno nuevo — confirmado cifra por
+    cifra contra el catálogo real (ver tests).
+
+    `num_cuotas=1` es un caso aparte: no hay periodos intermedios que
+    amortizar, un solo pago con un mes de interés sobre el monto completo."""
+    if monto <= 0 or num_cuotas < 1:
+        return {"cuota_inicial": 0.0, "total_a_pagar": 0.0, "total_intereses": 0.0}
+
+    tem = (1 + tea) ** (1 / 12) - 1
+
+    if num_cuotas == 1:
+        interes = monto * tem
+        cuota = monto + interes * (1 + igv)
+        return {
+            "cuota_inicial": round(cuota, 2),
+            "total_a_pagar": round(cuota, 2),
+            "total_intereses": round(interes, 2),
+        }
+
+    cuota_base = monto * tem / (1 - (1 + tem) ** -num_cuotas)
+    saldo = monto
+    total_a_pagar = 0.0
+    total_intereses = 0.0
+    cuota_inicial = None
+    for _ in range(num_cuotas):
+        interes = saldo * tem
+        capital = cuota_base - interes
+        cuota_total = capital + interes * (1 + igv)
+        if cuota_inicial is None:
+            cuota_inicial = cuota_total
+        total_a_pagar += cuota_total
+        total_intereses += interes
+        saldo -= capital
+
+    return {
+        "cuota_inicial": round(cuota_inicial, 2),
+        "total_a_pagar": round(total_a_pagar, 2),
+        "total_intereses": round(total_intereses, 2),
+    }
+
+
+async def obtener_tasas_financiamiento(negocio_id: str) -> tuple[float, float]:
+    """TEA/IGV configurados para ESTE negocio (tabla `configuracion`, ver
+    agent/memory.py — mismo patrón ya usado para los umbrales de asignación
+    automática, sin migración nueva). Nunca None: sin una tasa real no hay
+    ninguna cuota que mostrar con sentido — cae al default documentado
+    arriba (los valores reales de la plantilla del usuario) hasta que un
+    admin configure los suyos."""
+    tea = await obtener_configuracion(CLAVE_CONFIG_TEA, TEA_POR_DEFECTO, negocio_id=negocio_id)
+    igv = await obtener_configuracion(CLAVE_CONFIG_IGV, IGV_POR_DEFECTO, negocio_id=negocio_id)
+    return float(tea), float(igv)
+
+
+async def calcular_cuota_producto(monto: float, negocio_id: str, num_cuotas: int) -> dict | None:
+    """Punto de entrada público — resuelve la tasa configurada de ESTE
+    negocio y calcula. `None` si `num_cuotas` cae fuera del rango real (1 a
+    60) en vez de calcular algo sin sentido de negocio."""
+    if not (CUOTAS_MIN <= num_cuotas <= CUOTAS_MAX):
+        return None
+    tea, igv = await obtener_tasas_financiamiento(negocio_id)
+    return _calcular_amortizacion(monto, tea, igv, num_cuotas)
+
+
+_PATRON_CUOTAS_PEDIDAS = re.compile(r"\b(\d{1,2})\s*(?:cuotas?|meses)\b", re.IGNORECASE)
+
+
+def _cuotas_pedidas_en_mensaje(mensaje: str) -> int | None:
+    """Detecta si el cliente pidió un número PUNTUAL de cuotas/meses (ej.
+    "en 15 cuotas", "a 24 meses") — para poder calcularle esa cuota exacta
+    aunque no sea uno de los plazos que ya se muestran de entrada
+    (`PLAZOS_A_MOSTRAR`). `None` si no hay un pedido reconocible, o si el
+    número está fuera del rango real (1 a 60) — nunca se inventa un cálculo
+    fuera de lo que el negocio realmente financia."""
+    m = _PATRON_CUOTAS_PEDIDAS.search(mensaje)
+    if not m:
+        return None
+    n = int(m.group(1))
+    return n if CUOTAS_MIN <= n <= CUOTAS_MAX else None
 
 # El catálogo de productos vive en Postgres (tabla `productos`, ver
 # agent/memory.py) desde el bloque "Catálogo editable — sub-bloque a"
@@ -281,7 +392,7 @@ async def obtener_familia_producto(codigo_material: str, negocio_id: str | None)
     return familia
 
 
-def formatear_producto(producto: dict) -> str:
+def formatear_producto(producto: dict, tea: float, igv: float) -> str:
     """Da formato legible a un producto del catálogo.
 
     Combo/Incluye conexión (2026-09-16, pedido explícito: "cuando a Gabi le
@@ -291,7 +402,13 @@ def formatear_producto(producto: dict) -> str:
     catálogo (ver Producto.combo/incluye_conexion en agent/memory.py): Gabi
     literalmente no tenía cómo saberlo, porque nunca llegaba a este texto.
     Es justo la explicación más común de por qué dos filas del mismo modelo
-    tienen precios distintos — sin esto Gabi no podía dar esa razón."""
+    tienen precios distintos — sin esto Gabi no podía dar esa razón.
+
+    Gate 2026-09-23 — las cuotas ya NO se leen de las columnas fijas del
+    catálogo (3/6/9/12/18/24/36/48/60), se calculan EN VIVO con la tasa
+    (`tea`/`igv`) que ya resolvió quien llama (ver `obtener_tasas_
+    financiamiento`) — una sola vez por negocio, no una consulta por
+    producto. Ver `_calcular_amortizacion` para la fórmula."""
     marca = producto.get("MARCA", "")
     descripcion = producto.get("DESCRIPCIÓN", "")
     precio = producto.get("PRECIO", "")
@@ -299,11 +416,11 @@ def formatear_producto(producto: dict) -> str:
     combo = producto.get("COMBO", "")
     incluye_conexion = producto.get("INCLUYE CONEXIÓN", "")
 
+    monto = _precio_float(producto)
     cuotas = [
-        f"{plazo} meses: S/ {producto[plazo]}"
+        f"{plazo} meses: S/ {_calcular_amortizacion(monto, tea, igv, int(plazo))['cuota_inicial']:.2f}"
         for plazo in PLAZOS_A_MOSTRAR
-        if producto.get(plazo)
-    ]
+    ] if monto != float("inf") else []
 
     lineas = [f"{marca} — {descripcion}", f"Precio: S/ {precio}", f"Canal: {canal}"]
     if combo:
@@ -453,8 +570,12 @@ async def obtener_contexto_relevante(
     # de este contexto, no un cambio al default de la función.
     productos = await buscar_productos(mensaje, negocio_id, limite=5, excluir_codigos=excluir_codigos)
     if productos:
+        # negocio_id no puede ser None acá — buscar_productos ya devuelve []
+        # en ese caso (falla cerrado), así que si `productos` no está vacío
+        # es porque negocio_id era real.
+        tea, igv = await obtener_tasas_financiamiento(negocio_id)
         productos_texto = "\n\n".join(
-            f"{i}. {formatear_producto(p)}" for i, p in enumerate(productos, 1)
+            f"{i}. {formatear_producto(p, tea, igv)}" for i, p in enumerate(productos, 1)
         )
         secciones.append(
             "Productos del catálogo relacionados (numerados y ordenados de menor a "
@@ -462,6 +583,22 @@ async def obtener_contexto_relevante(
             "para responder de forma consistente a preguntas como \"la más barata\" "
             f"[opción 1] o \"la segunda más barata\" [opción 2]):\n{productos_texto}"
         )
+
+        # Gate 2026-09-23 — el cliente pidió un número PUNTUAL de cuotas que
+        # no es uno de los plazos que ya se muestran arriba (ej. "¿y en 15
+        # cuotas?") — se calcula aparte, solo para el producto más relevante
+        # (el primero de la lista), para no inflar el contexto repitiéndolo
+        # por cada producto mostrado.
+        cuotas_pedidas = _cuotas_pedidas_en_mensaje(mensaje)
+        if cuotas_pedidas is not None and str(cuotas_pedidas) not in PLAZOS_A_MOSTRAR:
+            monto_principal = _precio_float(productos[0])
+            if monto_principal != float("inf"):
+                calculo = _calcular_amortizacion(monto_principal, tea, igv, cuotas_pedidas)
+                secciones.append(
+                    f"El cliente preguntó puntualmente por {cuotas_pedidas} cuotas/meses — "
+                    f"para la opción 1 ({productos[0].get('DESCRIPCIÓN', '')}) esa cuota "
+                    f"sería S/ {calculo['cuota_inicial']:.2f} al mes."
+                )
 
     conocimiento = buscar_en_knowledge(mensaje, negocio_codigo)
     if conocimiento:

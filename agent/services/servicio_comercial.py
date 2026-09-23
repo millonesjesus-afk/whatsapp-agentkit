@@ -18,14 +18,48 @@ router traduce el `ValueError` a la respuesta HTTP, igual que antes.
 """
 
 import json
+import re
 
 from agent import asignacion
 from agent.memory import guardar_venta, ids_de_productos_existentes
+from agent.tools import CUOTAS_MIN, CUOTAS_MAX, obtener_tasas_financiamiento, _calcular_amortizacion
+
+CAMPOS_PACTO = ("monto_financiado", "cuota_pactada", "tea_pactada", "igv_pactado")
+_PACTO_VACIO = {campo: None for campo in CAMPOS_PACTO}
+_PATRON_PRECIO = re.compile(r"^\s*(?:S/\.?)?\s*([\d.,]+)\s*$", re.IGNORECASE)
+
+
+def _monto_de_lineas(lineas: list[dict]) -> float | None:
+    """Suma de los precios de las líneas, o None si alguno no es un número
+    limpio ("EN CREACIÓN", "1200 + a convenir"): sin un monto exacto no se
+    congela una cuota — antes que inventar un pacto sobre un total a medias."""
+    total = 0.0
+    for l in lineas:
+        m = _PATRON_PRECIO.match(str(l.get("precio") or ""))
+        if not m:
+            return None
+        try:
+            total += float(m.group(1).replace(",", ""))
+        except ValueError:
+            return None
+    return total if total > 0 else None
 
 MODALIDADES_PAGO = ["financiado", "contado"]
-CUOTAS_DISPONIBLES = ["12", "24", "36"]
 MEDIO_PAGO_FINANCIADO = "Recibo de gas"
 MEDIOS_PAGO_CONTADO = ["QR", "Link de pago", "Abono a cuenta corriente", "Otro"]
+
+
+def _cuotas_en_rango_valido(cuotas: str) -> bool:
+    """Gate 2026-09-23 — antes `cuotas` se validaba contra una lista fija de
+    3 valores (12/24/36, las únicas que el catálogo traía pre-calculadas).
+    Ahora la cuota se calcula en vivo con una tasa configurable (ver
+    agent/tools.py::calcular_cuota_producto) — cualquier entero real del
+    rango que financia el negocio (1 a 60) es válido, no solo esos 3."""
+    try:
+        n = int(cuotas)
+    except (TypeError, ValueError):
+        return False
+    return CUOTAS_MIN <= n <= CUOTAS_MAX
 
 
 def _id_producto(valor) -> int | None:
@@ -68,8 +102,8 @@ class ServicioComercial:
         # en el form cuando es contado, así que si llega igual, se ignora.
         if modalidad_pago != "financiado":
             cuotas = ""
-        elif cuotas and cuotas not in CUOTAS_DISPONIBLES:
-            raise ValueError("Cuotas inválidas")
+        elif cuotas and not _cuotas_en_rango_valido(cuotas):
+            raise ValueError(f"Cuotas inválidas — debe ser un número entre {CUOTAS_MIN} y {CUOTAS_MAX}")
         if modalidad_pago == "financiado":
             medio_pago = MEDIO_PAGO_FINANCIADO
         elif medio_pago and medio_pago not in MEDIOS_PAGO_CONTADO:
@@ -141,7 +175,47 @@ class ServicioComercial:
                 f"El producto seleccionado ya no existe en el catálogo (id {faltantes[0]})"
             )
 
-    async def persistir_venta(self, telefono: str, venta: dict) -> None:
+    async def calcular_pacto_financiamiento(
+        self, venta: dict, negocio_id: str, previo: dict | None,
+    ) -> dict:
+        """Cuota mensual PACTADA de esta venta, lista para guardarse junto con
+        ella (`monto_financiado`, `cuota_pactada`, `tea_pactada`, `igv_pactado`).
+
+        Regla de congelado (pedido del usuario, 2026-09-23): la tasa del negocio
+        puede cambiar, pero una venta ya pactada no se recalcula — el cambio
+        aplica solo a financiamientos nuevos.
+          · Si la venta ya tenía un pacto y NO cambió lo financiado (mismas
+            cuotas y mismo monto), se conserva tal cual, con la tasa de entonces.
+          · Si es una venta financiada nueva, o el asesor cambió las cuotas o el
+            carrito, es un financiamiento nuevo: se calcula con la tasa vigente.
+          · Contado, sin líneas, o sin un monto numérico exacto: sin pacto
+            (los cuatro campos en None, que sobrescribe cualquier pacto viejo).
+
+        `previo` es la venta tal como está guardada ahora (Lead/Opportunity),
+        o None si no hay nada guardado."""
+        if venta["modalidad_pago"] != "financiado" or not venta["cuotas"] or not venta["lineas"]:
+            return dict(_PACTO_VACIO)
+        monto = _monto_de_lineas(venta["lineas"])
+        if monto is None:
+            return dict(_PACTO_VACIO)
+
+        if previo and previo.get("cuota_pactada") and previo.get("cuotas") == venta["cuotas"]:
+            try:
+                if abs(float(previo["monto_financiado"]) - monto) < 0.005:
+                    return {campo: previo.get(campo) for campo in CAMPOS_PACTO}
+            except (TypeError, ValueError):
+                pass
+
+        tea, igv = await obtener_tasas_financiamiento(negocio_id)
+        calculo = _calcular_amortizacion(monto, tea, igv, int(venta["cuotas"]))
+        return {
+            "monto_financiado": f"{monto:.2f}",
+            "cuota_pactada": f"{calculo['cuota_inicial']:.2f}",
+            "tea_pactada": str(tea),
+            "igv_pactado": str(igv),
+        }
+
+    async def persistir_venta(self, telefono: str, venta: dict, pacto: dict | None = None) -> None:
         """Escribe una venta YA validada por `validar_venta`. No valida nada:
         recibir datos crudos acá es un error de programación, no una entrada
         de usuario.
@@ -164,6 +238,8 @@ class ServicioComercial:
         # estado anterior del lead DENTRO de la misma transacción.
         if lineas:
             campos["resultado"] = "vendido"
+        if pacto is not None:
+            campos.update(pacto)
 
         # `cuotas` va como campo explícito: al pasar de financiado a contado,
         # validar_venta() lo normaliza a "" ("las cuotas ya no aplican"), y sin
@@ -174,7 +250,7 @@ class ServicioComercial:
         # el vacío viene de una regla de negocio, no de "no sé".
         await guardar_venta(
             telefono, lineas, campos,
-            campos_explicitos=("cuotas",),
+            campos_explicitos=("cuotas",) + (CAMPOS_PACTO if pacto is not None else ()),
             revertir_resultado_al_vaciar=True,
         )
 
@@ -187,7 +263,8 @@ class ServicioComercial:
         de ruta sí las separa (ver validar_venta)."""
         venta = self.validar_venta(lineas_venta_json, modalidad_pago, cuotas, medio_pago)
         await self.validar_productos_de_venta(venta, negocio_id)
-        await self.persistir_venta(telefono, venta)
+        pacto = await self.calcular_pacto_financiamiento(venta, negocio_id, previo=None)
+        await self.persistir_venta(telefono, venta, pacto)
 
 
 # Instancia compartida por todo el proceso — mismo patrón que

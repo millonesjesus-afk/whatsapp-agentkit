@@ -465,6 +465,14 @@ class Lead(Base):
     modalidad_pago: Mapped[str | None] = mapped_column(String(30), nullable=True)  # financiado | contado
     # Solo aplica si modalidad_pago == "financiado" (plazo en meses: 12/24/36)
     cuotas: Mapped[str | None] = mapped_column(String(10), nullable=True)
+    # Pacto de financiamiento CONGELADO al cerrar la venta (Gate 2026-09-23):
+    # monto financiado, cuota mensual pactada y la TEA/IGV vigentes en ese
+    # momento. Cambiar la tasa del negocio después NO los toca — solo aplica a
+    # financiamientos nuevos. Ver ServicioComercial.calcular_pacto_financiamiento.
+    monto_financiado: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    cuota_pactada: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    tea_pactada: Mapped[str | None] = mapped_column(String(10), nullable=True)
+    igv_pactado: Mapped[str | None] = mapped_column(String(10), nullable=True)
     # Si financiado: siempre "Recibo de gas" (única opción). Si contado: el
     # canal que eligió el asesor (QR, Link de pago, Abono a cta cte, Otro).
     medio_pago: Mapped[str | None] = mapped_column(String(50), nullable=True)
@@ -1204,6 +1212,11 @@ class Opportunity(Base):
     fecha_cierre: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     modalidad_pago: Mapped[str | None] = mapped_column(String(30), nullable=True)
     cuotas: Mapped[str | None] = mapped_column(String(10), nullable=True)
+    # Pacto congelado — mismo significado que en Lead (ver allá).
+    monto_financiado: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    cuota_pactada: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    tea_pactada: Mapped[str | None] = mapped_column(String(10), nullable=True)
+    igv_pactado: Mapped[str | None] = mapped_column(String(10), nullable=True)
     medio_pago: Mapped[str | None] = mapped_column(String(50), nullable=True)
     version: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     creado: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
@@ -1959,6 +1972,10 @@ async def obtener_conversation_detalle(conversation_id: str, negocio_id: str) ->
             "fecha_cierre": opportunity.fecha_cierre if opportunity else None,
             "modalidad_pago": opportunity.modalidad_pago if opportunity else None,
             "cuotas": opportunity.cuotas if opportunity else None,
+            "monto_financiado": opportunity.monto_financiado if opportunity else None,
+            "cuota_pactada": opportunity.cuota_pactada if opportunity else None,
+            "tea_pactada": opportunity.tea_pactada if opportunity else None,
+            "igv_pactado": opportunity.igv_pactado if opportunity else None,
             "medio_pago": opportunity.medio_pago if opportunity else None,
             "asesor_asignado": conversation.asesor_asignado_id,
             "pausado_manual": conversation.pausado_manual,
@@ -2036,6 +2053,9 @@ async def resolver_opportunity_operable(opportunity_id: str, negocio_id: str) ->
             "id": opportunity.id, "conversation_id": opportunity.conversation_id,
             "version": opportunity.version, "resultado": opportunity.resultado,
             "asesor_asignado": conversation.asesor_asignado_id if conversation else None,
+            "cuotas": opportunity.cuotas, "monto_financiado": opportunity.monto_financiado,
+            "cuota_pactada": opportunity.cuota_pactada, "tea_pactada": opportunity.tea_pactada,
+            "igv_pactado": opportunity.igv_pactado,
         }
 
 
@@ -3307,6 +3327,10 @@ def _lead_a_dict(lead: Lead) -> dict:
         "proveedor_venta": lead.proveedor_venta,
         "modalidad_pago": lead.modalidad_pago,
         "cuotas": lead.cuotas,
+        "monto_financiado": lead.monto_financiado,
+        "cuota_pactada": lead.cuota_pactada,
+        "tea_pactada": lead.tea_pactada,
+        "igv_pactado": lead.igv_pactado,
         "medio_pago": lead.medio_pago,
         "visto_asesor": lead.visto_asesor,
         "revision_prioritaria": lead.revision_prioritaria,
@@ -3607,6 +3631,7 @@ async def actualizar_lead(
 _CAMPOS_OPPORTUNITY = (
     "interes", "producto_tipo", "producto_marca", "producto_modalidad",
     "resultado", "fecha_agendada", "fecha_cierre", "modalidad_pago", "cuotas", "medio_pago",
+    "monto_financiado", "cuota_pactada", "tea_pactada", "igv_pactado",
 )
 _CAMPOS_CONVERSATION = (
     "paso_flujo", "visto_asesor", "fallos_tecnicos", "pausado_manual",

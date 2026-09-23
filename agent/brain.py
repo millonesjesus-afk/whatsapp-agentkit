@@ -24,7 +24,10 @@ import logging
 from anthropic import AsyncAnthropic
 from dotenv import load_dotenv
 
-from agent.tools import obtener_contexto_relevante, obtener_estado_horario_atencion, formatear_producto
+from agent.tools import (
+    obtener_contexto_relevante, obtener_estado_horario_atencion, formatear_producto,
+    obtener_tasas_financiamiento,
+)
 from agent.memory import obtener_campana_por_nombre, obtener_configuracion, obtener_identidad_agente, obtener_negocio
 from agent.campanas import resolver_promo, resolver_familia_promo, obtener_codigos_promocionales_activos
 
@@ -385,7 +388,10 @@ async def _armar_bloques_contexto(
                 codigos_propios = {p.get("CODIGO HANA", "") for p in familia}
                 otras_variantes = [p for p in familia if p.get("CODIGO HANA") != campana.get("codigo_material")]
                 if otras_variantes:
-                    variantes_texto = "\n".join(f"- {formatear_producto(p)}" for p in otras_variantes)
+                    tea_promo, igv_promo = await obtener_tasas_financiamiento(negocio_id)
+                    variantes_texto = "\n".join(
+                        f"- {formatear_producto(p, tea_promo, igv_promo)}" for p in otras_variantes
+                    )
                     bloques.append(
                         f"Otras variantes de instalación de ese mismo producto, también a precio "
                         f"promocional de esta campaña (ofrécelas solo si el cliente pregunta por "
