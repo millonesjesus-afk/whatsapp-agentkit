@@ -68,6 +68,9 @@ class ServicioInteligencia:
     def obtener_mensaje_escalado_por_confianza(self) -> str:
         return brain.obtener_mensaje_escalado_por_confianza()
 
+    def obtener_mensaje_derivacion(self, dentro_de_horario: bool) -> str:
+        return brain.obtener_mensaje_derivacion(dentro_de_horario)
+
     async def resolver_accion_confianza(self, confianza: str) -> str:
         """Traduce un nivel de confianza emitido por el AI Engine en la
         acción de negocio configurada para ese nivel — nunca al revés: el

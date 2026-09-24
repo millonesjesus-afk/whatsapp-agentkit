@@ -341,6 +341,23 @@ def obtener_mensaje_escalado_por_confianza() -> str:
     )
 
 
+def obtener_mensaje_derivacion(dentro_de_horario: bool) -> str:
+    """Aviso al cliente cuando el sistema lo derivó a un asesor pero la
+    respuesta de Gabi no lo dijo (red de seguridad determinista de
+    agent/main.py — el prompt lo pide, pero un LLM no lo garantiza)."""
+    config = cargar_config_prompts()
+    if dentro_de_horario:
+        return config.get(
+            "derivacion_dentro_horario_message",
+            "Te estoy derivando con un asesor comercial 😊 En breve continuará la conversación contigo.",
+        )
+    return config.get(
+        "derivacion_fuera_horario_message",
+        "Te estoy derivando con un asesor comercial 😊 Ahora estamos fuera del horario de atención, "
+        "pero te contactará apenas se reinicie.",
+    )
+
+
 async def _armar_bloques_contexto(
     mensaje: str, historial: list[dict], lead: dict | None, negocio_id: str | None,
 ) -> list[str]:

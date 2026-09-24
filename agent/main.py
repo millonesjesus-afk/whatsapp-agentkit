@@ -9,6 +9,7 @@ Funciona con el proveedor Meta Cloud API a través de la capa de providers.
 import asyncio
 import contextlib
 import os
+import re
 import logging
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, HTTPException
@@ -33,6 +34,7 @@ from agent.dashboard import (
 from agent.tiempo_real import gestor_conexiones
 from agent.debounce import gestor_debounce_respuestas
 from agent.notificaciones import notificar_lead_derivado
+from agent.tools import obtener_estado_horario_atencion
 from agent.services.servicio_comercial import servicio_comercial
 from agent.services.servicio_canales import servicio_canales
 from agent.services.servicio_conversacion import servicio_conversacion
@@ -463,22 +465,57 @@ async def _generar_y_enviar_respuesta_ia(telefono: str, canal: dict | None) -> N
     datos_lead = await servicio_inteligencia.extraer_datos_lead(texto_actual, respuesta, lead)
     await actualizar_lead(telefono, **datos_lead)
 
-    # Si el lead recién pasa a "derivado_asesor" (no lo estaba antes): se le
-    # asigna automáticamente un asesor disponible (según nivel de
-    # experiencia y carga actual) y se avisa al equipo por correo. El
-    # supervisor/admin siempre puede reasignar manualmente después.
+    # Derivación a asesor. Se decide por HECHOS —el lead está derivado y no
+    # tiene asesor— y no por "acaba de pasar a derivado" (2026-09-23, hallazgo
+    # real en una demo): un lead que ya había sido derivado antes y cuya
+    # asignación se liberó (a mano, o por el timeout de inactividad) volvía a
+    # pedir un asesor, nunca contaba como transición y quedaba sin asignar y
+    # sin aviso. `paso_flujo` no se reinicia al liberar: alimenta el embudo de
+    # Analítica, y borrarlo sacaría esos leads de la cuenta.
+    #
+    # Aviso por correo: una vez por ciclo de derivación, o cuando esta vez SÍ
+    # se asignó un asesor — un cliente que insiste mientras nadie está
+    # disponible no le dispara un correo al equipo en cada mensaje.
     ya_estaba_derivado = bool(lead) and lead.get("paso_flujo") == "derivado_asesor"
     ahora_derivado = datos_lead.get("paso_flujo") == "derivado_asesor"
-    if ahora_derivado and not ya_estaba_derivado:
-        lead_actualizado = await obtener_lead(telefono, negocio_id=canal.get("negocio_id") if canal else None)
+    if ahora_derivado:
+        negocio_id = canal.get("negocio_id") if canal else None
+        lead_actualizado = await obtener_lead(telefono, negocio_id=negocio_id)
+        asignado_ahora = False
         if lead_actualizado and not lead_actualizado.get("asesor_asignado"):
             asesor = await servicio_comercial.elegir_asesor_automatico(
-                lead_actualizado.get("interes") or "", canal.get("negocio_id") if canal else None,
+                lead_actualizado.get("interes") or "", negocio_id,
             )
             if asesor:
                 await asignar_asesor_a_lead(telefono, asesor, automatico=True)
-                lead_actualizado = await obtener_lead(telefono, negocio_id=canal.get("negocio_id") if canal else None)
-        await notificar_lead_derivado(telefono, lead_actualizado or {}, texto_actual)
+                lead_actualizado = await obtener_lead(telefono, negocio_id=negocio_id)
+                asignado_ahora = True
+        if not ya_estaba_derivado or asignado_ahora:
+            await notificar_lead_derivado(telefono, lead_actualizado or {}, texto_actual)
+            await _avisar_derivacion_si_falto(telefono, respuesta, canal)
+
+
+_MENCIONA_ASESOR = re.compile(r"asesor|especialista|ejecutiv", re.IGNORECASE)
+
+
+async def _avisar_derivacion_si_falto(telefono: str, respuesta: str, canal: dict | None) -> None:
+    """Red de seguridad determinista: si el sistema acaba de derivar al
+    cliente pero la respuesta de Gabi no menciona a un asesor, el cliente
+    quedaría derivado sin enterarse (y Gabi calla desde ahí, con el asesor
+    asignado) — es el caso de "deriva sin decir nada" que se vio en varias
+    conversaciones. El prompt ya pide avisarlo; esto lo garantiza."""
+    if _MENCIONA_ASESOR.search(respuesta):
+        return
+    negocio_id = canal.get("negocio_id") if canal else None
+    estado = await obtener_estado_horario_atencion(negocio_id)
+    aviso = servicio_inteligencia.obtener_mensaje_derivacion(estado["dentro_de_horario"])
+    enviado, wamid = await proveedor.enviar_mensaje(telefono, aviso, canal=canal)
+    mensaje_guardado = await servicio_conversacion.guardar_mensaje(
+        telefono, "assistant", aviso, negocio_id=negocio_id,
+        mensaje_id_meta=wamid, estado_envio=None if enviado else "fallido",
+    )
+    await gestor_conexiones.emitir_mensaje_nuevo(mensaje_guardado["conversation_id"])
+    logger.info(f"Derivación de {telefono} sin aviso en la respuesta de Gabi — se envió el aviso de respaldo")
 
 
 @app.post("/webhook")
