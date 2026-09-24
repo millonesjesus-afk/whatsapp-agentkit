@@ -77,6 +77,11 @@ logger = logging.getLogger("agentkit")
 # (Origin) ni 4409 (duplicada).
 CODIGO_WS_INACTIVA = 4408
 
+# Dispositivos/pestañas del MISMO usuario que pueden mirar la MISMA
+# conversación a la vez (laptop + celular + otra pestaña). Ver
+# `GestorConexiones.set_conversation_activa`.
+MAX_CONEXIONES_POR_USUARIO_Y_CONVERSACION = 3
+
 
 class GestorConexiones:
     def __init__(self):
@@ -100,7 +105,7 @@ class GestorConexiones:
         await ws.accept()
         self._conexiones[ws] = {
             "username": username, "rol": rol, "negocio_id": negocio_id, "conversation_id_activo": None,
-            "ultima_actividad": time.monotonic(),
+            "ultima_actividad": time.monotonic(), "conectada_en": time.monotonic(),
         }
 
     def desconectar(self, ws: WebSocket):
@@ -146,10 +151,21 @@ class GestorConexiones:
         if conversation_id is None:
             return
         username = self._conexiones[ws]["username"]
-        duplicadas = [
+        # 2026-09-23 — antes el máximo era 1: con la laptop y el celular del
+        # mismo usuario en el mismo chat, cada conexión nueva cerraba a la
+        # otra, la cerrada reconectaba y volvía a cerrar a la primera, en
+        # bucle cada ~5 s (visto en producción) — las dos pantallas quedaban
+        # sin aviso instantáneo buena parte del tiempo. Ahora se toleran
+        # varios dispositivos a la vez y solo se cierra la MÁS ANTIGUA cuando
+        # se pasa del tope, que sigue existiendo por el motivo original:
+        # conexiones huérfanas cuyo cierre se perdió en el transporte.
+        mismas = [
             otro for otro, info in list(self._conexiones.items())
             if otro is not ws and info["username"] == username and info["conversation_id_activo"] == conversation_id
         ]
+        mismas.sort(key=lambda otro: self._conexiones[otro].get("conectada_en", 0.0))
+        sobrantes = len(mismas) + 1 - MAX_CONEXIONES_POR_USUARIO_Y_CONVERSACION
+        duplicadas = mismas[:sobrantes] if sobrantes > 0 else []
         for otro in duplicadas:
             logger.info(
                 "Cerrando conexión WS duplicada del panel (usuario=%s, conversation_id=%s) — "
