@@ -25,7 +25,7 @@ from agent.memory import (
     registrar_fallo_tecnico, resetear_fallos_tecnicos,
     sembrar_canales_desde_env, pausar_gabi_manual, marcar_revision_prioritaria,
     marcar_mensaje_procesado, obtener_negocio_por_codigo,
-    resolver_conversation_activa, medir_latencia_db,
+    resolver_conversation_activa, medir_latencia_db, medir_latencia_escritura_db,
 )
 from agent.providers import obtener_proveedor
 from agent.dashboard import (
@@ -233,6 +233,24 @@ async def _barrer_conexiones_ws_inactivas():
             logger.exception("Error en el barrido de conexiones WS del panel inactivas")
 
 
+INTERVALO_SONDA_ESCRITURA_SEG = 60
+
+
+async def _sondear_escritura_db_periodicamente():
+    """Cada minuto registra cuánto tarda un commit en la base
+    (`latencia_db_escritura`), para poder cruzar los momentos en que el
+    webhook tarda segundos con la velocidad de escritura del Postgres. Una
+    falla de la sonda se ignora: nunca debe afectar al servicio."""
+    while True:
+        await asyncio.sleep(INTERVALO_SONDA_ESCRITURA_SEG)
+        try:
+            logger.info(f"latencia_db_escritura {await medir_latencia_escritura_db(3)}")
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.warning(f"Sonda de escritura de la base falló: {e}")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Inicializa la base de datos al arrancar el servidor."""
@@ -272,6 +290,7 @@ async def lifespan(app: FastAPI):
     logger.info(f"Servidor AgentKit corriendo en puerto {PORT}")
     logger.info(f"Proveedor de WhatsApp: {proveedor.__class__.__name__}")
     tarea_barrido_ws = asyncio.create_task(_barrer_conexiones_ws_inactivas())
+    tarea_sonda_db = asyncio.create_task(_sondear_escritura_db_periodicamente())
     yield
     # Gate 2026-09-23 (debounce, fix #3) — le da a las respuestas de Gabi ya
     # programadas (esperando su ventana, o ya llamando a Claude) una
@@ -285,6 +304,9 @@ async def lifespan(app: FastAPI):
     tarea_barrido_ws.cancel()
     with contextlib.suppress(asyncio.CancelledError):
         await tarea_barrido_ws
+    tarea_sonda_db.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await tarea_sonda_db
     await cerrar_cliente_http()
 
 

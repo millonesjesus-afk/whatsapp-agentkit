@@ -63,9 +63,15 @@ def test_cronometro_reporta_total_y_cada_tramo():
 
 async def test_medir_latencia_db_devuelve_min_prom_max_y_costo_de_conexion_nueva():
     r = await mem.medir_latencia_db(muestras=3)
-    assert set(r) == {"min_ms", "prom_ms", "max_ms", "conexion_nueva_ms"}
+    assert {"min_ms", "prom_ms", "max_ms", "conexion_nueva_ms"} <= set(r)
     assert 0 <= r["min_ms"] <= r["prom_ms"] <= r["max_ms"]
     assert r["conexion_nueva_ms"] >= 0
+
+
+async def test_sonda_de_escritura_solo_aplica_a_postgres():
+    """En SQLite (tests/local) no hay `txid_current()`: la sonda se omite sin
+    romper el arranque. Las claves de Postgres se verifican en producción."""
+    assert await mem.medir_latencia_escritura_db(muestras=2) == {}
 
 
 def test_el_pool_de_postgres_retiene_mas_conexiones_que_el_default():

@@ -2934,9 +2934,34 @@ async def medir_latencia_db(muestras: int = 5) -> dict:
         conexion_nueva = (time.perf_counter() - inicio) * 1000
     finally:
         await sin_pool.dispose()
-    return {
+    resultado = {
         "min_ms": round(min(tiempos), 1), "prom_ms": round(sum(tiempos) / len(tiempos), 1),
         "max_ms": round(max(tiempos), 1), "conexion_nueva_ms": round(conexion_nueva, 1),
+    }
+    resultado.update(await medir_latencia_escritura_db(muestras))
+    return resultado
+
+
+async def medir_latencia_escritura_db(muestras: int = 5) -> dict:
+    """Mide cuánto tarda un COMMIT que escribe en el registro de transacciones
+    de Postgres (`txid_current()` asigna un id de transacción, así que el
+    commit debe grabarse en disco sin tocar ninguna tabla). 2026-09-24: en
+    producción los pasos del webhook que solo leen tardan 7-9 ms y los que
+    escriben 500-3800 ms, mientras `SELECT 1` va a 2 ms — sospecha: el disco
+    del Postgres. Este número lo confirma o lo descarta. Solo Postgres."""
+    if engine.dialect.name != "postgresql":
+        return {}
+    tiempos: list[float] = []
+    async with engine.connect() as conn:
+        for _ in range(muestras):
+            inicio = time.perf_counter()
+            await conn.execute(text("SELECT txid_current()"))
+            await conn.commit()
+            tiempos.append((time.perf_counter() - inicio) * 1000)
+    return {
+        "escritura_min_ms": round(min(tiempos), 1),
+        "escritura_prom_ms": round(sum(tiempos) / len(tiempos), 1),
+        "escritura_max_ms": round(max(tiempos), 1),
     }
 
 
