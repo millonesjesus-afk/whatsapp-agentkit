@@ -283,6 +283,30 @@ class GestorConexiones:
             if tiene_acceso_a_lead(info["rol"], info["username"], asesor_asignado):
                 await self._enviar_seguro(ws, evento)
 
+    async def emitir_gabi_escribiendo(self, conversation_id: str | None):
+        """Avisa que Gabi empezó a preparar su respuesta (el panel muestra los
+        tres puntos de "escribiendo…"). Mismo filtro de acceso que
+        `emitir_mensaje_nuevo` — solo lo reciben las conexiones de este Negocio
+        que pueden ver esa Conversation — y mismo criterio de no emitir si ya
+        no está activa. Efímero: no se guarda nada, y el panel lo apaga solo al
+        llegar la respuesta o tras un tiempo."""
+        if conversation_id is None:
+            return
+        conversation = await obtener_conversation_realtime(conversation_id)
+        if conversation is None or conversation["estado"] != "activa":
+            return
+        evento = {
+            "tipo": "gabi_escribiendo", "conversation_id": conversation_id,
+            "telefono": conversation["telefono"],
+        }
+        asesor_asignado = conversation.get("asesor_asignado_id")
+        negocio_id_conversation = conversation["negocio_id"]
+        for ws, info in list(self._conexiones.items()):
+            if info.get("negocio_id") != negocio_id_conversation:
+                continue
+            if tiene_acceso_a_lead(info["rol"], info["username"], asesor_asignado):
+                await self._enviar_seguro(ws, evento)
+
     async def emitir_escribiendo(self, conversation_id: str, telefono: str | None, nombre_mostrar: str, excluir_username: str):
         """`nombre_mostrar` es lo que se muestra en el aviso ("X está
         escribiendo...") — puede repetirse entre personas. `excluir_username`

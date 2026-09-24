@@ -25,7 +25,7 @@ from agent.memory import (
     registrar_fallo_tecnico, resetear_fallos_tecnicos,
     sembrar_canales_desde_env, pausar_gabi_manual, marcar_revision_prioritaria,
     marcar_mensaje_procesado, obtener_negocio_por_codigo,
-    resolver_conversation_activa, medir_latencia_db,
+    resolver_conversation_activa, medir_latencia_db, obtener_conversation_activa_de_telefono,
 )
 from agent.providers import obtener_proveedor
 from agent.dashboard import (
@@ -363,6 +363,22 @@ async def webhook_verificacion(request: Request):
     return {"status": "ok"}
 
 
+async def _avisar_que_gabi_escribe(telefono: str, canal: dict | None) -> None:
+    """Le avisa al panel que Gabi empezó a preparar su respuesta, para que
+    muestre los tres puntos de "escribiendo…" mientras tanto (2026-09-24). Es
+    solo un aviso visual: si algo falla acá se registra y se sigue — nunca puede
+    impedir ni retrasar la respuesta al cliente."""
+    negocio_id = (canal or {}).get("negocio_id")
+    if not negocio_id:
+        return
+    try:
+        conversation = await obtener_conversation_activa_de_telefono(telefono, negocio_id)
+        if conversation is not None:
+            await gestor_conexiones.emitir_gabi_escribiendo(conversation["id"])
+    except Exception as e:
+        logger.warning(f"No se pudo avisar al panel que Gabi está escribiendo ({telefono}): {e}")
+
+
 async def _generar_y_enviar_respuesta_ia(telefono: str, canal: dict | None) -> None:
     """Gate 2026-09-23 (fix #3, debounce) — el trabajo REAL que antes corría
     inline dentro de `webhook_handler` para cada mensaje de texto: arma el
@@ -399,6 +415,8 @@ async def _generar_y_enviar_respuesta_ia(telefono: str, canal: dict | None) -> N
     mensaje_actual = historial_completo[-1]
     historial = historial_completo[:-1]
     texto_actual = mensaje_actual["content"]
+
+    await _avisar_que_gabi_escribe(telefono, canal)
 
     modo_canal = (canal or {}).get("modo", "produccion")
     respuesta, hubo_error, confianza, razon = await servicio_inteligencia.generar_respuesta(
