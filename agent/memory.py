@@ -86,7 +86,22 @@ DATABASE_URL = os.getenv("DATABASE_URL", "sqlite+aiosqlite:///./agentkit.db")
 if DATABASE_URL.startswith("postgresql://"):
     DATABASE_URL = DATABASE_URL.replace("postgresql://", "postgresql+asyncpg://", 1)
 
-engine = create_async_engine(DATABASE_URL, echo=False)
+# Pool de conexiones (2026-09-24). Con el default de SQLAlchemy (5 conexiones
+# retenidas + 10 de desborde) cada pedido concurrente por encima de 5 abre una
+# conexión NUEVA y la cierra al terminar: medido en producción, un paso trivial
+# como resolver el canal tardaba ~405 ms (constante) cuando la base estaba
+# ocupada y 6-8 ms cuando no — el costo de abrir la conexión, no de la consulta
+# (un viaje a una conexión abierta cuesta ~2 ms). Varias pantallas sondeando en
+# el mismo segundo más los webhooks superan fácil las 5. Solo Postgres: SQLite
+# (desarrollo y tests) usa otro pool y no admite estos parámetros.
+def _argumentos_engine(url: str) -> dict:
+    args: dict = {"echo": False}
+    if url.startswith("postgresql"):
+        args.update(pool_size=10, max_overflow=20, pool_recycle=1800)
+    return args
+
+
+engine = create_async_engine(DATABASE_URL, **_argumentos_engine(DATABASE_URL))
 async_session = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
 # Resultados que cierran un lead (ya no se le hace seguimiento) — se usa acá
@@ -2899,14 +2914,30 @@ async def medir_latencia_db(muestras: int = 5) -> dict:
     Postgres en la misma región debería dar 1-5 ms. Este número separa "la
     base está lejos/lenta" de "el código hace demasiado". Se registra al
     arrancar (ver main.py) y es el primer dato a mirar en los logs."""
+    from sqlalchemy.pool import NullPool
+
     tiempos: list[float] = []
     async with engine.connect() as conn:
-        await conn.execute(text("SELECT 1"))  # descarta el primero: incluye abrir la conexión
+        await conn.execute(text("SELECT 1"))  # descarta el primero: puede incluir abrir la conexión
         for _ in range(muestras):
             inicio = time.perf_counter()
             await conn.execute(text("SELECT 1"))
             tiempos.append((time.perf_counter() - inicio) * 1000)
-    return {"min_ms": round(min(tiempos), 1), "prom_ms": round(sum(tiempos) / len(tiempos), 1), "max_ms": round(max(tiempos), 1)}
+
+    # Costo de abrir una conexión NUEVA (TCP + TLS + autenticación), que es lo
+    # que paga cada pedido cuando el pool no tiene una libre.
+    sin_pool = create_async_engine(DATABASE_URL, poolclass=NullPool)
+    try:
+        inicio = time.perf_counter()
+        async with sin_pool.connect() as conn:
+            await conn.execute(text("SELECT 1"))
+        conexion_nueva = (time.perf_counter() - inicio) * 1000
+    finally:
+        await sin_pool.dispose()
+    return {
+        "min_ms": round(min(tiempos), 1), "prom_ms": round(sum(tiempos) / len(tiempos), 1),
+        "max_ms": round(max(tiempos), 1), "conexion_nueva_ms": round(conexion_nueva, 1),
+    }
 
 
 async def guardar_mensaje(

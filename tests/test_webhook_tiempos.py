@@ -61,10 +61,27 @@ def test_cronometro_reporta_total_y_cada_tramo():
     assert set(cron.tramos) == {"canal", "guardar"}
 
 
-async def test_medir_latencia_db_devuelve_min_prom_max():
+async def test_medir_latencia_db_devuelve_min_prom_max_y_costo_de_conexion_nueva():
     r = await mem.medir_latencia_db(muestras=3)
-    assert set(r) == {"min_ms", "prom_ms", "max_ms"}
+    assert set(r) == {"min_ms", "prom_ms", "max_ms", "conexion_nueva_ms"}
     assert 0 <= r["min_ms"] <= r["prom_ms"] <= r["max_ms"]
+    assert r["conexion_nueva_ms"] >= 0
+
+
+def test_el_pool_de_postgres_retiene_mas_conexiones_que_el_default():
+    """Con el default (5) cada pedido concurrente extra abría una conexión
+    nueva (~400 ms medidos en producción). Se prueba la función real que arma
+    los argumentos del engine, no una copia de su lógica."""
+    from sqlalchemy.ext.asyncio import create_async_engine
+
+    args = mem._argumentos_engine("postgresql+asyncpg://u:p@localhost/db")
+    assert args["pool_size"] == 10 and args["max_overflow"] == 20 and args["pool_recycle"] == 1800
+    pool = create_async_engine("postgresql+asyncpg://u:p@localhost/db", **args).sync_engine.pool
+    assert pool.size() == 10 and pool._max_overflow == 20
+
+
+def test_sqlite_no_recibe_parametros_de_pool_de_postgres():
+    assert mem._argumentos_engine("sqlite+aiosqlite:///./x.db") == {"echo": False}
 
 
 async def test_un_mensaje_a_lead_asignado_deja_la_linea_webhook_tiempos(monkeypatch, caplog):
