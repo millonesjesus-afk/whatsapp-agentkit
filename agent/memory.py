@@ -2938,8 +2938,28 @@ async def medir_latencia_db(muestras: int = 5) -> dict:
         "min_ms": round(min(tiempos), 1), "prom_ms": round(sum(tiempos) / len(tiempos), 1),
         "max_ms": round(max(tiempos), 1), "conexion_nueva_ms": round(conexion_nueva, 1),
     }
+    resultado["red"] = tipo_de_red_de_la_base(DATABASE_URL)
     resultado.update(await medir_latencia_escritura_db(muestras))
     return resultado
+
+
+def tipo_de_red_de_la_base(url: str) -> str:
+    """Dice SOLO si la app llega a la base por la red privada de Railway
+    (`*.railway.internal`, rápida y sin costo de tráfico) o por otra ruta
+    (el proxy público `*.proxy.rlwy.net` u otro host). Nunca devuelve el host,
+    el usuario ni la contraseña: es lo único que se puede loguear sin filtrar
+    credenciales. 2026-09-24: las métricas del Postgres mostraban tráfico en
+    "red pública" con la app en la misma región."""
+    from urllib.parse import urlparse
+
+    if url.startswith("sqlite"):
+        return "local"
+    host = (urlparse(url).hostname or "").lower()
+    if host.endswith(".railway.internal"):
+        return "privada"
+    if host.endswith(".rlwy.net") or host.endswith(".railway.app"):
+        return "publica-proxy"
+    return "otra"
 
 
 async def medir_latencia_escritura_db(muestras: int = 5) -> dict:
@@ -2952,16 +2972,33 @@ async def medir_latencia_escritura_db(muestras: int = 5) -> dict:
     if engine.dialect.name != "postgresql":
         return {}
     tiempos: list[float] = []
+    sin_fsync: list[float] = []
+    lecturas: list[float] = []
     async with engine.connect() as conn:
         for _ in range(muestras):
+            # Commit normal: espera a que el registro llegue a disco (fsync).
             inicio = time.perf_counter()
             await conn.execute(text("SELECT txid_current()"))
             await conn.commit()
             tiempos.append((time.perf_counter() - inicio) * 1000)
+            # Mismo commit sin esperar el fsync: si este va rápido cuando el
+            # normal tarda ~400 ms, el retraso es del disco.
+            inicio = time.perf_counter()
+            await conn.execute(text("SET LOCAL synchronous_commit = off"))
+            await conn.execute(text("SELECT txid_current()"))
+            await conn.commit()
+            sin_fsync.append((time.perf_counter() - inicio) * 1000)
+            # Lectura pura, para ver si la lentitud alcanza también a la red
+            # y no solo al disco.
+            inicio = time.perf_counter()
+            await conn.execute(text("SELECT 1"))
+            lecturas.append((time.perf_counter() - inicio) * 1000)
     return {
         "escritura_min_ms": round(min(tiempos), 1),
         "escritura_prom_ms": round(sum(tiempos) / len(tiempos), 1),
         "escritura_max_ms": round(max(tiempos), 1),
+        "sin_fsync_max_ms": round(max(sin_fsync), 1),
+        "lectura_max_ms": round(max(lecturas), 1),
     }
 
 

@@ -74,6 +74,16 @@ async def test_sonda_de_escritura_solo_aplica_a_postgres():
     assert await mem.medir_latencia_escritura_db(muestras=2) == {}
 
 
+def test_tipo_de_red_no_filtra_host_ni_credenciales():
+    f = mem.tipo_de_red_de_la_base
+    assert f("postgresql+asyncpg://u:secreto@postgres.railway.internal:5432/db") == "privada"
+    assert f("postgresql+asyncpg://u:secreto@viaduct.proxy.rlwy.net:12345/db") == "publica-proxy"
+    assert f("postgresql+asyncpg://u:secreto@db.ejemplo.com/db") == "otra"
+    assert f("sqlite+aiosqlite:///./x.db") == "local"
+    for url in ("postgresql://u:secreto@postgres.railway.internal/db", "postgresql://u:secreto@x.proxy.rlwy.net/db"):
+        assert "secreto" not in f(url) and "rlwy" not in f(url)
+
+
 def test_el_pool_de_postgres_retiene_mas_conexiones_que_el_default():
     """Con el default (5) cada pedido concurrente extra abría una conexión
     nueva (~400 ms medidos en producción). Se prueba la función real que arma
