@@ -31,12 +31,13 @@ from pathlib import Path
 # patrón que scripts/liberar_leads_inactivos.py.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from agent.memory import cerrar_leads_definitivamente_inactivos
+from agent.memory import cerrar_leads_definitivamente_inactivos, esperar_base_de_datos
 
 DIAS_INACTIVIDAD = 7
 
 
 async def main() -> None:
+    await esperar_base_de_datos()
     cerrados = await cerrar_leads_definitivamente_inactivos(dias=DIAS_INACTIVIDAD)
     if cerrados:
         print(

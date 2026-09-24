@@ -39,7 +39,7 @@ from pathlib import Path
 # patrón que scripts/liberar_leads_inactivos.py.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from agent.memory import listar_leads_inactividad_cliente, actualizar_lead, guardar_mensaje
+from agent.memory import esperar_base_de_datos, listar_leads_inactividad_cliente, actualizar_lead, guardar_mensaje
 from agent.providers import obtener_proveedor
 from agent.tiempo_real import gestor_conexiones
 
@@ -52,6 +52,7 @@ MENSAJE_REENGANCHE = (
 
 
 async def main() -> None:
+    await esperar_base_de_datos()
     candidatos_reenganche, candidatos_cierre = await listar_leads_inactividad_cliente(
         horas_reenganche=HORAS_REENGANCHE, horas_cierre=HORAS_CIERRE,
     )

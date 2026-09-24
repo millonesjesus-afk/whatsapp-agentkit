@@ -27,12 +27,13 @@ from pathlib import Path
 # patrón que scripts/migrar_usuarios_a_railway.py.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from agent.memory import liberar_asignaciones_inactivas
+from agent.memory import esperar_base_de_datos, liberar_asignaciones_inactivas
 
 HORAS_INACTIVIDAD = 24
 
 
 async def main() -> None:
+    await esperar_base_de_datos()
     liberados = await liberar_asignaciones_inactivas(horas=HORAS_INACTIVIDAD)
     if liberados:
         print(

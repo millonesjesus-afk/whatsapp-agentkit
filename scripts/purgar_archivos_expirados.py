@@ -38,12 +38,13 @@ from pathlib import Path
 # patrón que scripts/liberar_leads_inactivos.py.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from agent.memory import listar_archivos_no_reutilizables_antes_de
+from agent.memory import esperar_base_de_datos, listar_archivos_no_reutilizables_antes_de
 
 DIAS_RETENCION = 90
 
 
 async def main() -> None:
+    await esperar_base_de_datos()
     corte = datetime.utcnow() - timedelta(days=DIAS_RETENCION)
     candidatos = await listar_archivos_no_reutilizables_antes_de(corte)
 

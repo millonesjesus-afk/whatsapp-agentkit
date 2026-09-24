@@ -31,6 +31,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import urlparse
@@ -40,6 +41,8 @@ from botocore.client import Config as BotoConfig
 
 BACKUP_RETENCION_DIAS = int(os.environ.get("BACKUP_RETENCION_DIAS", "30"))
 BACKUP_PREFIJO = os.environ.get("BACKUP_PREFIJO", "backups/")
+INTENTOS_CONEXION = 10
+PAUSA_CONEXION_SEG = 2
 
 
 def _validar_config() -> dict:
@@ -75,12 +78,20 @@ def _nombre_archivo() -> str:
 def _ejecutar_pg_dump(database_url: str, destino: Path) -> None:
     # --format=custom: comprimido y restaurable con pg_restore (soporta
     # restauración parcial/paralela) — más flexible que un dump plano.
-    resultado = subprocess.run(
-        ["pg_dump", database_url, "--format=custom", "--file", str(destino)],
-        capture_output=True, text=True, timeout=600,
-    )
-    if resultado.returncode != 0:
-        raise RuntimeError(f"pg_dump falló (código {resultado.returncode}): {resultado.stderr}")
+    # Reintenta si la conexión aún no está lista: en un contenedor recién
+    # arrancado la red PRIVADA de Railway tarda un instante y pg_dump falla
+    # con "Connection refused" (2026-09-24, mismo problema que los otros Cron).
+    for intento in range(1, INTENTOS_CONEXION + 1):
+        resultado = subprocess.run(
+            ["pg_dump", database_url, "--format=custom", "--file", str(destino)],
+            capture_output=True, text=True, timeout=600,
+        )
+        if resultado.returncode == 0:
+            return
+        sin_conexion = "could not connect" in resultado.stderr or "Connection refused" in resultado.stderr
+        if not sin_conexion or intento == INTENTOS_CONEXION:
+            raise RuntimeError(f"pg_dump falló (código {resultado.returncode}): {resultado.stderr}")
+        time.sleep(PAUSA_CONEXION_SEG)
 
 
 def _cliente_s3(config: dict):

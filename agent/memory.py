@@ -10,6 +10,7 @@ import os
 import csv
 import uuid
 import logging
+import asyncio
 import time
 from urllib.parse import urlparse
 from datetime import datetime, timedelta
@@ -2909,6 +2910,27 @@ async def inicializar_db():
     cambio de esquema en producción, ver agent/migraciones.py."""
     from agent.migraciones import aplicar_migraciones
     await aplicar_migraciones()
+
+
+async def esperar_base_de_datos(intentos: int = 15, pausa_seg: float = 1.0) -> None:
+    """Espera a que la base acepte conexiones antes de que un script de Cron
+    haga su trabajo. Railway tarda un instante en levantar la red PRIVADA
+    dentro de un contenedor nuevo, y un Cron que conecta en el mismo segundo
+    en que arranca falla con "Connection refused" (2026-09-24: las dos tareas
+    de las 11:01 y 11:04 fallaron así al pasar de la red pública a la
+    privada). Reintenta y solo se rinde si tras `intentos` la base sigue sin
+    contestar, con el último error a la vista."""
+    ultimo_error: Exception | None = None
+    for intento in range(1, intentos + 1):
+        try:
+            async with engine.connect() as conn:
+                await conn.execute(text("SELECT 1"))
+            return
+        except Exception as e:  # noqa: BLE001 — cualquier fallo de conexión cuenta como "aún no"
+            ultimo_error = e
+            if intento < intentos:
+                await asyncio.sleep(pausa_seg)
+    raise ultimo_error  # type: ignore[misc]
 
 
 async def medir_latencia_db(muestras: int = 5) -> dict:
