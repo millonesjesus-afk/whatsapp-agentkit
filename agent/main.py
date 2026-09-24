@@ -10,6 +10,7 @@ import asyncio
 import contextlib
 import os
 import re
+import time
 import logging
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, HTTPException
@@ -24,7 +25,7 @@ from agent.memory import (
     registrar_fallo_tecnico, resetear_fallos_tecnicos,
     sembrar_canales_desde_env, pausar_gabi_manual, marcar_revision_prioritaria,
     marcar_mensaje_procesado, obtener_negocio_por_codigo,
-    resolver_conversation_activa,
+    resolver_conversation_activa, medir_latencia_db,
 )
 from agent.providers import obtener_proveedor
 from agent.dashboard import (
@@ -110,6 +111,27 @@ TIPOS_MEDIA_SOPORTADOS = ("image", "document", "audio")
 # valida extensión, solo tamaño) — las notas de voz de WhatsApp son siempre
 # OGG/Opus.
 _MIME_A_EXTENSION_IMAGEN = {"image/jpeg": ".jpg", "image/png": ".png"}
+
+
+class _Cronometro:
+    """Mide cuánto tarda cada tramo del camino de un mensaje entrante y lo deja
+    en UNA línea de log (`webhook_tiempos`). 2026-09-24: guardar un mensaje
+    pasó a tardar 1.3-2.5 s sin que el código lo explicara (22 consultas SQL en
+    total); esta línea dice qué tramo se lleva el tiempo, con datos de
+    producción, antes de tocar nada."""
+
+    def __init__(self):
+        self._inicio = self._ultimo = time.perf_counter()
+        self.tramos: dict[str, int] = {}
+
+    def marca(self, nombre: str) -> None:
+        ahora = time.perf_counter()
+        self.tramos[nombre] = round((ahora - self._ultimo) * 1000)
+        self._ultimo = ahora
+
+    def resumen(self) -> str:
+        total = round((time.perf_counter() - self._inicio) * 1000)
+        return f"total={total}ms " + " ".join(f"{k}={v}ms" for k, v in self.tramos.items())
 
 
 def _gabi_debe_pausarse(lead: dict | None) -> bool:
@@ -215,6 +237,10 @@ async def _barrer_conexiones_ws_inactivas():
 async def lifespan(app: FastAPI):
     """Inicializa la base de datos al arrancar el servidor."""
     await inicializar_db()
+    try:
+        logger.info(f"latencia_db {await medir_latencia_db()}")
+    except Exception as e:  # una sonda nunca puede impedir que el servicio arranque
+        logger.warning(f"No se pudo medir la latencia de la base: {e}")
     # Corrección arquitectónica post-auditoría de Gate 5.2: el bootstrap de
     # canales desde .env ya no adivina a qué Negocio pertenecen (ni "el
     # único que hay", ni ningún nombre fijo) — el Negocio se identifica
@@ -552,6 +578,7 @@ async def webhook_handler(request: Request):
             # Ignorar mensajes propios
             if msg.es_propio:
                 continue
+            cron = _Cronometro()
 
             # Idempotencia general (API Architecture) — Meta puede reentregar
             # el mismo mensaje (reintentos de webhook, entregas duplicadas).
@@ -564,12 +591,15 @@ async def webhook_handler(request: Request):
                     logger.info(f"Mensaje {msg.mensaje_id} ya procesado antes — ignorado (idempotencia)")
                     continue
 
+            cron.marca("idempotencia")
+
             # Número de WhatsApp del NEGOCIO por el que entró este mensaje —
             # permite tener varios números activos a la vez (ej. pruebas y
             # producción); se responde siempre por el mismo canal, y se deja
             # guardado en el lead para que respuestas posteriores (asesor
             # desde el panel) también sepan por cuál número contestar.
             canal = await proveedor.resolver_canal(msg.numero_whatsapp_id)
+            cron.marca("canal")
             if msg.numero_whatsapp_id:
                 # Gate 5.2 (corrección H2): negocio_id se resuelve del Canal
                 # ya identificado por su phone_number_id — nunca un default
@@ -599,6 +629,8 @@ async def webhook_handler(request: Request):
                         msg.telefono, canal["negocio_id"], canal["id"],
                         unidad_id=canal.get("unidad_id"),
                     )
+
+            cron.marca("lead_y_conversacion")
 
             # Coexistencia: un asesor le respondió al cliente directo desde
             # la app de WhatsApp Business en el celular, no desde Gabi ni el
@@ -700,6 +732,7 @@ async def webhook_handler(request: Request):
             logger.info(f"Mensaje de {msg.telefono}: {msg.texto}")
 
             lead = await obtener_lead(msg.telefono, negocio_id=canal.get("negocio_id") if canal else None)
+            cron.marca("obtener_lead")
 
             # Primer contacto (o aún sin campaña detectada): se intenta
             # reconocer de qué campaña viene el lead — por el texto del
@@ -772,7 +805,10 @@ async def webhook_handler(request: Request):
                         f"Mensaje de {msg.telefono} guardado sin respuesta automática "
                         f"(asignado a {lead['asesor_asignado']})"
                     )
+                    cron.marca("guardar_y_marcar")
                     await gestor_conexiones.emitir_mensaje_nuevo(mensaje_guardado["conversation_id"])
+                    cron.marca("emitir")
+                    logger.info(f"webhook_tiempos {cron.resumen()}")
                     continue
 
             # Gate 2026-09-23 (fix #3, debounce) — el mensaje se guarda de
@@ -797,7 +833,10 @@ async def webhook_handler(request: Request):
             # Le muestra "escribiendo..." en WhatsApp de una vez — aunque la
             # respuesta real todavía no arranca (está en la ventana de
             # espera), esto ya le confirma al cliente que su mensaje llegó.
+            cron.marca("guardar")
             await proveedor.marcar_leido_y_escribiendo(msg.mensaje_id, canal=canal)
+            cron.marca("meta_escribiendo")
+            logger.info(f"webhook_tiempos {cron.resumen()}")
 
             clave_debounce = f"{canal.get('negocio_id') if canal else None}:{msg.telefono}"
             gestor_debounce_respuestas.reprogramar(

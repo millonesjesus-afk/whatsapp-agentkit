@@ -10,6 +10,7 @@ import os
 import csv
 import uuid
 import logging
+import time
 from urllib.parse import urlparse
 from datetime import datetime, timedelta
 from cryptography.fernet import Fernet
@@ -2889,6 +2890,23 @@ async def inicializar_db():
     cambio de esquema en producción, ver agent/migraciones.py."""
     from agent.migraciones import aplicar_migraciones
     await aplicar_migraciones()
+
+
+async def medir_latencia_db(muestras: int = 5) -> dict:
+    """Mide cuánto tarda UN viaje de ida y vuelta a la base (SELECT 1, en una
+    conexión ya abierta) — 2026-09-24: guardar un mensaje entrante pasó a
+    tardar 1.3-2.5 s con ~15 consultas, o sea 100 ms por consulta, cuando un
+    Postgres en la misma región debería dar 1-5 ms. Este número separa "la
+    base está lejos/lenta" de "el código hace demasiado". Se registra al
+    arrancar (ver main.py) y es el primer dato a mirar en los logs."""
+    tiempos: list[float] = []
+    async with engine.connect() as conn:
+        await conn.execute(text("SELECT 1"))  # descarta el primero: incluye abrir la conexión
+        for _ in range(muestras):
+            inicio = time.perf_counter()
+            await conn.execute(text("SELECT 1"))
+            tiempos.append((time.perf_counter() - inicio) * 1000)
+    return {"min_ms": round(min(tiempos), 1), "prom_ms": round(sum(tiempos) / len(tiempos), 1), "max_ms": round(max(tiempos), 1)}
 
 
 async def guardar_mensaje(
