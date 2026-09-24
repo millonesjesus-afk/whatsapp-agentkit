@@ -219,8 +219,38 @@ class ProveedorMeta(ProveedorWhatsApp):
                         # vez de recibir un mensaje vacío o "no soportado".
                         texto = msg.get("button", {}).get("text", "")
                         tipo = "text"
-                    elif tipo in ("image", "document", "audio"):
-                        # Adjunto real (imagen/documento/nota de voz) — el
+                    elif tipo == "reaction":
+                        # Reacción con un emoji a un mensaje (👍, ❤️…). No es un
+                        # mensaje nuevo que atender: main.py lo guarda como una
+                        # línea en el historial y nunca dispara a Gabi. Sin
+                        # `emoji` el cliente QUITÓ su reacción — no hay nada que
+                        # mostrar, `texto` queda vacío.
+                        emoji = msg.get("reaction", {}).get("emoji", "")
+                        texto = f"Reaccionó con {emoji}" if emoji else ""
+                    elif tipo == "location":
+                        # Ubicación compartida — se convierte en texto legible
+                        # (con enlace a Maps) y se trata como un mensaje normal,
+                        # así Gabi lo ve y responde en vez de "no se procesa".
+                        ubicacion = msg.get("location", {})
+                        detalle = ", ".join(p for p in (ubicacion.get("name"), ubicacion.get("address")) if p)
+                        latitud, longitud = ubicacion.get("latitude"), ubicacion.get("longitude")
+                        texto = "📍 Ubicación compartida" + (f": {detalle}" if detalle else "")
+                        if latitud is not None and longitud is not None:
+                            texto += f"\nhttps://maps.google.com/?q={latitud},{longitud}"
+                        tipo = "text"
+                    elif tipo == "contacts":
+                        # Contacto(s) compartido(s) — mismo criterio que la ubicación.
+                        compartidos = []
+                        for contacto in msg.get("contacts", []):
+                            nombre = contacto.get("name", {}).get("formatted_name", "")
+                            telefonos = [t.get("phone") or t.get("wa_id") for t in contacto.get("phones", [])]
+                            telefono_compartido = next((t for t in telefonos if t), "")
+                            compartidos.append(" ".join(p for p in (nombre, f"({telefono_compartido})" if telefono_compartido else "") if p))
+                        texto = "👤 Contacto compartido" + (f": {'; '.join(c for c in compartidos if c)}" if any(compartidos) else "")
+                        tipo = "text"
+                    elif tipo in ("image", "document", "audio", "sticker", "video"):
+                        # Adjunto real (imagen/documento/nota de voz/sticker/
+                        # video —los GIF de WhatsApp llegan como video—) — el
                         # webhook solo trae el media_id y su metadata, no el
                         # contenido: hay que descargarlo aparte (ver
                         # descargar_media) antes de poder guardarlo/

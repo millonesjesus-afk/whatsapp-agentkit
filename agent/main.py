@@ -97,12 +97,12 @@ PORT = int(os.getenv("PORT", 8000))
 # la nota de PROXIES_CONFIABLES en agent/rate_limit.py antes de cambiarlo.
 MAX_WEBHOOK_POR_IP_POR_MINUTO = 60
 
-# Tipos de adjunto entrante que este Gate soporta guardar como archivo real
-# — los mismos que el panel ya sabe ENVIAR del lado saliente (ver
-# dashboard.py: enviar-archivo/enviar-audio). Video, sticker, ubicación,
-# etc. quedan fuera a propósito y siguen el camino de "no soportado" de
-# siempre — no hay envío saliente equivalente que los reciba en el panel.
-TIPOS_MEDIA_SOPORTADOS = ("image", "document", "audio")
+# Tipos de adjunto entrante que se guardan como archivo real para que el panel
+# los muestre. Imagen/documento/audio son los que el panel también sabe ENVIAR;
+# sticker y video (los GIF de WhatsApp llegan como video) se agregaron el
+# 2026-09-24 solo para VERLOS — el panel no los envía. Lo demás que Meta
+# manda (p. ej. tipos desconocidos) sigue el camino de "no soportado".
+TIPOS_MEDIA_SOPORTADOS = ("image", "document", "audio", "sticker", "video")
 
 # Mismas restricciones de extensión que ya aplican al envío saliente de una
 # proforma (EXTENSIONES_ARCHIVO_PERMITIDAS, importado de dashboard.py) para
@@ -152,6 +152,12 @@ def _extension_permitida_para_media(tipo: str, mime_type: str, filename: str) ->
     con un tipo no soportado."""
     if tipo == "audio":
         return ".ogg"
+    # Solo para VERLOS en el panel — no entran en la lista de extensiones que
+    # el panel deja ENVIAR (EXTENSIONES_ARCHIVO_PERMITIDAS), a propósito.
+    if tipo == "sticker":
+        return ".webp" if (mime_type or "").startswith("image/webp") else None
+    if tipo == "video":
+        return ".mp4" if (mime_type or "").startswith("video/mp4") else None
     if tipo == "image":
         extension = _MIME_A_EXTENSION_IMAGEN.get(mime_type)
     else:  # document
@@ -361,6 +367,40 @@ async def webhook_verificacion(request: Request):
     if resultado is not None:
         return PlainTextResponse(str(resultado))
     return {"status": "ok"}
+
+
+async def _atender_mensaje_no_legible(msg, canal: dict | None, contenido: str, archivo_id: int | None = None) -> None:
+    """Un mensaje que Gabi no puede leer (nota de voz, imagen, sticker, video/GIF,
+    documento, tipo desconocido). Siempre se guarda —con su archivo, si lo hay—
+    para que el equipo lo vea en el panel. Después:
+      · con asesor asignado (o Gabi pausada): NO se responde nada automático y el
+        lead queda marcado "Nuevo" — un adjunto nunca hace que Gabi se meta en
+        una conversación que un humano ya atiende (Gate 2026-09-23).
+      · sin asesor: se avisa al cliente, con una frase según el tipo (audio /
+        foto-video-sticker / otro, editables en prompts.yaml), que ese contenido
+        no se lee y que lo escriba."""
+    negocio_id = canal.get("negocio_id") if canal else None
+    lead = await obtener_lead(msg.telefono, negocio_id=negocio_id)
+    if _gabi_debe_pausarse(lead):
+        mensaje_guardado = await servicio_conversacion.guardar_mensaje(
+            msg.telefono, "user", contenido, negocio_id=negocio_id,
+            archivo_id=archivo_id, mensaje_id_meta=msg.mensaje_id or None,
+        )
+        await marcar_lead_no_visto(msg.telefono)
+        logger.info(f"Mensaje de {msg.telefono} ({msg.tipo}) guardado sin respuesta automática (asignado a {lead['asesor_asignado']})")
+        await gestor_conexiones.emitir_mensaje_nuevo(mensaje_guardado["conversation_id"])
+        return
+    respuesta = servicio_inteligencia.obtener_mensaje_no_soportado(msg.tipo)
+    await servicio_conversacion.guardar_mensaje(
+        msg.telefono, "user", contenido, negocio_id=negocio_id,
+        archivo_id=archivo_id, mensaje_id_meta=msg.mensaje_id or None,
+    )
+    enviado, wamid = await proveedor.enviar_mensaje(msg.telefono, respuesta, canal=canal)
+    mensaje_guardado = await servicio_conversacion.guardar_mensaje(
+        msg.telefono, "assistant", respuesta, negocio_id=negocio_id,
+        mensaje_id_meta=wamid, estado_envio=None if enviado else "fallido",
+    )
+    await gestor_conexiones.emitir_mensaje_nuevo(mensaje_guardado["conversation_id"])
 
 
 async def _avisar_que_gabi_escribe(telefono: str, canal: dict | None) -> None:
@@ -669,79 +709,42 @@ async def webhook_handler(request: Request):
                 await gestor_conexiones.emitir_mensaje_nuevo(mensaje_guardado["conversation_id"])
                 continue
 
-            # Multimedia entrante soportada (imagen, documento, nota de voz)
-            # — se descarga el archivo real de Meta y se guarda como adjunto
+            # Reacción a un mensaje (👍, ❤️…): se deja como una línea en el
+            # historial para que el asesor vea que el cliente reaccionó, y
+            # NADA más — nunca dispara a Gabi ni el aviso de "tipo no
+            # soportado" (antes una reacción recibía esa respuesta absurda), ni
+            # marca el lead como "Nuevo": no pide atención. Sin emoji, el
+            # cliente quitó su reacción y no hay nada que guardar.
+            if msg.tipo == "reaction":
+                if msg.texto:
+                    mensaje_guardado = await servicio_conversacion.guardar_mensaje(
+                        msg.telefono, "user", msg.texto, negocio_id=canal.get("negocio_id") if canal else None,
+                        mensaje_id_meta=msg.mensaje_id or None,
+                    )
+                    await gestor_conexiones.emitir_mensaje_nuevo(mensaje_guardado["conversation_id"])
+                continue
+
+            # Multimedia entrante soportada (imagen, documento, nota de voz,
+            # sticker, video/GIF) — se descarga el archivo real de Meta y se guarda como adjunto
             # real del mensaje, en vez de descartar el contenido con el
             # placeholder de texto f"[{tipo}]" (comportamiento anterior).
             # Gabi sigue sin poder "leer" el contenido (no tiene visión ni
-            # transcripción — fuera de alcance de este Gate): se le sigue
-            # avisando al cliente que este tipo de mensaje no se procesa
-            # automáticamente, igual que antes.
-            #
-            # Gate 2026-09-23 (hallazgo real: 2 casos en la misma
-            # conversación, lead ya asignado) — ANTES de decidir si Gabi
-            # responde acá, se consulta el lead: si ya hay un asesor
-            # asignado (o pausado_manual), esta rama tiene que comportarse
-            # EXACTAMENTE como la rama de texto de abajo (guardar sin
-            # respuesta automática) — un adjunto nunca debe hacer que Gabi
-            # vuelva a meterse en una conversación que un humano ya está
-            # atendiendo. El asesor SÍ puede escuchar/ver el adjunto desde
-            # el panel (AdjuntoMensaje ya reproduce audio/imagen/documento
-            # real) — lo único que se bloquea es la respuesta AUTOMÁTICA.
+            # transcripción — entender imágenes/stickers/audio queda para una
+            # fase posterior, decisión del usuario 2026-09-24): al cliente se
+            # le sigue avisando, con una frase según el tipo, que ese contenido
+            # no se lee y que lo escriba (ver `_atender_mensaje_no_legible`).
             if msg.tipo in TIPOS_MEDIA_SOPORTADOS:
                 logger.info(f"Media entrante ({msg.tipo}) de {msg.telefono}")
                 archivo_id_creado = await _guardar_media_entrante(msg, canal)
                 contenido_usuario = (msg.media or {}).get("caption") or f"[{msg.tipo}]"
-                lead = await obtener_lead(msg.telefono, negocio_id=canal.get("negocio_id") if canal else None)
-                if _gabi_debe_pausarse(lead):
-                    mensaje_guardado = await servicio_conversacion.guardar_mensaje(
-                        msg.telefono, "user", contenido_usuario, negocio_id=canal.get("negocio_id") if canal else None,
-                        archivo_id=archivo_id_creado, mensaje_id_meta=msg.mensaje_id or None,
-                    )
-                    await marcar_lead_no_visto(msg.telefono)
-                    logger.info(f"Media de {msg.telefono} guardada sin respuesta automática (asignado a {lead['asesor_asignado']})")
-                    await gestor_conexiones.emitir_mensaje_nuevo(mensaje_guardado["conversation_id"])
-                    continue
-                respuesta = servicio_inteligencia.obtener_mensaje_no_soportado()
-                await servicio_conversacion.guardar_mensaje(
-                    msg.telefono, "user", contenido_usuario, negocio_id=canal.get("negocio_id") if canal else None,
-                    archivo_id=archivo_id_creado, mensaje_id_meta=msg.mensaje_id or None,
-                )
-                enviado, wamid = await proveedor.enviar_mensaje(msg.telefono, respuesta, canal=canal)
-                mensaje_guardado = await servicio_conversacion.guardar_mensaje(
-                    msg.telefono, "assistant", respuesta, negocio_id=canal.get("negocio_id") if canal else None,
-                    mensaje_id_meta=wamid, estado_envio=None if enviado else "fallido",
-                )
-                await gestor_conexiones.emitir_mensaje_nuevo(mensaje_guardado["conversation_id"])
+                await _atender_mensaje_no_legible(msg, canal, contenido_usuario, archivo_id_creado)
                 continue
 
-            # Tipos que aún no procesamos (video, sticker, ubicación, etc.):
-            # avisamos al cliente en vez de dejarlo sin respuesta — mismo
-            # chequeo de asignación que la rama de media de arriba (Gate
-            # 2026-09-23).
+            # Tipos que aún no procesamos (ubicación ya no: llega como texto;
+            # queda p. ej. lo desconocido): mismo tratamiento que la media.
             if msg.tipo != "text":
                 logger.info(f"Mensaje no soportado ({msg.tipo}) de {msg.telefono}")
-                lead = await obtener_lead(msg.telefono, negocio_id=canal.get("negocio_id") if canal else None)
-                if _gabi_debe_pausarse(lead):
-                    mensaje_guardado = await servicio_conversacion.guardar_mensaje(
-                        msg.telefono, "user", f"[{msg.tipo}]", negocio_id=canal.get("negocio_id") if canal else None,
-                        mensaje_id_meta=msg.mensaje_id or None,
-                    )
-                    await marcar_lead_no_visto(msg.telefono)
-                    logger.info(f"Mensaje de {msg.telefono} guardado sin respuesta automática (asignado a {lead['asesor_asignado']})")
-                    await gestor_conexiones.emitir_mensaje_nuevo(mensaje_guardado["conversation_id"])
-                    continue
-                respuesta = servicio_inteligencia.obtener_mensaje_no_soportado()
-                await servicio_conversacion.guardar_mensaje(
-                    msg.telefono, "user", f"[{msg.tipo}]", negocio_id=canal.get("negocio_id") if canal else None,
-                    mensaje_id_meta=msg.mensaje_id or None,
-                )
-                enviado, wamid = await proveedor.enviar_mensaje(msg.telefono, respuesta, canal=canal)
-                mensaje_guardado = await servicio_conversacion.guardar_mensaje(
-                    msg.telefono, "assistant", respuesta, negocio_id=canal.get("negocio_id") if canal else None,
-                    mensaje_id_meta=wamid, estado_envio=None if enviado else "fallido",
-                )
-                await gestor_conexiones.emitir_mensaje_nuevo(mensaje_guardado["conversation_id"])
+                await _atender_mensaje_no_legible(msg, canal, f"[{msg.tipo}]")
                 continue
 
             if not msg.texto:

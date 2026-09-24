@@ -146,4 +146,6 @@ system_prompt: |
 fallback_message: "Disculpa, no entendí tu mensaje. ¿Podrías contarme un poco más?"
 error_message: "Uy, estoy teniendo un problema técnico. Por favor intenta de nuevo en unos minutos 🙏"
 mensaje_no_soportado: "Por ahora no puedo escuchar audios 🙏 ¿me lo escribes por texto?"
+mensaje_no_soportado_visual: "Por ahora no puedo ver fotos, videos ni stickers 🙏 ¿me lo escribes por texto?"
+mensaje_no_soportado_otro: "Por ahora no puedo abrir ese tipo de mensaje 🙏 ¿me lo escribes por texto?"
 error_escalado_message: "Uy, parece que sigo con problemas técnicos 😓 Ya te voy a conectar con un asesor para que te ayude directamente. Si prefieres, también puedes llamarnos al 614-9002."

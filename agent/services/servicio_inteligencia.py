@@ -59,8 +59,8 @@ class ServicioInteligencia:
     async def extraer_datos_lead(self, mensaje_cliente: str, respuesta_gabi: str, lead_actual: dict | None) -> dict:
         return await brain.extraer_datos_lead(mensaje_cliente, respuesta_gabi, lead_actual)
 
-    def obtener_mensaje_no_soportado(self) -> str:
-        return brain.obtener_mensaje_no_soportado()
+    def obtener_mensaje_no_soportado(self, tipo: str | None = None) -> str:
+        return brain.obtener_mensaje_no_soportado(tipo)
 
     def obtener_mensaje_error_escalado(self) -> str:
         return brain.obtener_mensaje_error_escalado()

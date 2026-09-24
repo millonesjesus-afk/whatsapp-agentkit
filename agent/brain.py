@@ -313,10 +313,29 @@ def obtener_mensaje_fallback() -> str:
     return config.get("fallback_message", "Disculpa, no entendí tu mensaje. ¿Podrías reformularlo?")
 
 
-def obtener_mensaje_no_soportado() -> str:
-    """Retorna el mensaje para tipos de contenido que el agente aún no procesa (audio, imagen, etc.)."""
+_TIPOS_VISUALES_NO_SOPORTADOS = ("image", "video", "sticker")
+
+
+def obtener_mensaje_no_soportado(tipo: str | None = None) -> str:
+    """Mensaje para tipos de contenido que el agente aún no procesa. Hasta
+    2026-09-24 era UNO solo ("no puedo escuchar audios") aunque el cliente
+    hubiera mandado una foto; ahora se ajusta al tipo, con las tres frases
+    editables en prompts.yaml:
+      · audio (y sin tipo, por compatibilidad) → `mensaje_no_soportado`
+      · imagen, video/GIF, sticker → `mensaje_no_soportado_visual`
+      · cualquier otro (documento, tipo desconocido) → `mensaje_no_soportado_otro`"""
     config = cargar_config_prompts()
-    return config.get("mensaje_no_soportado", "Por ahora no puedo procesar ese tipo de mensaje. ¿me lo escribes por texto?")
+    if tipo in _TIPOS_VISUALES_NO_SOPORTADOS:
+        return config.get(
+            "mensaje_no_soportado_visual",
+            "Por ahora no puedo ver fotos, videos ni stickers 🙏 ¿me lo escribes por texto?",
+        )
+    if tipo in (None, "audio"):
+        return config.get("mensaje_no_soportado", "Por ahora no puedo escuchar audios 🙏 ¿me lo escribes por texto?")
+    return config.get(
+        "mensaje_no_soportado_otro",
+        "Por ahora no puedo abrir ese tipo de mensaje 🙏 ¿me lo escribes por texto?",
+    )
 
 
 def obtener_mensaje_error_escalado() -> str:
