@@ -92,8 +92,9 @@ def test_el_pool_de_postgres_retiene_mas_conexiones_que_el_default():
 
     args = mem._argumentos_engine("postgresql+asyncpg://u:p@localhost/db")
     assert args["pool_size"] == 10 and args["max_overflow"] == 20 and args["pool_recycle"] == 1800
+    assert args["pool_pre_ping"] is True  # sobrevive a un reinicio de Postgres sin errores de "connection reset"
     pool = create_async_engine("postgresql+asyncpg://u:p@localhost/db", **args).sync_engine.pool
-    assert pool.size() == 10 and pool._max_overflow == 20
+    assert pool.size() == 10 and pool._max_overflow == 20 and pool._pre_ping is True
 
 
 def test_sqlite_no_recibe_parametros_de_pool_de_postgres():

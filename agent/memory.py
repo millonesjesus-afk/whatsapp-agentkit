@@ -97,7 +97,11 @@ if DATABASE_URL.startswith("postgresql://"):
 def _argumentos_engine(url: str) -> dict:
     args: dict = {"echo": False}
     if url.startswith("postgresql"):
-        args.update(pool_size=10, max_overflow=20, pool_recycle=1800)
+        # pool_pre_ping: si Postgres se reinicia (deploy, mantenimiento de
+        # Railway), las conexiones que el pool guardaba quedan rotas; sin esto
+        # los primeros pedidos fallan con "connection reset". Con la red
+        # privada el chequeo previo cuesta ~1 ms.
+        args.update(pool_size=10, max_overflow=20, pool_recycle=1800, pool_pre_ping=True)
     return args
 
 
