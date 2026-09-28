@@ -4,6 +4,11 @@ anthropic>=0.40.0
 httpx>=0.25.0
 python-dotenv>=1.0.0
 sqlalchemy>=2.0.0
+# Dependencia transitiva de sqlalchemy[asyncio]/asyncpg — declarada explícita
+# porque el build de Railway a veces no la instala sola (2026-09-24 y
+# 2026-09-28: "ModuleNotFoundError: No module named 'greenlet'", primero en
+# los Cron y luego también en el servicio principal, producción caída ~1.5h).
+greenlet>=3.0.0
 pyyaml>=6.0.1
 aiosqlite>=0.19.0
 python-multipart>=0.0.6
