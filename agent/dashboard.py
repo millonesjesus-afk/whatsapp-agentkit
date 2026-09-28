@@ -22,6 +22,7 @@ de la lógica del bot, para poder extraerse a otro servicio más adelante
 sin tocar main.py/brain.py.
 """
 
+import asyncio
 import html
 import json
 import logging
@@ -37,7 +38,7 @@ from fastapi import APIRouter, Depends, HTTPException, Form, Request, UploadFile
 from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse, Response, FileResponse
 from sqlalchemy.exc import IntegrityError
 
-from agent.tiempo_real import gestor_conexiones
+from agent.tiempo_real import gestor_conexiones, emitir_ticket_ws, validar_y_consumir_ticket_ws
 from agent.rate_limit import limitador_login, bloqueo_login, ip_cliente
 from agent.memory import (
     listar_leads, obtener_lead, actualizar_lead,
@@ -425,6 +426,19 @@ async def _resolver_conversation_ws(datos: dict, negocio_id: str) -> dict | None
     return None
 
 
+PLAZO_AUTH_WS_TICKET_SEG = 5.0
+
+
+@router.post("/ws-ticket")
+async def emitir_ticket_ws_ruta(usuario: dict = Depends(_usuario_actual), _csrf: None = Depends(verificar_csrf)):
+    """Fase 2, tiempo real directo (MAIEK_AI_REALTIME_DIRECT_DESIGN.md) — la
+    Nueva Experiencia (Vercel, otro origen) llama esto ANTES de abrir el
+    WebSocket directo, con la cookie de sesión que sí le llega vía el BFF
+    (same-origin desde el navegador hasta ahí). Exige sesión + CSRF, mismo
+    candado que cualquier POST del panel — sin sesión válida no hay ticket."""
+    return {"ticket": emitir_ticket_ws(usuario["username"])}
+
+
 @router.websocket("/ws")
 async def websocket_panel(websocket: WebSocket):
     if not _origen_websocket_permitido(websocket):
@@ -432,16 +446,37 @@ async def websocket_panel(websocket: WebSocket):
         await websocket.close(code=4403)
         return
 
-    username = websocket.session.get("username")
-    if not username:
-        await websocket.close(code=4401)
-        return
-    usuario = await obtener_usuario(username)
-    if usuario is None:
-        await websocket.close(code=4401)
-        return
-
-    await gestor_conexiones.conectar(websocket, username, usuario["rol"], usuario["negocio_id"])
+    username_sesion = websocket.session.get("username")
+    if username_sesion:
+        # Camino legacy — cookie de sesión de Starlette, same-origin (panel
+        # HTML servido por este mismo FastAPI). Sin cambios de comportamiento.
+        usuario = await obtener_usuario(username_sesion)
+        if usuario is None:
+            await websocket.close(code=4401)
+            return
+        username = username_sesion
+        await gestor_conexiones.conectar(websocket, username, usuario["rol"], usuario["negocio_id"])
+    else:
+        # Camino del ticket (Fase 2) — sin cookie de sesión (cross-origin: la
+        # Nueva Experiencia). Se acepta la conexión para poder leer el primer
+        # mensaje (el protocolo WS exige aceptar antes de recibir nada) y se
+        # exige {"tipo":"auth","ticket":...} dentro de PLAZO_AUTH_WS_TICKET_SEG.
+        # Cualquier fallo (sin mensaje a tiempo, ticket inválido/vencido/
+        # reutilizado, usuario inexistente) cierra con 4401 — mismo código que
+        # el camino legacy usa para "sin sesión válida".
+        await websocket.accept()
+        try:
+            datos_auth = await asyncio.wait_for(websocket.receive_json(), timeout=PLAZO_AUTH_WS_TICKET_SEG)
+        except (TimeoutError, WebSocketDisconnect, ValueError, RuntimeError):
+            await websocket.close(code=4401)
+            return
+        ticket = datos_auth.get("ticket") if isinstance(datos_auth, dict) and datos_auth.get("tipo") == "auth" else None
+        username = validar_y_consumir_ticket_ws(ticket) if ticket else None
+        usuario = await obtener_usuario(username) if username else None
+        if usuario is None:
+            await websocket.close(code=4401)
+            return
+        await gestor_conexiones.conectar(websocket, username, usuario["rol"], usuario["negocio_id"], ya_aceptado=True)
     try:
         while True:
             datos = await websocket.receive_json()

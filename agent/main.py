@@ -224,6 +224,25 @@ UMBRAL_INACTIVIDAD_WS_SEG = 120.0
 INTERVALO_BARRIDO_INACTIVAS_SEG = 30.0
 
 
+INTERVALO_LATIDO_WS_SEG = 20.0
+
+
+async def _emitir_latido_ws_periodicamente():
+    """Fase 2, tiempo real directo (MAIEK_AI_REALTIME_DIRECT_DESIGN.md) — ver
+    GestorConexiones.emitir_latido_a_todos. Tarea aparte de
+    _barrer_conexiones_ws_inactivas a propósito: son dos frecuencias
+    distintas con dos propósitos distintos, y mezclarlas arriesgaba el margen
+    ya calculado de esa otra (ver su comentario, más abajo)."""
+    while True:
+        await asyncio.sleep(INTERVALO_LATIDO_WS_SEG)
+        try:
+            await gestor_conexiones.emitir_latido_a_todos()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Error al emitir el latido del WebSocket del panel")
+
+
 async def _barrer_conexiones_ws_inactivas():
     """Tarea de background del ciclo de vida del proceso — cierra
     activamente conexiones WS del panel abandonadas (Gate 4.1, ver
@@ -278,6 +297,7 @@ async def lifespan(app: FastAPI):
     logger.info(f"Servidor AgentKit corriendo en puerto {PORT}")
     logger.info(f"Proveedor de WhatsApp: {proveedor.__class__.__name__}")
     tarea_barrido_ws = asyncio.create_task(_barrer_conexiones_ws_inactivas())
+    tarea_latido_ws = asyncio.create_task(_emitir_latido_ws_periodicamente())
     yield
     # Gate 2026-09-23 (debounce, fix #3) — le da a las respuestas de Gabi ya
     # programadas (esperando su ventana, o ya llamando a Claude) una
@@ -291,6 +311,9 @@ async def lifespan(app: FastAPI):
     tarea_barrido_ws.cancel()
     with contextlib.suppress(asyncio.CancelledError):
         await tarea_barrido_ws
+    tarea_latido_ws.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await tarea_latido_ws
     await cerrar_cliente_http()
 
 

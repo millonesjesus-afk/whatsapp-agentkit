@@ -65,8 +65,11 @@ Dos tipos de evento:
 """
 
 import logging
+import os
+import secrets
 import time
 from fastapi import WebSocket
+from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
 
 from agent.memory import obtener_conversation_realtime, tiene_acceso_a_lead
 
@@ -76,6 +79,76 @@ logger = logging.getLogger("agentkit")
 # GestorConexiones.cerrar_inactivas). No colisiona con 4401 (sesión), 4403
 # (Origin) ni 4409 (duplicada).
 CODIGO_WS_INACTIVA = 4408
+
+
+# ── Ticket de un solo uso para el WebSocket DIRECTO (Fase 2) ────────────
+#
+# MAIEK_AI_REALTIME_DIRECT_DESIGN.md — el navegador de la Nueva Experiencia
+# (otro origen, en Vercel) no puede mandarle a este dominio la cookie de
+# sesión de FastAPI (es host-only, del dominio de Vercel). Antes de abrir el
+# WebSocket directo pide este ticket vía HTTP (con su cookie de sesión, que
+# SÍ viaja en esa llamada porque es same-origin a través del BFF) y lo manda
+# como primer mensaje al conectar — ver websocket_panel en dashboard.py.
+
+TICKET_WS_MAX_AGE_SEG = 30
+_TICKET_WS_SAL = "ws-ticket"
+
+
+def _serializador_ticket_ws() -> URLSafeTimedSerializer:
+    """Mismo secreto que `SessionMiddleware` (agent/main.py, SESSION_SECRET_KEY)
+    y mismo valor de respaldo para desarrollo local — ese chequeo de "es
+    obligatorio en producción" ya corre en main.py al arrancar, así que acá
+    alcanza con releer la variable (este módulo se importa ANTES de que
+    main.py llegue a esa validación, así que no se puede depender de ella)."""
+    secreto = os.environ.get("SESSION_SECRET_KEY") or "cambia-esta-clave-solo-para-desarrollo-local"
+    return URLSafeTimedSerializer(secreto, salt=_TICKET_WS_SAL)
+
+
+def emitir_ticket_ws(username: str) -> str:
+    """Pase de un solo uso para autenticar el WebSocket directo. Vence en
+    TICKET_WS_MAX_AGE_SEG y se consume una sola vez (ver
+    validar_y_consumir_ticket_ws) — robarlo solo sirve para abrir UNA
+    conexión dentro de esa ventana. Nunca lleva rol ni negocio_id: eso se
+    resuelve siempre de la base por username, igual que con la cookie de
+    sesión (mismo criterio del Gate 5.4/5.5 — nunca confiar en un dato de
+    autorización que viaja del lado del cliente)."""
+    jti = secrets.token_urlsafe(16)
+    return _serializador_ticket_ws().dumps({"u": username, "j": jti})
+
+
+# jti -> instante (time.monotonic()) en que se consumió. Un solo proceso —
+# mismo supuesto que el resto de este módulo (ver docstring de cabecera,
+# "Multi-proceso"); con más de una réplica esto tendría que compartirse.
+_tickets_ws_usados: dict[str, float] = {}
+
+
+def _purgar_tickets_ws_usados() -> None:
+    limite = time.monotonic() - TICKET_WS_MAX_AGE_SEG * 4
+    vencidos = [jti for jti, consumido_en in _tickets_ws_usados.items() if consumido_en < limite]
+    for jti in vencidos:
+        del _tickets_ws_usados[jti]
+
+
+def validar_y_consumir_ticket_ws(ticket: str) -> str | None:
+    """Retorna el username si el ticket es válido, no venció y no se había
+    usado antes — None en cualquier otro caso (firma inválida, vencido,
+    reutilizado, o el valor no es ni siquiera un ticket). Efecto secundario:
+    marca el jti como usado — llamar esto dos veces con el mismo ticket
+    retorna None la segunda vez."""
+    try:
+        datos = _serializador_ticket_ws().loads(ticket, max_age=TICKET_WS_MAX_AGE_SEG)
+    except (BadSignature, SignatureExpired):
+        return None
+    if not isinstance(datos, dict):
+        return None
+    jti, username = datos.get("j"), datos.get("u")
+    if not jti or not username:
+        return None
+    _purgar_tickets_ws_usados()
+    if jti in _tickets_ws_usados:
+        return None
+    _tickets_ws_usados[jti] = time.monotonic()
+    return username
 
 # Dispositivos/pestañas del MISMO usuario que pueden mirar la MISMA
 # conversación a la vez (laptop + celular + otra pestaña). Ver
@@ -90,7 +163,7 @@ class GestorConexiones:
         #        "ultima_actividad": float (time.monotonic())}
         self._conexiones: dict[WebSocket, dict] = {}
 
-    async def conectar(self, ws: WebSocket, username: str, rol: str, negocio_id: str):
+    async def conectar(self, ws: WebSocket, username: str, rol: str, negocio_id: str, ya_aceptado: bool = False):
         """`rol`/`negocio_id` se guardan al conectar (no se vuelven a
         resolver en cada emisión) — evita una consulta a la base de datos
         por conexión en cada mensaje nuevo del sistema entero, a costa de
@@ -101,8 +174,14 @@ class GestorConexiones:
 
         `negocio_id` (Gate 5.4, T1): candado real de emisión — ver
         `emitir_mensaje_nuevo`. Sin este campo, "admin/supervisor ven todo"
-        significaba "ven todo de cualquier Negocio"."""
-        await ws.accept()
+        significaba "ven todo de cualquier Negocio".
+
+        `ya_aceptado` (Fase 2, tiempo real directo): el camino del ticket en
+        `websocket_panel` necesita aceptar la conexión ANTES de poder leer el
+        primer mensaje con el ticket — llamar `accept()` dos veces sobre el
+        mismo WebSocket es un error, así que ese caller pasa `True` acá."""
+        if not ya_aceptado:
+            await ws.accept()
         self._conexiones[ws] = {
             "username": username, "rol": rol, "negocio_id": negocio_id, "conversation_id_activo": None,
             "ultima_actividad": time.monotonic(), "conectada_en": time.monotonic(),
@@ -329,6 +408,21 @@ class GestorConexiones:
         for ws, info in list(self._conexiones.items()):
             if info["conversation_id_activo"] == conversation_id and info["username"] != excluir_username:
                 await self._enviar_seguro(ws, evento)
+
+    async def emitir_latido_a_todos(self) -> None:
+        """Fase 2, tiempo real directo — sin el relay del BFF de por medio, el
+        navegador no tiene ninguna señal de aplicación para notar una conexión
+        que murió en silencio (laptop suspendida, red caída: el WebSocket
+        sigue "abierto" para JavaScript hasta que algo la corta). El
+        ping/pong de protocolo que ya maneja uvicorn nunca llega a
+        `onmessage` — por eso esto es un mensaje real, cada
+        INTERVALO_LATIDO_WS_SEG (ver agent/main.py), a TODAS las conexiones
+        (panel legacy incluido: ignora cualquier tipo de evento que no
+        reconoce, ver `_script_tiempo_real` en dashboard.py — no le hace
+        daño, y mantiene una sola tarea periódica en vez de dos)."""
+        evento = {"tipo": "latido"}
+        for ws in list(self._conexiones):
+            await self._enviar_seguro(ws, evento)
 
     async def _enviar_seguro(self, ws: WebSocket, evento: dict):
         try:
