@@ -19,7 +19,7 @@ from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sess
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, aliased
 from sqlalchemy import (
     String, Text, DateTime, select, Integer, Boolean, func, case, delete, update, JSON,
-    ForeignKey, Index, text, and_ as sa_and, or_ as sa_or,
+    ForeignKey, Index, text, and_ as sa_and, or_ as sa_or, exists as sa_exists,
 )
 from sqlalchemy.exc import IntegrityError
 from dotenv import load_dotenv
@@ -1798,7 +1798,8 @@ def _es_transicion_a_vendido_opportunity(opportunity: "Opportunity", campos: dic
 
 async def listar_conversaciones_activas(
     negocio_id: str, asesor_asignado: str | None = None, busqueda: str = "",
-    orden: str = "actualizado", direccion: str = "desc", pagina: int = 1, por_pagina: int = 20,
+    resultado: str = "", orden: str = "actualizado", direccion: str = "desc",
+    pagina: int = 1, por_pagina: int = 20,
 ) -> tuple[list[dict], int]:
     """Bandeja de Conversaciones (Diseño Técnico Gate 5.3 §13/§18) — a
     diferencia de Pipeline (que lista Opportunity), esto lista `Conversation`
@@ -1839,9 +1840,29 @@ async def listar_conversaciones_activas(
         )
         if asesor_asignado:
             query = query.where(Conversation.asesor_asignado_id == asesor_asignado)
+        if resultado:
+            query = query.where(opportunity_vigente.resultado == resultado)
         if busqueda:
+            # Punto 4 (pedido explícito del usuario, 2026-09-28: "que el
+            # buscador de chat busque por palabra asi como el de whatsapp"):
+            # antes solo miraba nombre/teléfono del Contact — ahora también
+            # el interés (ya visible en la fila) y el CONTENIDO de los
+            # mensajes de esa Conversation, vía EXISTS (no trae los mensajes,
+            # solo confirma que hay al menos uno que matchea — un JOIN normal
+            # duplicaría filas de Conversation por cada mensaje que calce).
             patron = f"%{busqueda}%"
-            query = query.where(Contact.nombre.ilike(patron) | Contact.telefono.ilike(patron))
+            existe_mensaje_con_texto = sa_exists(
+                select(Mensaje.id).where(
+                    Mensaje.conversation_id == Conversation.id,
+                    Mensaje.content.ilike(patron),
+                )
+            )
+            query = query.where(
+                Contact.nombre.ilike(patron)
+                | Contact.telefono.ilike(patron)
+                | opportunity_vigente.interes.ilike(patron)
+                | existe_mensaje_con_texto
+            )
 
         total = (await session.execute(select(func.count()).select_from(query.subquery()))).scalar_one()
 

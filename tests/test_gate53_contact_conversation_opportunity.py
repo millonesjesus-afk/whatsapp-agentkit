@@ -513,6 +513,44 @@ async def test_listar_conversaciones_activas_no_duplica_por_multiples_opportunit
     assert filas[0]["telefono"] == telefono
 
 
+async def test_listar_conversaciones_activas_busqueda_encuentra_por_contenido_de_mensaje():
+    """Punto 4 (pedido explícito del usuario, 2026-09-28: 'que el buscador
+    de chat busque por palabra asi como el de whatsapp') — antes `busqueda`
+    solo miraba nombre/teléfono del Contact; ahora también el contenido de
+    los mensajes de la Conversation."""
+    negocio, canal = await _negocio_con_canal("bnd4", "10000000029")
+    telefono = "51900100025"
+    await _abrir_conversacion(negocio, canal, telefono)
+    await mem.guardar_mensaje(telefono, "user", "¿tienen termas a gas de 8 litros?", negocio["id"])
+
+    filas, total = await mem.listar_conversaciones_activas(negocio["id"], busqueda="termas a gas")
+    assert total == 1
+    assert filas[0]["telefono"] == telefono
+
+    filas_sin_match, total_sin_match = await mem.listar_conversaciones_activas(
+        negocio["id"], busqueda="secadora",
+    )
+    assert total_sin_match == 0
+    assert filas_sin_match == []
+
+
+async def test_listar_conversaciones_activas_filtra_por_resultado():
+    """Punto 4 — filtro por resultado en la misma bandeja."""
+    negocio, canal = await _negocio_con_canal("bnd5", "10000000030")
+    tel_agendado = "51900100026"
+    tel_sin_resultado = "51900100027"
+    _, opp_agendado = await _abrir_conversacion(negocio, canal, tel_agendado)
+    await _abrir_conversacion(negocio, canal, tel_sin_resultado)
+    async with mem.async_session() as session:
+        o = await session.get(mem.Opportunity, opp_agendado.id)
+        o.resultado = "agendado"
+        await session.commit()
+
+    filas, total = await mem.listar_conversaciones_activas(negocio["id"], resultado="agendado")
+    assert total == 1
+    assert filas[0]["telefono"] == tel_agendado
+
+
 async def test_ownership_campana_y_canal_no_cruzan_negocios():
     """Corrección pequeña de seguridad: obtener_campana/obtener_canal_whatsapp
     (usadas por los chequeos de ownership de dashboard.py) devuelven

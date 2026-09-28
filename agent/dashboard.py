@@ -193,7 +193,13 @@ ETIQUETAS_RESULTADO = {
     "otro": "Otro",
     "consulta_atc": "Consulta ATC",
     "sin_saldo": "Sin saldo",
-    "servicio_postventa": "Servicio Postventa",
+    # Renombrado (2026-09-28, hallazgo del usuario): la clave `servicio_postventa`
+    # es de un negocio distinto — servicios adicionales de gas, no el
+    # seguimiento posventa de una venta de producto que se está diseñando
+    # ahora (punto 3, ese va a ser un resultado NUEVO, "Postventa", todavía
+    # sin construir). Se deja la clave en la base tal cual (nadie migra datos
+    # por un cambio de etiqueta) — solo cambia el texto que ve la persona.
+    "servicio_postventa": "Servicio adicional Gas",
     "cartera_fnb": "Cartera FNB",
     "sin_respuesta": "Sin respuesta",
 }
@@ -2665,6 +2671,7 @@ async def bandeja_conversaciones(
     q: str = "",
     asesor: str = "",
     alcance: str = "",
+    resultado: str = "",
     orden: str = "actualizado",
     dir: str = "desc",
     pagina: int = 1,
@@ -2686,11 +2693,17 @@ async def bandeja_conversaciones(
         orden = "actualizado"
     if dir not in ("asc", "desc"):
         dir = "desc"
+    # Punto 4 (2026-09-28): filtro por resultado en la Bandeja — mismo
+    # catálogo que ya usa la Ficha del Lead, así que un valor fuera de
+    # RESULTADOS es un cliente desactualizado o manipulando la URL a mano,
+    # nunca un caso real; se ignora en vez de fallar.
+    if resultado not in RESULTADOS:
+        resultado = ""
     pagina = max(1, pagina)
     por_pagina = min(max(1, por_pagina), POR_PAGINA_PIPELINE_MAXIMO)
     conversaciones, total = await listar_conversaciones_activas(
         negocio_id=usuario["negocio_id"], asesor_asignado=asesor_filtro, busqueda=q.strip(),
-        orden=orden, direccion=dir, pagina=pagina, por_pagina=por_pagina,
+        resultado=resultado, orden=orden, direccion=dir, pagina=pagina, por_pagina=por_pagina,
     )
     # Misma señal de actividad real para el idle timeout de conexiones WS
     # (Gate 4.1) que ya usan `mensajes_json`/`obtener_mensajes_conversation`
