@@ -26,6 +26,7 @@ from agent.memory import (
     sembrar_canales_desde_env, pausar_gabi_manual, marcar_revision_prioritaria,
     marcar_mensaje_procesado, obtener_negocio_por_codigo,
     resolver_conversation_activa, medir_latencia_db, obtener_conversation_activa_de_telefono,
+    enrutar_posventa_si_corresponde,
 )
 from agent.providers import obtener_proveedor
 from agent.dashboard import (
@@ -706,10 +707,31 @@ async def webhook_handler(request: Request):
                     # NOT NULL) — se deja para el próximo mensaje que sí
                     # resuelva canal, mismo criterio fail-closed que ya usa
                     # actualizar_lead() arriba.
-                    await resolver_conversation_activa(
+                    conversation_actual, _opportunity_actual = await resolver_conversation_activa(
                         msg.telefono, canal["negocio_id"], canal["id"],
                         unidad_id=canal.get("unidad_id"),
                     )
+
+                    # Punto 3 (2026-09-28) — la Conversation quedó sin
+                    # asesor (recién abierta por DR-4, o nunca tuvo uno):
+                    # si este Contact ya tiene una venta cerrada anterior,
+                    # se rutea en silencio al mismo asesor que la vendió,
+                    # ANTES de que _gabi_debe_pausarse (abajo) decida si
+                    # Gabi responde — así, cuando llegue a ese chequeo, ya
+                    # ve un asesor asignado y se pausa por la vía normal
+                    # (ver enrutar_posventa_si_corresponde para el porqué
+                    # completo, incluida la limpieza de cerrado_
+                    # definitivamente_en).
+                    if conversation_actual.asesor_asignado_id is None:
+                        asesor_posventa = await enrutar_posventa_si_corresponde(
+                            msg.telefono, conversation_actual.contact_id,
+                            canal["negocio_id"], conversation_actual.id,
+                        )
+                        if asesor_posventa:
+                            logger.info(
+                                f"{msg.telefono} tiene una venta previa — ruteado automáticamente "
+                                f"a {asesor_posventa} (posventa)"
+                            )
 
             cron.marca("lead_y_conversacion")
 

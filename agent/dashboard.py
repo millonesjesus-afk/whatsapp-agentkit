@@ -177,7 +177,7 @@ ETIQUETAS_FUNNEL = {
 RESULTADOS = [
     "agendado", "vendido", "no_interesado", "no_califica", "no_es_cliente_calidda",
     "producto_sin_stock", "otro", "consulta_atc", "sin_saldo",
-    "servicio_postventa", "cartera_fnb", "sin_respuesta",
+    "servicio_postventa", "cartera_fnb", "sin_respuesta", "postventa",
 ]
 # Los que NO están en RESULTADOS_CERRADOS (importado de memory.py) se
 # consideran "en seguimiento" — casos activos, con algo pendiente por
@@ -202,6 +202,11 @@ ETIQUETAS_RESULTADO = {
     "servicio_postventa": "Servicio adicional Gas",
     "cartera_fnb": "Cartera FNB",
     "sin_respuesta": "Sin respuesta",
+    # Resultado nuevo (Punto 3, 2026-09-28): lo pone SOLO `enrutar_
+    # posventa_si_corresponde` (agent/memory.py), nunca un asesor a mano —
+    # marca la Conversation nueva que se abre cuando un cliente con una
+    # venta ("vendido") ya cerrada definitivamente vuelve a escribir.
+    "postventa": "Postventa",
 }
 # ROLES_CON_VISION_TOTAL vive en agent/memory.py (importado arriba) — no acá:
 # agent/tiempo_real.py (el WebSocket) necesita el mismo valor para filtrar a
@@ -222,6 +227,7 @@ COLOR_RESULTADO = {
     "servicio_postventa": "#0d9488",
     "cartera_fnb": "#4f46e5",
     "sin_respuesta": "#94a3b8",
+    "postventa": "#ca8a04",
 }
 
 # Estados de conversación para las pestañas de filtro del panel — dos grupos:
@@ -3093,7 +3099,11 @@ async def conversation_cerrar_definitivamente(
     siempre sobre un caso que en la práctica ya murió. No hace nada por sí
     solo más allá de esa marca — ver `agent/main.py` para el efecto real
     y `agent/memory.py::cerrar_lead_definitivamente` para las
-    validaciones (resultado ya cerrado, nunca "vendido").
+    validaciones (resultado ya cerrado).
+
+    Punto 3 (2026-09-28): "vendido" ya no está excluido acá — si el cliente
+    vuelve a escribir, `agent/main.py` lo rutea en silencio al mismo asesor
+    que hizo la venta (nunca a Gabi, ver `enrutar_posventa_si_corresponde`).
 
     Mismo patrón que `/conversation/{id}/liberar` (Conversation-first, sin
     chequeo de `version` — un clic, no un formulario)."""
@@ -3106,7 +3116,7 @@ async def conversation_cerrar_definitivamente(
     if telefono is None:
         raise HTTPException(
             status_code=400,
-            detail="Solo se puede cerrar definitivamente un caso con resultado ya cerrado (y nunca uno vendido).",
+            detail="Solo se puede cerrar definitivamente un caso con resultado ya cerrado.",
         )
     return await _json_conversation_actualizada(conversation_id, usuario["negocio_id"])
 

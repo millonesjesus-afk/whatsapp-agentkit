@@ -70,10 +70,15 @@ async def test_cierre_manual_rechaza_resultado_abierto():
     assert lead["cerrado_definitivamente_en"] is None
 
 
-async def test_cierre_manual_rechaza_vendido():
+async def test_cierre_manual_ahora_permite_vendido():
+    # Punto 3 (2026-09-28): "vendido" dejó de estar excluido de
+    # cerrar_lead_definitivamente — ver test_posventa_ruteo.py para el
+    # ruteo al asesor original que reemplaza a la reactivación de Gabi.
     negocio, _ = await _escenario("g-cd-02", "51904100002", resultado="vendido")
 
-    assert await mem.cerrar_lead_definitivamente("51904100002", negocio["id"], "admin1") is False
+    assert await mem.cerrar_lead_definitivamente("51904100002", negocio["id"], "admin1") is True
+    lead = await mem.obtener_lead("51904100002", negocio_id=negocio["id"])
+    assert lead["cerrado_definitivamente_en"] is not None
 
 
 async def test_cierre_manual_funciona_con_resultado_cerrado_y_deja_evento():
@@ -336,14 +341,17 @@ async def test_ruta_cerrar_definitivamente_400_si_resultado_abierto():
     assert exc.value.status_code == 400
 
 
-async def test_ruta_cerrar_definitivamente_400_si_vendido():
+async def test_ruta_cerrar_definitivamente_ahora_permite_vendido():
+    # Punto 3 (2026-09-28): el botón manual también puede cerrar un
+    # "vendido" ahora — ver test_posventa_ruteo.py para el ruteo real.
     negocio, _ = await _escenario("g-cdh-04", "51904300004", resultado="vendido")
     conv_id = await _conversation_id(negocio["id"], "51904300004")
     admin = {"username": "admin1", "nombre": "admin1", "rol": "admin", "negocio_id": negocio["id"]}
 
-    with pytest.raises(HTTPException) as exc:
-        await dashboard.conversation_cerrar_definitivamente(conv_id, usuario=admin, _csrf=None)
-    assert exc.value.status_code == 400
+    respuesta = await dashboard.conversation_cerrar_definitivamente(conv_id, usuario=admin, _csrf=None)
+
+    import json
+    assert json.loads(respuesta.body)["lead"]["cerrado_definitivamente_en"] is not None
 
 
 async def test_ruta_cerrar_definitivamente_404_cross_tenant():

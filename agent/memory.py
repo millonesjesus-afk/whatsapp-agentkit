@@ -4100,7 +4100,15 @@ async def asignar_asesor_a_lead(telefono: str, asesor: str | None, automatico: b
     Con `automatico=False` (default) el comportamiento es el de antes: la ruta
     del panel ya avanzó la versión con intentar_avanzar_version() y registra
     su propio evento con el autor humano — hacerlo también acá duplicaría el
-    evento y saltearía la versión de dos en dos."""
+    evento y saltearía la versión de dos en dos.
+
+    Nota para `enrutar_posventa_si_corresponde` (Punto 3, 2026-09-28): esta
+    función solo deja un evento en el Timeline cuando el asesor CAMBIA
+    (`anterior != asesor`) — pero el ruteo a posventa suele apuntar al MISMO
+    asesor que ya figuraba en el `Lead` (DR-4 abre una Conversation nueva
+    SIN asesor, pero no toca `Lead.asesor_asignado`, que sigue mostrando al
+    vendedor original hasta acá). Por eso ese llamador registra su propio
+    evento aparte, en vez de depender de este (ver esa función)."""
     async with async_session() as session:
         # Gate 5.2 (H2): esta función nunca es el camino de creación de un
         # Lead — para cuando llega acá (asignación, automática o manual),
@@ -4282,16 +4290,28 @@ async def cerrar_lead_definitivamente(telefono: str, negocio_id: str, autor: str
     (mismo patrón dual que `liberar_asignacion`):
     1. Botón "Cerrar definitivamente" en la Ficha del Lead — `autor` es
        quien lo apretó.
-    2. `cerrar_leads_definitivamente_inactivos` (el Cron de inactividad
-       del cliente) — llamada automática, `autor=None`.
+    2. `cerrar_leads_definitivamente_inactivos` / `cerrar_ventas_sin_
+       seguimiento` (los Cron de inactividad del cliente) — llamada
+       automática, `autor=None`.
 
     No exige ningún umbral de silencio por sí sola (eso lo evalúa quien
     llama, versión 2 arriba) — un `autor=None` no es "sin validar", es
     "lo cerró el sistema, no una persona". Rechaza (retorna False, el
     router en dashboard.py lo traduce a 400) si el lead no existe, no es
-    de este Negocio, el `resultado` todavía no es uno cerrado, o ya está
-    vendido (Close-Won es indefinido — mismo criterio que ya existe para
-    pausado_manual de una venta y para el endpoint "reactivar-gabi").
+    de este Negocio, o el `resultado` todavía no es uno cerrado.
+
+    Punto 3 (2026-09-28) — "vendido" YA NO se rechaza acá. Antes sí
+    (Close-Won es indefinido, mismo criterio que pausado_manual de una
+    venta y "reactivar-gabi"), pero ese criterio hablaba de REACTIVAR A
+    GABI, no de si el caso puede marcarse cerrado — y esta función nunca
+    reactivó nada por sí sola (ver el párrafo de abajo). Lo que faltaba
+    era la otra mitad: cuando el cliente de una venta ya cerrada vuelve a
+    escribir, `agent/main.py` (`enrutar_posventa_si_corresponde`) rutea la
+    Conversation nueva en silencio al MISMO asesor que hizo la venta —
+    nunca a Gabi. El guardado real ("Gabi nunca vuelve a responderle a un
+    vendido") sigue intacto y sin tocar en `reactivar_gabi()` y en
+    `/conversation/{id}/liberar` (dashboard.py), que rechazan reactivar a
+    Gabi para un vendido sin importar este cierre.
 
     Este cierre por sí solo NO reactiva nada ni notifica a nadie — solo
     deja la puerta abierta para que, cuando el cliente vuelva a escribir,
@@ -4301,7 +4321,7 @@ async def cerrar_lead_definitivamente(telefono: str, negocio_id: str, autor: str
         lead = await session.get(Lead, telefono)
         if lead is None or lead.negocio_id != negocio_id:
             return False
-        if lead.resultado not in RESULTADOS_CERRADOS or lead.resultado == "vendido":
+        if lead.resultado not in RESULTADOS_CERRADOS:
             return False
         ahora = datetime.utcnow()
         lead.cerrado_definitivamente_en = ahora
@@ -4338,7 +4358,7 @@ async def cerrar_lead_definitivamente_via_conversation(conversation_id: str, neg
 
     Retorna None si la Conversation no existe/no es de este Negocio, o si
     `cerrar_lead_definitivamente` rechazó el cierre (resultado todavía
-    abierto, o vendido) — el router ya resolvió existencia por separado
+    abierto) — el router ya resolvió existencia por separado
     con `resolver_conversation_operable` antes de llamar acá, así que un
     None de esta función siempre se traduce a 400, nunca a 404. Si puede
     cerrar, retorna el teléfono (para que el router arme el DTO de
@@ -4416,6 +4436,156 @@ async def cerrar_leads_definitivamente_inactivos(dias: int = 7) -> list[str]:
             cerrados.append(telefono)
 
     return cerrados
+
+
+async def cerrar_ventas_sin_seguimiento(dias: int = 5) -> list[str]:
+    """Punto 3 (2026-09-28) — 4to escenario de inactividad, exclusivo de
+    "vendido": cierra definitivamente toda venta con asesor asignado que el
+    CLIENTE no respondió en los últimos `dias` días. Mismo mecanismo que
+    `cerrar_leads_definitivamente_inactivos` (reusa `cerrar_lead_
+    definitivamente`, ahora sin la exclusión de vendido — ver esa función),
+    separado en su propia función y su propio Cron Schedule porque el
+    umbral es distinto y deliberadamente MÁS CORTO que el de los otros 8
+    resultados cerrados (7 días):
+
+    - Este cierre es 100% silencioso e interno — nunca le escribe nada al
+      cliente, y si vuelve a contactar en cualquier momento
+      `agent/main.py` (`enrutar_posventa_si_corresponde`) reabre la
+      atención sin pérdida, ruteándola de una al mismo asesor que hizo la
+      venta. No hay downside de UX en cerrar antes.
+    - Sí hay downside de negocio en NO cerrar antes: hasta este Gate,
+      NINGÚN Cron cubría "vendido" — una venta con seguimiento pendiente
+      (instalación, entrega) podía quedar sin que nadie se enterara si el
+      cliente no volvía a escribir (ver el caso real investigado de
+      Mariella Lachira, memoria de sesión 2026-09-28). Cerrar más rápido
+      que el resto reduce esa ventana sin costo.
+    - 5 días (vs. los 7 de `cerrar_leads_definitivamente_inactivos`) da
+      margen de sobra para coordinación de entrega/instalación con
+      terveros (el caso real de Mariella tardó 6 días en escribir de
+      nuevo, y hubiera reabierto igual de bien un día después de cerrado)
+      y deja las colas de los asesores más limpias — la investigación de
+      mercado no arrojó un estándar único de "días de soporte post-venta
+      antes de archivar el caso" para este rubro, así que el criterio acá
+      es interno: no hay razón para esperar más que lo necesario cuando
+      reabrir no cuesta nada.
+
+    Pensado para correr como un Cron Schedule de Railway propio (mismo
+    patrón que los otros 3), una vez al día. Retorna la lista de
+    teléfonos cerrados."""
+    corte = datetime.utcnow() - timedelta(days=dias)
+    async with async_session() as session:
+        query = select(Lead).where(
+            Lead.asesor_asignado.is_not(None),
+            Lead.resultado == "vendido",
+            Lead.cerrado_definitivamente_en.is_(None),
+        )
+        candidatos = (await session.execute(query)).scalars().all()
+
+        elegibles: list[tuple[str, str]] = []
+        for lead in candidatos:
+            ultimo_cliente = await session.execute(
+                select(Mensaje.timestamp)
+                .where(Mensaje.telefono == lead.telefono, Mensaje.role == "user")
+                .order_by(Mensaje.timestamp.desc())
+                .limit(1)
+            )
+            fila = ultimo_cliente.first()
+            if fila is None or fila[0] >= corte:
+                continue
+            elegibles.append((lead.telefono, lead.negocio_id))
+
+    cerrados: list[str] = []
+    for telefono, negocio_id in elegibles:
+        if await cerrar_lead_definitivamente(telefono, negocio_id, autor=None):
+            cerrados.append(telefono)
+
+    return cerrados
+
+
+async def obtener_vendedor_venta_anterior(
+    contact_id: str, negocio_id: str, conversation_actual_id: str,
+) -> str | None:
+    """Punto 3 (2026-09-28) — busca, entre las Conversation de este Contact
+    DISTINTAS de la actual, la más reciente con asesor asignado cuya
+    Opportunity vigente haya quedado "vendido", y devuelve ese asesor.
+    None si no hay ninguna venta previa.
+
+    Recorre las Conversation cerradas del Contact de la más reciente a la
+    más vieja (nunca solo la última: una Conversation puede haberse
+    cerrado por otro resultado sin venta) y usa `_obtener_opportunity_
+    vigente` para cada una — el mismo criterio de "vigente" que usa el
+    resto del código, en vez de asumir que cada Conversation tiene una
+    sola Opportunity.
+
+    `estado == "cerrada"` (y no solo excluir `conversation_actual_id`) es
+    deliberado: el índice único parcial `ix_conversation_una_activa_por_
+    contact` garantiza que un Contact nunca tiene más de una Conversation
+    activa a la vez, así que cualquier "venta anterior" real solo puede
+    estar entre las ya cerradas — filtrarlo así de explícito evita
+    depender únicamente de que el llamador pase el id correcto a excluir."""
+    async with async_session() as session:
+        query = (
+            select(Conversation)
+            .where(
+                Conversation.contact_id == contact_id,
+                Conversation.negocio_id == negocio_id,
+                Conversation.id != conversation_actual_id,
+                Conversation.estado == "cerrada",
+                Conversation.asesor_asignado_id.is_not(None),
+            )
+            .order_by(Conversation.creado.desc())
+        )
+        conversaciones = (await session.execute(query)).scalars().all()
+        for conversation in conversaciones:
+            opportunity = await _obtener_opportunity_vigente(session, conversation.id)
+            if opportunity is not None and opportunity.resultado == "vendido":
+                return conversation.asesor_asignado_id
+        return None
+
+
+async def enrutar_posventa_si_corresponde(
+    telefono: str, contact_id: str, negocio_id: str, conversation_id: str,
+) -> str | None:
+    """Punto 3 (2026-09-28) — se llama desde `agent/main.py` justo después
+    de `resolver_conversation_activa`, únicamente cuando la Conversation
+    activa quedó sin asesor (recién abierta por DR-4, o nunca tuvo uno).
+    Si este Contact tiene una venta anterior, rutea la Conversation nueva
+    en silencio al mismo asesor que la cerró — resultado="postventa" — sin
+    ninguna llamada a IA: es una búsqueda determinística, el mismo criterio
+    que ya se le explicó al usuario para no reactivar a Gabi por una vía
+    indirecta (Human Decision Gate, Close-Won es indefinido).
+
+    También limpia `Lead.cerrado_definitivamente_en`: si no se limpiara,
+    el chequeo de abajo en `agent/main.py` (`lead.get("cerrado_
+    definitivamente_en") is not None`) leería el cierre de la venta VIEJA
+    y llamaría a `liberar_asignacion` — deshaciendo esta misma asignación
+    y devolviéndole el control a Gabi, justo lo que este diseño existe
+    para evitar.
+
+    Registra su PROPIO evento en el Timeline (en vez de dejárselo a
+    `asignar_asesor_a_lead`): el asesor encontrado suele ser el MISMO que
+    ya figuraba en `Lead.asesor_asignado` (DR-4 abre la Conversation nueva
+    sin asesor, pero nunca tocó `Lead` hasta acá), así que el chequeo
+    "¿cambió el dueño?" de esa función no dispara — y aun así ocurrió algo
+    que el asesor necesita ver: una venta cerrada se reabrió porque el
+    cliente volvió a escribir.
+
+    Retorna el asesor asignado, o None si no había venta previa (no hace
+    nada en ese caso — el flujo sigue exactamente igual que hoy)."""
+    asesor = await obtener_vendedor_venta_anterior(contact_id, negocio_id, conversation_id)
+    if asesor is None:
+        return None
+    await actualizar_lead(
+        telefono, campos_explicitos=("resultado", "cerrado_definitivamente_en"),
+        resultado="postventa", cerrado_definitivamente_en=None,
+    )
+    await asignar_asesor_a_lead(telefono, asesor, automatico=True)
+    await registrar_evento_lead(
+        telefono, tipo="asignado_automatico_postventa",
+        descripcion=f"Cliente con una venta anterior — se reabrió la atención y se ruteó automáticamente a {asesor} (mismo asesor que la cerró)",
+        autor=None, payload={"campo": "resultado", "anterior": "vendido", "nuevo": "postventa", "asesor": asesor},
+    )
+    return asesor
 
 
 async def listar_leads_inactividad_cliente(
