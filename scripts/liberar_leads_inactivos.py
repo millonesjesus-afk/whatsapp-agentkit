@@ -1,19 +1,27 @@
-"""Libera automáticamente la asignación de leads cuyo asesor no respondió
-en las últimas N horas — Gabi retoma la atención en silencio (2026-09-16,
-Opción 1 de la decisión tomada con el usuario: sin plantilla aprobada de
-Meta todavía, avisarle al cliente que su caso se cerró justo al cumplirse
-el timeout caería fuera de la ventana de servicio de 24h de WhatsApp,
-donde solo se permite una Plantilla — no texto libre. Cuando el cliente
-vuelva a escribir, ESE mensaje abre una ventana nueva gratis y Gabi lo
-atiende como lead nuevo en el flujo regular, sin fricción ni costo).
+"""Rota automáticamente un lead a un segundo asesor cuando el asignado no
+responde en 30 minutos de TURNO (negocio abierto según su Horario de
+Atención Y el asesor marcado `disponible`) — y lo libera del todo si ese
+segundo asesor tampoco responde en otros 30. Punto 2 (2026-09-29): reemplaza
+al mecanismo anterior (24h de RELOJ, sin distinguir turno), pedido explícito
+del usuario tras confirmar que 24h era demasiado tiempo sin que nadie se
+enterara ("no veo viable que una persona permanezca sin contestar 24 horas
+después de que Gabi lo asignó").
 
-Ver agent/memory.py::liberar_asignaciones_inactivas para la lógica real y
-el porqué completo — este script es solo el punto de entrada que Railway
+SIN avisar al cliente en ningún paso (mismo motivo que el mecanismo
+anterior): sin plantilla de WhatsApp aprobada todavía, un mensaje fuera de
+la ventana de servicio de 24h de Meta no se puede mandar como texto libre.
+Cuando el cliente vuelva a escribir, esa Conversation ya tiene un asesor
+(el rotado, o ninguno si se liberó) y el flujo normal de agent/main.py se
+encarga solo.
+
+Ver agent/memory.py::listar_leads_para_rotar_o_liberar y
+agent/asignacion.py::rotar_leads_inactivos para la lógica real y el
+porqué completo — este script es solo el punto de entrada que Railway
 Cron ejecuta.
 
-Pensado para correr como un Cron Schedule de Railway, en un servicio
-aparte del proceso web principal (mismo repo/imagen, comando de arranque
-distinto) — no dentro de main.py. Recomendado: cada hora.
+Pensado para correr como un Cron Schedule de Railway cada 5 minutos (antes
+corría cada hora — la granularidad de 30 min por paso de rotación no es
+medible con una corrida por hora).
 
 Uso local (prueba manual, no corre en Railway automáticamente):
     python scripts/liberar_leads_inactivos.py
@@ -27,26 +35,27 @@ from pathlib import Path
 # patrón que scripts/migrar_usuarios_a_railway.py.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from agent.memory import esperar_base_de_datos, liberar_asignaciones_inactivas
+from agent.memory import esperar_base_de_datos
+from agent.asignacion import rotar_leads_inactivos
 
-HORAS_INACTIVIDAD = 24
+INTERVALO_MINUTOS = 5
+UMBRAL_ROTACION_MINUTOS = 30
 
 
 async def main() -> None:
     await esperar_base_de_datos()
-    liberados = await liberar_asignaciones_inactivas(horas=HORAS_INACTIVIDAD)
-    if liberados:
-        print(
-            f"Liberados {len(liberados)} lead(s) por inactividad del asesor "
-            f"({HORAS_INACTIVIDAD}h sin responder): {', '.join(liberados)}"
-        )
+    rotados = await rotar_leads_inactivos(
+        intervalo_minutos=INTERVALO_MINUTOS, umbral_rotacion_minutos=UMBRAL_ROTACION_MINUTOS,
+    )
+    if rotados:
+        print(f"Rotados {len(rotados)} lead(s) por inactividad del asesor: {', '.join(rotados)}")
     else:
-        print("Ningún lead cruzó el umbral de inactividad.")
+        print("Ningún lead cruzó el umbral de rotación esta corrida.")
 
 
 if __name__ == "__main__":
     try:
         asyncio.run(main())
     except Exception as e:
-        print(f"ERROR: liberación de leads inactivos falló — {e}", file=sys.stderr)
+        print(f"ERROR: rotación de leads inactivos falló — {e}", file=sys.stderr)
         sys.exit(1)

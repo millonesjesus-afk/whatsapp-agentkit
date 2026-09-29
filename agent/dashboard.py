@@ -51,6 +51,7 @@ from agent.memory import (
     rango_periodo_utc, contar_flujo_periodo, calcular_embudo_comercial, contar_oportunidades_por_asesor,
     distribucion_resultados_periodo, resumen_ventas_periodo, productos_vendidos_periodo,
     cambiar_password, contar_conversations_activas_por_asesor, RESULTADOS_CERRADOS, listar_leads_agendados,
+    contar_rotaciones_por_inactividad_por_asesor,
     listar_leads_esperando_asesor, listar_leads_pipeline, COLUMNAS_ORDEN_PIPELINE,
     listar_conversaciones_activas, obtener_contact_detalle, obtener_conversation_detalle, listar_eventos_de_conversation,
     listar_conversaciones_de_contact, resolver_opportunity_operable, resolver_conversation_operable,
@@ -6123,8 +6124,22 @@ async def reactivar_gabi(
 
 
 @router.post("/disponibilidad")
-async def toggle_disponibilidad(usuario: dict = Depends(servicio_identidad.requiere_rol("asesor")), _csrf: None = Depends(verificar_csrf)):
-    """El asesor togglea si está disponible para recibir leads nuevos automáticamente."""
+async def toggle_disponibilidad(
+    request: Request,
+    usuario: dict = Depends(servicio_identidad.requiere_rol("asesor")), _csrf: None = Depends(verificar_csrf),
+):
+    """El asesor togglea si está disponible para recibir leads nuevos
+    automáticamente.
+
+    Punto 2 (2026-09-29): ahora también define si CUENTAN los minutos de
+    espera que pueden rotarlo/liberarlo de un lead ya asignado (ver
+    agent/memory.py::listar_leads_para_rotar_o_liberar) — antes solo
+    afectaba si Gabi/`asignar_lead_pendiente_a_asesor` lo consideraban
+    candidato para leads NUEVOS. Responde JSON cuando lo pide la Nueva
+    Experiencia (mismo criterio que el resto del panel, ver
+    `_pide_json_explicitamente`) — antes esta ruta solo existía en el panel
+    viejo, así que un asesor usando el panel nuevo no tenía forma de
+    marcarse a sí mismo "en turno"."""
     ahora_disponible = not usuario.get("disponible", True)
     await actualizar_disponibilidad(usuario["username"], usuario["negocio_id"], ahora_disponible)
 
@@ -6144,6 +6159,8 @@ async def toggle_disponibilidad(usuario: dict = Depends(servicio_identidad.requi
                 "[Asignado automáticamente al ponerse disponible el asesor — estaba en espera]",
             )
 
+    if _pide_json_explicitamente(request):
+        return JSONResponse({"disponible": ahora_disponible})
     return RedirectResponse(url="/dashboard", status_code=303)
 
 
@@ -6458,13 +6475,26 @@ async def listar_equipo_json(usuario: dict = Depends(_usuario_actual)):
         await contar_conversations_activas_por_asesor(usuario["negocio_id"], usernames_asesor)
         if usernames_asesor else {}
     )
+    # Punto 2 (2026-09-29) — seguimiento de rotación por inactividad, la
+    # data cruda de eficiencia que pidió el usuario ("esto debe salir en el
+    # seguimiento del supervisor"). Últimos 30 días; solo tiene sentido para
+    # asesores, mismo criterio que "carga".
+    rotaciones = (
+        await contar_rotaciones_por_inactividad_por_asesor(usuario["negocio_id"])
+        if usernames_asesor else {}
+    )
     return JSONResponse({
         "miembros": [
             # "carga" (leads activos) solo tiene sentido para asesores — Admin/
             # Supervisor nunca reciben asignación directa. `None` acá es lo que
             # la pantalla Equipo traduce a "—" (Decisión aprobada: nunca
             # inventar una métrica de disponibilidad/carga para esos roles).
-            {**m, "carga": conteos_carga.get(m["username"]) if m["rol"] == "asesor" else None}
+            {
+                **m,
+                "carga": conteos_carga.get(m["username"]) if m["rol"] == "asesor" else None,
+                "veces_rotado_desde": rotaciones.get(m["username"], {}).get("veces_rotado_desde") if m["rol"] == "asesor" else None,
+                "promedio_minutos_sin_responder": rotaciones.get(m["username"], {}).get("promedio_minutos_sin_responder") if m["rol"] == "asesor" else None,
+            }
             for m in miembros
         ],
     })
@@ -8547,7 +8577,15 @@ async def sesion_actual(request: Request, usuario: dict = Depends(_usuario_actua
         # futuro chip de contexto Negocio/Unidad (Gate 5.6). El BFF de
         # maiek-frontend (app/api/sesion/route.ts) ya es passthrough puro, no
         # necesita cambios para que este campo llegue al cliente.
-        "usuario": {"username": usuario["username"], "rol": usuario["rol"], "negocio_id": usuario.get("negocio_id")},
+        "usuario": {
+            "username": usuario["username"], "rol": usuario["rol"], "negocio_id": usuario.get("negocio_id"),
+            # Punto 2 (2026-09-29): solo tiene sentido para un asesor — el
+            # switch de disponibilidad de la Nueva Experiencia lo necesita
+            # para saber cómo renderizarse al montar, sin esperar a que el
+            # propio asesor lo togglee una vez para recién ahí saber su
+            # estado real.
+            "disponible": usuario.get("disponible") if usuario["rol"] == "asesor" else None,
+        },
         "capacidades": _capacidades_de(usuario["rol"]),
         "csrf_token": request.session.get("csrf_token", ""),
     })

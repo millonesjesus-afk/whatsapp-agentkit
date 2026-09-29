@@ -26,7 +26,8 @@ async def _negocio_con_canal(codigo: str, telefono_canal: str):
 
 async def _lead_gabi(telefono: str, negocio_id: str, canal_id: int, resultado: str | None = None):
     """Lead atendido por Gabi — sin asesor, sin pausar (el caso que aplica
-    a este mecanismo, a diferencia de liberar_asignaciones_inactivas)."""
+    a este mecanismo, a diferencia de listar_leads_para_rotar_o_liberar,
+    que exige asesor asignado)."""
     await mem.resolver_conversation_activa(telefono, negocio_id, canal_id)
     await mem.actualizar_lead(telefono, nombre="Cliente Test", negocio_id=negocio_id)
     if resultado is not None:

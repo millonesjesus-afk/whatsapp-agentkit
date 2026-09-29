@@ -13,7 +13,10 @@ import logging
 import asyncio
 import time
 from urllib.parse import urlparse
-from datetime import datetime, timedelta
+# `time` (el módulo, ya importado arriba para time.perf_counter) choca de
+# nombre con datetime.time (la clase de hora del día) — se importa aparte
+# con alias, mismo motivo que cualquier otro alias de este archivo.
+from datetime import datetime, timedelta, time as hora_del_dia
 from cryptography.fernet import Fernet
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, aliased
@@ -543,6 +546,22 @@ class Lead(Base):
     # pausado_manual al liberar la asignación (ver liberar_asignacion) — un
     # cierre ya consumido no debe seguir marcado.
     cerrado_definitivamente_en: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # Punto 2 (2026-09-29) — rotación por inactividad del asesor. Reemplaza
+    # al umbral fijo de 24h de reloj: ahora se acumulan solo los MINUTOS DE
+    # TURNO (negocio abierto según HorarioAtencion Y el asesor asignado
+    # marcado `disponible`) desde el último mensaje SIN RESPONDER del
+    # cliente — ver `rotar_o_liberar_por_inactividad`. `espera_medida_desde`
+    # es el timestamp de ESE mensaje: si cambia (el asesor respondió y el
+    # cliente volvió a escribir, o es la primera vez que se mide), el cron
+    # reconoce que es un ciclo de espera nuevo y reinicia el contador solo
+    # ahí — nunca a mitad de un ciclo en curso.
+    minutos_espera_asesor: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    # 0 = todavía con el asesor original; 1 = ya rotó una vez (al segundo
+    # asesor) — a los 30 min de turno SIN respuesta en ese estado, se libera
+    # en vez de rotar de nuevo (ver diseño: 30 min + 30 min, no una cadena
+    # infinita de asesores).
+    veces_rotado_espera: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    espera_medida_desde: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     # True cuando la IA respondió con confianza "Requiere validación"
     # (protocolo de confianza, AI Architecture Sec.6) — no transfiere la
     # conversación, solo marca que un asesor debería revisarla con
@@ -4226,63 +4245,159 @@ async def liberar_asignacion(telefono: str, autor: str | None = None, motivo: st
     )
 
 
-async def liberar_asignaciones_inactivas(horas: int = 24) -> list[str]:
-    """Libera en silencio la asignación de todo lead cuyo asesor no
-    respondió en las últimas `horas` — Gabi retoma la atención (2026-09-16,
-    pedido explícito: "no atendió la IA... aplicar un timeout donde se
-    finalice la sesión").
+# Punto 2 (2026-09-29) — mismo fallback que agent/tools.py::
+# obtener_estado_horario_atencion (lunes a sábado, 8:00-19:00) para un
+# Negocio que todavía no tiene fila de HorarioAtencion para hoy. Duplicado
+# acá (no importado) por el mismo motivo que rango_periodo_utc no importa
+# de tools.py: tools.py ya importa DE memory.py, así que memory.py
+# importando de tools.py cerraría un ciclo.
+_FALLBACK_DIAS_HABILITADOS_TURNO = range(0, 6)  # lunes a sábado
+_FALLBACK_HORA_APERTURA_TURNO = hora_del_dia(8, 0)
+_FALLBACK_HORA_CIERRE_TURNO = hora_del_dia(19, 0)
 
-    SIN avisar al cliente a propósito (Opción 1, decisión explícita del
-    usuario): mandarle un mensaje justo cuando se cumple el timeout caería
-    FUERA de la ventana de servicio al cliente de 24h de WhatsApp (que se
-    mide desde el último mensaje DEL CLIENTE) — fuera de esa ventana, Meta
-    solo permite una Plantilla de mensaje aprobada, no texto libre, y
-    todavía no hay ninguna aprobada para este caso (ver pendiente ya
-    anotado del proyecto). Silencio es la única opción viable hoy: cuando
-    el cliente vuelva a escribir, ESE mensaje abre una ventana nueva
-    gratis y Gabi lo atiende como lead nuevo en el flujo regular — sin
-    fricción, sin costo, sin depender de una aprobación de Meta.
 
-    Un lead califica si: tiene `asesor_asignado`, su `resultado` no está
-    en uno de los ya cerrados (mismo criterio que el gate de
-    agent/main.py que calla a Gabi mientras hay un asesor asignado — ver
-    ahí el porqué de la excepción de "vendido") y su mensaje MÁS RECIENTE
-    (de cualquier origen) es del CLIENTE (role="user") y ya pasó el
-    umbral — si el mensaje más reciente es del asesor (o de Gabi, aunque
-    debería estar pausada), significa que sí hubo respuesta después del
-    último mensaje del cliente, así que no aplica.
+def _dentro_de_horario_ahora(horarios: list[dict], ahora_lima: datetime) -> bool:
+    """¿El negocio está abierto AHORA (hora de Lima)? Mismo cálculo que
+    `agent/tools.py::obtener_estado_horario_atencion`, reescrito acá para
+    que `listar_leads_para_rotar_o_liberar` no dependa de otro módulo."""
+    dia_semana = ahora_lima.weekday()
+    hora_actual = ahora_lima.time()
+    horario_hoy = next((h for h in horarios if h["dia_semana"] == dia_semana), None)
+    if horario_hoy is not None:
+        if not horario_hoy["habilitado"] or horario_hoy["hora_apertura"] is None or horario_hoy["hora_cierre"] is None:
+            return False
+        return hora_del_dia.fromisoformat(horario_hoy["hora_apertura"]) <= hora_actual < hora_del_dia.fromisoformat(horario_hoy["hora_cierre"])
+    return dia_semana in _FALLBACK_DIAS_HABILITADOS_TURNO and _FALLBACK_HORA_APERTURA_TURNO <= hora_actual < _FALLBACK_HORA_CIERRE_TURNO
 
-    Pensado para correr como un Cron Schedule de Railway (mismo patrón que
-    scripts/backup_postgres.py), no dentro del proceso web. Retorna la
-    lista de teléfonos liberados, para que el script que llama esto pueda
-    loguearlo."""
-    corte = datetime.utcnow() - timedelta(hours=horas)
-    liberados: list[str] = []
+
+async def listar_leads_para_rotar_o_liberar(
+    intervalo_minutos: int = 5, umbral_rotacion_minutos: int = 30,
+) -> list[dict]:
+    """Punto 2 (2026-09-29) — reemplaza a la antigua `liberar_asignaciones_
+    inactivas` (umbral fijo de 24h de RELOJ, sin importar si el asesor
+    estaba en turno). Pedido explícito del usuario tras confirmar el hueco
+    con el caso real de "Sin asignar" silencioso: 24h de reloj era
+    demasiado — "no veo viable que una persona permanezca sin contestar 24
+    horas después de que Gabi lo asignó".
+
+    Pensado para correr cada `intervalo_minutos` (Cron Schedule de Railway
+    "*/5 * * * *", reemplaza al Hourly anterior — la granularidad de 30 min
+    por paso no es medible con una corrida por hora). Por cada lead con
+    asesor asignado, resultado abierto, y el mensaje MÁS RECIENTE sin
+    responder del cliente:
+
+    - Solo suma `intervalo_minutos` a `Lead.minutos_espera_asesor` si AHORA
+      MISMO el negocio está dentro de su horario de atención (Horario
+      Atencion) Y el asesor asignado está `disponible` — así las horas
+      fuera de turno (del negocio o del asesor puntual) no cuentan, tal
+      como se pidió. `Lead.espera_medida_desde` es la guarda contra
+      reiniciar a mitad de un ciclo: si el último mensaje del cliente
+      cambió desde la corrida anterior (el asesor respondió y el cliente
+      volvió a escribir, o es la primera vez que se mide), recién ahí se
+      reconoce como un ciclo nuevo y el contador vuelve a 0.
+    - Al llegar a `umbral_rotacion_minutos` (30 por defecto) de turno
+      acumulado: si `veces_rotado_espera == 0`, el lead califica para
+      ROTAR — se retorna en la lista (memory.py no elige al siguiente
+      asesor, eso vive en agent/asignacion.py, que sí sabe de nivel/carga;
+      ver `agent/asignacion.py::rotar_leads_inactivos`, el llamador real).
+      Si `veces_rotado_espera >= 1` (el SEGUNDO asesor tampoco respondió en
+      sus propios 30 min), se libera acá mismo (reusa `liberar_asignacion`,
+      mismo `motivo="timeout_inactividad"` de siempre — no hace falta
+      elegir a nadie para liberar).
+
+    Retorna solo los que necesitan ROTAR: `[{"telefono", "negocio_id",
+    "asesor_actual", "interes", "minutos_espera"}, ...]`."""
+    ahora_lima = datetime.utcnow() - timedelta(hours=5)
+    a_liberar: list[str] = []
+    a_rotar: list[dict] = []
+
     async with async_session() as session:
         query = select(Lead).where(
             Lead.asesor_asignado.is_not(None),
             sa_or(Lead.resultado.is_(None), Lead.resultado.notin_(RESULTADOS_CERRADOS)),
         )
-        result = await session.execute(query)
-        candidatos = result.scalars().all()
+        candidatos = (await session.execute(query)).scalars().all()
+
+        cache_horarios: dict[str, list[dict]] = {}
+        cache_disponibilidad: dict[tuple[str, str], bool] = {}
 
         for lead in candidatos:
-            ultimo = await session.execute(
-                select(Mensaje)
+            fila = (await session.execute(
+                select(Mensaje.role, Mensaje.timestamp)
                 .where(Mensaje.telefono == lead.telefono)
                 .order_by(Mensaje.timestamp.desc(), Mensaje.id.desc())
                 .limit(1)
-            )
-            ultimo_mensaje = ultimo.scalar_one_or_none()
-            if ultimo_mensaje is None:
+            )).first()
+            if fila is None or fila[0] != "user":
                 continue
-            if ultimo_mensaje.role == "user" and ultimo_mensaje.timestamp < corte:
-                liberados.append(lead.telefono)
+            ultimo_mensaje_cliente = fila[1]
 
-    for telefono in liberados:
+            if lead.espera_medida_desde != ultimo_mensaje_cliente:
+                lead.espera_medida_desde = ultimo_mensaje_cliente
+                lead.minutos_espera_asesor = 0
+                lead.veces_rotado_espera = 0
+
+            if lead.negocio_id not in cache_horarios:
+                cache_horarios[lead.negocio_id] = await listar_horarios_atencion(lead.negocio_id)
+            if not _dentro_de_horario_ahora(cache_horarios[lead.negocio_id], ahora_lima):
+                continue
+
+            clave_asesor = (lead.negocio_id, lead.asesor_asignado)
+            if clave_asesor not in cache_disponibilidad:
+                usuario = await _obtener_usuario_orm(session, lead.negocio_id, lead.asesor_asignado)
+                cache_disponibilidad[clave_asesor] = bool(usuario and usuario.disponible)
+            if not cache_disponibilidad[clave_asesor]:
+                continue
+
+            lead.minutos_espera_asesor += intervalo_minutos
+            if lead.minutos_espera_asesor < umbral_rotacion_minutos:
+                continue
+
+            if lead.veces_rotado_espera == 0:
+                a_rotar.append({
+                    "telefono": lead.telefono, "negocio_id": lead.negocio_id,
+                    "asesor_actual": lead.asesor_asignado, "interes": lead.interes,
+                    "minutos_espera": lead.minutos_espera_asesor,
+                })
+            else:
+                a_liberar.append(lead.telefono)
+
+        await session.commit()
+
+    for telefono in a_liberar:
         await liberar_asignacion(telefono, motivo="timeout_inactividad")
 
-    return liberados
+    return a_rotar
+
+
+async def rotar_asignacion_por_inactividad(telefono: str, asesor_anterior: str, asesor_nuevo: str, minutos_espera: int) -> None:
+    """Punto 2 (2026-09-29) — aplica la rotación que decidió `listar_leads_
+    para_rotar_o_liberar`: reasigna (reusa `asignar_asesor_a_lead`,
+    automatico=True — mismo mirror a Conversation y el mismo evento
+    "asignado_automatico" de cualquier reasignación automática) y además
+    reinicia el contador (`minutos_espera_asesor=0`) y marca
+    `veces_rotado_espera=1`, para que la PRÓXIMA corrida sepa que ya no
+    queda otra rotación disponible — si este segundo asesor tampoco
+    responde en 30 min, el siguiente paso es liberar, no rotar de nuevo.
+
+    Deja su PROPIO evento en el Timeline además del genérico de
+    `asignar_asesor_a_lead`: un supervisor necesita distinguir "Gabi lo
+    derivó" de "nadie contestó en 30 minutos de turno y se rotó" — son
+    señales de eficiencia distintas, y esta es la que alimenta el
+    seguimiento de asesores."""
+    await asignar_asesor_a_lead(telefono, asesor_nuevo, automatico=True)
+    async with async_session() as session:
+        lead = await session.get(Lead, telefono)
+        if lead is not None:
+            lead.minutos_espera_asesor = 0
+            lead.veces_rotado_espera = 1
+            await session.commit()
+    await registrar_evento_lead(
+        telefono, tipo="rotado_automatico_sin_respuesta",
+        descripcion=f"{asesor_anterior} no respondió en {minutos_espera} min de turno — se rotó automáticamente a {asesor_nuevo}",
+        autor=None,
+        payload={"asesor_anterior": asesor_anterior, "asesor_nuevo": asesor_nuevo, "minutos_espera": minutos_espera},
+    )
 
 
 async def cerrar_lead_definitivamente(telefono: str, negocio_id: str, autor: str | None) -> bool:
@@ -4386,8 +4501,9 @@ async def cerrar_leads_definitivamente_inactivos(dias: int = 7) -> list[str]:
 
     Complementa, sin solaparse, a los otros 2 Cron Schedule de inactividad
     ya en producción:
-    - `liberar_asignaciones_inactivas` mide silencio del ASESOR sobre un
-      resultado ABIERTO.
+    - `listar_leads_para_rotar_o_liberar` mide silencio del ASESOR sobre un
+      resultado ABIERTO (Punto 2, 2026-09-29: reemplazó a la antigua
+      `liberar_asignaciones_inactivas` de 24h de reloj).
     - `listar_leads_inactividad_cliente` mide silencio del CLIENTE sobre
       un lead que NUNCA tuvo asesor.
     - Esta mide silencio del CLIENTE sobre un resultado YA CERRADO con
@@ -4429,7 +4545,7 @@ async def cerrar_leads_definitivamente_inactivos(dias: int = 7) -> list[str]:
     # Fuera de la sesión de arriba: reusa cerrar_lead_definitivamente por
     # candidato (autor=None → cierre automático) en vez de duplicar el
     # mirror hacia Conversation y el registro de evento — mismo patrón que
-    # liberar_asignaciones_inactivas ya usa con liberar_asignacion.
+    # listar_leads_para_rotar_o_liberar ya usa con liberar_asignacion.
     cerrados: list[str] = []
     for telefono, negocio_id in elegibles:
         if await cerrar_lead_definitivamente(telefono, negocio_id, autor=None):
@@ -4598,8 +4714,8 @@ async def listar_leads_inactividad_cliente(
     — un timeout tipo "chat en vivo" de 5-10 min cerraría leads que solo
     están ocupados, no perdidos).
 
-    Distinto de `liberar_asignaciones_inactivas` (asesor inactivo, siempre
-    silencioso): acá SÍ hay un paso con mensaje — a `horas_reenganche` sin
+    Distinto de `listar_leads_para_rotar_o_liberar` (asesor inactivo,
+    siempre silencioso): acá SÍ hay un paso con mensaje — a `horas_reenganche` sin
     respuesta se manda UN mensaje de reenganche (el script que llama esto
     es quien lo envía y lo guarda, nunca esta función — memory.py no hace
     I/O externo); a `horas_cierre` sin respuesta (medidas desde el MISMO
@@ -4863,6 +4979,60 @@ async def crear_usuario(
         if nivel:
             usuario.nivel = nivel
         await session.commit()
+
+
+async def contar_rotaciones_por_inactividad_por_asesor(negocio_id: str, dias: int = 30) -> dict[str, dict]:
+    """Punto 2 (2026-09-29) — data cruda para el seguimiento del supervisor
+    (pantalla Equipo): cuántas veces se le ROTÓ un lead a cada asesor por no
+    responder en 30 min de turno, cuántas veces le LLEGÓ un lead rotado
+    desde otro, y su promedio de minutos de turno sin responder antes de
+    que lo rotaran. Ventana de `dias` (30 por defecto) — un contador desde
+    el inicio de los tiempos no mide eficiencia RECIENTE, que es lo que le
+    importa a un supervisor evaluando el desempeño de ahora, no el
+    histórico completo.
+
+    `payload` es JSON, sin índice — el filtro/agregado final se hace en
+    Python (mismo criterio que `contar_leads_activos` con `resultado`).
+    Solo cuenta usernames que aparecen en al menos un evento — un asesor
+    sin ninguna rotación en la ventana simplemente no sale en el dict (el
+    llamador decide el "—" para ese caso, igual que ya hace con `carga`)."""
+    corte = datetime.utcnow() - timedelta(days=dias)
+    async with async_session() as session:
+        query = select(EventoLead.payload).where(
+            EventoLead.negocio_id == negocio_id,
+            EventoLead.tipo == "rotado_automatico_sin_respuesta",
+            EventoLead.creado >= corte,
+        )
+        payloads = (await session.execute(query)).scalars().all()
+
+    perdidos: dict[str, int] = {}
+    recibidos: dict[str, int] = {}
+    minutos_por_asesor: dict[str, list[int]] = {}
+    for payload in payloads:
+        if not payload:
+            continue
+        anterior = payload.get("asesor_anterior")
+        nuevo = payload.get("asesor_nuevo")
+        minutos = payload.get("minutos_espera")
+        if anterior:
+            perdidos[anterior] = perdidos.get(anterior, 0) + 1
+            if isinstance(minutos, (int, float)):
+                minutos_por_asesor.setdefault(anterior, []).append(minutos)
+        if nuevo:
+            recibidos[nuevo] = recibidos.get(nuevo, 0) + 1
+
+    usernames = set(perdidos) | set(recibidos)
+    return {
+        u: {
+            "veces_rotado_desde": perdidos.get(u, 0),
+            "veces_rotado_hacia": recibidos.get(u, 0),
+            "promedio_minutos_sin_responder": (
+                round(sum(minutos_por_asesor[u]) / len(minutos_por_asesor[u]))
+                if minutos_por_asesor.get(u) else None
+            ),
+        }
+        for u in usernames
+    }
 
 
 async def cambiar_password(username: str, negocio_id: str, password_nueva: str):

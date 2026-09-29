@@ -12,7 +12,7 @@ import logging
 from agent.tools import buscar_productos
 from agent.memory import (
     listar_asesores, contar_leads_activos, listar_leads_esperando_asesor, asignar_asesor_a_lead,
-    obtener_configuracion,
+    obtener_configuracion, listar_leads_para_rotar_o_liberar, rotar_asignacion_por_inactividad,
 )
 
 logger = logging.getLogger("agentkit")
@@ -63,7 +63,7 @@ async def _nivel_requerido(interes: str, negocio_id: str | None) -> str:
     return "junior"
 
 
-async def elegir_asesor_automatico(interes: str, negocio_id: str | None) -> str | None:
+async def elegir_asesor_automatico(interes: str, negocio_id: str | None, excluir: str | None = None) -> str | None:
     """Retorna el username del asesor más adecuado y disponible, o None si no hay ninguno.
 
     `negocio_id` (Gate 5.4, T2): esta función llama a listar_asesores(), que
@@ -71,11 +71,16 @@ async def elegir_asesor_automatico(interes: str, negocio_id: str | None) -> str 
     (ver main.py), donde el Canal —y por lo tanto el Negocio— puede no
     haberse podido resolver todavía; con negocio_id=None se falla cerrado
     (no hay ningún asesor elegible) en vez de listar asesores de cualquier
-    Negocio."""
+    Negocio.
+
+    `excluir` (Punto 2, 2026-09-29): usado por `rotar_leads_inactivos` para
+    pedir "el mejor asesor DISTINTO del que ya no respondió" — sin esto, la
+    rotación por inactividad podría "rotar" un lead al mismo asesor que
+    acaba de fallar en responder, si es el único (o el de menor carga)."""
     if negocio_id is None:
         return None
     asesores = await listar_asesores(negocio_id)
-    disponibles = [a for a in asesores if a.get("disponible")]
+    disponibles = [a for a in asesores if a.get("disponible") and a["username"] != excluir]
     if not disponibles:
         return None
 
@@ -140,3 +145,38 @@ async def asignar_lead_pendiente_a_asesor(username: str, nivel_asesor: str | Non
     await asignar_asesor_a_lead(lead["telefono"], username, automatico=True)
     logger.info(f"Lead {lead['telefono']} (en espera, sin match de nivel) asignado a {username} al ponerse disponible")
     return lead["telefono"]
+
+
+async def rotar_leads_inactivos(intervalo_minutos: int = 5, umbral_rotacion_minutos: int = 30) -> list[str]:
+    """Punto 2 (2026-09-29) — el orquestador real del Cron nuevo (reemplaza
+    a `liberar_asignaciones_inactivas`, 24h de reloj sin distinguir turno).
+    `agent/memory.py::listar_leads_para_rotar_o_liberar` lleva la cuenta de
+    minutos de TURNO (negocio abierto + asesor `disponible`) y ya resuelve
+    directo los que corresponde LIBERAR (no necesita elegir a nadie) — acá
+    solo se resuelven los que corresponde ROTAR, porque elegir al segundo
+    asesor (nivel/carga, `elegir_asesor_automatico`) vive en este módulo,
+    no en memory.py (memory.py no puede importar de acá: este módulo ya
+    importa de memory.py, el ciclo rompería el arranque).
+
+    Si no hay ningún otro asesor disponible para rotar (excluyendo al que
+    ya no respondió), no tiene sentido esperar otros 30 min sin nadie a
+    quien pasárselo — se libera directo, mismo motivo="timeout_inactividad"
+    de siempre.
+
+    Retorna los teléfonos efectivamente rotados, para que el script que
+    llama esto pueda loguearlo."""
+    from agent.memory import liberar_asignacion
+
+    candidatos = await listar_leads_para_rotar_o_liberar(intervalo_minutos, umbral_rotacion_minutos)
+    rotados: list[str] = []
+    for c in candidatos:
+        asesor_nuevo = await elegir_asesor_automatico(c["interes"] or "", c["negocio_id"], excluir=c["asesor_actual"])
+        if asesor_nuevo is None:
+            logger.info(f"Lead {c['telefono']} sin otro asesor disponible para rotar — se libera directo")
+            await liberar_asignacion(c["telefono"], motivo="timeout_inactividad")
+            continue
+        await rotar_asignacion_por_inactividad(c["telefono"], c["asesor_actual"], asesor_nuevo, c["minutos_espera"])
+        logger.info(f"Lead {c['telefono']} rotado de {c['asesor_actual']} a {asesor_nuevo} tras {c['minutos_espera']} min de turno sin respuesta")
+        rotados.append(c["telefono"])
+
+    return rotados
