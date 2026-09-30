@@ -29,13 +29,19 @@ async def _horario_siempre_abierto(negocio_id: str):
 
 
 async def _lead_asignado(telefono: str, negocio_id: str, canal_id: int, asesor: str):
+    """Reproduce una derivación real (`asignar_asesor_a_lead(automatico=
+    True)`, no una escritura directa a la fila) para que `derivado_en`
+    quede armado tal como pasa en producción — ver Punto 2, rediseño
+    2026-09-30. `paso_flujo="derivado_asesor"` también reproduce lo que
+    Gabi deja escrito al derivar de verdad — sin esto, `listar_leads_
+    esperando_asesor` (el panel de Inicio del supervisor) no lo detectaría
+    si el mecanismo termina liberándolo."""
     await mem.resolver_conversation_activa(telefono, negocio_id, canal_id)
-    await mem.actualizar_lead(telefono, nombre="Cliente Test", negocio_id=negocio_id)
-    async with mem.async_session() as session:
-        lead = await session.get(mem.Lead, telefono)
-        lead.asesor_asignado = asesor
-        await session.commit()
-    await mem.guardar_mensaje(telefono, "user", "hola, sigo esperando", negocio_id)
+    await mem.actualizar_lead(
+        telefono, nombre="Cliente Test", negocio_id=negocio_id,
+        campos_explicitos=("paso_flujo",), paso_flujo="derivado_asesor",
+    )
+    await mem.asignar_asesor_a_lead(telefono, asesor, automatico=True)
 
 
 async def test_no_elige_asesor_desactivado_aunque_siga_disponible():
@@ -141,3 +147,61 @@ async def test_libera_directo_si_no_hay_otro_asesor_para_rotar():
     async with mem.async_session() as session:
         lead = await session.get(mem.Lead, telefono)
         assert lead.asesor_asignado is None
+
+    # Pedido del usuario: un lead liberado por inactividad debe aparecer en
+    # el panel de Inicio del supervisor ("Sin asesor asignado") — confirma
+    # que no hace falta código nuevo para eso: `paso_flujo` sigue en
+    # "derivado_asesor" (nada en la rotación/liberación lo toca), que es
+    # exactamente lo que `listar_leads_esperando_asesor` exige.
+    esperando = await mem.listar_leads_esperando_asesor(negocio["id"])
+    assert telefono in {l["telefono"] for l in esperando}
+
+
+# ---------------------------------------------------------------------------
+# Incidente real (Pedro Padilla Medrano, 2026-09-29) — extremo a extremo
+# contra el orquestador real, no solo la contabilidad de memory.py.
+# ---------------------------------------------------------------------------
+
+async def test_reasignacion_manual_nunca_se_deshace_sola():
+    negocio, canal = await _negocio_con_canal("g-rotf-4", "40300000004")
+    await _horario_siempre_abierto(negocio["id"])
+    await mem.crear_usuario("ase_uno_rotf4", "pw12345", "Asesor Uno", "asesor", negocio["id"])
+    await mem.crear_usuario("ase_dos_rotf4", "pw12345", "Asesor Dos", "asesor", negocio["id"])
+    telefono = "51900700004"
+    await _lead_asignado(telefono, negocio["id"], canal["id"], asesor="ase_uno_rotf4")
+
+    # Una PERSONA reasigna a mano (no el sistema) — mismo patrón real del
+    # incidente (Angie Huarcaya reasignando a Pedro Padilla Medrano).
+    await mem.asignar_asesor_a_lead(telefono, "ase_dos_rotf4", automatico=False)
+
+    # El siguiente Cron (varias corridas seguidas, como pasaba cada 5 min en
+    # el incidente real) NUNCA debe deshacer esto.
+    for _ in range(3):
+        rotados = await asignacion.rotar_leads_inactivos(intervalo_minutos=30, umbral_rotacion_minutos=30)
+        assert telefono not in rotados
+
+    async with mem.async_session() as session:
+        lead = await session.get(mem.Lead, telefono)
+        assert lead.asesor_asignado == "ase_dos_rotf4"
+
+
+async def test_reabrir_resultado_viejo_no_dispara_rotacion_ni_liberacion():
+    negocio, canal = await _negocio_con_canal("g-rotf-5", "40300000005")
+    await _horario_siempre_abierto(negocio["id"])
+    await mem.crear_usuario("ase_uno_rotf5", "pw12345", "Asesor Uno", "asesor", negocio["id"])
+    await mem.crear_usuario("ase_dos_rotf5", "pw12345", "Asesor Dos", "asesor", negocio["id"])
+    telefono = "51900700005"
+    await _lead_asignado(telefono, negocio["id"], canal["id"], asesor="ase_uno_rotf5")
+    # El asesor responde de verdad y cierra el caso — semanas/días después
+    # alguien reabre el resultado sin que el cliente haya escrito nada nuevo
+    # (el gatillo real del incidente con Pedro Padilla Medrano).
+    await mem.guardar_mensaje(telefono, "asesor", "listo, quedamos así", negocio_id=negocio["id"])
+    await mem.actualizar_lead(telefono, campos_explicitos=("resultado",), resultado="sin_respuesta")
+    await mem.actualizar_lead(telefono, campos_explicitos=("resultado",), resultado=None)
+
+    rotados = await asignacion.rotar_leads_inactivos(intervalo_minutos=30, umbral_rotacion_minutos=30)
+
+    assert telefono not in rotados
+    async with mem.async_session() as session:
+        lead = await session.get(mem.Lead, telefono)
+        assert lead.asesor_asignado == "ase_uno_rotf5"  # nadie lo tocó

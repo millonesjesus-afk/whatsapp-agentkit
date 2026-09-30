@@ -546,22 +546,27 @@ class Lead(Base):
     # pausado_manual al liberar la asignación (ver liberar_asignacion) — un
     # cierre ya consumido no debe seguir marcado.
     cerrado_definitivamente_en: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
-    # Punto 2 (2026-09-29) — rotación por inactividad del asesor. Reemplaza
-    # al umbral fijo de 24h de reloj: ahora se acumulan solo los MINUTOS DE
-    # TURNO (negocio abierto según HorarioAtencion Y el asesor asignado
-    # marcado `disponible`) desde el último mensaje SIN RESPONDER del
-    # cliente — ver `rotar_o_liberar_por_inactividad`. `espera_medida_desde`
-    # es el timestamp de ESE mensaje: si cambia (el asesor respondió y el
-    # cliente volvió a escribir, o es la primera vez que se mide), el cron
-    # reconoce que es un ciclo de espera nuevo y reinicia el contador solo
-    # ahí — nunca a mitad de un ciclo en curso.
+    # Punto 2 (2026-09-29, rediseñado tras el incidente del mismo día —
+    # ver `listar_leads_para_rotar_o_liberar`) — rotación por inactividad
+    # del asesor. `derivado_en` es un timestamp de EVENTO, no de contenido:
+    # se arma (pone la hora actual) SOLO cuando `asignar_asesor_a_lead`
+    # asigna automáticamente (Gabi deriva, o la rotación pasa al segundo
+    # asesor) y se desarma (vuelve a None) apenas el asesor responde
+    # (`guardar_mensaje` con role="asesor" o el echo de coexistencia) o
+    # apenas una persona reasigna a mano (`asignar_asesor_a_lead`,
+    # automatico=False — "ya el lead es de esa persona", nunca se
+    # segunda-adivina una decisión humana). Mientras esté en None, el cron
+    # ni siquiera considera el lead — así un resultado que se reabre sobre
+    # un mensaje viejo NUNCA vuelve a arrancar un conteo (el incidente real:
+    # un asesor limpió un resultado de hace 10 días y el lead se rotó y
+    # liberó solo, dos veces, sobre un mensaje que ya nadie iba a responder).
     minutos_espera_asesor: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     # 0 = todavía con el asesor original; 1 = ya rotó una vez (al segundo
     # asesor) — a los 30 min de turno SIN respuesta en ese estado, se libera
     # en vez de rotar de nuevo (ver diseño: 30 min + 30 min, no una cadena
     # infinita de asesores).
     veces_rotado_espera: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
-    espera_medida_desde: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    derivado_en: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     # True cuando la IA respondió con confianza "Requiere validación"
     # (protocolo de confianza, AI Architecture Sec.6) — no transfiere la
     # conversación, solo marca que un asesor debería revisarla con
@@ -1632,7 +1637,22 @@ async def intentar_cambiar_resultado_opportunity(
     como gate de concurrencia válido para el endpoint legacy que todavía no
     conoce `opportunity_version` (cutover real §2): si esta escritura no
     avanzara Lead.version, un cliente legacy con una version vieja pero
-    todavía "vigente" podría sobrescribir en silencio un cambio hecho acá."""
+    todavía "vigente" podría sobrescribir en silencio un cambio hecho acá.
+
+    Punto 2 (2026-09-30) — desarma `Lead.derivado_en` cuando `campos` trae
+    "resultado": el usuario fue explícito sobre esto tras el incidente —
+    "la regla de los 30 minutos... es cuando el asesor no responde O no le
+    da algún resultado (cualquiera que sea)" — así que dar CUALQUIER
+    resultado (incluido volver a limpiarlo) cuenta como que el asesor ya
+    actuó sobre el lead, igual que responder un mensaje. Cubre también,
+    como efecto colateral necesario, el hueco más serio que esta misma
+    pregunta destapó: hasta acá una venta cerrada (`resultado="vendido"`)
+    no desarmaba nada por su cuenta — solo lo hacía si el asesor además
+    mandaba un mensaje de chat — así que un "vendido" sin mensaje posterior
+    quedaba con el reloj corriendo, en contra de "Close-Won es indefinido"
+    (Human Decision Gate). Como TODO cambio de resultado pasa por acá o
+    por `actualizar_lead` (ver ahí), no hace falta un chequeo aparte en
+    `listar_leads_para_rotar_o_liberar`."""
     async with async_session() as session:
         async with session.begin():
             resultado_version = await session.execute(
@@ -1663,6 +1683,8 @@ async def intentar_cambiar_resultado_opportunity(
                         setattr(lead, campo, valor)
                 if transicion_a_vendido:
                     _marcar_cierre_vendido(lead)
+                if "resultado" in campos:
+                    lead.derivado_en = None
                 _avanzar_version(lead)
                 lead.actualizado = datetime.utcnow()
 
@@ -1679,7 +1701,18 @@ async def intentar_asignar_conversation(
     identidad de "quién atiende" pertenece al hilo, no al ciclo comercial) —
     mismo criterio que ya fijaba el modelo. Atómica, mismo patrón que
     `intentar_cambiar_resultado_opportunity`: chequeo + escritura + sync de
-    Lead.version en un solo commit."""
+    Lead.version en un solo commit.
+
+    Punto 2 (2026-09-30) — ESTE es el camino REAL de reasignación manual en
+    producción (`/conversation/{id}/asignar` y el legacy `/lead/{telefono}/
+    asignar` una vez que ya existe Contact/Conversation/Opportunity, que es
+    el caso normal): a diferencia de `asignar_asesor_a_lead(automatico=
+    False)`, que solo cubre el fallback sin Conversation todavía, esta
+    función escribía directo sobre `Lead.asesor_asignado` SIN pasar por ahí
+    — así que nunca desarmaba `derivado_en`. Mismo hueco exacto que el
+    incidente de Pedro Padilla Medrano (una reasignación manual que el cron
+    deshacía), reubicado acá. Se desarma siempre, asigne o desasigne: las
+    dos son una decisión humana explícita, igual que `automatico=False`."""
     async with async_session() as session:
         async with session.begin():
             resultado_version = await session.execute(
@@ -1700,6 +1733,7 @@ async def intentar_asignar_conversation(
             if lead is not None:
                 lead.asesor_asignado = asesor_asignado
                 lead.visto_asesor = asesor_asignado is None
+                lead.derivado_en = None
                 _avanzar_version(lead)
                 lead.actualizado = datetime.utcnow()
 
@@ -1799,6 +1833,15 @@ async def cerrar_opportunity_con_venta(
                         setattr(lead, campo, valor)
                 if transicion_a_vendido:
                     _marcar_cierre_vendido(lead)
+                # Punto 2 (2026-09-30) — mismo desarme que `intentar_cambiar_
+                # resultado_opportunity`: ESTE es el camino real de "vendido"
+                # (Registrar venta), el más grave de los dos huecos que
+                # destapó la pregunta del usuario — sin esto, una venta
+                # cerrada sin mensaje de chat posterior podía quedar con el
+                # reloj de rotación corriendo, violando "Close-Won es
+                # indefinido".
+                if "resultado" in campos:
+                    lead.derivado_en = None
                 _avanzar_version(lead)
                 lead.actualizado = datetime.utcnow()
 
@@ -3149,6 +3192,18 @@ async def guardar_mensaje(
             # de traerse. Cada mensaje (cliente, Gabi o asesor) ahora cuenta
             # como actividad real de la conversación.
             conversation.actualizado = datetime.utcnow()
+        # Punto 2 (2026-09-30) — un asesor respondiendo de verdad (desde el
+        # panel, o el echo de coexistencia cuando responde directo desde la
+        # app de WhatsApp Business) desarma el reloj de rotación por
+        # inactividad para siempre en este ciclo — ver `Lead.derivado_en` y
+        # `listar_leads_para_rotar_o_liberar`. Nunca se reactiva por un
+        # cambio de resultado después: solo una respuesta real, o una
+        # reasignación manual (`asignar_asesor_a_lead`, automatico=False),
+        # apagan este reloj.
+        if role == "asesor" or (role == "assistant" and via_app):
+            lead = await session.get(Lead, telefono)
+            if lead is not None and lead.derivado_en is not None:
+                lead.derivado_en = None
         await session.commit()
         await session.refresh(mensaje)
         return {
@@ -3792,6 +3847,15 @@ async def actualizar_lead(
             setattr(lead, campo, valor)
         if transicion_a_vendido:
             _marcar_cierre_vendido(lead)
+        # Punto 2 (2026-09-30) — mismo desarme que `intentar_cambiar_
+        # resultado_opportunity`/`cerrar_opportunity_con_venta` (ver ahí el
+        # porqué), para el camino fallback legacy: un Lead sin Contact/
+        # Conversation/Opportunity todavía usa esta función como escritura
+        # real de resultado. Solo cuenta como decisión humana cuando
+        # "resultado" está en `campos_explicitos` (nunca en la escritura
+        # automática de Gabi, que no lo incluye ahí).
+        if "resultado" in campos and "resultado" in campos_explicitos:
+            lead.derivado_en = None
         lead.actualizado = datetime.utcnow()
 
         # Gate 5.3 — mirror best-effort hacia Conversation/Opportunity, EN LA
@@ -4127,7 +4191,24 @@ async def asignar_asesor_a_lead(telefono: str, asesor: str | None, automatico: b
     asesor que ya figuraba en el `Lead` (DR-4 abre una Conversation nueva
     SIN asesor, pero no toca `Lead.asesor_asignado`, que sigue mostrando al
     vendedor original hasta acá). Por eso ese llamador registra su propio
-    evento aparte, en vez de depender de este (ver esa función)."""
+    evento aparte, en vez de depender de este (ver esa función).
+
+    Punto 2 (2026-09-30) — acá también se arma/desarma `Lead.derivado_en`,
+    el reloj de rotación por inactividad (ver `listar_leads_para_rotar_o_
+    liberar`): `automatico=True` con un `asesor` real arma una ventana
+    fresca de 30 min (Gabi deriva por primera vez, o
+    `rotar_asignacion_por_inactividad` pasa al segundo asesor — en ambos
+    casos hay una persona nueva que todavía no respondió, corresponde
+    monitorear). `automatico=False` (una persona asignó/reasignó a mano
+    desde el panel) SIEMPRE lo desarma — "ya el lead es de esa persona",
+    una decisión humana no se segunda-adivina con un timeout automático.
+    `asesor=None` (desasignación) también lo desarma — sin nadie asignado
+    no hay a quién monitorear. `enrutar_posventa_si_corresponde` (Punto 3)
+    es la única excepción real: llama a esta función con automatico=True
+    pero para un `asesor` que YA era el mismo antes (nunca None), así que
+    la arma igual — por eso esa función limpia `derivado_en` ella misma
+    después, a propósito (un caso de posventa nunca debe rotar/liberarse
+    por inactividad, es un flujo silencioso aparte)."""
     async with async_session() as session:
         # Gate 5.2 (H2): esta función nunca es el camino de creación de un
         # Lead — para cuando llega acá (asignación, automática o manual),
@@ -4137,6 +4218,7 @@ async def asignar_asesor_a_lead(telefono: str, asesor: str | None, automatico: b
         anterior = lead.asesor_asignado
         lead.asesor_asignado = asesor
         lead.visto_asesor = asesor is None
+        lead.derivado_en = datetime.utcnow() if (automatico and asesor is not None) else None
         if automatico:
             _avanzar_version(lead, es_nuevo=False)
         lead.actualizado = datetime.utcnow()
@@ -4273,48 +4355,75 @@ def _dentro_de_horario_ahora(horarios: list[dict], ahora_lima: datetime) -> bool
 async def listar_leads_para_rotar_o_liberar(
     intervalo_minutos: int = 5, umbral_rotacion_minutos: int = 30,
 ) -> list[dict]:
-    """Punto 2 (2026-09-29) — reemplaza a la antigua `liberar_asignaciones_
-    inactivas` (umbral fijo de 24h de RELOJ, sin importar si el asesor
-    estaba en turno). Pedido explícito del usuario tras confirmar el hueco
-    con el caso real de "Sin asignar" silencioso: 24h de reloj era
-    demasiado — "no veo viable que una persona permanezca sin contestar 24
-    horas después de que Gabi lo asignó".
+    """Punto 2 (2026-09-29, REDISEÑADO 2026-09-30 tras un incidente real en
+    producción) — reemplaza a la antigua `liberar_asignaciones_inactivas`
+    (24h de RELOJ, sin turno). Pedido explícito del usuario: "no veo viable
+    que una persona permanezca sin contestar 24 horas después de que Gabi
+    lo asignó".
+
+    **El incidente que motivó el rediseño**: la primera versión de esta
+    función detectaba "ciclo nuevo" comparando el timestamp del ÚLTIMO
+    MENSAJE DEL CLIENTE — así que cuando un asesor reabría un resultado
+    viejo (sin que el cliente hubiera escrito nada nuevo), el mensaje de
+    hace DÍAS se trataba como si acabara de llegar, arrancando una cuenta
+    regresiva de 30 min falsa. Peor: como el criterio de candidatura era
+    puramente "resultado abierto + asesor asignado", una reasignación
+    MANUAL (una persona resolviendo el caso a mano) no apagaba nada — el
+    cron siguiente la deshacía igual. En un caso real (Pedro Padilla
+    Medrano) esto rotó y liberó el mismo lead 5 veces en 3 horas, incluso
+    deshaciendo una asignación manual 50 segundos después de hecha, y otra
+    vez después de que el asesor ya lo había marcado "agendado".
+
+    **El rediseño — basado en EVENTO, no en contenido**: ahora solo se
+    considera un lead si `Lead.derivado_en` está seteado. Ese campo se
+    arma (con la hora actual) EXCLUSIVAMENTE dentro de
+    `asignar_asesor_a_lead` cuando la asignación es automática (Gabi deriva
+    por primera vez, o `rotar_asignacion_por_inactividad` pasa al segundo
+    asesor) — nunca por un cambio de resultado. Se desarma (vuelve a None)
+    apenas el asesor responde de verdad (`guardar_mensaje` con role=
+    "asesor", o el echo de coexistencia) o apenas una PERSONA reasigna a
+    mano (`asignar_asesor_a_lead` con automatico=False — una decisión
+    humana nunca se segunda-adivina). Mientras `derivado_en` sea None, este
+    cron directamente no lo mira — un resultado que se reabre sobre un
+    mensaje viejo, o un lead que un supervisor ya resolvió a mano, quedan
+    afuera con certeza, no por casualidad de timing.
 
     Pensado para correr cada `intervalo_minutos` (Cron Schedule de Railway
-    "*/5 * * * *", reemplaza al Hourly anterior — la granularidad de 30 min
-    por paso no es medible con una corrida por hora). Por cada lead con
-    asesor asignado, resultado abierto, y el mensaje MÁS RECIENTE sin
-    responder del cliente:
-
+    "*/5 * * * *"). Por cada lead con `derivado_en` armado:
     - Solo suma `intervalo_minutos` a `Lead.minutos_espera_asesor` si AHORA
       MISMO el negocio está dentro de su horario de atención (Horario
-      Atencion) Y el asesor asignado está `disponible` — así las horas
-      fuera de turno (del negocio o del asesor puntual) no cuentan, tal
-      como se pidió. `Lead.espera_medida_desde` es la guarda contra
-      reiniciar a mitad de un ciclo: si el último mensaje del cliente
-      cambió desde la corrida anterior (el asesor respondió y el cliente
-      volvió a escribir, o es la primera vez que se mide), recién ahí se
-      reconoce como un ciclo nuevo y el contador vuelve a 0.
-    - Al llegar a `umbral_rotacion_minutos` (30 por defecto) de turno
-      acumulado: si `veces_rotado_espera == 0`, el lead califica para
-      ROTAR — se retorna en la lista (memory.py no elige al siguiente
-      asesor, eso vive en agent/asignacion.py, que sí sabe de nivel/carga;
-      ver `agent/asignacion.py::rotar_leads_inactivos`, el llamador real).
-      Si `veces_rotado_espera >= 1` (el SEGUNDO asesor tampoco respondió en
+      Atencion) Y el asesor asignado está `disponible` — las horas fuera de
+      turno no cuentan.
+    - Al llegar a `umbral_rotacion_minutos` (30 por defecto): si
+      `veces_rotado_espera == 0`, el lead califica para ROTAR — se retorna
+      en la lista (memory.py no elige al siguiente asesor, eso vive en
+      agent/asignacion.py, que sí sabe de nivel/carga; ver
+      `agent/asignacion.py::rotar_leads_inactivos`, el llamador real). Si
+      `veces_rotado_espera >= 1` (el SEGUNDO asesor tampoco respondió en
       sus propios 30 min), se libera acá mismo (reusa `liberar_asignacion`,
-      mismo `motivo="timeout_inactividad"` de siempre — no hace falta
-      elegir a nadie para liberar).
+      motivo="timeout_inactividad" de siempre).
 
     Retorna solo los que necesitan ROTAR: `[{"telefono", "negocio_id",
-    "asesor_actual", "interes", "minutos_espera"}, ...]`."""
+    "asesor_actual", "interes", "minutos_espera"}, ...]`.
+
+    Defensa en profundidad (2026-09-30): además de `derivado_en`, la query
+    excluye explícitamente `pausado_manual == True`. En teoría ya no hace
+    falta — cada camino real de escritura de `resultado` (`intentar_cambiar_
+    resultado_opportunity`, `cerrar_opportunity_con_venta`, `actualizar_lead`)
+    desarma `derivado_en` en la misma transacción que marca `pausado_manual`
+    — pero "Close-Won es indefinido" es una garantía demasiado sensible (ya
+    hubo un incidente real) para depender de que nadie agregue un cuarto
+    camino de escritura sin acordarse de este desarme. Un lead pausado a
+    mano nunca debe rotar ni liberarse, así se haya colado por donde se
+    haya colado."""
     ahora_lima = datetime.utcnow() - timedelta(hours=5)
     a_liberar: list[str] = []
     a_rotar: list[dict] = []
 
     async with async_session() as session:
         query = select(Lead).where(
-            Lead.asesor_asignado.is_not(None),
-            sa_or(Lead.resultado.is_(None), Lead.resultado.notin_(RESULTADOS_CERRADOS)),
+            Lead.derivado_en.is_not(None), Lead.asesor_asignado.is_not(None),
+            Lead.pausado_manual.is_(False),
         )
         candidatos = (await session.execute(query)).scalars().all()
 
@@ -4322,21 +4431,6 @@ async def listar_leads_para_rotar_o_liberar(
         cache_disponibilidad: dict[tuple[str, str], bool] = {}
 
         for lead in candidatos:
-            fila = (await session.execute(
-                select(Mensaje.role, Mensaje.timestamp)
-                .where(Mensaje.telefono == lead.telefono)
-                .order_by(Mensaje.timestamp.desc(), Mensaje.id.desc())
-                .limit(1)
-            )).first()
-            if fila is None or fila[0] != "user":
-                continue
-            ultimo_mensaje_cliente = fila[1]
-
-            if lead.espera_medida_desde != ultimo_mensaje_cliente:
-                lead.espera_medida_desde = ultimo_mensaje_cliente
-                lead.minutos_espera_asesor = 0
-                lead.veces_rotado_espera = 0
-
             if lead.negocio_id not in cache_horarios:
                 cache_horarios[lead.negocio_id] = await listar_horarios_atencion(lead.negocio_id)
             if not _dentro_de_horario_ahora(cache_horarios[lead.negocio_id], ahora_lima):
@@ -4687,7 +4781,14 @@ async def enrutar_posventa_si_corresponde(
     cliente volvió a escribir.
 
     Retorna el asesor asignado, o None si no había venta previa (no hace
-    nada en ese caso — el flujo sigue exactamente igual que hoy)."""
+    nada en ese caso — el flujo sigue exactamente igual que hoy).
+
+    Punto 2 (2026-09-30): `asignar_asesor_a_lead(automatico=True)` arma
+    `Lead.derivado_en` (el reloj de rotación por inactividad) para
+    cualquier asignación automática — pero un caso de posventa NUNCA debe
+    rotar ni liberarse solo por inactividad, es un flujo silencioso aparte
+    (el asesor original puede tardar en responder sin que eso dispare nada
+    automático). Se desarma acá mismo, explícito, después de asignar."""
     asesor = await obtener_vendedor_venta_anterior(contact_id, negocio_id, conversation_id)
     if asesor is None:
         return None
@@ -4696,6 +4797,11 @@ async def enrutar_posventa_si_corresponde(
         resultado="postventa", cerrado_definitivamente_en=None,
     )
     await asignar_asesor_a_lead(telefono, asesor, automatico=True)
+    async with async_session() as session:
+        lead = await session.get(Lead, telefono)
+        if lead is not None:
+            lead.derivado_en = None
+            await session.commit()
     await registrar_evento_lead(
         telefono, tipo="asignado_automatico_postventa",
         descripcion=f"Cliente con una venta anterior — se reabrió la atención y se ruteó automáticamente a {asesor} (mismo asesor que la cerró)",
