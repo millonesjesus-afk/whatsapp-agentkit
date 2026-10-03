@@ -2679,7 +2679,7 @@ async def bandeja_conversaciones(
     asesor: str = "",
     alcance: str = "",
     resultado: str = "",
-    orden: str = "actualizado",
+    orden: str = "actividad",
     dir: str = "desc",
     pagina: int = 1,
     por_pagina: int = POR_PAGINA_PIPELINE,
@@ -2696,8 +2696,8 @@ async def bandeja_conversaciones(
     Opportunity). Solo responde JSON — no tiene contraparte HTML en el
     panel legacy, que sigue sirviéndose de `/pipeline`."""
     asesor_filtro, _ = _alcance_pipeline(usuario, alcance, asesor)
-    if orden not in ("nombre", "resultado", "asesor", "actualizado", "creado"):
-        orden = "actualizado"
+    if orden not in ("nombre", "resultado", "asesor", "actualizado", "creado", "actividad"):
+        orden = "actividad"
     if dir not in ("asc", "desc"):
         dir = "desc"
     # Punto 4 (2026-09-28): filtro por resultado en la Bandeja — mismo

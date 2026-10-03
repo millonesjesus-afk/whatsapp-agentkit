@@ -64,8 +64,10 @@ async def test_conversacion_con_mensaje_nuevo_sube_al_tope_de_la_bandeja():
     async with mem.async_session() as session:
         vieja = await session.get(mem.Conversation, conversation_vieja.id)
         vieja.actualizado = datetime.utcnow() - timedelta(hours=5)
+        vieja.ultimo_mensaje_en = datetime.utcnow() - timedelta(hours=5)
         reciente = await session.get(mem.Conversation, conversation_reciente.id)
         reciente.actualizado = datetime.utcnow() - timedelta(hours=1)
+        reciente.ultimo_mensaje_en = datetime.utcnow() - timedelta(hours=1)
         await session.commit()
 
     filas, _ = await mem.listar_conversaciones_activas(negocio_id=negocio["id"])

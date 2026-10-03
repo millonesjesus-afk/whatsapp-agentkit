@@ -1209,6 +1209,13 @@ class Conversation(Base):
     version: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     creado: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
     actualizado: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, index=True)
+    # Hora del ÚLTIMO MENSAJE real (cliente, Gabi o asesor) — 2026-10-03.
+    # `actualizado` mezclaba dos cosas: "hubo un mensaje" y "algo cambió"
+    # (asignar, rotar, liberar, cierre automático), así que los Cron de
+    # cierre subían al tope de la Bandeja 57 chats sin actividad real. La
+    # Bandeja ordena y muestra esta columna; `actualizado` queda como "última
+    # modificación". Solo la escribe `guardar_mensaje` (y nace con la fila).
+    ultimo_mensaje_en: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, default=datetime.utcnow, index=True)
 
     __table_args__ = (
         Index("ix_conversation_negocio_unidad", "negocio_id", "unidad_id"),
@@ -1863,7 +1870,7 @@ def _es_transicion_a_vendido_opportunity(opportunity: "Opportunity", campos: dic
 
 async def listar_conversaciones_activas(
     negocio_id: str, asesor_asignado: str | None = None, busqueda: str = "",
-    resultado: str = "", orden: str = "actualizado", direccion: str = "desc",
+    resultado: str = "", orden: str = "actividad", direccion: str = "desc",
     pagina: int = 1, por_pagina: int = 20,
 ) -> tuple[list[dict], int]:
     """Bandeja de Conversaciones (Diseño Técnico Gate 5.3 §13/§18) — a
@@ -1878,8 +1885,13 @@ async def listar_conversaciones_activas(
         "nombre": Contact.nombre, "resultado": Opportunity.resultado,
         "asesor": Conversation.asesor_asignado_id, "actualizado": Conversation.actualizado,
         "creado": Conversation.creado,
+        # 2026-10-03 — "actividad" = hora del último mensaje real; asignar,
+        # rotar, liberar o un cierre automático NO la mueven (sí mueven
+        # `actualizado`). El respaldo a `creado` cubre filas anteriores a la
+        # columna que la migración no alcanzara a rellenar.
+        "actividad": func.coalesce(Conversation.ultimo_mensaje_en, Conversation.creado),
     }
-    columna = columnas_orden.get(orden, Conversation.actualizado)
+    columna = columnas_orden.get(orden, columnas_orden["actividad"])
 
     async with async_session() as session:
         # Opportunity vigente por Conversation — row_number() por
@@ -2007,6 +2019,7 @@ async def listar_conversaciones_activas(
                 "interes": opportunity.interes if opportunity else None,
                 "resultado": opportunity.resultado if opportunity else None,
                 "actualizado": iso_utc(conversation.actualizado),
+                "ultimo_mensaje_en": iso_utc(conversation.ultimo_mensaje_en or conversation.creado),
                 "creado": iso_utc(conversation.creado),
                 "fecha_agendada": opportunity.fecha_agendada.isoformat() if opportunity and opportunity.fecha_agendada else None,
                 "visto_asesor": conversation.visto_asesor,
@@ -3166,13 +3179,14 @@ async def guardar_mensaje(
         # RESOLUCIÓN" del backfill si nunca llega a crearse la Conversation.
         contact = await _obtener_contact(session, negocio_id, telefono)
         conversation = await _obtener_conversation_activa(session, contact.id) if contact else None
+        ahora = datetime.utcnow()
         mensaje = Mensaje(
             telefono=telefono,
             negocio_id=negocio_id,
             conversation_id=conversation.id if conversation else None,
             role=role,
             content=content,
-            timestamp=datetime.utcnow(),
+            timestamp=ahora,
             archivo_id=archivo_id,
             via_app=via_app,
             mensaje_id_meta=mensaje_id_meta,
@@ -3194,7 +3208,11 @@ async def guardar_mensaje(
             # ni el badge de pendientes es visible, porque la fila entera deja
             # de traerse. Cada mensaje (cliente, Gabi o asesor) ahora cuenta
             # como actividad real de la conversación.
-            conversation.actualizado = datetime.utcnow()
+            conversation.actualizado = ahora
+            # 2026-10-03 — la Bandeja ordena y muestra ESTA hora, no
+            # `actualizado` (que también se mueve al asignar, rotar, liberar
+            # o cerrar por Cron). Solo un mensaje real la mueve.
+            conversation.ultimo_mensaje_en = ahora
         # Punto 2 (2026-09-30) — un asesor respondiendo de verdad (desde el
         # panel, o el echo de coexistencia cuando responde directo desde la
         # app de WhatsApp Business) desarma el reloj de rotación por
@@ -4550,10 +4568,18 @@ async def cerrar_lead_definitivamente(telefono: str, negocio_id: str, autor: str
 
         await session.commit()
 
+    # Un vendido NUNCA vuelve a Gabi: si el cliente escribe de nuevo, el caso
+    # pasa a postventa con el mismo asesor (`enrutar_posventa_si_corresponde`).
+    # El texto anterior ("Gabi retomará la atención") era falso para ese caso.
+    consecuencia = (
+        "si el cliente vuelve a escribir, el caso pasará a postventa con el mismo asesor de la venta."
+        if lead.resultado == "vendido" else
+        "si el cliente vuelve a escribir, Gabi retomará la atención sin avisarle a quien lo tenía asignado."
+    )
     descripcion = (
-        "Cerró el caso definitivamente — si el cliente vuelve a escribir, Gabi retomará la atención sin avisarle a quien lo tenía asignado."
+        f"Cerró el caso definitivamente — {consecuencia}"
         if autor is not None else
-        "Se cerró el caso automáticamente por inactividad del cliente sobre un resultado ya cerrado — si el cliente vuelve a escribir, Gabi retomará la atención sin avisarle a quien lo tenía asignado."
+        f"Se cerró el caso automáticamente por inactividad del cliente sobre un resultado ya cerrado — {consecuencia}"
     )
     await registrar_evento_lead(
         telefono, tipo="cerrado_definitivamente" if autor is not None else "cerrado_definitivamente_automatico",

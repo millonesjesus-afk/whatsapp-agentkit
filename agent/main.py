@@ -844,10 +844,16 @@ async def webhook_handler(request: Request):
                 # EXPLÍCITO (manual desde la Ficha del Lead, o automático
                 # por `cerrar_leads_definitivamente.py` tras 7 días de
                 # silencio del cliente), nunca el `resultado` por sí solo.
-                # "vendido" sigue excluido: `cerrado_definitivamente_en`
-                # nunca se setea en un caso vendido (ver Human Decision
-                # Gate ya documentado — Close-Won es indefinido).
-                if lead.get("cerrado_definitivamente_en") is not None:
+                # "vendido" NUNCA vuelve a Gabi (Close-Won es indefinido, ver
+                # Human Decision Gate). Desde el Punto 3 (2026-09-28) un
+                # vendido SÍ puede quedar cerrado definitivamente; si el
+                # cliente escribe de nuevo, `enrutar_posventa_si_corresponde`
+                # lo manda al mismo asesor y borra el cierre. Si por un borde
+                # (p. ej. el espejo hacia Conversation no se aplicó) ese
+                # ruteo no ocurrió, el lead sigue "vendido" con cierre: aquí
+                # NO se libera la asignación — cae al `else` (mensaje
+                # guardado para el asesor) en vez de entregárselo a Gabi.
+                if lead.get("cerrado_definitivamente_en") is not None and lead.get("resultado") != "vendido":
                     # El caso quedó cerrado de verdad — DR-4 (resolver_
                     # conversation_activa, ya corrió arriba con este mismo
                     # mensaje) ya abrió una Conversation nueva sin asesor;
