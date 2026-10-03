@@ -597,6 +597,9 @@ class Lead(Base):
     negocio_id: Mapped[str] = mapped_column(String(36), ForeignKey("negocios.id"), nullable=False, index=True)
 
 
+TIPO_EVENTO_LARGO_MAX = 60  # ver migración d4b7a1c93e52 (antes 30: dos tipos automáticos no cabían en Postgres)
+
+
 class EventoLead(Base):
     """Conversation Timeline (MAIEK_AI_PRODUCT_PATTERNS.md, Cap. 6) — eventos
     de NEGOCIO sobre un hilo (resultado cambiado, asignado, venta registrada),
@@ -625,7 +628,7 @@ class EventoLead(Base):
     # NULL para eventos de Conversation (asignado/desasignado); poblado para
     # eventos de Opportunity (resultado_cambiado, venta_registrada).
     opportunity_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("opportunities.id"), nullable=True, index=True)
-    tipo: Mapped[str] = mapped_column(String(30))  # resultado_cambiado | asignado | venta_registrada
+    tipo: Mapped[str] = mapped_column(String(TIPO_EVENTO_LARGO_MAX))  # resultado_cambiado | asignado | venta_registrada
     descripcion: Mapped[str] = mapped_column(String(300))
     payload: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     autor: Mapped[str | None] = mapped_column(String(100), nullable=True)
