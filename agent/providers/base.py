@@ -68,6 +68,14 @@ class ProveedorWhatsApp(ABC):
         """Verificación GET del webhook (solo Meta la requiere). Retorna respuesta o None."""
         return None
 
+    def parsear_estados(self, cuerpo: dict) -> list[dict]:
+        """Extrae los ESTADOS de entrega de mensajes que el negocio ya envió
+        (sent/delivered/read/failed) del payload del webhook, con el precio
+        que el proveedor informó. Lista vacía por defecto: solo Meta los
+        manda. Cada evento: {wamid, estado, momento, phone_number_id,
+        destinatario, pricing, error} — ver ProveedorMeta.parsear_estados."""
+        return []
+
     async def resolver_canal(self, numero_whatsapp_id: str | None, negocio_id: str | None = None) -> dict | None:
         """Dado el ID de un número de WhatsApp del negocio, retorna su
         configuración (token, etc.) para poder enviar por ese canal

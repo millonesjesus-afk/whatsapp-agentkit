@@ -27,6 +27,7 @@ import html
 import json
 import logging
 import os
+import re
 import secrets
 import subprocess
 import tempfile
@@ -41,6 +42,7 @@ from sqlalchemy.exc import IntegrityError
 from agent.tiempo_real import gestor_conexiones, emitir_ticket_ws, validar_y_consumir_ticket_ws
 from agent.rate_limit import limitador_login, bloqueo_login, ip_cliente
 from agent.memory import (
+    resumen_uso_mensual,
     listar_leads, obtener_lead, actualizar_lead,
     obtener_usuario, listar_asesores, listar_equipo, crear_usuario,
     asignar_asesor_a_lead, marcar_lead_visto, limpiar_revision_prioritaria, actualizar_disponibilidad, actualizar_nivel_asesor,
@@ -6703,6 +6705,20 @@ async def toggle_campana_json(
 
 def _anuncio_a_json(a: dict) -> dict:
     return {**a, "primero": iso_utc(a["primero"]), "ultimo": iso_utc(a["ultimo"])}
+
+
+@router.get("/uso-mensajes.json")
+async def uso_mensajes_json(
+    mes: str = "", usuario: dict = Depends(servicio_identidad.requiere_rol("admin", "supervisor")),
+):
+    """Uso y costo de mensajes de WhatsApp del mes, por número del negocio,
+    según los estados que Meta informó (ver `resumen_uso_mensual`): gratis de
+    la cuota usados/restantes, cobrables, ventana gratuita de anuncios y
+    alertas 80/95/100 %. `mes` = YYYY-MM (por defecto, el mes en curso). Solo
+    lectura; Admin y Supervisor del propio negocio."""
+    if mes and not re.fullmatch(r"\d{4}-(0[1-9]|1[0-2])", mes):
+        raise HTTPException(status_code=400, detail="El mes debe tener el formato AAAA-MM")
+    return JSONResponse(await resumen_uso_mensual(usuario["negocio_id"], mes or None))
 
 
 @router.get("/anuncios.json")

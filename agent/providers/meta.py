@@ -6,6 +6,7 @@ import json
 import hmac
 import hashlib
 import logging
+from datetime import datetime, timezone
 from fastapi import Request
 from agent.providers.base import ProveedorWhatsApp, MensajeEntrante
 from agent.memory import listar_canales_whatsapp
@@ -197,6 +198,56 @@ class ProveedorMeta(ProveedorWhatsApp):
             # Meta espera el challenge como respuesta en texto plano
             return int(challenge)
         return None
+
+    @staticmethod
+    def parsear_estados(cuerpo: dict) -> list[dict]:
+        """Extrae los estados de entrega (`value.statuses`) del payload de Meta:
+        sent / delivered / read / failed de mensajes que el negocio YA envió,
+        con el objeto `pricing` que Meta adjunta (en `sent` y en `delivered`
+        o `read`) — es la fuente de verdad de si un mensaje fue gratis
+        (`free_customer_service`, `free_entry_point`) o cobrable (`regular`) y
+        de su categoría (service, utility, marketing, ...). No se calcula ni
+        se supone nada acá: se transcribe lo que Meta informó.
+
+        Cada evento: {wamid, estado, momento (UTC naive), phone_number_id,
+        destinatario, pricing: {billable, pricing_model, type, category} | None,
+        error: {codigo, titulo} | None}. Estados desconocidos y entradas sin
+        id se omiten. Solo se conservan código y título de un error —nunca el
+        texto libre ni `error_data`— para no volcar nada innecesario."""
+        eventos: list[dict] = []
+        for entry in cuerpo.get("entry", []) or []:
+            for change in entry.get("changes", []) or []:
+                value = change.get("value", {}) or {}
+                phone_number_id = (value.get("metadata") or {}).get("phone_number_id", "")
+                for estado_meta in value.get("statuses", []) or []:
+                    wamid = estado_meta.get("id")
+                    estado = estado_meta.get("status")
+                    if not wamid or estado not in ("sent", "delivered", "read", "failed"):
+                        continue
+                    try:
+                        momento = datetime.fromtimestamp(int(estado_meta.get("timestamp")), tz=timezone.utc).replace(tzinfo=None)
+                    except (TypeError, ValueError):
+                        momento = None
+                    pricing = estado_meta.get("pricing")
+                    if isinstance(pricing, dict):
+                        pricing = {
+                            "billable": pricing.get("billable"),
+                            "pricing_model": pricing.get("pricing_model"),
+                            "type": pricing.get("type"),
+                            "category": pricing.get("category"),
+                        }
+                    else:
+                        pricing = None
+                    errores = estado_meta.get("errors") or []
+                    error = None
+                    if errores and isinstance(errores[0], dict):
+                        error = {"codigo": errores[0].get("code"), "titulo": str(errores[0].get("title") or "")[:200]}
+                    eventos.append({
+                        "wamid": wamid, "estado": estado, "momento": momento,
+                        "phone_number_id": phone_number_id, "destinatario": estado_meta.get("recipient_id"),
+                        "pricing": pricing, "error": error,
+                    })
+        return eventos
 
     async def parsear_webhook(self, request: Request) -> list[MensajeEntrante]:
         """Parsea el payload anidado de Meta Cloud API."""

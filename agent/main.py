@@ -26,7 +26,7 @@ from agent.memory import (
     sembrar_canales_desde_env, pausar_gabi_manual, marcar_revision_prioritaria,
     marcar_mensaje_procesado, obtener_negocio_por_codigo,
     resolver_conversation_activa, medir_latencia_db, obtener_conversation_activa_de_telefono,
-    enrutar_posventa_si_corresponde,
+    enrutar_posventa_si_corresponde, registrar_estado_mensaje_meta,
 )
 from agent.providers import obtener_proveedor
 from agent.dashboard import (
@@ -626,6 +626,31 @@ async def _avisar_derivacion_si_falto(telefono: str, respuesta: str, canal: dict
     logger.info(f"Derivación de {telefono} sin aviso en la respuesta de Gabi — se envió el aviso de respaldo")
 
 
+async def _registrar_estados_de_mensajes(body: dict) -> None:
+    """Registra en `uso_mensajes_meta` los estados de entrega del payload.
+
+    Aislado a propósito: cualquier falla (canal sin resolver, base caída, un
+    evento mal formado) se registra y se ignora, para que ni un estado ni su
+    registro puedan tumbar el procesamiento de un mensaje del cliente ni
+    provocar un 500 que haga a Meta reintentar. Un estado perdido se
+    recupera: Meta manda varios por mensaje (sent y delivered/read) y el
+    registro es idempotente."""
+    parsear_estados = getattr(proveedor, "parsear_estados", None)
+    if parsear_estados is None:  # proveedor sin estados de entrega
+        return
+    try:
+        eventos = parsear_estados(body)
+        for evento in eventos:
+            try:
+                canal = await proveedor.resolver_canal(evento.get("phone_number_id"))
+                evento["negocio_id"] = canal.get("negocio_id") if canal else None
+                await registrar_estado_mensaje_meta(evento)
+            except Exception:
+                logger.exception("No se pudo registrar un estado de mensaje de Meta")
+    except Exception:
+        logger.exception("No se pudieron leer los estados de mensajes del webhook")
+
+
 @app.post("/webhook")
 async def webhook_handler(request: Request):
     """
@@ -652,6 +677,11 @@ async def webhook_handler(request: Request):
         if body.get("object") == "page":
             await servicio_canales.procesar_leads_formulario(body, proveedor)
             return {"status": "ok"}
+
+        # Estados de entrega de mensajes que YA enviamos (sent/delivered/read/
+        # failed) con el precio que informa Meta — registro de uso y costo.
+        # Nunca puede afectar el flujo de mensajes de abajo.
+        await _registrar_estados_de_mensajes(body)
 
         # Parsear webhook — el proveedor normaliza el formato
         mensajes = await proveedor.parsear_webhook(request)

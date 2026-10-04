@@ -367,7 +367,7 @@ class Mensaje(Base):
     # quiere citar no tiene este campo, la cita se rechaza explícitamente
     # (ver responder_cliente en dashboard.py) en vez de mandarle a Meta un
     # context inválido.
-    mensaje_id_meta: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    mensaje_id_meta: Mapped[str | None] = mapped_column(String(100), nullable=True, index=True)  # índice: se cruza con uso_mensajes_meta.wamid
     # "fallido" cuando un envío SALIENTE no se pudo confirmar con Meta
     # (status distinto de 200, o falla de red) — a diferencia del
     # comportamiento anterior (no guardar nada si el envío fallaba), el
@@ -2542,6 +2542,49 @@ class MensajeProcesado(Base):
     procesado_en: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
+class UsoMensajeMeta(Base):
+    """Registro de uso y costo de cada mensaje SALIENTE, tal como lo informa
+    Meta en los webhooks de estado (2026-10-04). Desde el 2026-10-01 los
+    mensajes de servicio se cobran por mensaje tras una cuota gratuita por
+    número, y hasta ahora el sistema ignoraba esos estados por completo: no
+    había forma de saber qué mensaje se entregó ni cuál cobró Meta.
+
+    Una fila por mensaje (clave = wamid). No calcula ni supone nada: guarda lo
+    que Meta dice en `pricing` — `type` ∈ regular | free_customer_service |
+    free_entry_point y `category` ∈ service | utility | marketing | ... —
+    porque esas reglas cambian por fecha, país y categoría y no deben vivir
+    como constantes en el código. Los estados llegan repetidos y fuera de
+    orden (read antes que delivered): el registro es idempotente."""
+    __tablename__ = "uso_mensajes_meta"
+
+    wamid: Mapped[str] = mapped_column(String(100), primary_key=True)
+    # phone_number_id de Meta del número del NEGOCIO (no del cliente): la
+    # cuota gratuita es por business phone number.
+    phone_number_id: Mapped[str] = mapped_column(String(50), nullable=False)
+    negocio_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    destinatario: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    # sent | delivered | read | failed — el estado más avanzado visto
+    # (failed solo si nunca se vio delivered/read).
+    estado: Mapped[str] = mapped_column(String(20), nullable=False, default="sent")
+    enviado_en: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    entregado_en: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    leido_en: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    fallido_en: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    error_codigo: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    error_titulo: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    pricing_billable: Mapped[bool | None] = mapped_column(Boolean, nullable=True)  # en desuso según Meta: usar pricing_type
+    pricing_model: Mapped[str | None] = mapped_column(String(10), nullable=True)
+    pricing_type: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    pricing_categoria: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    creado: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    actualizado: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    __table_args__ = (
+        Index("ix_uso_mensajes_phone_entregado", "phone_number_id", "entregado_en"),
+        Index("ix_uso_mensajes_negocio_entregado", "negocio_id", "entregado_en"),
+    )
+
+
 class Producto(Base):
     """Catálogo de productos / lista de precios — fuente de verdad para
     Gabi (cotización en vivo), campañas, autocompletar de "Cierre de venta"
@@ -2804,6 +2847,190 @@ async def marcar_mensaje_procesado(mensaje_id: str) -> bool:
         except IntegrityError:
             await session.rollback()
             return True
+
+
+_RANGO_ESTADO_MENSAJE = {"sent": 1, "delivered": 2, "read": 3}
+_CAMPO_MOMENTO_POR_ESTADO = {
+    "sent": "enviado_en", "delivered": "entregado_en", "read": "leido_en", "failed": "fallido_en",
+}
+
+
+async def registrar_estado_mensaje_meta(evento: dict) -> bool:
+    """Registra (idempotente) un estado de entrega de Meta en `uso_mensajes_meta`.
+
+    `evento` = lo que devuelve `ProveedorMeta.parsear_estados` (más
+    `negocio_id` si se pudo resolver el canal). Meta reenvía estados y los
+    manda fuera de orden, así que: la fila se crea o actualiza por `wamid`;
+    el estado nunca retrocede (read > delivered > sent; failed solo si nunca
+    se entregó); cada momento conserva el PRIMER valor visto; el `pricing` se
+    guarda cuando aparece (viene en `sent` y en `delivered`/`read`) sin
+    pisarlo con un estado que no lo trae. Dos webhooks simultáneos para el
+    mismo wamid se resuelven con la clave primaria (se reintenta como
+    actualización). Devuelve False solo si el evento es inválido."""
+    wamid, estado, phone_number_id = evento.get("wamid"), evento.get("estado"), evento.get("phone_number_id")
+    if not wamid or not phone_number_id or estado not in _CAMPO_MOMENTO_POR_ESTADO:
+        return False
+    momento = evento.get("momento") or datetime.utcnow()
+    pricing = evento.get("pricing") or {}
+    error = evento.get("error") or {}
+
+    async with async_session() as session:
+        for _ in range(2):
+            fila = await session.get(UsoMensajeMeta, wamid)
+            if fila is None:
+                fila = UsoMensajeMeta(wamid=wamid, phone_number_id=phone_number_id, estado=estado)
+                session.add(fila)
+            if not fila.negocio_id and evento.get("negocio_id"):
+                fila.negocio_id = evento["negocio_id"]
+            if not fila.destinatario and evento.get("destinatario"):
+                fila.destinatario = evento["destinatario"]
+
+            campo = _CAMPO_MOMENTO_POR_ESTADO[estado]
+            actual = getattr(fila, campo)
+            if actual is None or momento < actual:
+                setattr(fila, campo, momento)
+
+            if estado == "failed":
+                if fila.estado not in ("delivered", "read"):
+                    fila.estado = "failed"
+            elif _RANGO_ESTADO_MENSAJE[estado] > _RANGO_ESTADO_MENSAJE.get(fila.estado, 0):
+                fila.estado = estado
+
+            if pricing.get("type") is not None:
+                fila.pricing_type = pricing.get("type")
+            if pricing.get("category") is not None:
+                fila.pricing_categoria = pricing.get("category")
+            if pricing.get("pricing_model") is not None:
+                fila.pricing_model = pricing.get("pricing_model")
+            if pricing.get("billable") is not None:
+                fila.pricing_billable = bool(pricing.get("billable"))
+            if error.get("codigo") is not None and fila.error_codigo is None:
+                fila.error_codigo = error.get("codigo")
+                fila.error_titulo = error.get("titulo")
+            try:
+                await session.commit()
+                return True
+            except IntegrityError:
+                await session.rollback()
+        return False
+
+
+def _a_numero(valor: str | None, por_defecto: float | None = None) -> float | None:
+    try:
+        return float(str(valor).strip())
+    except (TypeError, ValueError):
+        return por_defecto
+
+
+def _limites_de_mes_utc(mes: str | None, zona: str) -> tuple[datetime, datetime, str]:
+    """(inicio, fin, 'YYYY-MM') del mes pedido en UTC naive. El mes se mide en
+    `zona`: Meta no documenta en qué zona horaria reinicia la cuota, así que
+    es configurable (`meta_zona_horaria_mes`, UTC por defecto) y se calibra
+    contra el primer mensaje que Meta marque `regular`."""
+    from datetime import timezone
+    from zoneinfo import ZoneInfo
+
+    try:
+        tz = ZoneInfo(zona)
+    except Exception:  # zona desconocida o sin base de zonas en el sistema
+        tz = timezone.utc
+    if mes:
+        anio, num = (int(p) for p in mes.split("-"))
+    else:
+        ahora = datetime.now(tz)
+        anio, num = ahora.year, ahora.month
+    inicio = datetime(anio, num, 1, tzinfo=tz)
+    fin = datetime(anio + 1, 1, 1, tzinfo=tz) if num == 12 else datetime(anio, num + 1, 1, tzinfo=tz)
+    como_utc = lambda d: d.astimezone(timezone.utc).replace(tzinfo=None)
+    return como_utc(inicio), como_utc(fin), f"{anio:04d}-{num:02d}"
+
+
+async def resumen_uso_mensual(negocio_id: str, mes: str | None = None) -> dict:
+    """Uso del mes por número de WhatsApp del negocio, a partir de lo que Meta
+    informó en cada mensaje ENTREGADO (`uso_mensajes_meta`):
+
+    - `servicio_gratis_usados`: type=free_customer_service (consumen la cuota).
+    - `servicio_cobrables`: type=regular y categoría service (ya pasó la cuota).
+    - `ventana_anuncio_gratis`: type=free_entry_point (ventana gratuita de
+      anuncios Click-to-WhatsApp; se cuenta aparte, no se supone que consuma
+      la cuota — eso lo dice Meta mensaje a mensaje).
+    - `otros_cobrables`: type=regular de otras categorías (utility,
+      marketing, authentication...) por categoría.
+    - `sin_clasificar`: entregados sin `pricing` (todavía no llegó o Meta no
+      lo informó) — no se asigna a ningún grupo.
+
+    La cuota (`meta_cuota_gratis_servicio`, 1000), la zona del mes
+    (`meta_zona_horaria_mes`, UTC) y las tarifas (`meta_tarifa_usd_<categoria>`,
+    sin valor por defecto) son configuración por negocio — nada de eso está
+    fijo en el código. Sin tarifa configurada, `costo_estimado_usd` es None y
+    se informa cuáles faltan. Las alertas (80/95/100 %) usan los gratis usados
+    sobre la cuota; 100 % también si ya hay cobrables de servicio."""
+    zona = await obtener_configuracion("meta_zona_horaria_mes", "UTC", negocio_id=negocio_id)
+    cuota = int(_a_numero(await obtener_configuracion("meta_cuota_gratis_servicio", "1000", negocio_id=negocio_id), 1000) or 0)
+    inicio, fin, mes_normalizado = _limites_de_mes_utc(mes, zona)
+
+    momento = func.coalesce(UsoMensajeMeta.entregado_en, UsoMensajeMeta.leido_en)
+    async with async_session() as session:
+        filas = (await session.execute(
+            select(
+                UsoMensajeMeta.phone_number_id, UsoMensajeMeta.pricing_type, UsoMensajeMeta.pricing_categoria,
+                func.count().label("n"),
+            )
+            .where(
+                UsoMensajeMeta.negocio_id == negocio_id,
+                UsoMensajeMeta.estado.in_(("delivered", "read")),
+                momento >= inicio, momento < fin,
+            )
+            .group_by(UsoMensajeMeta.phone_number_id, UsoMensajeMeta.pricing_type, UsoMensajeMeta.pricing_categoria)
+        )).all()
+
+    numeros: dict[str, dict] = {}
+    for phone_number_id, tipo, categoria, n in filas:
+        d = numeros.setdefault(phone_number_id, {
+            "phone_number_id": phone_number_id, "entregados": 0, "servicio_gratis_usados": 0,
+            "servicio_cobrables": 0, "ventana_anuncio_gratis": 0, "otros_cobrables": {}, "sin_clasificar": 0,
+        })
+        d["entregados"] += n
+        if tipo == "free_customer_service":
+            d["servicio_gratis_usados"] += n
+        elif tipo == "free_entry_point":
+            d["ventana_anuncio_gratis"] += n
+        elif tipo == "regular" and categoria == "service":
+            d["servicio_cobrables"] += n
+        elif tipo == "regular":
+            clave = categoria or "sin_categoria"
+            d["otros_cobrables"][clave] = d["otros_cobrables"].get(clave, 0) + n
+        else:
+            d["sin_clasificar"] += n
+
+    categorias_usadas: set[str] = set()
+    for d in numeros.values():
+        if d["servicio_cobrables"]:
+            categorias_usadas.add("service")
+        categorias_usadas.update(d["otros_cobrables"])
+    tarifas = {c: _a_numero(await obtener_configuracion(f"meta_tarifa_usd_{c}", "", negocio_id=negocio_id)) for c in categorias_usadas}
+    faltantes = sorted(c for c, t in tarifas.items() if t is None)
+
+    for d in numeros.values():
+        usados = d["servicio_gratis_usados"]
+        d["gratis_restantes"] = max(0, cuota - usados)
+        d["porcentaje_cuota"] = round(100 * usados / cuota, 1) if cuota else None
+        alertas = [u for u in (80, 95, 100) if cuota and usados * 100 >= u * cuota]
+        if d["servicio_cobrables"] and 100 not in alertas:
+            alertas.append(100)
+        d["alertas"] = alertas
+        if faltantes:
+            d["costo_estimado_usd"] = None
+        else:
+            costo = d["servicio_cobrables"] * (tarifas.get("service") or 0)
+            costo += sum(n * (tarifas.get(c) or 0) for c, n in d["otros_cobrables"].items())
+            d["costo_estimado_usd"] = round(costo, 4)
+
+    return {
+        "mes": mes_normalizado, "zona_horaria": zona, "cuota_gratis_servicio": cuota,
+        "tarifas_usd": {c: t for c, t in tarifas.items() if t is not None}, "tarifas_faltantes": faltantes,
+        "numeros": sorted(numeros.values(), key=lambda d: d["phone_number_id"]),
+    }
 
 
 def _canal_a_dict(c: CanalWhatsApp) -> dict:
