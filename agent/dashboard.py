@@ -79,6 +79,7 @@ from agent.memory import (
 from agent.services.servicio_conversacion import servicio_conversacion
 from agent.http_utils import get_con_reintentos, post_con_reintentos
 from agent.meta_timezones import zona_iana_de_meta
+from agent import envios
 
 # Paleta de colores para distinguir canales de WhatsApp en el panel — se
 # asigna por posición (orden de creación), no por nombre, así que un canal
@@ -5325,7 +5326,7 @@ async def responder_cliente(
 
     proveedor = obtener_proveedor()
     canal = await proveedor.resolver_canal(lead.get("numero_whatsapp_id"))
-    enviado, wamid = await proveedor.enviar_mensaje(telefono, mensaje, canal=canal, mensaje_id_citado=wamid_citado)
+    enviado, wamid = await envios.enviar_texto(proveedor, telefono, mensaje, origen="asesor_texto", canal=canal, mensaje_id_citado=wamid_citado)
 
     # A diferencia del comportamiento anterior (no guardar nada si el envío
     # fallaba), el mensaje se persiste igual con estado_envio="fallido" —
@@ -5415,9 +5416,9 @@ async def _subir_y_enviar_media(telefono: str, nombre_archivo: str, content_type
         return False, None
     es_imagen = content_type.startswith("image/")
     enviado, wamid = (
-        await proveedor.enviar_imagen(telefono, media_id, caption, canal=canal)
+        await envios.enviar_imagen(proveedor, telefono, media_id, caption, origen="asesor_archivo", canal=canal)
         if es_imagen else
-        await proveedor.enviar_documento(telefono, media_id, nombre_archivo, caption, canal=canal)
+        await envios.enviar_documento(proveedor, telefono, media_id, nombre_archivo, caption, origen="asesor_archivo", canal=canal)
     )
     return enviado, wamid
 
@@ -5533,7 +5534,7 @@ async def enviar_audio_chat(
     media_id = await proveedor.subir_media(contenido_ogg, "nota_de_voz.ogg", "audio/ogg", canal=canal)
     enviado, wamid = (False, None)
     if media_id:
-        enviado, wamid = await proveedor.enviar_audio(telefono, media_id, canal=canal)
+        enviado, wamid = await envios.enviar_audio(proveedor, telefono, media_id, origen="asesor_audio", canal=canal)
 
     # Mismo criterio que enviar-archivo: la nota de voz ya convertida se
     # guarda y el mensaje se persiste SIEMPRE, para que un envío fallido se

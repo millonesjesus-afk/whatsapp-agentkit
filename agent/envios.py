@@ -1,0 +1,152 @@
+# agent/envios.py — Capa central de envíos de WhatsApp (Fase A, 2026-10-04)
+#
+# Todo mensaje que el sistema manda a un cliente pasa por acá, con la etiqueta
+# del ORIGEN que lo pidió. Desde el 2026-10-01 Meta cobra los mensajes de
+# servicio tras una cuota gratuita, y antes cada lugar del código llamaba al
+# proveedor por su cuenta: no había forma de saber qué origen gasta cuánto ni de
+# frenar uno sin tocar a los demás.
+#
+# Fase A (esta): registrar cada envío con su origen y agrupar los avisos
+# repetidos. NO decide qué se cobra ni bloquea por costo — eso es la Fase B
+# (interruptores siempre | solo_gratis | nunca y tope mensual), que se apoya en
+# esta misma puerta.
+#
+# Los envíos llaman al proveedor con los MISMOS argumentos de siempre (el
+# proveedor es el que recibe quien llama, así que sustituirlo en pruebas sigue
+# funcionando) y la respuesta se puede desempaquetar igual: `enviado, wamid = …`.
+
+import asyncio
+import logging
+import weakref
+
+from agent.memory import cerrar_envio_meta, obtener_configuracion, reservar_envio_meta
+
+logger = logging.getLogger("agentkit")
+
+# origen → política. `esencial`: un envío que el cliente espera y que ningún tope
+# de gasto debe frenar (la Fase B lo usa; acá solo queda declarado).
+# `agrupar_minutos`: no repetir este origen al mismo cliente dentro de esa
+# ventana (configurable con `envios_agrupar_minutos_<origen>`).
+ORIGENES: dict[str, dict] = {
+    "gabi_respuesta": {"esencial": True},
+    "gabi_aviso_derivacion": {"esencial": True},
+    "gabi_aviso_no_legible": {"esencial": False, "agrupar_minutos": 10},
+    "reenganche_inactividad": {"esencial": False},
+    "asesor_texto": {"esencial": True},
+    "asesor_archivo": {"esencial": True},
+    "asesor_audio": {"esencial": True},
+    "plantilla_formulario": {"esencial": False},
+}
+
+
+class ResultadoEnvio:
+    """Resultado de un envío. Se desempaqueta como `(enviado, wamid)` y es
+    verdadero si se envió, para que los llamadores que antes recibían una
+    tupla o un booleano no cambien."""
+
+    def __init__(self, enviado: bool, wamid: str | None = None, bloqueado: bool = False, motivo: str | None = None):
+        self.enviado, self.wamid, self.bloqueado, self.motivo = enviado, wamid, bloqueado, motivo
+
+    def __iter__(self):
+        yield self.enviado
+        yield self.wamid
+
+    def __bool__(self) -> bool:
+        return self.enviado
+
+    def __repr__(self) -> str:
+        return f"ResultadoEnvio(enviado={self.enviado}, wamid={self.wamid!r}, bloqueado={self.bloqueado}, motivo={self.motivo!r})"
+
+
+# Un candado por event loop: el chequeo de agrupación y la reserva tienen que ser
+# atómicos entre los mensajes simultáneos de un mismo cliente (tres fotos
+# seguidas llegan como tres webhooks en paralelo).
+_candados: "weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Lock]" = weakref.WeakKeyDictionary()
+
+
+def _candado_de_reserva() -> asyncio.Lock:
+    loop = asyncio.get_running_loop()
+    if loop not in _candados:
+        _candados[loop] = asyncio.Lock()
+    return _candados[loop]
+
+
+async def _minutos_de_agrupacion(origen: str, negocio_id: str | None) -> int:
+    por_defecto = ORIGENES[origen].get("agrupar_minutos", 0)
+    if not por_defecto:
+        return 0
+    try:
+        valor = await obtener_configuracion(f"envios_agrupar_minutos_{origen}", str(por_defecto), negocio_id=negocio_id)
+        return max(0, int(float(valor)))
+    except Exception:
+        return por_defecto
+
+
+def _normalizar(respuesta) -> tuple[bool, str | None]:
+    if isinstance(respuesta, tuple):
+        return bool(respuesta[0]), (respuesta[1] if len(respuesta) > 1 else None)
+    return bool(respuesta), None
+
+
+async def _enviar(origen: str, tipo: str, telefono: str, canal: dict | None, llamada) -> ResultadoEnvio:
+    if origen not in ORIGENES:
+        raise ValueError(f"Origen de envío desconocido: {origen!r}. Registrarlo en agent/envios.py::ORIGENES.")
+    negocio_id = (canal or {}).get("negocio_id")
+
+    # El registro nunca puede impedir un envío: si falla, se envía igual.
+    envio_id: int | None = None
+    try:
+        agrupar = await _minutos_de_agrupacion(origen, negocio_id)
+        if agrupar:
+            async with _candado_de_reserva():
+                envio_id, motivo = await reservar_envio_meta(negocio_id, origen, telefono, tipo, agrupar)
+        else:
+            envio_id, motivo = await reservar_envio_meta(negocio_id, origen, telefono, tipo)
+        if envio_id is None and motivo:
+            logger.info(f"Envío {origen} a {telefono} omitido — {motivo}")
+            return ResultadoEnvio(False, None, bloqueado=True, motivo=motivo)
+    except Exception:
+        logger.exception(f"No se pudo registrar el envío {origen} a {telefono} — se envía igual")
+        envio_id = None
+
+    try:
+        enviado, wamid = _normalizar(await llamada())
+    except BaseException:
+        await _cerrar(envio_id, False, None)
+        raise
+    await _cerrar(envio_id, enviado, wamid)
+    return ResultadoEnvio(enviado, wamid)
+
+
+async def _cerrar(envio_id: int | None, enviado: bool, wamid: str | None) -> None:
+    if envio_id is None:
+        return
+    try:
+        await cerrar_envio_meta(envio_id, enviado, wamid)
+    except Exception:
+        logger.exception(f"No se pudo cerrar el registro de envío {envio_id}")
+
+
+async def enviar_texto(proveedor, telefono: str, texto: str, *, origen: str, canal: dict | None = None, **extra) -> ResultadoEnvio:
+    """`extra` se reenvía tal cual al proveedor (ej. `mensaje_id_citado`)."""
+    return await _enviar(origen, "texto", telefono, canal, lambda: proveedor.enviar_mensaje(telefono, texto, canal=canal, **extra))
+
+
+async def enviar_imagen(proveedor, telefono: str, media_id: str, caption: str = "", *, origen: str, canal: dict | None = None) -> ResultadoEnvio:
+    return await _enviar(origen, "imagen", telefono, canal, lambda: proveedor.enviar_imagen(telefono, media_id, caption, canal=canal))
+
+
+async def enviar_documento(
+    proveedor, telefono: str, media_id: str, nombre_archivo: str, caption: str = "", *, origen: str, canal: dict | None = None,
+) -> ResultadoEnvio:
+    return await _enviar(origen, "documento", telefono, canal, lambda: proveedor.enviar_documento(telefono, media_id, nombre_archivo, caption, canal=canal))
+
+
+async def enviar_audio(proveedor, telefono: str, media_id: str, *, origen: str, canal: dict | None = None) -> ResultadoEnvio:
+    return await _enviar(origen, "audio", telefono, canal, lambda: proveedor.enviar_audio(telefono, media_id, canal=canal))
+
+
+async def enviar_plantilla(
+    proveedor, telefono: str, nombre_plantilla: str, parametros: list[str], idioma: str = "es", *, origen: str, canal: dict | None = None,
+) -> ResultadoEnvio:
+    return await _enviar(origen, "plantilla", telefono, canal, lambda: proveedor.enviar_plantilla(telefono, nombre_plantilla, parametros, idioma, canal=canal))

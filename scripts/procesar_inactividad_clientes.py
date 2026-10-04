@@ -41,6 +41,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from agent.memory import esperar_base_de_datos, listar_leads_inactividad_cliente, actualizar_lead, guardar_mensaje
 from agent.providers import obtener_proveedor
+from agent import envios
 from agent.tiempo_real import gestor_conexiones
 
 HORAS_REENGANCHE = 2.0
@@ -66,7 +67,9 @@ async def main() -> None:
             invalidos.append(repr(fila["telefono"]))
             continue
         canal = await proveedor.resolver_canal(fila["numero_whatsapp_id"], negocio_id=fila["negocio_id"])
-        enviado, wamid = await proveedor.enviar_mensaje(fila["telefono"], MENSAJE_REENGANCHE, canal=canal)
+        enviado, wamid = await envios.enviar_texto(
+            proveedor, fila["telefono"], MENSAJE_REENGANCHE, origen="reenganche_inactividad", canal=canal,
+        )
         if not enviado:
             fallidos.append(fila["telefono"])
             continue

@@ -29,6 +29,7 @@ from agent.memory import (
     enrutar_posventa_si_corresponde, registrar_estado_mensaje_meta,
 )
 from agent.providers import obtener_proveedor
+from agent import envios
 from agent.dashboard import (
     router as dashboard_router, NoAutenticado,
     ARCHIVOS_DIR, EXTENSIONES_ARCHIVO_PERMITIDAS, TAMANO_MAXIMO_ARCHIVO_MB, _guardar_archivo_en_disco,
@@ -419,7 +420,12 @@ async def _atender_mensaje_no_legible(msg, canal: dict | None, contenido: str, a
         msg.telefono, "user", contenido, negocio_id=negocio_id,
         archivo_id=archivo_id, mensaje_id_meta=msg.mensaje_id or None,
     )
-    enviado, wamid = await proveedor.enviar_mensaje(msg.telefono, respuesta, canal=canal)
+    resultado = await envios.enviar_texto(proveedor, msg.telefono, respuesta, origen="gabi_aviso_no_legible", canal=canal)
+    if resultado.bloqueado:
+        # Varios adjuntos seguidos: ya se le avisó hace poco (ver envios.ORIGENES).
+        # Los adjuntos quedaron guardados arriba; no se inventa un aviso que no salió.
+        return
+    enviado, wamid = resultado
     mensaje_guardado = await servicio_conversacion.guardar_mensaje(
         msg.telefono, "assistant", respuesta, negocio_id=negocio_id,
         mensaje_id_meta=wamid, estado_envio=None if enviado else "fallido",
@@ -524,7 +530,7 @@ async def _generar_y_enviar_respuesta_ia(telefono: str, canal: dict | None) -> N
 
     # El mensaje del cliente ya se guardó al llegar (ver webhook_handler) —
     # acá solo falta la respuesta de Gabi.
-    enviado, wamid = await proveedor.enviar_mensaje(telefono, respuesta, canal=canal)
+    enviado, wamid = await envios.enviar_texto(proveedor, telefono, respuesta, origen="gabi_respuesta", canal=canal)
     mensaje_guardado = await servicio_conversacion.guardar_mensaje(
         telefono, "assistant", respuesta, negocio_id=canal.get("negocio_id") if canal else None,
         mensaje_id_meta=wamid, estado_envio=None if enviado else "fallido",
@@ -617,7 +623,7 @@ async def _avisar_derivacion_si_falto(telefono: str, respuesta: str, canal: dict
     negocio_id = canal.get("negocio_id") if canal else None
     estado = await obtener_estado_horario_atencion(negocio_id)
     aviso = servicio_inteligencia.obtener_mensaje_derivacion(estado["dentro_de_horario"])
-    enviado, wamid = await proveedor.enviar_mensaje(telefono, aviso, canal=canal)
+    enviado, wamid = await envios.enviar_texto(proveedor, telefono, aviso, origen="gabi_aviso_derivacion", canal=canal)
     mensaje_guardado = await servicio_conversacion.guardar_mensaje(
         telefono, "assistant", aviso, negocio_id=negocio_id,
         mensaje_id_meta=wamid, estado_envio=None if enviado else "fallido",

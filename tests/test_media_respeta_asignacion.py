@@ -189,3 +189,23 @@ async def test_una_reaccion_nunca_recibe_respuesta_ni_con_ni_sin_asesor(monkeypa
 
         assert proveedor.enviados == [] and await _mensajes_assistant(negocio["id"], telefono) == []
         assert [m.content for m in await _mensajes_de(negocio["id"], telefono, "user")] == ["Reaccionó con 👍"]
+
+
+async def test_dos_adjuntos_seguidos_reciben_un_solo_aviso_y_ambos_quedan_guardados(monkeypatch):
+    """Capa central de envíos (2026-10-04): tres fotos seguidas hacían tres avisos
+    idénticos, tres mensajes de servicio. Ahora el aviso sale una vez por cliente
+    cada 10 min; los adjuntos se guardan todos y no se inventa un mensaje de Gabi
+    que no salió."""
+    telefono = "51903100006"
+    negocio, proveedor = await _armar(monkeypatch, "g-med-agr", telefono, "image")
+
+    await app_main.webhook_handler(_request())
+    proveedor._mensaje = MensajeEntrante(     # segunda foto: otro wamid (el mismo se descarta por duplicado)
+        telefono=telefono, texto="", mensaje_id="wamid.g-med-agr-2", es_propio=False, tipo="image",
+        numero_whatsapp_id=proveedor._canal["phone_number_id"],
+    )
+    await app_main.webhook_handler(_request())
+
+    assert len(proveedor.enviados) == 1
+    assert len(await _mensajes_de(negocio["id"], telefono, "user")) == 2
+    assert len(await _mensajes_assistant(negocio["id"], telefono)) == 1

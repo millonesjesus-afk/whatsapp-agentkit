@@ -2586,6 +2586,74 @@ class UsoMensajeMeta(Base):
     )
 
 
+class EnvioMeta(Base):
+    """Una fila por cada intento de enviar un mensaje de WhatsApp, con el ORIGEN
+    que lo pidió (2026-10-04, Fase A de la capa central de envíos). Nace para
+    poder responder "¿cuánto cuesta Gabi, el reenganche, las campañas?": cruzada
+    por `wamid` con `uso_mensajes_meta` (lo que Meta cobró) da el costo por
+    origen, y es la base de los interruptores pagar/no pagar de la Fase B.
+
+    La fila se crea ANTES de enviar (decision="enviado", sin wamid) y se cierra
+    después: así dos mensajes simultáneos del mismo cliente no pasan juntos el
+    chequeo de agrupación. Si el envío falla pasa a "fallido" y deja de contar
+    como enviado. "bloqueado" = la capa decidió no enviar (`motivo` lo dice)."""
+    __tablename__ = "envios_meta"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    negocio_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    origen: Mapped[str] = mapped_column(String(40), nullable=False)
+    # 150, como Mensaje.telefono (un BSUID de Meta puede ser más largo que un teléfono).
+    telefono: Mapped[str] = mapped_column(String(150), nullable=False)
+    tipo: Mapped[str] = mapped_column(String(20), nullable=False)  # texto | imagen | documento | audio | plantilla
+    decision: Mapped[str] = mapped_column(String(20), nullable=False)  # enviado | fallido | bloqueado
+    motivo: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    wamid: Mapped[str | None] = mapped_column(String(100), nullable=True, index=True)
+    creado: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    __table_args__ = (
+        Index("ix_envios_meta_agrupacion", "negocio_id", "origen", "telefono", "creado"),
+    )
+
+
+async def reservar_envio_meta(
+    negocio_id: str | None, origen: str, telefono: str, tipo: str, agrupar_minutos: int = 0,
+) -> tuple[int | None, str | None]:
+    """Registra el intento de envío. Con `agrupar_minutos` > 0, si ya hay un
+    envío "enviado" del mismo origen al mismo cliente dentro de esa ventana no
+    reserva nada: guarda un "bloqueado" y devuelve (None, motivo). Devuelve
+    (id, None) si se puede enviar."""
+    async with async_session() as session:
+        if agrupar_minutos > 0:
+            desde = datetime.utcnow() - timedelta(minutes=agrupar_minutos)
+            previo = (await session.execute(
+                select(EnvioMeta.id).where(
+                    EnvioMeta.negocio_id == negocio_id, EnvioMeta.origen == origen,
+                    EnvioMeta.telefono == telefono, EnvioMeta.decision == "enviado", EnvioMeta.creado >= desde,
+                ).limit(1)
+            )).scalar_one_or_none()
+            if previo is not None:
+                motivo = f"agrupado: ya se envió este aviso hace menos de {agrupar_minutos} min"
+                session.add(EnvioMeta(negocio_id=negocio_id, origen=origen, telefono=telefono, tipo=tipo, decision="bloqueado", motivo=motivo))
+                await session.commit()
+                return None, motivo
+        envio = EnvioMeta(negocio_id=negocio_id, origen=origen, telefono=telefono, tipo=tipo, decision="enviado")
+        session.add(envio)
+        await session.commit()
+        return envio.id, None
+
+
+async def cerrar_envio_meta(envio_id: int, enviado: bool, wamid: str | None) -> None:
+    """Cierra una reserva: guarda el wamid si Meta lo devolvió, o la marca
+    "fallido" (deja de contar para la agrupación) si el envío no se confirmó."""
+    async with async_session() as session:
+        envio = await session.get(EnvioMeta, envio_id)
+        if envio is None:
+            return
+        envio.decision = "enviado" if enviado else "fallido"
+        envio.wamid = wamid if enviado else None
+        await session.commit()
+
+
 class Producto(Base):
     """Catálogo de productos / lista de precios — fuente de verdad para
     Gabi (cotización en vivo), campañas, autocompletar de "Cierre de venta"

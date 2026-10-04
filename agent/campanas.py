@@ -25,6 +25,8 @@ import os
 import logging
 import urllib.parse
 
+from agent import envios
+
 from agent.memory import (
     listar_campanas, asignar_campana_origen, obtener_campana_por_nombre,
     obtener_lead, actualizar_lead, registrar_attribution_event,
@@ -316,7 +318,10 @@ async def procesar_leads_formulario(body: dict, proveedor) -> None:
                 continue
 
             primer_nombre = (datos.get("nombre") or "").strip().split(" ")[0] or "🙂"
-            enviado = await proveedor.enviar_plantilla(telefono, nombre_plantilla, [primer_nombre], idioma_plantilla, canal=canal)
+            enviado = await envios.enviar_plantilla(
+                proveedor, telefono, nombre_plantilla, [primer_nombre], idioma_plantilla,
+                origen="plantilla_formulario", canal=canal,
+            )
             if enviado:
                 logger.info(f"Plantilla '{nombre_plantilla}' enviada a {telefono} (lead de formulario)")
             else:
