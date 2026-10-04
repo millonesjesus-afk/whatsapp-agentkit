@@ -3285,13 +3285,19 @@ async def _zona_accion_admin_datos(datos: dict, negocio_id: str) -> dict:
     (Product Patterns Cap. 3 §3: qué requiere intervención hoy, alcance del
     Negocio)."""
     esperando_asignar = await listar_leads_esperando_asesor(negocio_id)
+    # 2026-10-04: los que ningún asesor atendió (pasaron a la cola de
+    # supervisión) van primero y con su propio motivo — Gabi no los retoma,
+    # así que si el supervisor no los trata, nadie lo hace.
+    escalados = [l for l in esperando_asignar if l.get("escalado_supervision_en")]
+    sin_asesor = [l for l in esperando_asignar if not l.get("escalado_supervision_en")]
     esperando_respuesta = sorted(
-        (l for l in datos["leads_todos"] if l.get("pausado_manual")),
+        (l for l in datos["leads_todos"] if l.get("pausado_manual") and not l.get("escalado_supervision_en")),
         key=lambda l: l.get("actualizado") or datetime.min,
     )
     agendados = await listar_leads_agendados(negocio_id)
 
-    pares = [(l, "Sin asesor asignado") for l in esperando_asignar[:5]]
+    pares = [(l, "Escalado a supervisión — ningún asesor respondió") for l in escalados[:5]]
+    pares += [(l, "Sin asesor asignado") for l in sin_asesor[:5]]
     for l in esperando_respuesta[:5]:
         asesor_nombre = l.get("asesor_asignado") or "sin asesor"
         pares.append((l, f"Esperando respuesta — {asesor_nombre}"))

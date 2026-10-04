@@ -12,7 +12,8 @@ import logging
 from agent.tools import buscar_productos
 from agent.memory import (
     listar_asesores, contar_leads_activos, listar_leads_esperando_asesor, asignar_asesor_a_lead,
-    obtener_configuracion, listar_leads_para_rotar_o_liberar, rotar_asignacion_por_inactividad,
+    obtener_configuracion, ejecutar_ciclo_de_espera, rotar_asignacion_por_inactividad,
+    enviar_a_cola_de_supervision,
 )
 
 logger = logging.getLogger("agentkit")
@@ -127,7 +128,13 @@ async def asignar_lead_pendiente_a_asesor(username: str, nivel_asesor: str | Non
     desde una sesión HTTP real del panel (el propio asesor togglea su
     disponibilidad), así que hay un Negocio legítimo garantizado.
     """
-    pendientes = await listar_leads_esperando_asesor(negocio_id)
+    # Los que pasaron a la cola de supervisión (ningún asesor los atendió) NO
+    # se reparten solos: los trata un supervisor. Si no, el primer asesor en
+    # ponerse "disponible" —quizá el mismo que no respondió— los recibiría.
+    pendientes = [
+        l for l in await listar_leads_esperando_asesor(negocio_id)
+        if not l.get("escalado_supervision_en")
+    ]
     if not pendientes:
         return None
 
@@ -165,18 +172,27 @@ async def rotar_leads_inactivos(intervalo_minutos: int = 5, umbral_rotacion_minu
 
     Retorna los teléfonos efectivamente rotados, para que el script que
     llama esto pueda loguearlo."""
-    from agent.memory import liberar_asignacion
+    return (await ejecutar_ciclo_de_rotacion(intervalo_minutos, umbral_rotacion_minutos))["rotados"]
 
-    candidatos = await listar_leads_para_rotar_o_liberar(intervalo_minutos, umbral_rotacion_minutos)
+
+async def ejecutar_ciclo_de_rotacion(intervalo_minutos: int = 5, umbral_rotacion_minutos: int = 30) -> dict:
+    """Una corrida completa del Cron: devuelve `{"rotados": [...], "escalados":
+    [...]}` con los teléfonos rotados a un segundo asesor y los que pasaron a la
+    cola de supervisión (dos rotaciones sin respuesta, o sin otro asesor
+    disponible). 2026-10-04: el script solo informaba los rotados y decía
+    "ningún lead cruzó el umbral" aunque hubiera escalado/liberado otros."""
+    ciclo = await ejecutar_ciclo_de_espera(intervalo_minutos, umbral_rotacion_minutos)
     rotados: list[str] = []
-    for c in candidatos:
+    escalados: list[str] = list(ciclo["escalados"])
+    for c in ciclo["a_rotar"]:
         asesor_nuevo = await elegir_asesor_automatico(c["interes"] or "", c["negocio_id"], excluir=c["asesor_actual"])
         if asesor_nuevo is None:
-            logger.info(f"Lead {c['telefono']} sin otro asesor disponible para rotar — se libera directo")
-            await liberar_asignacion(c["telefono"], motivo="timeout_inactividad")
+            logger.info(f"Lead {c['telefono']} sin otro asesor disponible para rotar — pasa a la cola de supervisión")
+            if await enviar_a_cola_de_supervision(c["telefono"], motivo="timeout_inactividad"):
+                escalados.append(c["telefono"])
             continue
         await rotar_asignacion_por_inactividad(c["telefono"], c["asesor_actual"], asesor_nuevo, c["minutos_espera"])
         logger.info(f"Lead {c['telefono']} rotado de {c['asesor_actual']} a {asesor_nuevo} tras {c['minutos_espera']} min de turno sin respuesta")
         rotados.append(c["telefono"])
 
-    return rotados
+    return {"rotados": rotados, "escalados": escalados}

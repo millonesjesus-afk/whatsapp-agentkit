@@ -567,6 +567,12 @@ class Lead(Base):
     # infinita de asesores).
     veces_rotado_espera: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     derivado_en: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # 2026-10-04 — el lead pasó a la COLA DE SUPERVISIÓN: dos asesores seguidos
+    # no respondieron en su turno (o no había otro asesor disponible). Gabi NO
+    # lo retoma (`pausado_manual=True`, sin asesor) y tampoco se reasigna solo
+    # al primer asesor que se ponga "disponible": lo trata un supervisor. Se
+    # apaga al asignarlo a alguien o al devolverlo a Gabi a mano.
+    escalado_supervision_en: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     # True cuando la IA respondió con confianza "Requiere validación"
     # (protocolo de confianza, AI Architecture Sec.6) — no transfiere la
     # conversación, solo marca que un asesor debería revisarla con
@@ -1744,6 +1750,7 @@ async def intentar_asignar_conversation(
                 lead.asesor_asignado = asesor_asignado
                 lead.visto_asesor = asesor_asignado is None
                 lead.derivado_en = None
+                lead.escalado_supervision_en = None  # una persona decidió: ya no está en la cola de supervisión
                 _avanzar_version(lead)
                 lead.actualizado = datetime.utcnow()
 
@@ -3573,6 +3580,7 @@ def _lead_a_dict(lead: Lead) -> dict:
         "fecha_cierre": lead.fecha_cierre,
         "asesor_asignado": lead.asesor_asignado,
         "pausado_manual": lead.pausado_manual,
+        "escalado_supervision_en": lead.escalado_supervision_en,
         "cerrado_definitivamente_en": lead.cerrado_definitivamente_en,
         "producto_vendido": lead.producto_vendido,
         "precio_venta": lead.precio_venta,
@@ -4240,6 +4248,8 @@ async def asignar_asesor_a_lead(telefono: str, asesor: str | None, automatico: b
         lead.asesor_asignado = asesor
         lead.visto_asesor = asesor is None
         lead.derivado_en = datetime.utcnow() if (automatico and asesor is not None) else None
+        if asesor is not None:
+            lead.escalado_supervision_en = None  # ya tiene dueño: sale de la cola de supervisión
         if automatico:
             _avanzar_version(lead, es_nuevo=False)
         lead.actualizado = datetime.utcnow()
@@ -4312,6 +4322,7 @@ async def liberar_asignacion(telefono: str, autor: str | None = None, motivo: st
         anterior = lead.asesor_asignado
         lead.asesor_asignado = None
         lead.pausado_manual = False
+        lead.escalado_supervision_en = None  # devolverlo a Gabi lo saca de la cola de supervisión
         lead.cerrado_definitivamente_en = None
         lead.visto_asesor = True
         _avanzar_version(lead)
@@ -4376,7 +4387,29 @@ def _dentro_de_horario_ahora(horarios: list[dict], ahora_lima: datetime) -> bool
 async def listar_leads_para_rotar_o_liberar(
     intervalo_minutos: int = 5, umbral_rotacion_minutos: int = 30,
 ) -> list[dict]:
-    """Punto 2 (2026-09-29, REDISEÑADO 2026-09-30 tras un incidente real en
+    """Compatibilidad: devuelve solo los leads a ROTAR. Los que ya agotaron sus
+    dos rotaciones se resuelven igual dentro (ver `ejecutar_ciclo_de_espera`,
+    que además informa cuáles pasaron a la cola de supervisión)."""
+    return (await ejecutar_ciclo_de_espera(intervalo_minutos, umbral_rotacion_minutos))["a_rotar"]
+
+
+async def ejecutar_ciclo_de_espera(
+    intervalo_minutos: int = 5, umbral_rotacion_minutos: int = 30,
+) -> dict:
+    """Una corrida del ciclo de espera del asesor. Devuelve
+    `{"a_rotar": [...], "escalados": [telefonos]}`: los `a_rotar` los resuelve
+    quien llama (elegir al segundo asesor vive en agent/asignacion.py) y los
+    `escalados` ya pasaron a la cola de supervisión DENTRO de esta función.
+
+    2026-10-04 — dos correcciones tras la primera corrida real del Cron de
+    5 minutos (liberó un lead con resultado "Agendado", y el script decía
+    "ningún lead cruzó el umbral" porque no contaba las liberaciones):
+    - Solo entran leads SIN resultado. Si una persona ya le puso resultado
+      (agendado, vendido, lo que sea), ya lo trabajó: nunca rota ni escala.
+    - Los que agotan las dos rotaciones YA NO vuelven a Gabi: pasan a la cola
+      de supervisión (ver `enviar_a_cola_de_supervision`).
+
+    Punto 2 (2026-09-29, REDISEÑADO 2026-09-30 tras un incidente real en
     producción) — reemplaza a la antigua `liberar_asignaciones_inactivas`
     (24h de RELOJ, sin turno). Pedido explícito del usuario: "no veo viable
     que una persona permanezca sin contestar 24 horas después de que Gabi
@@ -4445,6 +4478,7 @@ async def listar_leads_para_rotar_o_liberar(
         query = select(Lead).where(
             Lead.derivado_en.is_not(None), Lead.asesor_asignado.is_not(None),
             Lead.pausado_manual.is_(False),
+            sa_or(Lead.resultado.is_(None), Lead.resultado == ""),
         )
         candidatos = (await session.execute(query)).scalars().all()
 
@@ -4479,10 +4513,64 @@ async def listar_leads_para_rotar_o_liberar(
 
         await session.commit()
 
+    escalados: list[str] = []
     for telefono in a_liberar:
-        await liberar_asignacion(telefono, motivo="timeout_inactividad")
+        if await enviar_a_cola_de_supervision(telefono, motivo="timeout_inactividad"):
+            escalados.append(telefono)
 
-    return a_rotar
+    return {"a_rotar": a_rotar, "escalados": escalados}
+
+
+async def enviar_a_cola_de_supervision(telefono: str, motivo: str = "timeout_inactividad") -> bool:
+    """2026-10-04 — destino de un lead que NINGÚN asesor atendió (dos rotaciones
+    sin respuesta, o no había otro asesor disponible). Antes se "liberaba":
+    quedaba sin asesor y Gabi lo retomaba, aunque Gabi ya lo había derivado
+    porque no podía seguir. Ahora se queda sin asesor, con Gabi PAUSADA
+    (`pausado_manual`, mismo estado que usa `pausar_gabi_manual`), marcado
+    `escalado_supervision_en`: aparece en la Zona de acción de Inicio del
+    supervisor y NO se reasigna solo al primer asesor que se ponga disponible.
+
+    Nunca actúa sobre un lead con resultado (False): ya lo trabajó una persona.
+    Reinicia el reloj de espera. Devuelve True si lo escaló."""
+    async with async_session() as session:
+        lead = await session.get(Lead, telefono)
+        if lead is None or (lead.resultado or "") != "":
+            return False
+        anterior = lead.asesor_asignado
+        ahora = datetime.utcnow()
+        lead.asesor_asignado = None
+        lead.pausado_manual = True
+        lead.escalado_supervision_en = ahora
+        lead.derivado_en = None
+        lead.minutos_espera_asesor = 0
+        lead.veces_rotado_espera = 0
+        lead.visto_asesor = True
+        if not lead.paso_flujo:
+            lead.paso_flujo = "derivado_asesor"
+        _avanzar_version(lead)
+        lead.actualizado = ahora
+
+        contact = await _obtener_contact(session, lead.negocio_id, telefono)
+        if contact is not None:
+            conversation = await _obtener_conversation_activa(session, contact.id)
+            if conversation is not None:
+                conversation.asesor_asignado_id = None
+                conversation.pausado_manual = True
+                conversation.visto_asesor = True
+                conversation.version = Conversation.version + 1
+                conversation.actualizado = ahora
+        await session.commit()
+
+    await registrar_evento_lead(
+        telefono, tipo="desasignado_automatico",
+        descripcion=(
+            "Ningún asesor respondió a tiempo — el caso pasó a la cola de supervisión. "
+            "Gabi no lo retoma: lo debe tratar un supervisor."
+        ),
+        autor=None,
+        payload={"campo": "asesor_asignado", "anterior": anterior, "nuevo": None, "motivo": motivo, "destino": "supervision"},
+    )
+    return True
 
 
 async def rotar_asignacion_por_inactividad(telefono: str, asesor_anterior: str, asesor_nuevo: str, minutos_espera: int) -> None:

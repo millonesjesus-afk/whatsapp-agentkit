@@ -36,7 +36,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from agent.memory import esperar_base_de_datos
-from agent.asignacion import rotar_leads_inactivos
+from agent.asignacion import ejecutar_ciclo_de_rotacion
 
 INTERVALO_MINUTOS = 5
 UMBRAL_ROTACION_MINUTOS = 30
@@ -44,13 +44,16 @@ UMBRAL_ROTACION_MINUTOS = 30
 
 async def main() -> None:
     await esperar_base_de_datos()
-    rotados = await rotar_leads_inactivos(
+    resultado = await ejecutar_ciclo_de_rotacion(
         intervalo_minutos=INTERVALO_MINUTOS, umbral_rotacion_minutos=UMBRAL_ROTACION_MINUTOS,
     )
+    rotados, escalados = resultado["rotados"], resultado["escalados"]
     if rotados:
         print(f"Rotados {len(rotados)} lead(s) por inactividad del asesor: {', '.join(rotados)}")
-    else:
-        print("Ningún lead cruzó el umbral de rotación esta corrida.")
+    if escalados:
+        print(f"Pasaron a la cola de supervisión {len(escalados)} lead(s) que ningún asesor atendió: {', '.join(escalados)}")
+    if not rotados and not escalados:
+        print("Ningún lead rotó ni pasó a supervisión en esta corrida.")
 
 
 if __name__ == "__main__":
