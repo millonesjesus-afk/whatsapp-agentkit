@@ -78,6 +78,7 @@ from agent.memory import (
 )
 from agent.services.servicio_conversacion import servicio_conversacion
 from agent.http_utils import get_con_reintentos, post_con_reintentos
+from agent.meta_timezones import zona_iana_de_meta
 
 # Paleta de colores para distinguir canales de WhatsApp en el panel — se
 # asigna por posición (orden de creación), no por nombre, así que un canal
@@ -6750,6 +6751,45 @@ async def uso_mensajes_estimacion_previa_json(
     if fin <= inicio:
         raise HTTPException(status_code=400, detail="'hasta' debe ser posterior a 'desde'.")
     return JSONResponse(await estimar_uso_previo_servicio(negocio_id, inicio, fin))
+
+
+@router.post("/uso-mensajes/detectar-zona.json")
+async def uso_mensajes_detectar_zona_json(
+    request: Request,
+    usuario: dict = Depends(servicio_identidad.requiere_rol("admin")),
+    _csrf: None = Depends(verificar_csrf),
+):
+    """Lee de Meta la zona horaria de la cuenta de WhatsApp Business
+    (`GET /{waba_id}?fields=timezone_id`) — la que decide cuándo se reinicia la
+    cuota gratis del mes — y la guarda como `meta_zona_horaria_mes`. Con
+    `{"guardar": false}` solo informa, sin guardar. Si ningún canal tiene
+    `waba_id`, o Meta devuelve un id que no está en la tabla de
+    `meta_timezones`, no adivina: explica qué falta y la zona se elige a mano
+    en la configuración. Solo Admin."""
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    guardar = not (isinstance(body, dict) and body.get("guardar") is False)
+
+    canales = [c for c in await listar_canales_whatsapp(negocio_id=usuario["negocio_id"], solo_activos=True) if c.get("waba_id") and c.get("access_token")]
+    if not canales:
+        raise HTTPException(status_code=409, detail="Ningún canal activo tiene el ID de la cuenta de WhatsApp Business (waba_id). Cárgalo en Canales o elige la zona a mano.")
+    canal = canales[0]
+    r = await get_con_reintentos(
+        f"https://graph.facebook.com/v21.0/{canal['waba_id']}",
+        params={"fields": "timezone_id"}, headers={"Authorization": f"Bearer {canal['access_token']}"},
+    )
+    if r.status_code != 200:
+        logger.error(f"Detección de zona horaria de la cuenta: {_resumen_seguro_error_meta(r)}")
+        raise HTTPException(status_code=502, detail="Meta no devolvió la zona horaria de la cuenta (revisa los permisos del token). Elige la zona a mano.")
+    timezone_id = (r.json() or {}).get("timezone_id")
+    zona = zona_iana_de_meta(timezone_id)
+    if zona is None:
+        raise HTTPException(status_code=422, detail=f"Meta informó la zona horaria con el id {timezone_id}, que todavía no está en la tabla del sistema. Elige la zona a mano.")
+    if guardar:
+        await guardar_configuracion_uso_meta(usuario["negocio_id"], {"zona_horaria_mes": zona})
+    return JSONResponse({"ok": True, "zona_horaria": zona, "timezone_id": str(timezone_id), "guardada": guardar})
 
 
 @router.post("/uso-mensajes/configuracion.json")
