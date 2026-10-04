@@ -11,6 +11,7 @@ import csv
 import uuid
 import logging
 import asyncio
+import re
 import time
 from urllib.parse import urlparse
 # `time` (el módulo, ya importado arriba para time.perf_counter) choca de
@@ -2945,6 +2946,82 @@ def _limites_de_mes_utc(mes: str | None, zona: str) -> tuple[datetime, datetime,
     return como_utc(inicio), como_utc(fin), f"{anio:04d}-{num:02d}"
 
 
+CLAVE_USO_PREVIO = "meta_uso_previo_servicio_"
+_CATEGORIA_TARIFA = re.compile(r"[a-z_]{1,40}")
+
+
+async def _usos_previos_del_mes(negocio_id: str, mes: str) -> dict[str, int]:
+    """{phone_number_id: mensajes de servicio gratis ya consumidos antes de que
+    el registro de estados empezara a medir}, de la configuración del negocio."""
+    prefijo = f"{CLAVE_USO_PREVIO}{mes}:"
+    async with async_session() as session:
+        filas = (await session.execute(
+            select(Configuracion.clave, Configuracion.valor)
+            .where(Configuracion.negocio_id == negocio_id, Configuracion.clave.like(f"{prefijo}%"))
+        )).all()
+    previos: dict[str, int] = {}
+    for clave, valor in filas:
+        n = _a_numero(valor)
+        if n is not None and n > 0:
+            previos[clave[len(prefijo):]] = int(n)
+    return previos
+
+
+async def guardar_configuracion_uso_meta(negocio_id: str, datos: dict) -> dict:
+    """Valida y guarda la configuración del control de uso de mensajes de Meta
+    (cuota gratis, zona horaria del mes, tarifas en USD por categoría y uso
+    previo estimado por número y mes). Todo o nada: si algo no es válido no se
+    guarda nada y se lanza ValueError con el motivo. Devuelve las claves
+    guardadas."""
+    cambios: dict[str, str] = {}
+
+    if datos.get("cuota_gratis_servicio") is not None:
+        cuota = datos["cuota_gratis_servicio"]
+        if isinstance(cuota, bool) or not isinstance(cuota, int) or not 0 <= cuota <= 1_000_000:
+            raise ValueError("La cuota gratis debe ser un entero entre 0 y 1 000 000.")
+        cambios["meta_cuota_gratis_servicio"] = str(cuota)
+
+    if datos.get("zona_horaria_mes") is not None:
+        from zoneinfo import ZoneInfo
+
+        zona = str(datos["zona_horaria_mes"]).strip()
+        try:
+            ZoneInfo(zona)
+        except Exception:
+            raise ValueError("La zona horaria no existe (ej.: America/Lima o UTC).")
+        cambios["meta_zona_horaria_mes"] = zona
+
+    tarifas = datos.get("tarifas_usd")
+    if tarifas is not None:
+        if not isinstance(tarifas, dict):
+            raise ValueError("Las tarifas deben ir como {categoria: monto en USD}.")
+        for categoria, monto in tarifas.items():
+            if not _CATEGORIA_TARIFA.fullmatch(str(categoria)):
+                raise ValueError(f"Categoría de tarifa no válida: {categoria!r}.")
+            if isinstance(monto, bool) or not isinstance(monto, (int, float)) or not 0 <= monto <= 10:
+                raise ValueError(f"La tarifa de {categoria} debe ser un monto en USD entre 0 y 10.")
+            cambios[f"meta_tarifa_usd_{categoria}"] = repr(float(monto))
+
+    previo = datos.get("uso_previo")
+    if previo is not None:
+        if not isinstance(previo, dict):
+            raise ValueError("El uso previo debe ir como {mes, phone_number_id, valor}.")
+        mes, numero, valor = str(previo.get("mes", "")), str(previo.get("phone_number_id", "")), previo.get("valor")
+        if not re.fullmatch(r"\d{4}-(0[1-9]|1[0-2])", mes):
+            raise ValueError("El mes del uso previo debe tener el formato AAAA-MM.")
+        if not re.fullmatch(r"\d{5,30}", numero):
+            raise ValueError("Falta el phone_number_id del número (solo dígitos).")
+        if isinstance(valor, bool) or not isinstance(valor, int) or not 0 <= valor <= 1_000_000:
+            raise ValueError("El uso previo debe ser un entero entre 0 y 1 000 000.")
+        cambios[f"{CLAVE_USO_PREVIO}{mes}:{numero}"] = str(valor)
+
+    if not cambios:
+        raise ValueError("No hay nada que guardar.")
+    for clave, valor in cambios.items():
+        await guardar_configuracion(clave, valor, negocio_id=negocio_id)
+    return {"guardadas": sorted(cambios)}
+
+
 async def resumen_uso_mensual(negocio_id: str, mes: str | None = None) -> dict:
     """Uso del mes por número de WhatsApp del negocio, a partir de lo que Meta
     informó en cada mensaje ENTREGADO (`uso_mensajes_meta`):
@@ -2984,12 +3061,17 @@ async def resumen_uso_mensual(negocio_id: str, mes: str | None = None) -> dict:
             .group_by(UsoMensajeMeta.phone_number_id, UsoMensajeMeta.pricing_type, UsoMensajeMeta.pricing_categoria)
         )).all()
 
-    numeros: dict[str, dict] = {}
-    for phone_number_id, tipo, categoria, n in filas:
-        d = numeros.setdefault(phone_number_id, {
+    previos = await _usos_previos_del_mes(negocio_id, mes_normalizado)
+
+    def _nuevo_numero(phone_number_id: str) -> dict:
+        return {
             "phone_number_id": phone_number_id, "entregados": 0, "servicio_gratis_usados": 0,
             "servicio_cobrables": 0, "ventana_anuncio_gratis": 0, "otros_cobrables": {}, "sin_clasificar": 0,
-        })
+        }
+
+    numeros: dict[str, dict] = {pid: _nuevo_numero(pid) for pid in previos}
+    for phone_number_id, tipo, categoria, n in filas:
+        d = numeros.setdefault(phone_number_id, _nuevo_numero(phone_number_id))
         d["entregados"] += n
         if tipo == "free_customer_service":
             d["servicio_gratis_usados"] += n
@@ -3012,7 +3094,12 @@ async def resumen_uso_mensual(negocio_id: str, mes: str | None = None) -> dict:
     faltantes = sorted(c for c, t in tarifas.items() if t is None)
 
     for d in numeros.values():
-        usados = d["servicio_gratis_usados"]
+        # Lo enviado antes de que existiera el registro de estados (estimado a
+        # mano, `meta_uso_previo_servicio_<mes>:<phone_number_id>`) consume la
+        # misma cuota; se informa aparte para que no se confunda con lo medido.
+        d["servicio_gratis_previos_estimados"] = previos.get(d["phone_number_id"], 0)
+        usados = d["servicio_gratis_usados"] + d["servicio_gratis_previos_estimados"]
+        d["servicio_gratis_total"] = usados
         d["gratis_restantes"] = max(0, cuota - usados)
         d["porcentaje_cuota"] = round(100 * usados / cuota, 1) if cuota else None
         alertas = [u for u in (80, 95, 100) if cuota and usados * 100 >= u * cuota]

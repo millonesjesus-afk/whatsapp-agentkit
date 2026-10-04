@@ -43,6 +43,7 @@ from agent.tiempo_real import gestor_conexiones, emitir_ticket_ws, validar_y_con
 from agent.rate_limit import limitador_login, bloqueo_login, ip_cliente
 from agent.memory import (
     resumen_uso_mensual,
+    guardar_configuracion_uso_meta,
     listar_leads, obtener_lead, actualizar_lead,
     obtener_usuario, listar_asesores, listar_equipo, crear_usuario,
     asignar_asesor_a_lead, marcar_lead_visto, limpiar_revision_prioritaria, actualizar_disponibilidad, actualizar_nivel_asesor,
@@ -6719,6 +6720,30 @@ async def uso_mensajes_json(
     if mes and not re.fullmatch(r"\d{4}-(0[1-9]|1[0-2])", mes):
         raise HTTPException(status_code=400, detail="El mes debe tener el formato AAAA-MM")
     return JSONResponse(await resumen_uso_mensual(usuario["negocio_id"], mes or None))
+
+
+@router.post("/uso-mensajes/configuracion.json")
+async def uso_mensajes_configuracion_json(
+    request: Request,
+    usuario: dict = Depends(servicio_identidad.requiere_rol("admin")),
+    _csrf: None = Depends(verificar_csrf),
+):
+    """Guarda la configuración del control de uso de mensajes de Meta: cuota
+    gratis, zona horaria del mes, tarifas en USD por categoría y uso previo
+    estimado por número y mes (ver `guardar_configuracion_uso_meta`). Solo
+    Admin; todo o nada."""
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="El cuerpo debe ser JSON.")
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="El cuerpo debe ser un objeto JSON.")
+    try:
+        guardado = await guardar_configuracion_uso_meta(usuario["negocio_id"], body)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    logger.info("Configuración de uso de mensajes Meta actualizada por %s: %s", usuario.get("username"), guardado["guardadas"])
+    return JSONResponse({"ok": True, **guardado})
 
 
 @router.get("/anuncios.json")
