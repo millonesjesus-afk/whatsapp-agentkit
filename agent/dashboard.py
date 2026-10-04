@@ -44,6 +44,9 @@ from agent.rate_limit import limitador_login, bloqueo_login, ip_cliente
 from agent.memory import (
     resumen_uso_mensual,
     guardar_configuracion_uso_meta,
+    estimar_uso_previo_servicio,
+    primer_momento_de_uso_registrado,
+    _limites_de_mes_utc,
     listar_leads, obtener_lead, actualizar_lead,
     obtener_usuario, listar_asesores, listar_equipo, crear_usuario,
     asignar_asesor_a_lead, marcar_lead_visto, limpiar_revision_prioritaria, actualizar_disponibilidad, actualizar_nivel_asesor,
@@ -6720,6 +6723,33 @@ async def uso_mensajes_json(
     if mes and not re.fullmatch(r"\d{4}-(0[1-9]|1[0-2])", mes):
         raise HTTPException(status_code=400, detail="El mes debe tener el formato AAAA-MM")
     return JSONResponse(await resumen_uso_mensual(usuario["negocio_id"], mes or None))
+
+
+@router.get("/uso-mensajes/estimacion-previa.json")
+async def uso_mensajes_estimacion_previa_json(
+    desde: str = "", hasta: str = "", usuario: dict = Depends(servicio_identidad.requiere_rol("admin")),
+):
+    """Estima cuántos mensajes de servicio gratis se consumieron antes de que el
+    registro de estados de Meta empezara a medir (ver
+    `estimar_uso_previo_servicio`). `desde`/`hasta` en UTC ISO (AAAA-MM-DDTHH:MM);
+    por defecto, desde el inicio del mes hasta el primer estado registrado.
+    Solo lectura; solo Admin."""
+    def _fecha(texto: str) -> datetime:
+        try:
+            return datetime.fromisoformat(texto).replace(tzinfo=None)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Las fechas deben ir como AAAA-MM-DDTHH:MM (UTC).")
+
+    negocio_id = usuario["negocio_id"]
+    if desde:
+        inicio = _fecha(desde)
+    else:
+        zona = await obtener_configuracion("meta_zona_horaria_mes", "UTC", negocio_id=negocio_id)
+        inicio = _limites_de_mes_utc(None, zona)[0]
+    fin = _fecha(hasta) if hasta else await primer_momento_de_uso_registrado(negocio_id)
+    if fin <= inicio:
+        raise HTTPException(status_code=400, detail="'hasta' debe ser posterior a 'desde'.")
+    return JSONResponse(await estimar_uso_previo_servicio(negocio_id, inicio, fin))
 
 
 @router.post("/uso-mensajes/configuracion.json")

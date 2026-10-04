@@ -3022,6 +3022,106 @@ async def guardar_configuracion_uso_meta(negocio_id: str, datos: dict) -> dict:
     return {"guardadas": sorted(cambios)}
 
 
+async def primer_momento_de_uso_registrado(negocio_id: str) -> datetime:
+    """Cuándo el registro de estados de Meta empezó a medir en este negocio
+    (UTC naive); ahora mismo si todavía no hay ninguno."""
+    async with async_session() as session:
+        primero = (await session.execute(
+            select(func.min(UsoMensajeMeta.creado)).where(UsoMensajeMeta.negocio_id == negocio_id)
+        )).scalar_one_or_none()
+    return primero or datetime.utcnow()
+
+
+async def estimar_uso_previo_servicio(
+    negocio_id: str, desde: datetime, hasta: datetime, ventanas_fep_horas: tuple[int, ...] = (72, 168),
+) -> dict:
+    """Cuántos mensajes de servicio gratis (cuota de 1000) consumió el negocio
+    entre `desde` y `hasta` (UTC naive), ANTES de que el registro de estados de
+    Meta empezara a medir — insumo para `meta_uso_previo_servicio_<mes>:<numero>`.
+
+    Parte de los mensajes realmente enviados por la API (Gabi y los asesores
+    del panel; sin los de la app de WhatsApp Business ni los fallidos) y los
+    clasifica como lo haría Meta:
+    - `ventana_anuncio`: dentro del intervalo gratuito de un anuncio Click-to-
+      WhatsApp. Se abre con la primera respuesta (dentro de las 24 h del
+      mensaje que trajo el referral) y dura `D` horas. La duración se prueba
+      con varios valores (72 h y 7 días) porque la documentación de Meta no
+      es consistente entre páginas; el registro de estados dirá cuál es.
+    - `servicio`: respuesta libre dentro de las 24 h del último mensaje del
+      cliente → consume la cuota gratis.
+    - `fuera_de_ventana_24h`: sin mensaje del cliente en las 24 h previas, solo
+      puede haber sido plantilla → se cobra por su categoría, no es servicio.
+    Es una cota: no distingue si el cliente hizo clic desde la app móvil
+    (el único caso en que Meta abre el intervalo) ni si el mensaje llegó a ser
+    entregado, así que 'ventana_anuncio' es el máximo posible y `servicio`
+    el mínimo."""
+    holgura = timedelta(days=max(ventanas_fep_horas) / 24 + 1)
+    async with async_session() as session:
+        mensajes = (await session.execute(
+            select(Mensaje.telefono, Mensaje.role, Mensaje.timestamp, Mensaje.via_app, Mensaje.estado_envio)
+            .where(Mensaje.negocio_id == negocio_id, Mensaje.timestamp >= desde - holgura, Mensaje.timestamp < hasta)
+            .order_by(Mensaje.telefono, Mensaje.timestamp)
+        )).all()
+        anuncios = (await session.execute(
+            select(AttributionEvent.lead_telefono, AttributionEvent.creado)
+            .where(
+                AttributionEvent.negocio_id == negocio_id,
+                AttributionEvent.tipo_origen.in_(("meta_ads", "meta_ads_no_resuelto")),
+                AttributionEvent.creado >= desde - holgura, AttributionEvent.creado < hasta,
+            )
+        )).all()
+
+    clics: dict[str, list[datetime]] = {}
+    for telefono, creado in anuncios:
+        clics.setdefault(telefono, []).append(creado)
+    por_telefono: dict[str, list[tuple]] = {}
+    for fila in mensajes:
+        por_telefono.setdefault(fila[0], []).append(fila[1:])
+
+    dia = timedelta(hours=24)
+    resultado = {h: {"ventana_anuncio": 0, "servicio": 0, "fuera_de_ventana_24h": 0} for h in ventanas_fep_horas}
+    salientes = 0
+    telefonos_con_anuncio: set[str] = set()
+    for telefono, filas in por_telefono.items():
+        salidas = [
+            ts for role, ts, via_app, estado in filas
+            if role in ("assistant", "asesor") and not via_app and estado != "fallido"
+        ]
+        # Aperturas: primera respuesta de la API dentro de las 24 h de cada referral.
+        aperturas = []
+        for clic in clics.get(telefono, []):
+            apertura = next((ts for ts in salidas if clic <= ts <= clic + dia), None)
+            if apertura is not None:
+                aperturas.append(apertura)
+        ultimo_cliente: datetime | None = None
+        for role, ts, via_app, estado in filas:
+            if role == "user":
+                ultimo_cliente = ts
+                continue
+            if role not in ("assistant", "asesor") or via_app or estado == "fallido":
+                continue
+            if not desde <= ts < hasta:
+                continue
+            salientes += 1
+            en_servicio = ultimo_cliente is not None and ts - ultimo_cliente <= dia
+            for horas in ventanas_fep_horas:
+                if any(a <= ts <= a + timedelta(hours=horas) for a in aperturas):
+                    resultado[horas]["ventana_anuncio"] += 1
+                    telefonos_con_anuncio.add(telefono)
+                elif en_servicio:
+                    resultado[horas]["servicio"] += 1
+                else:
+                    resultado[horas]["fuera_de_ventana_24h"] += 1
+
+    consumos = [r["servicio"] for r in resultado.values()]
+    return {
+        "desde": desde.isoformat(), "hasta": hasta.isoformat(), "salientes_api": salientes,
+        "conversaciones_con_anuncio": len(telefonos_con_anuncio),
+        "por_duracion_ventana_horas": {str(h): r for h, r in resultado.items()},
+        "consumo_cuota_estimado": {"minimo": min(consumos), "maximo": max(consumos)} if consumos else None,
+    }
+
+
 async def resumen_uso_mensual(negocio_id: str, mes: str | None = None) -> dict:
     """Uso del mes por número de WhatsApp del negocio, a partir de lo que Meta
     informó en cada mensaje ENTREGADO (`uso_mensajes_meta`):
