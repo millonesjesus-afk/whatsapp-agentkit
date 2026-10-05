@@ -3137,14 +3137,19 @@ async def guardar_configuracion_uso_meta(negocio_id: str, datos: dict) -> dict:
                 if ORIGENES[origen].get("esencial") and modo != "siempre":
                     raise ValueError(f"{origen} es un envío esencial (el cliente lo espera): no se puede frenar por costo.")
                 cambios[f"envios_modo_{origen}"] = modo
+        if "autorecarga" in envios:
+            if not isinstance(envios["autorecarga"], bool):
+                raise ValueError("autorecarga debe ser true o false.")
+            cambios["envios_tope_modo"] = "autorecarga" if envios["autorecarga"] else "tope"
         if "tope_mensual_usd" in envios:
             tope = envios["tope_mensual_usd"]
             if tope is None:
-                cambios["envios_tope_mensual_usd"] = ""
+                cambios["envios_tope_mensual_usd"] = ""       # sin monto elegido: vale USD 0
             elif isinstance(tope, bool) or not isinstance(tope, (int, float)) or not 0 <= tope <= 1_000_000:
-                raise ValueError("El tope mensual debe ser un monto en USD entre 0 y 1 000 000 (o null para quitarlo).")
+                raise ValueError("El tope mensual debe ser un monto en USD entre 0 y 1 000 000 (o null para volver a USD 0).")
             else:
                 cambios["envios_tope_mensual_usd"] = repr(float(tope))
+                cambios.setdefault("envios_tope_modo", "tope")   # elegir un monto sale de la autorecarga
         if "tope_bloquea_esenciales" in envios:
             if not isinstance(envios["tope_bloquea_esenciales"], bool):
                 raise ValueError("tope_bloquea_esenciales debe ser true o false.")
@@ -3361,17 +3366,20 @@ async def resumen_uso_mensual(negocio_id: str, mes: str | None = None) -> dict:
     # Tope mensual de gasto (capa de envíos, Fase B): sin tope configurado todo
     # esto queda en None. El gasto es el estimado con las tarifas configuradas;
     # con tarifas faltantes no se puede calcular y se informa como None.
-    tope = _a_numero(await obtener_configuracion("envios_tope_mensual_usd", "", negocio_id=negocio_id), 0) or 0
+    autorecarga = (await obtener_configuracion("envios_tope_modo", "tope", negocio_id=negocio_id)) == "autorecarga"
+    tope = 0 if autorecarga else (_a_numero(await obtener_configuracion("envios_tope_mensual_usd", "", negocio_id=negocio_id), 0) or 0)
     gasto = None if faltantes else round(sum(d["costo_estimado_usd"] or 0 for d in numeros.values()), 4)
     porcentaje_tope = round(100 * gasto / tope, 1) if tope > 0 and gasto is not None else None
     alertas_tope = [u for u in (80, 100) if porcentaje_tope is not None and porcentaje_tope >= u]
+    if tope == 0 and not autorecarga and gasto:
+        alertas_tope = [80, 100]   # tope de USD 0 y ya hay gasto: está superado
 
     return {
         "mes": mes_normalizado, "zona_horaria": zona, "cuota_gratis_servicio": cuota,
         "tarifas_usd": {c: t for c, t in tarifas.items() if t is not None}, "tarifas_faltantes": faltantes,
         "numeros": sorted(numeros.values(), key=lambda d: d["phone_number_id"]),
-        "tope_mensual_usd": tope or None, "gasto_estimado_usd": gasto,
-        "porcentaje_tope": porcentaje_tope, "alertas_tope": alertas_tope,
+        "autorecarga": autorecarga, "tope_mensual_usd": None if autorecarga else tope,
+        "gasto_estimado_usd": gasto, "porcentaje_tope": porcentaje_tope, "alertas_tope": alertas_tope,
     }
 
 

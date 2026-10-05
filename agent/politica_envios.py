@@ -135,6 +135,10 @@ async def estimar_envio(origen: str, tipo: str, telefono: str, canal: dict | Non
     return Estimacion(categoria, False, "cobrable", tarifa)
 
 
+async def _autorecarga(negocio_id: str | None) -> bool:
+    return (await obtener_configuracion("envios_tope_modo", "tope", negocio_id=negocio_id)) == "autorecarga"
+
+
 async def _gasto_del_mes(negocio_id: str | None) -> float:
     resumen = await _resumen_del_mes(negocio_id)
     if not resumen:
@@ -168,8 +172,11 @@ async def decidir(origen: str, tipo: str, telefono: str, canal: dict | None, pol
             if not estimacion.gratis:
                 return Decision(True, "solo_gratis: este envío se cobraría", estimacion)
 
-        tope = _a_numero(await obtener_configuracion("envios_tope_mensual_usd", "", negocio_id=negocio_id), 0) or 0
-        if tope > 0:
+        # Tope mensual. Sin monto elegido el tope es USD 0 (no se paga nada no
+        # esencial); el usuario fija un monto o elige "autorecarga" (sin tope: se
+        # sigue pagando lo que cueste, con el saldo recargándose solo).
+        if not await _autorecarga(negocio_id):
+            tope = _a_numero(await obtener_configuracion("envios_tope_mensual_usd", "", negocio_id=negocio_id), 0) or 0
             bloquea_esenciales = (await obtener_configuracion("envios_tope_bloquea_esenciales", "false", negocio_id=negocio_id)).lower() == "true"
             if not esencial or bloquea_esenciales:
                 if estimacion is None:
@@ -177,7 +184,7 @@ async def decidir(origen: str, tipo: str, telefono: str, canal: dict | None, pol
                         return Decision(True, "tope mensual: no se pudo estimar el costo", None)
                 elif not estimacion.gratis:
                     gasto = await _gasto_del_mes(negocio_id)
-                    if gasto + (estimacion.costo_usd or 0.0) > tope:
+                    if estimacion.costo_usd is None or gasto + estimacion.costo_usd > tope:
                         return Decision(True, f"tope mensual de USD {tope:g} alcanzado (gasto estimado USD {gasto:.2f})", estimacion)
         return Decision(False, None, estimacion)
     except Exception:
