@@ -6,10 +6,10 @@
 # proveedor por su cuenta: no había forma de saber qué origen gasta cuánto ni de
 # frenar uno sin tocar a los demás.
 #
-# Fase A (esta): registrar cada envío con su origen y agrupar los avisos
-# repetidos. NO decide qué se cobra ni bloquea por costo — eso es la Fase B
-# (interruptores siempre | solo_gratis | nunca y tope mensual), que se apoya en
-# esta misma puerta.
+# Fase A: registrar cada envío con su origen y agrupar los avisos repetidos.
+# Fase B: antes de enviar, agent/politica_envios.py estima si el envío sería
+# gratis o cobrable y aplica el interruptor del origen (siempre | solo_gratis |
+# nunca) y el tope mensual en USD. Lo esencial no se frena nunca por costo.
 #
 # Los envíos llaman al proveedor con los MISMOS argumentos de siempre (el
 # proveedor es el que recibe quien llama, así que sustituirlo en pruebas sigue
@@ -19,23 +19,29 @@ import asyncio
 import logging
 import weakref
 
-from agent.memory import cerrar_envio_meta, obtener_configuracion, reservar_envio_meta
+from agent import politica_envios
+from agent.memory import cerrar_envio_meta, obtener_configuracion, registrar_envio_bloqueado, reservar_envio_meta
 
 logger = logging.getLogger("agentkit")
 
-# origen → política. `esencial`: un envío que el cliente espera y que ningún tope
-# de gasto debe frenar (la Fase B lo usa; acá solo queda declarado).
+# origen → política.
+# `esencial`: un envío que el cliente espera; ningún interruptor ni tope de gasto
+#   lo frena (salvo el modo B explícito `envios_tope_bloquea_esenciales`).
+# `modo`: interruptor por defecto de un origen no esencial
+#   (siempre | solo_gratis | nunca), cambiable con `envios_modo_<origen>`.
 # `agrupar_minutos`: no repetir este origen al mismo cliente dentro de esa
-# ventana (configurable con `envios_agrupar_minutos_<origen>`).
+#   ventana (configurable con `envios_agrupar_minutos_<origen>`).
+# `categoria_plantilla`: categoría de Meta que se supone para una plantilla de
+#   este origen al estimar su costo (cambiable con `envios_categoria_<origen>`).
 ORIGENES: dict[str, dict] = {
     "gabi_respuesta": {"esencial": True},
     "gabi_aviso_derivacion": {"esencial": True},
-    "gabi_aviso_no_legible": {"esencial": False, "agrupar_minutos": 10},
-    "reenganche_inactividad": {"esencial": False},
+    "gabi_aviso_no_legible": {"esencial": False, "modo": "solo_gratis", "agrupar_minutos": 10},
+    "reenganche_inactividad": {"esencial": False, "modo": "solo_gratis"},
     "asesor_texto": {"esencial": True},
     "asesor_archivo": {"esencial": True},
     "asesor_audio": {"esencial": True},
-    "plantilla_formulario": {"esencial": False},
+    "plantilla_formulario": {"esencial": False, "modo": "siempre", "categoria_plantilla": "marketing"},
 }
 
 
@@ -93,15 +99,26 @@ async def _enviar(origen: str, tipo: str, telefono: str, canal: dict | None, lla
         raise ValueError(f"Origen de envío desconocido: {origen!r}. Registrarlo en agent/envios.py::ORIGENES.")
     negocio_id = (canal or {}).get("negocio_id")
 
+    # Política de costo (Fase B): interruptor del origen y tope mensual. Lo
+    # esencial nunca se frena por costo; `decidir` no lanza.
+    decision = await politica_envios.decidir(origen, tipo, telefono, canal, ORIGENES[origen])
+    if decision.bloquear:
+        logger.info(f"Envío {origen} a {telefono} omitido — {decision.motivo}")
+        try:
+            await registrar_envio_bloqueado(negocio_id, origen, telefono, tipo, decision.motivo or "bloqueado", decision.estimacion)
+        except Exception:
+            logger.exception(f"No se pudo registrar el envío bloqueado {origen} a {telefono}")
+        return ResultadoEnvio(False, None, bloqueado=True, motivo=decision.motivo)
+
     # El registro nunca puede impedir un envío: si falla, se envía igual.
     envio_id: int | None = None
     try:
         agrupar = await _minutos_de_agrupacion(origen, negocio_id)
         if agrupar:
             async with _candado_de_reserva():
-                envio_id, motivo = await reservar_envio_meta(negocio_id, origen, telefono, tipo, agrupar)
+                envio_id, motivo = await reservar_envio_meta(negocio_id, origen, telefono, tipo, agrupar, decision.estimacion)
         else:
-            envio_id, motivo = await reservar_envio_meta(negocio_id, origen, telefono, tipo)
+            envio_id, motivo = await reservar_envio_meta(negocio_id, origen, telefono, tipo, 0, decision.estimacion)
         if envio_id is None and motivo:
             logger.info(f"Envío {origen} a {telefono} omitido — {motivo}")
             return ResultadoEnvio(False, None, bloqueado=True, motivo=motivo)

@@ -46,6 +46,7 @@ from agent.memory import (
     guardar_configuracion_uso_meta,
     estimar_uso_previo_servicio,
     primer_momento_de_uso_registrado,
+    resumen_envios_por_origen,
     _limites_de_mes_utc,
     listar_leads, obtener_lead, actualizar_lead,
     obtener_usuario, listar_asesores, listar_equipo, crear_usuario,
@@ -6725,6 +6726,18 @@ async def uso_mensajes_json(
     if mes and not re.fullmatch(r"\d{4}-(0[1-9]|1[0-2])", mes):
         raise HTTPException(status_code=400, detail="El mes debe tener el formato AAAA-MM")
     return JSONResponse(await resumen_uso_mensual(usuario["negocio_id"], mes or None))
+
+
+@router.get("/uso-mensajes/envios.json")
+async def uso_mensajes_envios_json(
+    mes: str = "", usuario: dict = Depends(servicio_identidad.requiere_rol("admin", "supervisor")),
+):
+    """Envíos del mes por origen (Gabi, reenganche, asesores, plantillas...):
+    cuántos salieron, cuántos frenó la política de costo y por qué, y qué terminó
+    cobrando Meta por cada origen (ver `resumen_envios_por_origen`). Solo lectura."""
+    if mes and not re.fullmatch(r"\d{4}-(0[1-9]|1[0-2])", mes):
+        raise HTTPException(status_code=400, detail="El mes debe tener el formato AAAA-MM")
+    return JSONResponse(await resumen_envios_por_origen(usuario["negocio_id"], mes or None))
 
 
 @router.get("/uso-mensajes/estimacion-previa.json")

@@ -98,7 +98,9 @@ async def test_cron_de_inactividad_omite_telefonos_invalidos_y_los_nombra(monkey
 
     class ProveedorFalso:
         async def resolver_canal(self, numero_whatsapp_id, negocio_id=None):
-            return {"phone_number_id": "x"}
+            # Un canal real siempre trae su negocio: la política de envíos lo necesita
+            # para estimar el costo del reenganche.
+            return {"phone_number_id": "x", "negocio_id": "n"}
 
         async def enviar_mensaje(self, telefono, mensaje, canal=None):
             enviados.append(telefono)

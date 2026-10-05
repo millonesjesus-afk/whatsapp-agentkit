@@ -22,7 +22,7 @@ from cryptography.fernet import Fernet
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, aliased
 from sqlalchemy import (
-    String, Text, DateTime, select, Integer, Boolean, func, case, delete, update, JSON,
+    String, Text, DateTime, select, Integer, Boolean, Float, func, case, delete, update, JSON,
     ForeignKey, Index, text, and_ as sa_and, or_ as sa_or, exists as sa_exists,
 )
 from sqlalchemy.exc import IntegrityError
@@ -2608,6 +2608,12 @@ class EnvioMeta(Base):
     decision: Mapped[str] = mapped_column(String(20), nullable=False)  # enviado | fallido | bloqueado
     motivo: Mapped[str | None] = mapped_column(String(200), nullable=True)
     wamid: Mapped[str | None] = mapped_column(String(100), nullable=True, index=True)
+    # Fase B: lo que la política estimó ANTES de enviar. `gratis_esperado` y
+    # `costo_esperado_usd` quedan vacíos si no se pudo estimar; `categoria_esperada`
+    # es la categoría de Meta que se supuso (service | marketing | utility...).
+    categoria_esperada: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    gratis_esperado: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    costo_esperado_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
     creado: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
     __table_args__ = (
@@ -2615,8 +2621,38 @@ class EnvioMeta(Base):
     )
 
 
+def _campos_de_estimacion(estimacion) -> dict:
+    if estimacion is None:
+        return {}
+    return {
+        "categoria_esperada": estimacion.categoria, "gratis_esperado": estimacion.gratis,
+        "costo_esperado_usd": estimacion.costo_usd,
+    }
+
+
+async def registrar_envio_bloqueado(negocio_id: str | None, origen: str, telefono: str, tipo: str, motivo: str, estimacion=None) -> None:
+    """Deja constancia de un envío que la política decidió no hacer. Un mismo
+    bloqueo (origen + cliente + motivo) se anota una vez por hora: un proceso
+    que reintenta en cada corrida (el reenganche) no llena la tabla."""
+    async with async_session() as session:
+        repetido = (await session.execute(
+            select(EnvioMeta.id).where(
+                EnvioMeta.negocio_id == negocio_id, EnvioMeta.origen == origen, EnvioMeta.telefono == telefono,
+                EnvioMeta.decision == "bloqueado", EnvioMeta.motivo == motivo[:200],
+                EnvioMeta.creado >= datetime.utcnow() - timedelta(hours=1),
+            ).limit(1)
+        )).scalar_one_or_none()
+        if repetido is not None:
+            return
+        session.add(EnvioMeta(
+            negocio_id=negocio_id, origen=origen, telefono=telefono, tipo=tipo, decision="bloqueado",
+            motivo=motivo[:200], **_campos_de_estimacion(estimacion),
+        ))
+        await session.commit()
+
+
 async def reservar_envio_meta(
-    negocio_id: str | None, origen: str, telefono: str, tipo: str, agrupar_minutos: int = 0,
+    negocio_id: str | None, origen: str, telefono: str, tipo: str, agrupar_minutos: int = 0, estimacion=None,
 ) -> tuple[int | None, str | None]:
     """Registra el intento de envío. Con `agrupar_minutos` > 0, si ya hay un
     envío "enviado" del mismo origen al mismo cliente dentro de esa ventana no
@@ -2633,10 +2669,10 @@ async def reservar_envio_meta(
             )).scalar_one_or_none()
             if previo is not None:
                 motivo = f"agrupado: ya se envió este aviso hace menos de {agrupar_minutos} min"
-                session.add(EnvioMeta(negocio_id=negocio_id, origen=origen, telefono=telefono, tipo=tipo, decision="bloqueado", motivo=motivo))
+                session.add(EnvioMeta(negocio_id=negocio_id, origen=origen, telefono=telefono, tipo=tipo, decision="bloqueado", motivo=motivo, **_campos_de_estimacion(estimacion)))
                 await session.commit()
                 return None, motivo
-        envio = EnvioMeta(negocio_id=negocio_id, origen=origen, telefono=telefono, tipo=tipo, decision="enviado")
+        envio = EnvioMeta(negocio_id=negocio_id, origen=origen, telefono=telefono, tipo=tipo, decision="enviado", **_campos_de_estimacion(estimacion))
         session.add(envio)
         await session.commit()
         return envio.id, None
@@ -3083,6 +3119,47 @@ async def guardar_configuracion_uso_meta(negocio_id: str, datos: dict) -> dict:
             raise ValueError("El uso previo debe ser un entero entre 0 y 1 000 000.")
         cambios[f"{CLAVE_USO_PREVIO}{mes}:{numero}"] = str(valor)
 
+    envios = datos.get("envios")
+    if envios is not None:
+        from agent.envios import ORIGENES   # import tardío: envios importa este módulo
+
+        if not isinstance(envios, dict):
+            raise ValueError("La configuración de envíos debe ir como un objeto.")
+        modos = envios.get("modos")
+        if modos is not None:
+            if not isinstance(modos, dict):
+                raise ValueError("Los interruptores deben ir como {origen: modo}.")
+            for origen, modo in modos.items():
+                if origen not in ORIGENES:
+                    raise ValueError(f"Origen de envío desconocido: {origen!r}.")
+                if modo not in ("siempre", "solo_gratis", "nunca"):
+                    raise ValueError(f"El modo de {origen} debe ser siempre, solo_gratis o nunca.")
+                if ORIGENES[origen].get("esencial") and modo != "siempre":
+                    raise ValueError(f"{origen} es un envío esencial (el cliente lo espera): no se puede frenar por costo.")
+                cambios[f"envios_modo_{origen}"] = modo
+        if "tope_mensual_usd" in envios:
+            tope = envios["tope_mensual_usd"]
+            if tope is None:
+                cambios["envios_tope_mensual_usd"] = ""
+            elif isinstance(tope, bool) or not isinstance(tope, (int, float)) or not 0 <= tope <= 1_000_000:
+                raise ValueError("El tope mensual debe ser un monto en USD entre 0 y 1 000 000 (o null para quitarlo).")
+            else:
+                cambios["envios_tope_mensual_usd"] = repr(float(tope))
+        if "tope_bloquea_esenciales" in envios:
+            if not isinstance(envios["tope_bloquea_esenciales"], bool):
+                raise ValueError("tope_bloquea_esenciales debe ser true o false.")
+            cambios["envios_tope_bloquea_esenciales"] = "true" if envios["tope_bloquea_esenciales"] else "false"
+        agrupar = envios.get("agrupar_minutos")
+        if agrupar is not None:
+            if not isinstance(agrupar, dict):
+                raise ValueError("La agrupación debe ir como {origen: minutos}.")
+            for origen, minutos in agrupar.items():
+                if origen not in ORIGENES:
+                    raise ValueError(f"Origen de envío desconocido: {origen!r}.")
+                if isinstance(minutos, bool) or not isinstance(minutos, int) or not 0 <= minutos <= 1440:
+                    raise ValueError(f"Los minutos de agrupación de {origen} deben ser un entero entre 0 y 1440.")
+                cambios[f"envios_agrupar_minutos_{origen}"] = str(minutos)
+
     if not cambios:
         raise ValueError("No hay nada que guardar.")
     for clave, valor in cambios.items():
@@ -3281,11 +3358,92 @@ async def resumen_uso_mensual(negocio_id: str, mes: str | None = None) -> dict:
             costo += sum(n * (tarifas.get(c) or 0) for c, n in d["otros_cobrables"].items())
             d["costo_estimado_usd"] = round(costo, 4)
 
+    # Tope mensual de gasto (capa de envíos, Fase B): sin tope configurado todo
+    # esto queda en None. El gasto es el estimado con las tarifas configuradas;
+    # con tarifas faltantes no se puede calcular y se informa como None.
+    tope = _a_numero(await obtener_configuracion("envios_tope_mensual_usd", "", negocio_id=negocio_id), 0) or 0
+    gasto = None if faltantes else round(sum(d["costo_estimado_usd"] or 0 for d in numeros.values()), 4)
+    porcentaje_tope = round(100 * gasto / tope, 1) if tope > 0 and gasto is not None else None
+    alertas_tope = [u for u in (80, 100) if porcentaje_tope is not None and porcentaje_tope >= u]
+
     return {
         "mes": mes_normalizado, "zona_horaria": zona, "cuota_gratis_servicio": cuota,
         "tarifas_usd": {c: t for c, t in tarifas.items() if t is not None}, "tarifas_faltantes": faltantes,
         "numeros": sorted(numeros.values(), key=lambda d: d["phone_number_id"]),
+        "tope_mensual_usd": tope or None, "gasto_estimado_usd": gasto,
+        "porcentaje_tope": porcentaje_tope, "alertas_tope": alertas_tope,
     }
+
+
+async def resumen_envios_por_origen(negocio_id: str, mes: str | None = None) -> dict:
+    """Cuánto envió cada origen en el mes y qué terminó cobrando Meta por ello.
+    `enviados`/`bloqueados`/`fallidos` salen del registro de envíos; lo cobrado
+    sale de cruzar el wamid con lo que Meta informó (uso_mensajes_meta): gratis
+    por la cuota de servicio, gratis por ventana de anuncio, o cobrable (por
+    categoría). `sin_estado` = enviados de los que Meta todavía no informó la
+    entrega. El costo usa las tarifas configuradas (None si falta alguna)."""
+    zona = await obtener_configuracion("meta_zona_horaria_mes", "UTC", negocio_id=negocio_id)
+    inicio, fin, mes_normalizado = _limites_de_mes_utc(mes, zona)
+    origenes: dict[str, dict] = {}
+
+    def _origen(nombre: str) -> dict:
+        return origenes.setdefault(nombre, {
+            "origen": nombre, "enviados": 0, "fallidos": 0, "bloqueados": 0, "motivos_bloqueo": {},
+            "gratis_cuota": 0, "gratis_ventana_anuncio": 0, "cobrables": {}, "sin_estado": 0,
+        })
+
+    async with async_session() as session:
+        conteos = (await session.execute(
+            select(EnvioMeta.origen, EnvioMeta.decision, func.count())
+            .where(EnvioMeta.negocio_id == negocio_id, EnvioMeta.creado >= inicio, EnvioMeta.creado < fin)
+            .group_by(EnvioMeta.origen, EnvioMeta.decision)
+        )).all()
+        motivos = (await session.execute(
+            select(EnvioMeta.origen, EnvioMeta.motivo, func.count())
+            .where(EnvioMeta.negocio_id == negocio_id, EnvioMeta.decision == "bloqueado", EnvioMeta.creado >= inicio, EnvioMeta.creado < fin)
+            .group_by(EnvioMeta.origen, EnvioMeta.motivo)
+        )).all()
+        cruzados = (await session.execute(
+            select(EnvioMeta.origen, UsoMensajeMeta.pricing_type, UsoMensajeMeta.pricing_categoria, func.count())
+            .join(UsoMensajeMeta, UsoMensajeMeta.wamid == EnvioMeta.wamid)
+            .where(
+                EnvioMeta.negocio_id == negocio_id, EnvioMeta.decision == "enviado",
+                EnvioMeta.creado >= inicio, EnvioMeta.creado < fin, UsoMensajeMeta.estado.in_(("delivered", "read")),
+            )
+            .group_by(EnvioMeta.origen, UsoMensajeMeta.pricing_type, UsoMensajeMeta.pricing_categoria)
+        )).all()
+
+    for nombre, decision, n in conteos:
+        d = _origen(nombre)
+        if decision == "enviado":
+            d["enviados"] += n
+        elif decision == "fallido":
+            d["fallidos"] += n
+        elif decision == "bloqueado":
+            d["bloqueados"] += n
+    for nombre, motivo, n in motivos:
+        _origen(nombre)["motivos_bloqueo"][motivo or "sin motivo"] = n
+    medidos: dict[str, int] = {}
+    for nombre, tipo, categoria, n in cruzados:
+        d = _origen(nombre)
+        medidos[nombre] = medidos.get(nombre, 0) + n
+        if tipo == "free_customer_service":
+            d["gratis_cuota"] += n
+        elif tipo == "free_entry_point":
+            d["gratis_ventana_anuncio"] += n
+        elif tipo == "regular":
+            clave = categoria or "sin_categoria"
+            d["cobrables"][clave] = d["cobrables"].get(clave, 0) + n
+    tarifas: dict[str, float | None] = {}
+    for d in origenes.values():
+        d["sin_estado"] = max(0, d["enviados"] - medidos.get(d["origen"], 0))
+        costo: float | None = 0.0
+        for categoria, n in d["cobrables"].items():
+            if categoria not in tarifas:
+                tarifas[categoria] = _a_numero(await obtener_configuracion(f"meta_tarifa_usd_{categoria}", "", negocio_id=negocio_id))
+            costo = None if (costo is None or tarifas[categoria] is None) else costo + n * tarifas[categoria]
+        d["costo_estimado_usd"] = None if costo is None else round(costo, 4)
+    return {"mes": mes_normalizado, "zona_horaria": zona, "origenes": sorted(origenes.values(), key=lambda d: d["origen"])}
 
 
 def _canal_a_dict(c: CanalWhatsApp) -> dict:

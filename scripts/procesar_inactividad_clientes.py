@@ -60,6 +60,7 @@ async def main() -> None:
 
     proveedor = obtener_proveedor()
     reenganchados: list[str] = []
+    bloqueados: list[str] = []
     fallidos: list[str] = []
     invalidos: list[str] = []
     for fila in candidatos_reenganche:
@@ -67,9 +68,15 @@ async def main() -> None:
             invalidos.append(repr(fila["telefono"]))
             continue
         canal = await proveedor.resolver_canal(fila["numero_whatsapp_id"], negocio_id=fila["negocio_id"])
-        enviado, wamid = await envios.enviar_texto(
+        resultado = await envios.enviar_texto(
             proveedor, fila["telefono"], MENSAJE_REENGANCHE, origen="reenganche_inactividad", canal=canal,
         )
+        if resultado.bloqueado:
+            # La política de costo lo frenó (ver agent/politica_envios.py): no es una falla.
+            # Sigue siendo candidato y se vuelve a evaluar en la próxima corrida.
+            bloqueados.append(fila["telefono"])
+            continue
+        enviado, wamid = resultado
         if not enviado:
             fallidos.append(fila["telefono"])
             continue
@@ -85,8 +92,8 @@ async def main() -> None:
 
     print(
         f"Inactividad de clientes: {len(reenganchados)} reenganchado(s) tras {HORAS_REENGANCHE}h "
-        f"({len(fallidos)} fallo(s) de envío), {len(candidatos_cierre)} cerrado(s) por sin respuesta "
-        f"tras {HORAS_CIERRE}h."
+        f"({len(fallidos)} fallo(s) de envío, {len(bloqueados)} frenado(s) por la política de costo), "
+        f"{len(candidatos_cierre)} cerrado(s) por sin respuesta tras {HORAS_CIERRE}h."
     )
     if fallidos:
         print(f"  Envíos fallidos a: {', '.join(fallidos)}")

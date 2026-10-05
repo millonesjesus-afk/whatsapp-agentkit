@@ -173,7 +173,7 @@ async def test_si_el_registro_falla_el_mensaje_se_envia_igual(monkeypatch):
 
 async def test_sin_canal_registra_sin_negocio_y_envia():
     p = _Proveedor()
-    r = await envios.enviar_texto(p, "51911111122", "x", origen="reenganche_inactividad", canal=None)
+    r = await envios.enviar_texto(p, "51911111122", "x", origen="gabi_respuesta", canal=None)
     assert r.enviado
 
 
