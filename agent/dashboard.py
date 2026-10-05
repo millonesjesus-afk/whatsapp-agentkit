@@ -47,6 +47,8 @@ from agent.memory import (
     estimar_uso_previo_servicio,
     primer_momento_de_uso_registrado,
     resumen_envios_por_origen,
+    obtener_configuracion_envios,
+    listar_cambios_configuracion,
     _limites_de_mes_utc,
     listar_leads, obtener_lead, actualizar_lead,
     obtener_usuario, listar_asesores, listar_equipo, crear_usuario,
@@ -6767,6 +6769,21 @@ async def uso_mensajes_estimacion_previa_json(
     return JSONResponse(await estimar_uso_previo_servicio(negocio_id, inicio, fin))
 
 
+@router.get("/uso-mensajes/configuracion.json")
+async def uso_mensajes_configuracion_actual_json(usuario: dict = Depends(servicio_identidad.requiere_rol("admin"))):
+    """Configuración vigente de uso y envíos (interruptor de cada origen, tope,
+    autorecarga, tarifas...) para pintar la pantalla. Solo lectura; solo Admin."""
+    return JSONResponse(await obtener_configuracion_envios(usuario["negocio_id"]))
+
+
+@router.get("/uso-mensajes/historial-cambios.json")
+async def uso_mensajes_historial_cambios_json(limite: int = 50, usuario: dict = Depends(servicio_identidad.requiere_rol("admin"))):
+    """Quién cambió qué de la configuración de uso y envíos, y cuándo (con el
+    valor anterior y el nuevo). Solo lectura; solo Admin."""
+    cambios = await listar_cambios_configuracion(usuario["negocio_id"], limite)
+    return JSONResponse({"cambios": [{**c, "creado": c["creado"].isoformat() + "Z"} for c in cambios]})
+
+
 @router.post("/uso-mensajes/detectar-zona.json")
 async def uso_mensajes_detectar_zona_json(
     request: Request,
@@ -6802,7 +6819,7 @@ async def uso_mensajes_detectar_zona_json(
     if zona is None:
         raise HTTPException(status_code=422, detail=f"Meta informó la zona horaria con el id {timezone_id}, que todavía no está en la tabla del sistema. Elige la zona a mano.")
     if guardar:
-        await guardar_configuracion_uso_meta(usuario["negocio_id"], {"zona_horaria_mes": zona})
+        await guardar_configuracion_uso_meta(usuario["negocio_id"], {"zona_horaria_mes": zona}, autor=usuario.get("username"))
     return JSONResponse({"ok": True, "zona_horaria": zona, "timezone_id": str(timezone_id), "guardada": guardar})
 
 
@@ -6823,10 +6840,10 @@ async def uso_mensajes_configuracion_json(
     if not isinstance(body, dict):
         raise HTTPException(status_code=400, detail="El cuerpo debe ser un objeto JSON.")
     try:
-        guardado = await guardar_configuracion_uso_meta(usuario["negocio_id"], body)
+        guardado = await guardar_configuracion_uso_meta(usuario["negocio_id"], body, autor=usuario.get("username"))
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    logger.info("Configuración de uso de mensajes Meta actualizada por %s: %s", usuario.get("username"), guardado["guardadas"])
+    logger.info("Configuración de uso de mensajes Meta actualizada por %s: %s", usuario.get("username"), guardado["modificadas"])
     return JSONResponse({"ok": True, **guardado})
 
 
@@ -8710,6 +8727,7 @@ async def sesion_actual(request: Request, usuario: dict = Depends(_usuario_actua
         # necesita cambios para que este campo llegue al cliente.
         "usuario": {
             "username": usuario["username"], "rol": usuario["rol"], "negocio_id": usuario.get("negocio_id"),
+            "nombre": usuario.get("nombre") or usuario["username"],
             # Punto 2 (2026-09-29): solo tiene sentido para un asesor — el
             # switch de disponibilidad de la Nueva Experiencia lo necesita
             # para saber cómo renderizarse al montar, sin esperar a que el

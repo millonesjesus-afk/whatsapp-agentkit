@@ -72,7 +72,7 @@ async def test_el_envio_llega_al_proveedor_con_los_mismos_argumentos_y_queda_reg
 
 async def test_los_argumentos_extra_se_reenvian_y_cada_tipo_queda_con_su_tipo():
     nid, canal = await _negocio("env-2")
-    await mem.guardar_configuracion_uso_meta(nid, {"envios": {"autorecarga": True}})   # la plantilla de marketing se cobra: sin tope no sale
+    await mem.guardar_configuracion_uso_meta(nid, {"confirmar_riesgo": True, "envios": {"autorecarga": True}})   # la plantilla de marketing se cobra: sin tope no sale
     p = _Proveedor()
     await envios.enviar_texto(p, "51911111112", "x", origen="asesor_texto", canal=canal, mensaje_id_citado="wamid.cita")
     await envios.enviar_imagen(p, "51911111112", "m1", "pie", origen="asesor_archivo", canal=canal)

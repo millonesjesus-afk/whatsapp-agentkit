@@ -155,7 +155,7 @@ async def test_la_ruta_guarda_para_el_negocio_del_admin_y_traduce_los_errores_a_
 
 
 def test_la_ruta_exige_rol_admin_y_csrf():
-    ruta = next(r for r in dashboard.router.routes if getattr(r, "path", "").endswith("/uso-mensajes/configuracion.json"))
+    ruta = next(r for r in dashboard.router.routes if getattr(r, "path", "").endswith("/uso-mensajes/configuracion.json") and "POST" in r.methods)
     assert ruta.methods == {"POST"}
     dependencias = {d.call.__name__ for d in ruta.dependant.dependencies}
     assert "verificar_csrf" in dependencias

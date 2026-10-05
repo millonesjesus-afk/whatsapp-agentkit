@@ -131,7 +131,7 @@ async def test_un_cliente_que_llego_por_anuncio_y_no_tiene_respuesta_aun_se_cons
 async def test_modo_siempre_envia_aunque_cueste_y_modo_nunca_no_envia_aunque_sea_gratis():
     nid, canal = await _negocio("pol-6")
     await _agotar_cuota(nid)
-    await mem.guardar_configuracion_uso_meta(nid, {"envios": {"autorecarga": True, "modos": {"reenganche_inactividad": "siempre"}}})
+    await mem.guardar_configuracion_uso_meta(nid, {"confirmar_riesgo": True, "envios": {"autorecarga": True, "modos": {"reenganche_inactividad": "siempre"}}})
     assert (await _reenganche(_Proveedor(), canal)).enviado
     await mem.guardar_configuracion_uso_meta(nid, {"envios": {"modos": {"reenganche_inactividad": "nunca"}}})
     r = await _reenganche(_Proveedor(), canal, telefono="51922000006")
@@ -141,7 +141,7 @@ async def test_modo_siempre_envia_aunque_cueste_y_modo_nunca_no_envia_aunque_sea
 async def test_la_plantilla_de_formulario_se_envia_por_defecto_y_se_puede_apagar():
     nid, canal = await _negocio("pol-7")
     await _agotar_cuota(nid)
-    await mem.guardar_configuracion_uso_meta(nid, {"envios": {"autorecarga": True}})
+    await mem.guardar_configuracion_uso_meta(nid, {"confirmar_riesgo": True, "envios": {"autorecarga": True}})
     p = _Proveedor()
     assert (await envios.enviar_plantilla(p, "51922000007", "bienvenida", ["Ana"], "es", origen="plantilla_formulario", canal=canal)).enviado
     await mem.guardar_configuracion_uso_meta(nid, {"envios": {"modos": {"plantilla_formulario": "solo_gratis"}}})
@@ -217,7 +217,7 @@ async def test_el_tope_nunca_frena_a_los_esenciales_opcion_a():
 async def test_con_la_opcion_b_activada_el_tope_tambien_frena_a_los_esenciales():
     nid, canal = await _negocio("pol-13")
     await _agotar_cuota(nid)
-    await mem.guardar_configuracion_uso_meta(nid, {"envios": {"tope_mensual_usd": 0.05, "tope_bloquea_esenciales": True}})
+    await mem.guardar_configuracion_uso_meta(nid, {"confirmar_riesgo": True, "envios": {"tope_mensual_usd": 0.05, "tope_bloquea_esenciales": True}})
     await _gastar(nid, 3)
     r = await envios.enviar_texto(_Proveedor(), "51922000014", "x", origen="gabi_respuesta", canal=canal)
     assert r.bloqueado and "tope mensual" in r.motivo
@@ -238,7 +238,7 @@ async def test_sin_monto_elegido_el_tope_es_cero_y_la_autorecarga_o_un_monto_lo_
     await mem.guardar_configuracion_uso_meta(nid, {"envios": {"tope_mensual_usd": None}})
     assert (await enviar()).bloqueado
     # La autorecarga sí es "sin tope": se paga lo que cueste.
-    await mem.guardar_configuracion_uso_meta(nid, {"envios": {"autorecarga": True}})
+    await mem.guardar_configuracion_uso_meta(nid, {"confirmar_riesgo": True, "envios": {"autorecarga": True}})
     assert (await enviar()).enviado
     # Volver a elegir un monto sale de la autorecarga.
     await mem.guardar_configuracion_uso_meta(nid, {"envios": {"tope_mensual_usd": 0.01}})
@@ -267,7 +267,7 @@ async def test_el_resumen_del_mes_informa_gasto_porcentaje_y_alertas_del_tope():
     assert r2["alertas_tope"] == [80, 100]
     sin_monto = await mem.resumen_uso_mensual((await _negocio("pol-15b"))[0])
     assert (sin_monto["tope_mensual_usd"], sin_monto["porcentaje_tope"], sin_monto["alertas_tope"], sin_monto["autorecarga"]) == (0, None, [], False)
-    await mem.guardar_configuracion_uso_meta(nid, {"envios": {"autorecarga": True}})
+    await mem.guardar_configuracion_uso_meta(nid, {"confirmar_riesgo": True, "envios": {"autorecarga": True}})
     con_autorecarga = await mem.resumen_uso_mensual(nid)
     assert (con_autorecarga["autorecarga"], con_autorecarga["tope_mensual_usd"], con_autorecarga["alertas_tope"]) == (True, None, [])
 
@@ -285,7 +285,7 @@ async def test_si_la_estimacion_falla_lo_esencial_sale_y_lo_no_esencial_con_cost
     r = await _reenganche(_Proveedor(), canal, telefono="51922000017")
     assert r.bloqueado and "no se pudo estimar" in r.motivo
     # un no esencial en modo "siempre" tampoco se frena por no poder estimar
-    await mem.guardar_configuracion_uso_meta(nid, {"envios": {"autorecarga": True, "modos": {"reenganche_inactividad": "siempre"}}})
+    await mem.guardar_configuracion_uso_meta(nid, {"confirmar_riesgo": True, "envios": {"autorecarga": True, "modos": {"reenganche_inactividad": "siempre"}}})
     assert (await _reenganche(_Proveedor(), canal, telefono="51922000018")).enviado
 
 

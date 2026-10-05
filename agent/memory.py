@@ -2507,7 +2507,8 @@ class Configuracion(Base):
     __tablename__ = "configuracion"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    clave: Mapped[str] = mapped_column(String(50))
+    # 50 → 100 (2026-10-05): `meta_uso_previo_servicio_AAAA-MM:<phone_number_id>` llegaba a 49.
+    clave: Mapped[str] = mapped_column(String(100))
     negocio_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("negocios.id"), nullable=True)
     valor: Mapped[str] = mapped_column(String(200))
 
@@ -3071,13 +3072,14 @@ async def _usos_previos_del_mes(negocio_id: str, mes: str) -> dict[str, int]:
     return previos
 
 
-async def guardar_configuracion_uso_meta(negocio_id: str, datos: dict) -> dict:
+async def guardar_configuracion_uso_meta(negocio_id: str, datos: dict, autor: str | None = None) -> dict:
     """Valida y guarda la configuración del control de uso de mensajes de Meta
     (cuota gratis, zona horaria del mes, tarifas en USD por categoría y uso
     previo estimado por número y mes). Todo o nada: si algo no es válido no se
     guarda nada y se lanza ValueError con el motivo. Devuelve las claves
     guardadas."""
     cambios: dict[str, str] = {}
+    monto_elegido = False
 
     if datos.get("cuota_gratis_servicio") is not None:
         cuota = datos["cuota_gratis_servicio"]
@@ -3149,7 +3151,7 @@ async def guardar_configuracion_uso_meta(negocio_id: str, datos: dict) -> dict:
                 raise ValueError("El tope mensual debe ser un monto en USD entre 0 y 1 000 000 (o null para volver a USD 0).")
             else:
                 cambios["envios_tope_mensual_usd"] = repr(float(tope))
-                cambios.setdefault("envios_tope_modo", "tope")   # elegir un monto sale de la autorecarga
+                monto_elegido = True   # si venía en autorecarga, elegir un monto sale de ella (ver más abajo)
         if "tope_bloquea_esenciales" in envios:
             if not isinstance(envios["tope_bloquea_esenciales"], bool):
                 raise ValueError("tope_bloquea_esenciales debe ser true o false.")
@@ -3167,9 +3169,120 @@ async def guardar_configuracion_uso_meta(negocio_id: str, datos: dict) -> dict:
 
     if not cambios:
         raise ValueError("No hay nada que guardar.")
-    for clave, valor in cambios.items():
-        await guardar_configuracion(clave, valor, negocio_id=negocio_id)
-    return {"guardadas": sorted(cambios)}
+    if monto_elegido and "envios_tope_modo" not in cambios and (await obtener_configuracion("envios_tope_modo", "tope", negocio_id=negocio_id)) == "autorecarga":
+        cambios["envios_tope_modo"] = "tope"
+
+    # Valores sensibles: debilitan la protección de costo o pueden dejar a Gabi
+    # sin responder. Exigen `confirmar_riesgo: true` (la pantalla lo pide con un
+    # diálogo) y la combinación peligrosa se rechaza siempre.
+    confirmado = datos.get("confirmar_riesgo") is True or (
+        isinstance(datos.get("envios"), dict) and datos["envios"].get("confirmar_riesgo") is True
+    )
+    modo_tope = cambios.get("envios_tope_modo") or await obtener_configuracion("envios_tope_modo", "tope", negocio_id=negocio_id)
+    if "envios_tope_mensual_usd" in cambios:
+        tope_texto = cambios["envios_tope_mensual_usd"]
+    else:
+        tope_texto = await obtener_configuracion("envios_tope_mensual_usd", "", negocio_id=negocio_id)
+    tope_efectivo = 0 if modo_tope == "autorecarga" else (_a_numero(tope_texto, 0) or 0)
+    riesgos: list[str] = []
+    if cambios.get("envios_tope_bloquea_esenciales") == "true":
+        if modo_tope != "autorecarga" and tope_efectivo == 0:
+            raise ValueError(
+                "No se puede hacer que el tope también frene lo esencial mientras el tope sea USD 0: "
+                "Gabi dejaría de responder a tus clientes en cuanto se agote la cuota gratis. Fija primero un monto."
+            )
+        riesgos.append("que el tope también frene lo esencial (Gabi y los asesores)")
+    if cambios.get("envios_tope_modo") == "autorecarga":
+        riesgos.append("quitar el límite de gasto (Meta cobrará a tu método de pago sin tope)")
+    if "meta_cuota_gratis_servicio" in cambios and int(cambios["meta_cuota_gratis_servicio"]) > 1000:
+        riesgos.append("una cuota gratis mayor a 1000 (el sistema creerá que hay gratis cuando Meta ya cobra)")
+    if riesgos and not confirmado:
+        raise ValueError("Confirma el riesgo para guardar: " + "; ".join(riesgos) + ". Envía confirmar_riesgo: true.")
+
+    # Todo en UNA transacción, junto con la fila de auditoría: si no se puede
+    # dejar constancia de quién cambió qué, no se cambia nada.
+    async with async_session() as session:
+        actuales = {
+            c.clave: c for c in (await session.execute(
+                select(Configuracion).where(Configuracion.negocio_id == negocio_id, Configuracion.clave.in_(list(cambios)))
+            )).scalars().all()
+        }
+        registro: dict[str, dict] = {}
+        for clave, valor in cambios.items():
+            existente = actuales.get(clave)
+            antes = existente.valor if existente else None
+            if antes == valor:
+                continue
+            if existente is None:
+                session.add(Configuracion(clave=clave, negocio_id=negocio_id, valor=valor))
+            else:
+                existente.valor = valor
+            registro[clave] = {"antes": antes, "despues": valor}
+        if registro:
+            session.add(RegistroAuditoria(
+                accion="uso_meta_configuracion", actor=autor, negocio_id=negocio_id, entidad_tipo="configuracion",
+                payload={"cambios": registro, "riesgo_confirmado": bool(riesgos)},
+            ))
+        await session.commit()
+    return {"guardadas": sorted(cambios), "modificadas": sorted(registro)}
+
+
+async def listar_cambios_configuracion(negocio_id: str, limite: int = 50) -> list[dict]:
+    """Historial de cambios de la configuración de uso y envíos (más reciente
+    primero): quién, cuándo, y el valor anterior y nuevo de cada clave."""
+    async with async_session() as session:
+        filas = (await session.execute(
+            select(RegistroAuditoria).where(
+                RegistroAuditoria.negocio_id == negocio_id, RegistroAuditoria.entidad_tipo == "configuracion",
+            ).order_by(RegistroAuditoria.creado.desc()).limit(max(1, min(limite, 200)))
+        )).scalars().all()
+    return [
+        {
+            "creado": f.creado, "actor": f.actor, "accion": f.accion,
+            "cambios": (f.payload or {}).get("cambios", {}), "riesgo_confirmado": bool((f.payload or {}).get("riesgo_confirmado")),
+        }
+        for f in filas
+    ]
+
+
+async def obtener_configuracion_envios(negocio_id: str) -> dict:
+    """Configuración vigente de uso y envíos, lista para pintar la pantalla:
+    interruptor de cada origen (con su valor por defecto y si es esencial),
+    agrupación, tope, autorecarga y los demás ajustes. Solo lectura."""
+    from agent.envios import ORIGENES   # import tardío: envios importa este módulo
+
+    origenes = []
+    for nombre, politica in ORIGENES.items():
+        por_defecto = "siempre" if politica.get("esencial") else politica.get("modo", "siempre")
+        modo = por_defecto if politica.get("esencial") else await obtener_configuracion(f"envios_modo_{nombre}", por_defecto, negocio_id=negocio_id)
+        if modo not in ("siempre", "solo_gratis", "nunca"):
+            modo = por_defecto
+        agrupar = None
+        if politica.get("agrupar_minutos"):
+            valor = await obtener_configuracion(f"envios_agrupar_minutos_{nombre}", str(politica["agrupar_minutos"]), negocio_id=negocio_id)
+            agrupar = int(_a_numero(valor, politica["agrupar_minutos"]) or 0)
+        categoria = None
+        if politica.get("categoria_plantilla"):
+            categoria = await obtener_configuracion(f"envios_categoria_{nombre}", politica["categoria_plantilla"], negocio_id=negocio_id)
+        origenes.append({
+            "origen": nombre, "esencial": bool(politica.get("esencial")), "modo": modo, "modo_por_defecto": por_defecto,
+            "agrupar_minutos": agrupar, "categoria_plantilla": categoria,
+        })
+    autorecarga = (await obtener_configuracion("envios_tope_modo", "tope", negocio_id=negocio_id)) == "autorecarga"
+    tarifas = {}
+    for categoria in ("service", "utility", "marketing", "authentication"):
+        valor = _a_numero(await obtener_configuracion(f"meta_tarifa_usd_{categoria}", "", negocio_id=negocio_id))
+        if valor is not None:
+            tarifas[categoria] = valor
+    tope = _a_numero(await obtener_configuracion("envios_tope_mensual_usd", "", negocio_id=negocio_id), 0) or 0
+    return {
+        "origenes": origenes, "autorecarga": autorecarga, "tope_mensual_usd": 0 if autorecarga else tope,
+        "tope_bloquea_esenciales": (await obtener_configuracion("envios_tope_bloquea_esenciales", "false", negocio_id=negocio_id)).lower() == "true",
+        "meta_fep_horas": _a_numero(await obtener_configuracion("meta_fep_horas", "72", negocio_id=negocio_id), 72),
+        "cuota_gratis_servicio": int(_a_numero(await obtener_configuracion("meta_cuota_gratis_servicio", "1000", negocio_id=negocio_id), 1000) or 0),
+        "zona_horaria": await obtener_configuracion("meta_zona_horaria_mes", "UTC", negocio_id=negocio_id),
+        "tarifas_usd": tarifas,
+    }
 
 
 async def primer_momento_de_uso_registrado(negocio_id: str) -> datetime:
