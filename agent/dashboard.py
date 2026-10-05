@@ -75,7 +75,7 @@ from agent.memory import (
     CAMPOS_NEGOCIO_PRODUCTO, PLAZOS_CUOTAS_CATALOGO,
     iso_utc, ROLES_CON_VISION_TOTAL, tiene_acceso_a_lead, liberar_asignacion,
     obtener_conversation_realtime, obtener_conversation_activa_de_telefono,
-    resolver_conversation_ids_por_telefono,
+    resolver_conversation_ids_por_telefono, listar_clientes_esperando, contar_casos_activos,
     obtener_negocio, obtener_identidad_agente, listar_horarios_atencion,
     actualizar_negocio, crear_o_actualizar_identidad_agente, guardar_horario_atencion,
 )
@@ -3261,93 +3261,254 @@ def _zona_accion_vacia(mensaje: str) -> str:
 # solo al panel legacy.
 
 
+# ── Inicio verdadero (paquete B, 2026-10-05) ───────────────────────────
+#
+# Contrato ADITIVO de `GET /dashboard/inicio.json`: los campos de siempre
+# (`vision_total`, `zona_accion.{vacio,mensaje_vacio,items[{telefono,
+# conversation_id,nombre,motivo}]}`, `zona_indicadores[{valor,etiqueta}]`) se
+# conservan; se agregan `categoria` (y datos de ventana de Meta) en cada
+# ítem, `zona_accion.totales` y `avisos`.
+#
+# "Cliente esperando" ya no es `pausado_manual`: es una conversación activa
+# cuyo último mensaje real es del cliente y nadie respondió después, con un
+# asesor/supervisión de por medio (ver `memory.listar_clientes_esperando`).
+# Aplica a cualquier resultado, incluido vendido y agendado.
+
+TOPES_ZONA_ACCION = {
+    "escalados": 5, "sin_asesor": 5, "cliente_esperando": 8, "citas_proximas": 3, "citas_vencidas": 3,
+}
+# fecha_agendada se guarda como hora local de Lima, SIN zona (la tipea un
+# humano en un datetime-local) — para compararla con "ahora" hay que llevar
+# "ahora" a Lima (UTC-5, sin horario de verano). Un instante UTC (Mensaje.
+# timestamp) NO se mueve: va con iso_utc.
+_OFFSET_LIMA = timedelta(hours=5)
+_VENTANA_POR_VENCER = timedelta(hours=4)
+_MENSAJE_VACIO_ASESOR = "No tienes conversaciones que requieran tu atención ahora mismo."
+_MENSAJE_VACIO_ADMIN = "El equipo no tiene conversaciones que requieran tu intervención ahora mismo."
+_RUTA_USO = "/configuracion/uso"
+
+
+def _texto_cita(lead: dict, prefijo: str) -> str:
+    fecha = lead["fecha_agendada"].strftime("%d/%m %H:%M") if lead.get("fecha_agendada") else "sin hora"
+    return f"{prefijo} — {fecha}"
+
+
+def _item_zona(lead: dict, motivo: str, categoria: str) -> dict:
+    return {
+        "telefono": lead["telefono"], "conversation_id": lead.get("conversation_id"),
+        "nombre": lead.get("nombre"), "motivo": motivo, "categoria": categoria,
+    }
+
+
+def _item_cliente_esperando(cliente: dict, vista_admin: bool) -> dict:
+    asesor = cliente.get("asesor_asignado")
+    item = _item_zona(
+        cliente,
+        f"Esperando respuesta — {asesor or 'sin asesor'}" if vista_admin else "Esperando tu respuesta",
+        "cliente_esperando",
+    )
+    item.update({
+        "ultimo_mensaje_cliente_en": iso_utc(cliente["ultimo_mensaje_cliente_en"]),
+        "ventana_vence_en": iso_utc(cliente["ventana_vence_en"]),
+        "ventana_abierta": cliente["ventana_abierta"],
+        "probable_cierre": cliente["probable_cierre"],
+        "resultado": cliente.get("resultado"),
+    })
+    if vista_admin:
+        item["asesor"] = asesor
+    return item
+
+
+async def _citas_inicio(negocio_id: str, asesor: str | None, ahora_utc: datetime) -> tuple[list, list, int]:
+    """(próximas, vencidas, cuántas en los próximos 7 días). Próximas: la más
+    cercana primero (antes mostraba las 3 más VIEJAS). Vencidas: la fecha ya
+    pasó y el lead sigue 'agendado' (nadie la cerró) — la más reciente primero."""
+    agendados = await listar_leads_agendados(negocio_id, asesor_asignado=asesor)
+    ahora_lima = ahora_utc - _OFFSET_LIMA
+    con_fecha = [l for l in agendados if l.get("fecha_agendada")]
+    proximas = sorted((l for l in con_fecha if l["fecha_agendada"] >= ahora_lima), key=lambda l: l["fecha_agendada"])
+    vencidas = sorted((l for l in con_fecha if l["fecha_agendada"] < ahora_lima), key=lambda l: l["fecha_agendada"], reverse=True)
+    en_7_dias = sum(1 for l in proximas if l["fecha_agendada"] <= ahora_lima + timedelta(days=7))
+    return proximas, vencidas, en_7_dias
+
+
+async def _zona_accion_datos(negocio_id: str, asesor: str | None, vista_admin: bool) -> dict:
+    """Zona de acción de Inicio. `asesor` acota a los leads de ese asesor
+    (vista Asesor); la vista admin/supervisor ve el negocio completo y suma
+    los que están sin asesor / escalados a supervisión."""
+    ahora = datetime.utcnow()
+    esperando = await listar_clientes_esperando(negocio_id, asesor=asesor, ahora=ahora)
+    proximas, vencidas, citas_7_dias = await _citas_inicio(negocio_id, asesor, ahora)
+
+    escalados: list[dict] = []
+    sin_asesor: list[dict] = []
+    if vista_admin:
+        esperando_asignar = await listar_leads_esperando_asesor(negocio_id)
+        # 2026-10-04: los que ningún asesor atendió (pasaron a la cola de
+        # supervisión) van primero y con su propio motivo — Gabi no los
+        # retoma, así que si el supervisor no los trata, nadie lo hace.
+        escalados = [l for l in esperando_asignar if l.get("escalado_supervision_en")]
+        sin_asesor = [l for l in esperando_asignar if not l.get("escalado_supervision_en")]
+
+    pares: list[tuple[dict, dict]] = []   # (lead_o_cliente, item sin conversation_id resuelto)
+    mostrados: set[str] = set()
+    for l in escalados[:TOPES_ZONA_ACCION["escalados"]]:
+        pares.append((l, _item_zona(l, "Escalado a supervisión — ningún asesor respondió", "escalado")))
+        mostrados.add(l["telefono"])
+    for l in sin_asesor[:TOPES_ZONA_ACCION["sin_asesor"]]:
+        pares.append((l, _item_zona(l, "Sin asesor asignado", "sin_asesor")))
+        mostrados.add(l["telefono"])
+    # Un mismo cliente no aparece dos veces (escalado/sin asesor ya lo cubren).
+    for c in [c for c in esperando if c["telefono"] not in mostrados][:TOPES_ZONA_ACCION["cliente_esperando"]]:
+        pares.append((c, _item_cliente_esperando(c, vista_admin)))
+    for l in proximas[:TOPES_ZONA_ACCION["citas_proximas"]]:
+        pares.append((l, _item_zona(l, _texto_cita(l, "Cita agendada"), "cita")))
+    for l in vencidas[:TOPES_ZONA_ACCION["citas_vencidas"]]:
+        pares.append((l, _item_zona(l, _texto_cita(l, "Cita vencida sin cerrar"), "cita_vencida")))
+
+    abiertas = [c for c in esperando if c["ventana_abierta"]]
+    totales = {
+        "cliente_esperando": len(esperando),
+        "ventana_abierta": len(abiertas),
+        "ventana_por_vencer": sum(1 for c in abiertas if c["ventana_vence_en"] - ahora < _VENTANA_POR_VENCER),
+        "escalados": len(escalados), "sin_asesor": len(sin_asesor),
+        # Casos DISTINTOS de la sección "Responde ahora" (escalados + sin asesor +
+        # clientes esperando): un escalado suele ser también cliente esperando,
+        # así que sumar los tres totales contaría dos veces al mismo cliente.
+        "ahora_total": len(
+            {l["telefono"] for l in escalados} | {l["telefono"] for l in sin_asesor} | {c["telefono"] for c in esperando}
+        ),
+        "citas_proximas": len(proximas), "citas_vencidas": len(vencidas),
+        # Extra (no estaba en el contrato original): alimenta el indicador
+        # "Citas próximas (7 días)" de la vista Asesor.
+        "citas_7_dias": citas_7_dias,
+    }
+
+    if not pares:
+        mensaje = _MENSAJE_VACIO_ADMIN if vista_admin else _MENSAJE_VACIO_ASESOR
+        return {"vacio": True, "mensaje_vacio": mensaje, "items": [], "totales": totales}
+
+    # Los clientes esperando ya traen su conversation_id; el resto (leads sin
+    # asignar, citas) se resuelve en bloque, no uno por uno.
+    faltantes = [fuente["telefono"] for fuente, item in pares if not item["conversation_id"]]
+    conversation_ids = await resolver_conversation_ids_por_telefono(negocio_id, faltantes) if faltantes else {}
+    items = []
+    for fuente, item in pares:
+        if not item["conversation_id"]:
+            item["conversation_id"] = conversation_ids.get(fuente["telefono"])
+        items.append(item)
+    return {"vacio": False, "mensaje_vacio": None, "items": items, "totales": totales}
+
+
 async def _zona_accion_asesor_datos(usuario: dict, datos: dict) -> dict:
     """Estructura de datos de la Zona de acción — Asesor (Product Patterns
     Cap. 3 §3: lista priorizada de conversaciones/oportunidades propias)."""
-    esperando = sorted(
-        (l for l in datos["leads_todos"] if l.get("pausado_manual")),
-        key=lambda l: l.get("actualizado") or datetime.min,
-    )
-    agendados = await listar_leads_agendados(usuario["negocio_id"], asesor_asignado=usuario["username"])
-
-    pares = [(l, "Esperando tu respuesta") for l in esperando[:5]]
-    for l in agendados[:3]:
-        fecha = l["fecha_agendada"].strftime("%d/%m %H:%M") if l.get("fecha_agendada") else "sin hora"
-        pares.append((l, f"Cita agendada — {fecha}"))
-
-    if not pares:
-        return {"vacio": True, "mensaje_vacio": "No tenés conversaciones que requieran tu atención ahora mismo.", "items": []}
-
-    conversation_ids = await resolver_conversation_ids_por_telefono(
-        usuario["negocio_id"], [l["telefono"] for l, _ in pares],
-    )
-    items = [
-        {
-            "telefono": l["telefono"], "conversation_id": conversation_ids.get(l["telefono"]),
-            "nombre": l.get("nombre"), "motivo": motivo,
-        }
-        for l, motivo in pares
-    ]
-    return {"vacio": False, "mensaje_vacio": None, "items": items}
+    return await _zona_accion_datos(usuario["negocio_id"], usuario["username"], vista_admin=False)
 
 
 async def _zona_accion_admin_datos(datos: dict, negocio_id: str) -> dict:
     """Estructura de datos de la Zona de acción — Administrador/Supervisor
     (Product Patterns Cap. 3 §3: qué requiere intervención hoy, alcance del
     Negocio)."""
-    esperando_asignar = await listar_leads_esperando_asesor(negocio_id)
-    # 2026-10-04: los que ningún asesor atendió (pasaron a la cola de
-    # supervisión) van primero y con su propio motivo — Gabi no los retoma,
-    # así que si el supervisor no los trata, nadie lo hace.
-    escalados = [l for l in esperando_asignar if l.get("escalado_supervision_en")]
-    sin_asesor = [l for l in esperando_asignar if not l.get("escalado_supervision_en")]
-    esperando_respuesta = sorted(
-        (l for l in datos["leads_todos"] if l.get("pausado_manual") and not l.get("escalado_supervision_en")),
-        key=lambda l: l.get("actualizado") or datetime.min,
-    )
-    agendados = await listar_leads_agendados(negocio_id)
-
-    pares = [(l, "Escalado a supervisión — ningún asesor respondió") for l in escalados[:5]]
-    pares += [(l, "Sin asesor asignado") for l in sin_asesor[:5]]
-    for l in esperando_respuesta[:5]:
-        asesor_nombre = l.get("asesor_asignado") or "sin asesor"
-        pares.append((l, f"Esperando respuesta — {asesor_nombre}"))
-    for l in agendados[:3]:
-        fecha = l["fecha_agendada"].strftime("%d/%m %H:%M") if l.get("fecha_agendada") else "sin hora"
-        pares.append((l, f"Cita agendada — {fecha}"))
-
-    if not pares:
-        return {"vacio": True, "mensaje_vacio": "El equipo no tiene conversaciones que requieran tu intervención ahora mismo.", "items": []}
-
-    conversation_ids = await resolver_conversation_ids_por_telefono(
-        negocio_id, [l["telefono"] for l, _ in pares],
-    )
-    items = [
-        {
-            "telefono": l["telefono"], "conversation_id": conversation_ids.get(l["telefono"]),
-            "nombre": l.get("nombre"), "motivo": motivo,
-        }
-        for l, motivo in pares
-    ]
-    return {"vacio": False, "mensaje_vacio": None, "items": items}
+    return await _zona_accion_datos(negocio_id, None, vista_admin=True)
 
 
-def _zona_indicadores_asesor_datos(datos: dict) -> list[dict]:
-    activas = len(datos["leads_derivados"]) + len(datos["leads_con_gabi"])
+def _zona_indicadores_asesor_datos(casos_activos: int, totales: dict) -> list[dict]:
+    # Antes "Conversaciones activas" y "Leads asignados" eran el MISMO número
+    # (y contaban cerrados). Ahora: casos vivos, los que esperan, y agenda.
     return [
-        {"valor": activas, "etiqueta": "Conversaciones activas"},
-        {"valor": len(datos["leads_todos"]), "etiqueta": "Leads asignados"},
+        {"valor": casos_activos, "etiqueta": "Mis casos activos"},
+        {"valor": totales["cliente_esperando"], "etiqueta": "Esperando respuesta"},
+        {"valor": totales["citas_7_dias"], "etiqueta": "Citas próximas (7 días)"},
     ]
 
 
-def _zona_indicadores_admin_datos(datos: dict, asesores: list[dict]) -> list[dict]:
+def _zona_indicadores_admin_datos(casos_activos: int, totales: dict, asesores: list[dict]) -> list[dict]:
     disponibles = sum(1 for a in asesores if a.get("disponible"))
-    activas = len(datos["leads_derivados"]) + len(datos["leads_con_gabi"])
     return [
-        {"valor": activas, "etiqueta": "Conversaciones activas"},
-        {"valor": len(datos["leads_todos"]), "etiqueta": "Leads en curso"},
+        {"valor": casos_activos, "etiqueta": "Casos activos"},
+        {"valor": totales["cliente_esperando"], "etiqueta": "Esperando respuesta"},
         {"valor": f"{disponibles}/{len(asesores)}", "etiqueta": "Asesores disponibles"},
     ]
+
+
+def _aviso(id_: str, nivel: str, titulo: str, detalle: str) -> dict:
+    return {"id": id_, "nivel": nivel, "titulo": titulo, "detalle": detalle, "enlace": _RUTA_USO}
+
+
+async def _avisos_inicio(usuario: dict) -> list[dict]:
+    """Avisos de uso/costos de WhatsApp para Inicio — SOLO para el rol
+    'admin' (decisión del usuario: supervisor y asesor no los ven). Nunca
+    rompe Inicio: ante cualquier falla se registra y devuelve []."""
+    if usuario.get("rol") != "admin":
+        return []
+    try:
+        negocio_id = usuario["negocio_id"]
+        resumen = await resumen_uso_mensual(negocio_id)
+        try:
+            mapa_canales = await _mapa_canales(negocio_id)
+        except Exception:
+            mapa_canales = {}
+        avisos: list[dict] = []
+
+        for numero in resumen.get("numeros", []):
+            alertas = numero.get("alertas") or []
+            if not alertas:
+                continue
+            pid = numero["phone_number_id"]
+            nombre = (mapa_canales.get(pid) or {}).get("nombre") or pid
+            cuota = resumen.get("cuota_gratis_servicio")
+            usados = numero.get("servicio_gratis_total", 0)
+            restantes = numero.get("gratis_restantes", 0)
+            cobrables = numero.get("servicio_cobrables", 0)
+            nivel_alerta = max(alertas)
+            if nivel_alerta >= 100:
+                avisos.append(_aviso(
+                    f"cuota-{pid}-100", "error", "Se acabaron los mensajes gratis de WhatsApp este mes",
+                    f"{nombre}: usaste {usados} de {cuota} mensajes gratis. Te quedan {restantes} gratis "
+                    f"y ya hay {cobrables} mensajes de servicio cobrables este mes.",
+                ))
+            elif nivel_alerta >= 95:
+                avisos.append(_aviso(
+                    f"cuota-{pid}-95", "warning", "Te quedan muy pocos mensajes gratis de WhatsApp este mes",
+                    f"{nombre}: usaste {usados} de {cuota} mensajes gratis; te quedan {restantes}.",
+                ))
+            else:
+                avisos.append(_aviso(
+                    f"cuota-{pid}-80", "warning", "Usaste el 80 % de tus mensajes gratis de WhatsApp",
+                    f"{nombre}: usaste {usados} de {cuota} mensajes gratis; te quedan {restantes}.",
+                ))
+
+        alertas_tope = resumen.get("alertas_tope") or []
+        if alertas_tope:
+            gasto = resumen.get("gasto_estimado_usd")
+            tope = resumen.get("tope_mensual_usd")
+            detalle_tope = f"Gasto estimado USD {gasto} sobre un tope de USD {tope}."
+            if max(alertas_tope) >= 100:
+                avisos.append(_aviso("tope-100", "error", "Llegaste al tope de gasto mensual", detalle_tope))
+            else:
+                avisos.append(_aviso("tope-80", "warning", "Estás cerca del tope de gasto mensual (80 %)", detalle_tope))
+
+        faltantes = resumen.get("tarifas_faltantes") or []
+        if faltantes:
+            avisos.append(_aviso(
+                "tarifas-faltantes", "warning", "Faltan tarifas: el costo y el tope no se pueden calcular",
+                "Configura la tarifa de: " + ", ".join(faltantes) + ".",
+            ))
+
+        gasto = resumen.get("gasto_estimado_usd")
+        if resumen.get("autorecarga") is False and resumen.get("tope_mensual_usd") == 0 and gasto and gasto > 0:
+            avisos.append(_aviso(
+                "tope-cero", "warning", "Tienes el tope en USD 0: los envíos no esenciales que se cobren se frenarán",
+                f"Ya hay un gasto estimado de USD {gasto} este mes. Sube el tope o activa la autorecarga si quieres que sigan saliendo.",
+            ))
+
+        orden = {"error": 0, "warning": 1, "info": 2}
+        avisos.sort(key=lambda a: orden.get(a["nivel"], 3))
+        return avisos
+    except Exception:
+        logger.exception("Inicio: no se pudieron calcular los avisos de uso (se devuelve lista vacía)")
+        return []
 
 
 async def _zona_accion_asesor(usuario: dict, datos: dict) -> str:
@@ -3362,7 +3523,7 @@ async def _zona_accion_asesor(usuario: dict, datos: dict) -> str:
     agendados = await listar_leads_agendados(usuario["negocio_id"], asesor_asignado=usuario["username"])
 
     if not esperando and not agendados:
-        return _zona_accion_vacia("No tenés conversaciones que requieran tu atención ahora mismo.")
+        return _zona_accion_vacia(_MENSAJE_VACIO_ASESOR)
 
     items = [_item_zona_accion(l["telefono"], l.get("nombre"), "Esperando tu respuesta") for l in esperando[:5]]
     for l in agendados[:3]:
@@ -3455,15 +3616,18 @@ async def inicio_json(usuario: dict = Depends(_usuario_actual)):
     if datos["vision_total"]:
         zona_accion = await _zona_accion_admin_datos(datos, usuario["negocio_id"])
         asesores = await listar_asesores(usuario["negocio_id"])
-        zona_indicadores = _zona_indicadores_admin_datos(datos, asesores)
+        casos_activos = await contar_casos_activos(usuario["negocio_id"])
+        zona_indicadores = _zona_indicadores_admin_datos(casos_activos, zona_accion["totales"], asesores)
     else:
         zona_accion = await _zona_accion_asesor_datos(usuario, datos)
-        zona_indicadores = _zona_indicadores_asesor_datos(datos)
+        casos_activos = await contar_casos_activos(usuario["negocio_id"], asesor=usuario["username"])
+        zona_indicadores = _zona_indicadores_asesor_datos(casos_activos, zona_accion["totales"])
 
     return JSONResponse({
         "vision_total": datos["vision_total"],
         "zona_accion": zona_accion,
         "zona_indicadores": zona_indicadores,
+        "avisos": await _avisos_inicio(usuario),
     })
 
 

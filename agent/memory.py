@@ -13,6 +13,7 @@ import logging
 import asyncio
 import re
 import time
+import unicodedata
 from urllib.parse import urlparse
 # `time` (el módulo, ya importado arriba para time.perf_counter) choca de
 # nombre con datetime.time (la clase de hora del día) — se importa aparte
@@ -4565,6 +4566,158 @@ async def listar_leads_esperando_asesor(negocio_id: str) -> list[dict]:
         result = await session.execute(query)
         leads = result.scalars().all()
         return [_lead_a_dict(l) for l in leads if l.resultado not in RESULTADOS_CERRADOS]
+
+
+# ── Inicio verdadero (paquete B, 2026-10-05) ────────────────────────────
+#
+# "Clientes esperando": conversaciones activas cuyo ÚLTIMO mensaje real es del
+# cliente y nadie respondió después, con una persona (asesor/supervisión) de
+# por medio. Reemplaza el criterio anterior de Inicio (`pausado_manual`), que
+# no decía si el cliente realmente estaba esperando ni cuánto le quedaba a la
+# ventana de 24 h de Meta.
+
+VENTANA_META_HORAS = 24
+
+# Prefijo con el que meta.py guarda las reacciones (👍 sobre un mensaje): no
+# son un mensaje real del cliente ni una respuesta — se ignoran al decidir.
+PREFIJO_REACCION = "Reaccionó con"
+
+_EMOJIS_CIERRE = "👍🙏👌🙌😊😉✅🤝👏"
+_PALABRAS_NUCLEO_CIERRE = frozenset({
+    "gracias", "ok", "okay", "okey", "listo", "lista", "vale", "perfecto", "perfecta", "dale",
+    "entendido", "entendida", "genial", "excelente", "buenisimo", "emoji",
+})
+_PALABRAS_RELLENO_CIERRE = frozenset({
+    "muchas", "muchisimas", "mil", "por", "todo", "la", "el", "su", "tu", "ayuda", "atencion",
+    "informacion", "info", "ya", "bien", "bueno", "de", "nada", "quedo", "atento", "atenta",
+    "saludos", "entonces", "te", "aviso", "avisare",
+})
+
+
+def es_probable_cierre(texto: str | None) -> bool:
+    """True si el mensaje del cliente parece un cierre de cortesía (gracias,
+    ok, listo, 👍...): muy corto (<= 30 caracteres), sin pregunta y formado
+    solo por palabras de agradecimiento/cierre. SOLO etiqueta y baja la
+    prioridad en Inicio — nunca oculta el caso ni cambia su estado."""
+    t = (texto or "").strip()
+    if not t or len(t) > 30 or "?" in t or "¿" in t:
+        return False
+    t = unicodedata.normalize("NFKD", t.lower())
+    t = "".join(c for c in t if not unicodedata.combining(c))
+    t = re.sub("[️\U0001F3FB-\U0001F3FF]", "", t)  # selector de variación y tonos de piel
+    t = re.sub(f"[{_EMOJIS_CIERRE}]", " emoji ", t)
+    t = re.sub(r"[^\w\s]|_", " ", t)
+    palabras = t.split()
+    if not palabras:
+        return False
+    permitidas = _PALABRAS_NUCLEO_CIERRE | _PALABRAS_RELLENO_CIERRE
+    return all(p in permitidas for p in palabras) and any(p in _PALABRAS_NUCLEO_CIERRE for p in palabras)
+
+
+async def listar_clientes_esperando(
+    negocio_id: str, asesor: str | None = None, limite: int | None = None, ahora: datetime | None = None,
+) -> list[dict]:
+    """Clientes que esperan respuesta de una persona (Inicio verdadero).
+
+    Criterio: Conversation `activa` del negocio cuyo ÚLTIMO mensaje real
+    (ignorando reacciones) es del cliente (`role == "user"`), con un humano de
+    por medio: lead con `asesor_asignado`, `pausado_manual` o
+    `escalado_supervision_en`. NO incluye lo que Gabi atiende sola sin asesor
+    (ella responde). Aplica a CUALQUIER resultado, incluido vendido y
+    agendado — un cliente ya vendido que escribe de nuevo también espera.
+    `asesor` acota a los leads de ese asesor (el asesor ve solo los suyos).
+
+    Una sola consulta (ROW_NUMBER por conversación, sin N+1). Cada ítem:
+    `conversation_id`, `telefono`, `nombre`, `asesor_asignado`, `resultado`,
+    `ultimo_mensaje_cliente_en` (UTC naive), `escalado`, `probable_cierre`,
+    `ventana_vence_en` (último mensaje + 24 h, UTC naive) y `ventana_abierta`.
+
+    Orden: primero ventana abierta (la que vence antes, primero); luego
+    ventanas cerradas (la más reciente primero). Dentro de cada grupo los
+    `probable_cierre` van al final. `probable_cierre` solo etiqueta: nunca
+    oculta el ítem ni toca el estado del lead."""
+    ahora = ahora or datetime.utcnow()
+    async with async_session() as session:
+        conversaciones_activas = select(Conversation.id).where(
+            Conversation.negocio_id == negocio_id, Conversation.estado == "activa",
+        )
+        fila = (
+            func.row_number()
+            .over(partition_by=Mensaje.conversation_id, order_by=(Mensaje.timestamp.desc(), Mensaje.id.desc()))
+            .label("fila")
+        )
+        ultimos = (
+            select(
+                Mensaje.conversation_id.label("conversation_id"), Mensaje.role.label("role"),
+                Mensaje.content.label("content"), Mensaje.timestamp.label("ts"),
+            )
+            .where(
+                Mensaje.negocio_id == negocio_id,
+                Mensaje.conversation_id.in_(conversaciones_activas),
+                ~func.coalesce(Mensaje.content, "").startswith(PREFIJO_REACCION),
+            )
+            .add_columns(fila)
+            .subquery()
+        )
+        hay_humano = sa_or(
+            sa_and(Lead.asesor_asignado.is_not(None), Lead.asesor_asignado != ""),
+            Lead.pausado_manual.is_(True),
+            Lead.escalado_supervision_en.is_not(None),
+        )
+        query = (
+            select(
+                Conversation.id, Contact.telefono, Contact.nombre, Lead.nombre, Lead.asesor_asignado,
+                Lead.resultado, Lead.escalado_supervision_en, ultimos.c.content, ultimos.c.ts,
+            )
+            .join(ultimos, sa_and(ultimos.c.conversation_id == Conversation.id, ultimos.c.fila == 1))
+            .join(Contact, Contact.id == Conversation.contact_id)
+            .join(Lead, sa_and(Lead.telefono == Contact.telefono, Lead.negocio_id == Conversation.negocio_id))
+            .where(
+                Conversation.negocio_id == negocio_id, Conversation.estado == "activa",
+                ultimos.c.role == "user", hay_humano,
+            )
+        )
+        if asesor:
+            query = query.where(Lead.asesor_asignado == asesor)
+        filas = (await session.execute(query)).all()
+
+    items = []
+    for conv_id, telefono, nombre_contact, nombre_lead, asesor_asignado, resultado, escalado_en, contenido, ts in filas:
+        vence = ts + timedelta(hours=VENTANA_META_HORAS)
+        items.append({
+            "conversation_id": conv_id, "telefono": telefono, "nombre": nombre_lead or nombre_contact,
+            "asesor_asignado": asesor_asignado or None, "resultado": resultado,
+            "ultimo_mensaje_cliente_en": ts, "escalado": escalado_en is not None,
+            "probable_cierre": es_probable_cierre(contenido),
+            "ventana_vence_en": vence, "ventana_abierta": vence > ahora,
+        })
+
+    def _clave(it: dict):
+        ts = (it["ultimo_mensaje_cliente_en"] - datetime(1970, 1, 1)).total_seconds()
+        # abiertas: la que vence antes (mensaje más viejo) primero; cerradas: la más reciente primero
+        return (0 if it["ventana_abierta"] else 1, 1 if it["probable_cierre"] else 0, ts if it["ventana_abierta"] else -ts)
+
+    items.sort(key=_clave)
+    return items[:limite] if limite is not None else items
+
+
+async def contar_casos_activos(negocio_id: str, asesor: str | None = None) -> int:
+    """Conversaciones activas del negocio cuyo lead no tiene un resultado
+    cerrado (`RESULTADOS_CERRADOS`) — el "caso activo" de Inicio. Con
+    `asesor`, solo las de ese asesor. Un conteo SQL, sin traer filas."""
+    async with async_session() as session:
+        query = (
+            select(func.count(Conversation.id))
+            .join(Contact, Contact.id == Conversation.contact_id)
+            .join(Lead, sa_and(Lead.telefono == Contact.telefono, Lead.negocio_id == Conversation.negocio_id))
+            .where(
+                Conversation.negocio_id == negocio_id, Conversation.estado == "activa",
+                sa_or(Lead.resultado.is_(None), Lead.resultado.not_in(RESULTADOS_CERRADOS)),
+            )
+        )
+        if asesor:
+            query = query.where(Lead.asesor_asignado == asesor)
+        return (await session.execute(query)).scalar_one()
 
 
 def _exigir_lead_existente(lead: "Lead | None", telefono: str, funcion: str) -> "Lead":

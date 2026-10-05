@@ -10,6 +10,12 @@
 #
 # Datos sintéticos únicamente, reutiliza los helpers ya establecidos de
 # test_gate53_contact_conversation_opportunity.py.
+#
+# 2026-10-05 (Inicio verdadero, ver tests/test_inicio_v2.py): "esperando"
+# dejó de ser `pausado_manual` — ahora es "el último mensaje real es del
+# cliente y nadie respondió" (hace falta un mensaje del cliente en estos
+# datos de prueba), los indicadores cambiaron (sin el duplicado) y la Zona de
+# acción suma `categoria` y `totales`. Los mensajes de vacío usan tuteo.
 
 import json
 from datetime import datetime, timedelta
@@ -33,6 +39,10 @@ async def _lead_pausado(telefono: str, negocio_id: str, asesor: str, nombre: str
         lead.pausado_manual = True
         lead.actualizado = actualizado
         await session.commit()
+
+
+async def _mensaje_cliente(negocio_id: str, telefono: str, texto: str = "Hola, necesito ayuda"):
+    await mem.guardar_mensaje(telefono, "user", texto, negocio_id)
 
 
 async def _lead_agendado(telefono: str, negocio_id: str, asesor: str | None, nombre: str, fecha: datetime):
@@ -63,11 +73,9 @@ async def test_zona_accion_asesor_vacia_cuando_no_hay_nada():
     usuario = {"username": "asesor1", "negocio_id": negocio["id"]}
     datos = {"leads_todos": []}
     resultado = await dashboard._zona_accion_asesor_datos(usuario, datos)
-    assert resultado == {
-        "vacio": True,
-        "mensaje_vacio": "No tenés conversaciones que requieran tu atención ahora mismo.",
-        "items": [],
-    }
+    assert resultado["vacio"] is True and resultado["items"] == []
+    assert resultado["mensaje_vacio"] == "No tienes conversaciones que requieran tu atención ahora mismo."
+    assert resultado["totales"]["cliente_esperando"] == 0
 
 
 async def test_zona_accion_asesor_prioriza_esperando_antes_que_agendados_y_resuelve_conversation_id():
@@ -79,6 +87,7 @@ async def test_zona_accion_asesor_prioriza_esperando_antes_que_agendados_y_resue
         "51900400001", negocio["id"], "asesor1", "Cliente Esperando",
         datetime.utcnow() - timedelta(hours=2),
     )
+    await _mensaje_cliente(negocio["id"], "51900400001")
     await _lead_agendado(
         "51900400002", negocio["id"], "asesor1", "Cliente Agendado",
         datetime.utcnow() + timedelta(days=1),
@@ -95,6 +104,7 @@ async def test_zona_accion_asesor_prioriza_esperando_antes_que_agendados_y_resue
     assert [i["motivo"] for i in resultado["items"]] == ["Esperando tu respuesta", "Cita agendada — " + (
         datetime.utcnow() + timedelta(days=1)
     ).strftime("%d/%m %H:%M")]
+    assert [i["categoria"] for i in resultado["items"]] == ["cliente_esperando", "cita"]
     assert resultado["items"][0]["telefono"] == "51900400001"
     assert resultado["items"][0]["conversation_id"] == conversation.id
     assert resultado["items"][1]["telefono"] == "51900400002"
@@ -104,9 +114,12 @@ async def test_zona_accion_asesor_prioriza_esperando_antes_que_agendados_y_resue
 async def test_zona_accion_admin_incluye_sin_asignar_y_esperando_con_nombre_de_asesor():
     negocio, _ = await _negocio_con_canal("g31-c", "30100000003")
     await _lead_sin_asignar("51900400003", negocio["id"], "Sin Asignar")
+    canal = (await mem.listar_canales_whatsapp(negocio_id=negocio["id"]))[0]
+    await mem.resolver_conversation_activa("51900400004", negocio["id"], canal["id"])
     await _lead_pausado(
         "51900400004", negocio["id"], "asesor2", "Cliente Pausado", datetime.utcnow(),
     )
+    await _mensaje_cliente(negocio["id"], "51900400004")
 
     datos = {"leads_todos": [
         await mem.obtener_lead("51900400003", negocio_id=negocio["id"]),
@@ -123,6 +136,7 @@ async def test_zona_accion_admin_vacia_mensaje_distinto_del_asesor():
     resultado = await dashboard._zona_accion_admin_datos({"leads_todos": []}, negocio["id"])
     assert resultado["vacio"] is True
     assert resultado["mensaje_vacio"] == "El equipo no tiene conversaciones que requieran tu intervención ahora mismo."
+    assert resultado["totales"]["escalados"] == 0
 
 
 # ---------------------------------------------------------------------------
@@ -130,21 +144,21 @@ async def test_zona_accion_admin_vacia_mensaje_distinto_del_asesor():
 # ---------------------------------------------------------------------------
 
 def test_zona_indicadores_asesor_datos():
-    datos = {"leads_derivados": [1, 2], "leads_con_gabi": [1], "leads_todos": [1, 2, 3]}
-    resultado = dashboard._zona_indicadores_asesor_datos(datos)
+    totales = {"cliente_esperando": 2, "citas_7_dias": 1}
+    resultado = dashboard._zona_indicadores_asesor_datos(5, totales)
     assert resultado == [
-        {"valor": 3, "etiqueta": "Conversaciones activas"},
-        {"valor": 3, "etiqueta": "Leads asignados"},
+        {"valor": 5, "etiqueta": "Mis casos activos"},
+        {"valor": 2, "etiqueta": "Esperando respuesta"},
+        {"valor": 1, "etiqueta": "Citas próximas (7 días)"},
     ]
 
 
 def test_zona_indicadores_admin_datos():
-    datos = {"leads_derivados": [1], "leads_con_gabi": [], "leads_todos": [1, 2]}
     asesores = [{"disponible": True}, {"disponible": False}, {"disponible": True}]
-    resultado = dashboard._zona_indicadores_admin_datos(datos, asesores)
+    resultado = dashboard._zona_indicadores_admin_datos(7, {"cliente_esperando": 3}, asesores)
     assert resultado == [
-        {"valor": 1, "etiqueta": "Conversaciones activas"},
-        {"valor": 2, "etiqueta": "Leads en curso"},
+        {"valor": 7, "etiqueta": "Casos activos"},
+        {"valor": 3, "etiqueta": "Esperando respuesta"},
         {"valor": "2/3", "etiqueta": "Asesores disponibles"},
     ]
 
@@ -180,7 +194,10 @@ async def test_ruta_inicio_json_asesor_ve_solo_lo_propio():
     await mem.crear_usuario("asesor1", "pw12345", "Asesor Uno", "asesor", negocio["id"])
     await mem.resolver_conversation_activa("51900400007", negocio["id"], canal["id"])
     await _lead_pausado("51900400007", negocio["id"], "asesor1", "Mío", datetime.utcnow())
+    await _mensaje_cliente(negocio["id"], "51900400007")
+    await mem.resolver_conversation_activa("51900400008", negocio["id"], canal["id"])
     await _lead_pausado("51900400008", negocio["id"], "otro_asesor", "Ajeno", datetime.utcnow())
+    await _mensaje_cliente(negocio["id"], "51900400008")
 
     usuario = await mem.obtener_usuario("asesor1", negocio_id=negocio["id"])
     respuesta = await dashboard.inicio_json(usuario=usuario)
@@ -190,7 +207,8 @@ async def test_ruta_inicio_json_asesor_ve_solo_lo_propio():
     telefonos = [i["telefono"] for i in cuerpo["zona_accion"]["items"]]
     assert "51900400007" in telefonos
     assert "51900400008" not in telefonos
-    assert cuerpo["zona_indicadores"][1]["etiqueta"] == "Leads asignados"
+    assert cuerpo["zona_indicadores"][1] == {"valor": 1, "etiqueta": "Esperando respuesta"}
+    assert cuerpo["avisos"] == []
 
 
 async def test_ruta_inicio_json_admin_ve_alcance_global():
@@ -199,6 +217,7 @@ async def test_ruta_inicio_json_admin_ve_alcance_global():
     await mem.crear_usuario("asesor_x", "pw12345", "Asesor X", "asesor", negocio["id"])
     await mem.resolver_conversation_activa("51900400009", negocio["id"], canal["id"])
     await _lead_pausado("51900400009", negocio["id"], "asesor_x", "De Otro Asesor", datetime.utcnow())
+    await _mensaje_cliente(negocio["id"], "51900400009")
 
     usuario = await mem.obtener_usuario("admin1", negocio_id=negocio["id"])
     respuesta = await dashboard.inicio_json(usuario=usuario)
@@ -218,6 +237,7 @@ async def test_legacy_zona_accion_asesor_sigue_generando_html_equivalente():
     negocio, canal = await _negocio_con_canal("g31-j", "30100000010")
     await mem.resolver_conversation_activa("51900400010", negocio["id"], canal["id"])
     await _lead_pausado("51900400010", negocio["id"], "asesor1", "Cliente Legacy", datetime.utcnow())
+    await _mensaje_cliente(negocio["id"], "51900400010")
 
     usuario = {"username": "asesor1", "negocio_id": negocio["id"]}
     datos = {"leads_todos": [await mem.obtener_lead("51900400010", negocio_id=negocio["id"])]}
