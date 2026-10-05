@@ -116,12 +116,15 @@ async def test_el_historial_es_por_negocio():
 
 # ── Lectura de la configuración y rutas ──────────────────────────────────
 
-async def test_la_configuracion_vigente_trae_los_ocho_origenes_con_sus_defaults_y_lo_que_se_cambio():
+async def test_la_configuracion_vigente_trae_los_nueve_origenes_con_sus_defaults_y_lo_que_se_cambio():
     nid = await _negocio("seg-8")
     c = await mem.obtener_configuracion_envios(nid)
     por = {o["origen"]: o for o in c["origenes"]}
-    assert len(por) == 8
-    assert all(por[o]["esencial"] and por[o]["modo"] == "siempre" for o in ("gabi_respuesta", "gabi_aviso_derivacion", "asesor_texto", "asesor_archivo", "asesor_audio"))
+    assert len(por) == 9
+    assert all(por[o]["esencial"] and por[o]["modo"] == "siempre" for o in ("gabi_respuesta", "gabi_aviso_derivacion", "gabi_respaldo_sin_ia", "asesor_texto", "asesor_archivo", "asesor_audio"))
+    # El aviso del modo sin IA no se agrupa menos de 60 min y queda fuera del tope de gasto.
+    assert (por["gabi_respaldo_sin_ia"]["agrupar_minutos"], por["gabi_respaldo_sin_ia"]["exento_tope"]) == (60, True)
+    assert not any(por[o]["exento_tope"] for o in por if o != "gabi_respaldo_sin_ia")
     assert (por["reenganche_inactividad"]["modo"], por["gabi_aviso_no_legible"]["modo"], por["gabi_aviso_no_legible"]["agrupar_minutos"]) == ("solo_gratis", "solo_gratis", 10)
     assert (por["plantilla_formulario"]["modo"], por["plantilla_formulario"]["categoria_plantilla"]) == ("siempre", "marketing")
     assert (c["tope_mensual_usd"], c["autorecarga"], c["tope_bloquea_esenciales"], c["meta_fep_horas"], c["cuota_gratis_servicio"]) == (0, False, False, 72, 1000)

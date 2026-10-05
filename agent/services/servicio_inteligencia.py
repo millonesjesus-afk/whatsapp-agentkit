@@ -71,6 +71,13 @@ class ServicioInteligencia:
     def obtener_mensaje_derivacion(self, dentro_de_horario: bool) -> str:
         return brain.obtener_mensaje_derivacion(dentro_de_horario)
 
+    def obtener_mensaje_sin_ia(
+        self, tipo: str, nombre: str | None = None, *, horario: str | None = None, dia: str | None = None,
+        hora: str | None = None,
+    ) -> str:
+        """Texto fijo del modo sin IA (Fase 1) — no gasta tokens ni llama a Claude."""
+        return brain.obtener_mensaje_sin_ia(tipo, nombre, horario=horario, dia=dia, hora=hora)
+
     async def resolver_accion_confianza(self, confianza: str) -> str:
         """Traduce un nivel de confianza emitido por el AI Engine en la
         acción de negocio configurada para ese nivel — nunca al revés: el

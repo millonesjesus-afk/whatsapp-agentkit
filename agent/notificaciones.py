@@ -115,3 +115,68 @@ async def notificar_solicitud_reseteo(username: str) -> bool:
         return False
     logger.info(f"Notificación de reseteo de contraseña enviada para {username}")
     return True
+
+
+# Alerta al DUEÑO DE LA PLATAFORMA (no al equipo comercial) cuando el circuito de la IA se abre o
+# se cierra (Fase 1, modo sin IA). Una lista aparte de NOTIFICACION_DESTINATARIOS a propósito:
+# aquella es el equipo comercial (supervisores), y esta alerta habla de saldo y credenciales de la
+# API — un asunto de quien paga la plataforma, no de las asesoras. Mismo servicio de correo (Resend).
+DESTINATARIOS_PLATAFORMA = [
+    correo.strip()
+    for correo in os.getenv("ALERTA_PLATAFORMA_DESTINATARIOS", "").split(",")
+    if correo.strip()
+]
+
+_MOTIVO_LEGIBLE = {
+    "credito": "el saldo (créditos) de la API de Anthropic se agotó",
+    "tope_gasto": "se alcanzó el límite de gasto de la API de Anthropic",
+    "auth": "la API de Anthropic rechazó la credencial (clave inválida o sin permiso)",
+    "transitorio": "la API de Anthropic falla de forma repetida (errores transitorios)",
+}
+
+
+async def notificar_circuito_ia(abierto: bool, motivo: str, resumen: dict | None = None) -> bool:
+    """Un RESUMEN (nunca un correo por lead) para el dueño de la plataforma: el circuito de la IA
+    se abrió (Gabi pasa a modo sin IA) o se cerró (Gabi vuelve a responder con IA). `resumen`
+    ({"total", "en_cola"}) solo se usa al cerrar: cuántos casos derivó el modo sin IA.
+
+    Siempre deja una línea WARNING en el log (es lo que queda si el correo no está configurado
+    o falla). Nunca lanza: una alerta no puede romper el camino de un mensaje."""
+    razon = _MOTIVO_LEGIBLE.get(motivo, motivo)
+    if abierto:
+        asunto = "Maiek AI — Gabi está en MODO SIN IA"
+        cuerpo = (
+            f"<h2>Gabi pasó a modo sin IA</h2><p>Motivo: {razon}.</p>"
+            "<p>Mientras tanto Gabi responde un mensaje automático (sin gastar tokens), transfiere cada "
+            "cliente a un asesor y, si no hay ninguno, lo deja en la cola de supervisión. "
+            "Se prueba la API con una llamada mínima cada pocos minutos y Gabi vuelve sola cuando responda.</p>"
+            "<p>Revisa el saldo y la clave en la consola de Anthropic.</p>"
+        )
+        logger.warning(f"ALERTA PLATAFORMA — circuito de la IA ABIERTO: {razon}")
+    else:
+        derivados = (resumen or {}).get("total", 0)
+        en_cola = (resumen or {}).get("en_cola", 0)
+        asunto = "Maiek AI — Gabi volvió a responder con IA"
+        cuerpo = (
+            "<h2>Gabi volvió a responder con IA</h2>"
+            f"<p>Durante el modo sin IA se derivaron {derivados} cliente(s) a un asesor con un mensaje "
+            f"automático; {en_cola} quedaron en la cola de supervisión por no haber asesor.</p>"
+        )
+        logger.warning(f"ALERTA PLATAFORMA — circuito de la IA CERRADO: {derivados} derivado(s), {en_cola} en cola")
+
+    if not RESEND_API_KEY or not DESTINATARIOS_PLATAFORMA:
+        logger.warning("RESEND_API_KEY o ALERTA_PLATAFORMA_DESTINATARIOS no configurados; la alerta del circuito de la IA solo queda en el log")
+        return False
+    try:
+        r = await post_con_reintentos(
+            "https://api.resend.com/emails",
+            json={"from": REMITENTE, "to": DESTINATARIOS_PLATAFORMA, "subject": asunto, "html": cuerpo},
+            headers={"Authorization": f"Bearer {RESEND_API_KEY}", "Content-Type": "application/json"},
+        )
+        if r.status_code >= 300:
+            logger.error(f"Error enviando la alerta del circuito de la IA: {r.status_code} — {r.text}")
+            return False
+        return True
+    except Exception:
+        logger.exception("No se pudo enviar la alerta del circuito de la IA")
+        return False

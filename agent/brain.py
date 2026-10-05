@@ -17,6 +17,7 @@ módulo desde fuera del dominio de AI.
 """
 
 import os
+import re
 import json
 import time
 import yaml
@@ -30,6 +31,7 @@ from agent.tools import (
 )
 from agent.memory import obtener_campana_por_nombre, obtener_configuracion, obtener_identidad_agente, obtener_negocio
 from agent.campanas import resolver_promo, resolver_familia_promo, obtener_codigos_promocionales_activos
+from agent import circuito_ia
 
 load_dotenv()
 logger = logging.getLogger("agentkit")
@@ -377,6 +379,53 @@ def obtener_mensaje_derivacion(dentro_de_horario: bool) -> str:
     )
 
 
+# Modo sin IA (Fase 1) — mensajes AUTOMÁTICOS (sin tokens) para cuando la IA no está disponible
+# y el caso se deriva a una persona. Editables en prompts.yaml; estos son solo el respaldo si la
+# clave falta. NUNCA mencionan IA, tokens ni créditos: el cliente solo sabe que lo atenderá un
+# asesor. Ojo: estos textos no renuevan la ventana de 24 h de WhatsApp (solo la abre el último
+# mensaje del CLIENTE), así que no sirven para "reabrir" una conversación.
+_SIN_IA_POR_DEFECTO = {
+    "dentro_horario": (
+        "¡Hola{nombre}! 👋 Gracias por escribirnos. Te estoy transfiriendo con un asesor de nuestro equipo, "
+        "que te atenderá por este mismo chat en unos minutos. 😊"
+    ),
+    "fuera_horario": (
+        "¡Hola{nombre}! 👋 Gracias por escribirnos. Te transferí con un asesor y te atenderá en nuestro "
+        "horario de atención ({horario}). Si prefieres, también puedes llamarnos al 614-9002."
+    ),
+    "fin_de_semana": (
+        "¡Hola{nombre}! 👋 Gracias por escribirnos. Te transferí con un asesor y te atenderá el {dia} "
+        "desde las {hora}. Si prefieres, también puedes llamarnos al 614-9002."
+    ),
+}
+TIPOS_MENSAJE_SIN_IA = tuple(_SIN_IA_POR_DEFECTO)
+
+
+def obtener_mensaje_sin_ia(
+    tipo: str, nombre: str | None = None, *, horario: str | None = None, dia: str | None = None, hora: str | None = None,
+) -> str:
+    """Texto fijo del modo sin IA. `tipo`: "dentro_horario" | "fuera_horario" |
+    "fin_de_semana". `{nombre}` queda como ", Nombre" (primer nombre) solo si el lead
+    tiene nombre; `{horario}`, `{dia}` y `{hora}` vienen del horario real del negocio.
+    Se reemplaza a mano (no con str.format) para que una llave suelta en el YAML no
+    rompa el envío."""
+    if tipo not in _SIN_IA_POR_DEFECTO:
+        raise ValueError(f"Tipo de mensaje sin IA desconocido: {tipo!r}")
+    config = cargar_config_prompts()
+    texto = config.get(f"sin_ia_{tipo}_message") or _SIN_IA_POR_DEFECTO[tipo]
+    primer_nombre = (nombre or "").strip().split(" ")[0][:30]
+    reemplazos = {
+        "{nombre}": f", {primer_nombre}" if primer_nombre else "",
+        "{horario}": horario or "nuestro horario de atención",
+        "{dia}": dia or "próximo día hábil",
+        "{hora}": hora or "la apertura",
+    }
+    for marca, valor in reemplazos.items():
+        texto = texto.replace(marca, valor)
+    # "8:00 a. m." ya termina en punto: sin esto, "…desde las {hora}." quedaría "a. m..".
+    return re.sub(r"(?<!\.)\.\.(?!\.)", ".", texto)
+
+
 async def _armar_bloques_contexto(
     mensaje: str, historial: list[dict], lead: dict | None, negocio_id: str | None,
 ) -> list[str]:
@@ -546,10 +595,15 @@ async def _generar_respuesta_protocolo_confianza(
                 ensure_ascii=False,
             )
         )
+        circuito_ia.registrar_exito()
         return respuesta, False, confianza, razon
 
     except Exception as e:
         logger.error(f"Error Claude API (protocolo de confianza): {e}")
+        # Modo sin IA: un saldo agotado / tope / credencial inválida abre el circuito al PRIMER
+        # error; main.py lo consulta tras `hubo_error` para derivar en vez de mandar el texto
+        # técnico. La firma de 4 valores no cambia.
+        await circuito_ia.registrar_error(e)
         return obtener_mensaje_error(), True, None, None
 
 
@@ -677,10 +731,12 @@ async def generar_respuesta(
             f" / {getattr(response.usage, 'cache_read_input_tokens', None)} cache_read"
             f" / {getattr(response.usage, 'cache_creation_input_tokens', None)} cache_write)"
         )
+        circuito_ia.registrar_exito()
         return respuesta, False, None, None
 
     except Exception as e:
         logger.error(f"Error Claude API: {e}")
+        await circuito_ia.registrar_error(e)  # ver el comentario del protocolo de confianza, arriba
         return obtener_mensaje_error(), True, None, None
 
 
@@ -739,6 +795,7 @@ async def extraer_datos_lead(mensaje_cliente: str, respuesta_gabi: str, lead_act
         }
     except Exception as e:
         logger.warning(f"No se pudo extraer datos del lead: {e}")
+        await circuito_ia.registrar_error(e)
         return {}
 
 
@@ -805,6 +862,7 @@ async def generar_resumen_conversacion(historial: list[dict]) -> str:
     except Exception as e:
         latencia_ms = round((time.monotonic() - inicio) * 1000)
         logger.warning(f"No se pudo generar el resumen de la conversación: {e}")
+        await circuito_ia.registrar_error(e)
         logger.info(
             "resumen_ia "
             + json.dumps(

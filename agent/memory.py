@@ -3516,7 +3516,8 @@ async def obtener_configuracion_envios(negocio_id: str) -> dict:
         if politica.get("categoria_plantilla"):
             categoria = await obtener_configuracion(f"envios_categoria_{nombre}", politica["categoria_plantilla"], negocio_id=negocio_id)
         origenes.append({
-            "origen": nombre, "esencial": bool(politica.get("esencial")), "modo": modo, "modo_por_defecto": por_defecto,
+            "origen": nombre, "esencial": bool(politica.get("esencial")), "exento_tope": bool(politica.get("exento_tope")),
+            "modo": modo, "modo_por_defecto": por_defecto,
             "agrupar_minutos": agrupar, "categoria_plantilla": categoria,
         })
     autorecarga = (await obtener_configuracion("envios_tope_modo", "tope", negocio_id=negocio_id)) == "autorecarga"
@@ -6217,6 +6218,26 @@ async def pausar_gabi_manual(telefono: str):
             lead.paso_flujo = "derivado_asesor"
         lead.actualizado = datetime.utcnow()
         await session.commit()
+
+
+# Tipo del evento que deja agent/respaldo_sin_ia.py cuando Gabi no puede usar la IA y
+# deriva el caso a una persona (Fase 1, modo sin IA) — 14 caracteres, cabe en
+# eventos_lead.tipo (TIPO_EVENTO_LARGO_MAX).
+TIPO_EVENTO_DERIVADO_SIN_IA = "derivado_sin_ia"
+
+
+async def contar_derivados_sin_ia(desde: datetime, negocio_id: str | None = None) -> dict:
+    """Cuántos casos derivó el modo sin IA desde `desde` (UTC naive): `total` y, de ellos,
+    cuántos no encontraron ningún asesor y quedaron en la cola de supervisión (`en_cola`,
+    por el `destino` del payload del evento — es lo que ocurrió al derivar). Con
+    `negocio_id=None` cuenta todos los negocios (alerta al dueño de la plataforma)."""
+    async with async_session() as session:
+        query = select(EventoLead.payload).where(EventoLead.tipo == TIPO_EVENTO_DERIVADO_SIN_IA, EventoLead.creado >= desde)
+        if negocio_id is not None:
+            query = query.where(EventoLead.negocio_id == negocio_id)
+        payloads = (await session.execute(query)).scalars().all()
+    en_cola = sum(1 for p in payloads if isinstance(p, dict) and p.get("destino") == "supervision")
+    return {"total": len(payloads), "en_cola": en_cola}
 
 
 async def registrar_fallo_tecnico(telefono: str) -> int:

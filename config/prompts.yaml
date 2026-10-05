@@ -149,3 +149,10 @@ mensaje_no_soportado: "Por ahora no puedo escuchar audios 🙏 ¿me lo escribes 
 mensaje_no_soportado_visual: "Por ahora no puedo ver fotos, videos ni stickers 🙏 ¿me lo escribes por texto?"
 mensaje_no_soportado_otro: "Por ahora no puedo abrir ese tipo de mensaje 🙏 ¿me lo escribes por texto?"
 error_escalado_message: "Uy, parece que sigo con problemas técnicos 😓 Ya te voy a conectar con un asesor para que te ayude directamente. Si prefieres, también puedes llamarnos al 614-9002."
+
+# Modo sin IA (Fase 1): mensajes AUTOMATICOS que se envian cuando la IA no esta disponible y el
+# caso se deriva a una persona. NUNCA mencionan IA, tokens ni creditos. {nombre} se reemplaza por
+# ", Nombre" (o vacio si el lead no tiene nombre); {horario}, {dia} y {hora} salen del horario real.
+sin_ia_dentro_horario_message: "¡Hola{nombre}! 👋 Gracias por escribirnos. Te estoy transfiriendo con un asesor de nuestro equipo, que te atenderá por este mismo chat en unos minutos. 😊"
+sin_ia_fuera_horario_message: "¡Hola{nombre}! 👋 Gracias por escribirnos. Te transferí con un asesor y te atenderá en nuestro horario de atención ({horario}). Si prefieres, también puedes llamarnos al 614-9002."
+sin_ia_fin_de_semana_message: "¡Hola{nombre}! 👋 Gracias por escribirnos. Te transferí con un asesor y te atenderá el {dia} desde las {hora}. Si prefieres, también puedes llamarnos al 614-9002."

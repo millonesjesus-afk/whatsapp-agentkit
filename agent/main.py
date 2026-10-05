@@ -31,6 +31,7 @@ from agent.memory import (
 )
 from agent.providers import obtener_proveedor
 from agent import envios
+from agent import circuito_ia, respaldo_sin_ia
 from agent.dashboard import (
     router as dashboard_router, NoAutenticado,
     ARCHIVOS_DIR, EXTENSIONES_ARCHIVO_PERMITIDAS, TAMANO_MAXIMO_ARCHIVO_MB, _guardar_archivo_en_disco,
@@ -416,6 +417,20 @@ async def _atender_mensaje_no_legible(msg, canal: dict | None, contenido: str, a
         logger.info(f"Mensaje de {msg.telefono} ({msg.tipo}) guardado sin respuesta automática (asignado a {lead['asesor_asignado']})")
         await gestor_conexiones.emitir_mensaje_nuevo(mensaje_guardado["conversation_id"])
         return
+    if lead and await circuito_ia.esta_abierto():
+        # Modo sin IA (Fase 1): con el circuito abierto y sin asesor, el adjunto va por el mismo
+        # camino que un texto — mensaje automático y derivación a una persona (no el aviso de
+        # "no puedo leer audios", que prometería algo que nadie va a atender).
+        mensaje_guardado = await servicio_conversacion.guardar_mensaje(
+            msg.telefono, "user", contenido, negocio_id=negocio_id,
+            archivo_id=archivo_id, mensaje_id_meta=msg.mensaje_id or None,
+        )
+        await gestor_conexiones.emitir_mensaje_nuevo(mensaje_guardado["conversation_id"])
+        circuito_ia.sondear_en_segundo_plano()
+        await respaldo_sin_ia.derivar_por_falla_ia(
+            msg.telefono, canal, (await circuito_ia.obtener_estado()).get("motivo") or "circuito_abierto", proveedor=proveedor,
+        )
+        return
     respuesta = servicio_inteligencia.obtener_mensaje_no_soportado(msg.tipo)
     await servicio_conversacion.guardar_mensaje(
         msg.telefono, "user", contenido, negocio_id=negocio_id,
@@ -476,6 +491,16 @@ async def _generar_y_enviar_respuesta_ia(telefono: str, canal: dict | None) -> N
         logger.info(f"Respuesta debounced de {telefono} cancelada — un humano tomó el caso mientras se esperaba")
         return
 
+    # Modo sin IA (Fase 1): con el circuito abierto NO se llama a Claude. Se dispara (en segundo
+    # plano, sin bloquear ni romper este mensaje) el sondeo que puede cerrarlo, y el cliente recibe
+    # el mensaje automático y queda en manos de una persona.
+    if await circuito_ia.esta_abierto():
+        circuito_ia.sondear_en_segundo_plano()
+        await respaldo_sin_ia.derivar_por_falla_ia(
+            telefono, canal, (await circuito_ia.obtener_estado()).get("motivo") or "circuito_abierto", proveedor=proveedor,
+        )
+        return
+
     historial_completo = await servicio_conversacion.obtener_historial(telefono)
     if not historial_completo or historial_completo[-1]["role"] != "user":
         # No debería pasar (esto se programa siempre justo después de
@@ -495,19 +520,29 @@ async def _generar_y_enviar_respuesta_ia(telefono: str, canal: dict | None) -> N
         negocio_id=canal.get("negocio_id") if canal else None,
     )
 
-    # Si Claude falla, se pide reintentar la primera vez. Si vuelve a
-    # fallar (2 veces seguidas), se escala a un asesor en vez de seguir
-    # insistiendo — ver conversación sobre las 3 opciones evaluadas
-    # (esperar / escalar / call center 614002). Sin cambios respecto a
-    # antes: esto cubre fallas de la llamada en sí (API caída), no la
-    # confianza de una respuesta exitosa — ver el bloque de confianza
-    # más abajo.
-    escalado_por_falla = False
+    # Saldo agotado, tope de gasto o credencial inválida (Fase 1, modo sin IA): brain.py ya abrió
+    # el circuito al PRIMER error de esas categorías. Acá no se manda el texto técnico ni se cuenta
+    # como falla del lead: el cliente recibe el mensaje automático y queda en manos de una persona.
+    if hubo_error and await circuito_ia.esta_abierto():
+        await respaldo_sin_ia.derivar_por_falla_ia(
+            telefono, canal, (await circuito_ia.obtener_estado()).get("motivo") or "circuito_abierto", proveedor=proveedor,
+        )
+        return
+
+    # Si Claude falla por otra causa (transitoria), se pide reintentar la primera vez. Si vuelve a
+    # fallar (2 veces seguidas), se escala a una persona en vez de seguir insistiendo — ver
+    # conversación sobre las 3 opciones evaluadas (esperar / escalar / call center 614002). Esto
+    # cubre fallas de la llamada en sí (API caída), no la confianza de una respuesta exitosa — ver
+    # el bloque de confianza más abajo. La 2.ª falla escala por `derivar_por_falla_ia` (fija
+    # paso_flujo, cola de supervisión si no hay asesor, un solo texto, sin correo por lead), no por
+    # un camino propio: antes ese escalado no fijaba paso_flujo ni dejaba rastro si nadie atendía.
     if hubo_error:
         fallos = await registrar_fallo_tecnico(telefono)
         if fallos >= 2:
-            respuesta = servicio_inteligencia.obtener_mensaje_error_escalado()
-            escalado_por_falla = True
+            await respaldo_sin_ia.derivar_por_falla_ia(telefono, canal, "falla_tecnica_repetida", proveedor=proveedor)
+            await resetear_fallos_tecnicos(telefono)
+            logger.warning(f"Escalado {telefono} por fallas técnicas repetidas del bot")
+            return
     else:
         await resetear_fallos_tecnicos(telefono)
 
@@ -540,20 +575,6 @@ async def _generar_y_enviar_respuesta_ia(telefono: str, canal: dict | None) -> N
     )
     await gestor_conexiones.emitir_mensaje_nuevo(mensaje_guardado["conversation_id"])
     logger.info(f"Respuesta a {telefono}: {respuesta}")
-
-    if escalado_por_falla:
-        asesor = await servicio_comercial.elegir_asesor_automatico(
-            (lead or {}).get("interes") or "", canal.get("negocio_id") if canal else None,
-        )
-        if asesor:
-            await asignar_asesor_a_lead(telefono, asesor, automatico=True)
-        lead_actualizado = await obtener_lead(telefono, negocio_id=canal.get("negocio_id") if canal else None)
-        await notificar_lead_derivado(
-            telefono, lead_actualizado or {},
-            "[Escalado automáticamente por fallas técnicas repetidas del bot]",
-        )
-        logger.warning(f"Escalado {telefono} a asesor por fallas técnicas repetidas")
-        return
 
     if escalado_por_confianza:
         # La IA deja de tomar decisiones sobre esta conversación — mismo

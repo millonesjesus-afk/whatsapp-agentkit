@@ -10,7 +10,9 @@
 # Principio (Opción A, aprobada): los envíos ESENCIALES —lo que el cliente
 # espera: la respuesta de Gabi, el aviso de derivación, lo que escribe el
 # asesor— no se bloquean nunca por costo. Solo se puede frenar lo no esencial,
-# salvo que se active `envios_tope_bloquea_esenciales` (Opción B).
+# salvo que se active `envios_tope_bloquea_esenciales` (Opción B). Excepción a la
+# excepción: un origen marcado `exento_tope` (el aviso del modo sin IA) no se frena
+# NI con la Opción B.
 
 import asyncio
 import logging
@@ -175,7 +177,9 @@ async def decidir(origen: str, tipo: str, telefono: str, canal: dict | None, pol
         # Tope mensual. Sin monto elegido el tope es USD 0 (no se paga nada no
         # esencial); el usuario fija un monto o elige "autorecarga" (sin tope: se
         # sigue pagando lo que cueste, con el saldo recargándose solo).
-        if not await _autorecarga(negocio_id):
+        # Un origen con `exento_tope` queda fuera del tope INCLUSO con la Opción B activa
+        # (ver agent/envios.py::ORIGENES): es el aviso del modo sin IA, que no puede callarse.
+        if not politica.get("exento_tope") and not await _autorecarga(negocio_id):
             tope = _a_numero(await obtener_configuracion("envios_tope_mensual_usd", "", negocio_id=negocio_id), 0) or 0
             bloquea_esenciales = (await obtener_configuracion("envios_tope_bloquea_esenciales", "false", negocio_id=negocio_id)).lower() == "true"
             if not esencial or bloquea_esenciales:

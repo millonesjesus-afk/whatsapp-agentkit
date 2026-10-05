@@ -12,7 +12,7 @@ import re
 import glob
 import itertools
 import logging
-from datetime import datetime, time
+from datetime import datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
 from agent.memory import (
@@ -541,6 +541,81 @@ async def obtener_estado_horario_atencion(negocio_id: str | None) -> dict:
         "dentro_de_horario": dentro,
         "fecha_hora_lima": f"{DIAS_ES[dia_semana]} {ahora.strftime('%d/%m/%Y')}, {ahora.strftime('%H:%M')} (hora de Lima)",
     }
+
+
+def _hora_legible(hhmm: str) -> str:
+    """"08:00" -> "8:00 a. m."; "19:00" -> "7:00 p. m." — como se escribe en Perú."""
+    hora = time.fromisoformat(hhmm)
+    sufijo = "a. m." if hora.hour < 12 else "p. m."
+    return f"{hora.hour % 12 or 12}:{hora.minute:02d} {sufijo}"
+
+
+async def _rangos_de_atencion_por_dia(negocio_id: str | None) -> dict[int, tuple[str, str] | None]:
+    """Para cada día de la semana (0=lunes), `(apertura, cierre)` o None si ese día no se
+    atiende. Mismo criterio que `obtener_estado_horario_atencion`: la fila de
+    `HorarioAtencion` del negocio manda; si el negocio no tiene fila para un día, se usa
+    el horario por defecto de siempre (lunes a sábado, 8:00 a 19:00)."""
+    filas = {}
+    if negocio_id is not None:
+        filas = {h["dia_semana"]: h for h in await listar_horarios_atencion(negocio_id)}
+    rangos: dict[int, tuple[str, str] | None] = {}
+    for dia in range(7):
+        h = filas.get(dia)
+        if h is not None:
+            abierto = h["habilitado"] and h["hora_apertura"] is not None and h["hora_cierre"] is not None
+            rangos[dia] = (h["hora_apertura"], h["hora_cierre"]) if abierto else None
+        elif dia in _FALLBACK_DIAS_HABILITADOS:
+            rangos[dia] = (_FALLBACK_HORA_APERTURA.strftime("%H:%M"), _FALLBACK_HORA_CIERRE.strftime("%H:%M"))
+        else:
+            rangos[dia] = None
+    return rangos
+
+
+async def describir_horario_atencion(negocio_id: str | None) -> str:
+    """El horario real del negocio en una frase, para el cliente: "lunes a sábado, de
+    8:00 a. m. a 7:00 p. m.". Agrupa los días CONSECUTIVOS con el mismo rango."""
+    rangos = await _rangos_de_atencion_por_dia(negocio_id)
+    grupos: list[tuple[int, int, tuple[str, str]]] = []
+    for dia in range(7):
+        rango = rangos[dia]
+        if rango is None:
+            continue
+        if grupos and grupos[-1][1] == dia - 1 and grupos[-1][2] == rango:
+            grupos[-1] = (grupos[-1][0], dia, rango)
+        else:
+            grupos.append((dia, dia, rango))
+    if not grupos:
+        return "nuestro horario de atención"
+    partes = []
+    for inicio, fin, (apertura, cierre) in grupos:
+        dias = DIAS_ES[inicio] if inicio == fin else f"{DIAS_ES[inicio]} a {DIAS_ES[fin]}"
+        partes.append(f"{dias}, de {_hora_legible(apertura)} a {_hora_legible(cierre)}")
+    return "; ".join(partes)
+
+
+async def obtener_proxima_apertura(negocio_id: str | None, ahora: datetime | None = None) -> dict | None:
+    """La próxima vez que este negocio abre (hora de Lima), según los `HorarioAtencion`
+    reales con el mismo fallback que `obtener_estado_horario_atencion`. Siempre es una
+    apertura FUTURA: con el negocio abierto ahora mismo, es la del siguiente día de
+    atención. `ahora` solo existe para poder probarlo con una hora fija.
+
+    Devuelve `{"inicio": datetime (Lima), "dia": "lunes", "hora": "8:00 a. m.",
+    "dias_de_diferencia": int, "hoy_es_dia_de_atencion": bool}`, o None si el negocio no
+    atiende ningún día."""
+    ahora = ahora or datetime.now(TZ_LIMA)
+    rangos = await _rangos_de_atencion_por_dia(negocio_id)
+    for adelante in range(8):
+        fecha = (ahora + timedelta(days=adelante)).date()
+        rango = rangos[fecha.weekday()]
+        if rango is None:
+            continue
+        inicio = datetime.combine(fecha, time.fromisoformat(rango[0]), tzinfo=ahora.tzinfo or TZ_LIMA)
+        if inicio > ahora:
+            return {
+                "inicio": inicio, "dia": DIAS_ES[fecha.weekday()], "hora": _hora_legible(rango[0]),
+                "dias_de_diferencia": adelante, "hoy_es_dia_de_atencion": rangos[ahora.weekday()] is not None,
+            }
+    return None
 
 
 async def obtener_contexto_relevante(

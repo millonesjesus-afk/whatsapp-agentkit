@@ -34,6 +34,15 @@ def _cargar_script():
     spec = importlib.util.spec_from_file_location("recuperar_mensajes_sin_respuesta", ruta)
     modulo = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(modulo)
+    # Sin red: la derivación real (modo sin IA) manda un texto por WhatsApp. Cada módulo cargado
+    # lleva su propia lista de derivaciones para que las pruebas puedan comprobarlas.
+    modulo.derivaciones = []
+
+    async def derivar_falso(telefono, canal, motivo):
+        modulo.derivaciones.append((telefono, motivo))
+        return {"accion": "derivado_asesor", "asesor": None, "texto_enviado": False}
+
+    modulo._derivar_real = derivar_falso
     return modulo
 
 
@@ -529,6 +538,8 @@ async def test_el_script_hace_como_maximo_dos_intentos_por_mensaje_aunque_siga_s
         await script.recuperar_mensajes_sin_respuesta(generar_respuesta=generar_sin_efecto, resolver_canal=_canal_ok)
 
     assert intentos == [telefono, telefono]
+    # Agotados los 2 intentos, el caso ya no se abandona: se deriva a una persona.
+    assert set(script.derivaciones) == {(telefono, "mensaje_sin_respuesta")}
     eventos = await _eventos_de_recuperacion(telefono)
     assert [e["payload"] for e in eventos] == [{"mensaje_id": ultimo["id"]}] * 2
 

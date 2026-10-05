@@ -24,6 +24,15 @@ un intento que revienta también cuenta. Si la IA está caída, además, el barr
 se DETIENE tras 2 recuperaciones seguidas que fallan por la IA: no martilla a
 Anthropic ni al cliente.
 
+Modo sin IA (Fase 1): con el circuito de la IA abierto (agent/circuito_ia.py) el barrido no hace
+nada — los clientes que escriben ya se derivan a una persona sin llamar a Claude. Antes de rendirse
+intenta el sondeo de 1 token (como mucho cada 5 min), así que este Cron también puede ser quien
+detecte que la IA volvió. Un fallo por saldo/tope/credencial NO cuenta como intento: el caso se
+deriva en el acto (el barrido se detiene, la siguiente corrida sale al ver el circuito abierto). Y
+cuando un mensaje ya agotó sus 2 intentos sin respuesta, en vez de abandonarlo se deriva con
+`derivar_por_falla_ia` (asesor, o cola de supervisión si no hay ninguno o si pasaron más de 24 h
+desde el último mensaje del cliente: la ventana de WhatsApp cerró y no se manda texto libre).
+
 Pensado para correr como un Cron Schedule de Railway cada 5-10 minutos (NO está
 programado ni desplegado: lo crea el usuario). Necesita las mismas variables de
 entorno que el servicio web (ANTHROPIC_API_KEY, CANAL_ENCRYPTION_KEY, base de
@@ -43,6 +52,7 @@ from typing import Awaitable, Callable
 # scripts/procesar_inactividad_clientes.py.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from agent import circuito_ia
 from agent.memory import (
     esperar_base_de_datos, listar_mensajes_sin_respuesta_de_gabi, registrar_evento_lead,
     obtener_lead, TIPO_EVENTO_RESPUESTA_RECUPERADA,
@@ -54,32 +64,59 @@ LIMITE = 50
 MAX_INTENTOS_POR_MENSAJE = 2
 # Recuperaciones seguidas que terminan en falla de la IA antes de abortar el barrido.
 MAX_FALLOS_IA_SEGUIDOS = 2
+# Los agotados se buscan en una ventana más ancha que la de recuperación: pasadas las 20 h ya no se
+# reintenta con la IA, pero un mensaje que se quedó sin respuesta tras sus 2 intentos sigue
+# necesitando que una persona lo atienda (si ya pasaron 24 h, derivar lo manda a la cola).
+MAX_HORAS_AGOTADOS = 72
+
+
+async def _derivar_real(telefono: str, canal: dict, motivo: str) -> dict:
+    """Deriva por el mismo camino que el webhook: asesor o cola de supervisión, un solo texto."""
+    from agent import main as app_main  # import tardío: arrastra FastAPI, dashboard y las claves de entorno
+    from agent import respaldo_sin_ia
+
+    return await respaldo_sin_ia.derivar_por_falla_ia(telefono, canal, motivo, proveedor=app_main.proveedor)
 
 
 async def recuperar_mensajes_sin_respuesta(
     generar_respuesta: Callable[[str, dict | None], Awaitable[None]] | None = None,
     resolver_canal: Callable[..., Awaitable[dict | None]] | None = None,
     negocio_id: str | None = None,
+    derivar: Callable[[str, dict, str], Awaitable[dict]] | None = None,
 ) -> dict:
     """Una pasada del barrido. `generar_respuesta(telefono, canal)` y
     `resolver_canal(numero_whatsapp_id, negocio_id=...)` se inyectan en las
     pruebas; sin ellas se usa el camino real del webhook (agent.main).
 
+    `derivar(telefono, canal, motivo)` también se inyecta en las pruebas; sin ella se usa
+    `respaldo_sin_ia.derivar_por_falla_ia` con el proveedor real.
+
     Retorna los contadores: encontrados, intentados, sin_canal, con_error,
-    ia_caida (True si se abortó por fallas seguidas de la IA) y `fallos_ia`."""
+    ia_caida (True si se abortó por fallas seguidas de la IA), `fallos_ia`,
+    `circuito_abierto` (True si el circuito de la IA estaba abierto al empezar o se abrió durante
+    la corrida) y `derivados_agotados` (mensajes que agotaron sus intentos y se derivaron)."""
+    resumen = {
+        "encontrados": 0, "intentados": 0, "sin_canal": 0, "con_error": 0,
+        "fallos_ia": 0, "ia_caida": False, "circuito_abierto": False, "derivados_agotados": 0,
+    }
+
+    # Modo sin IA: con el circuito abierto no se hace nada (se prueba antes si ya volvió).
+    await circuito_ia.sondear_si_corresponde()
+    if await circuito_ia.esta_abierto():
+        resumen["circuito_abierto"] = True
+        return resumen
+
     if generar_respuesta is None or resolver_canal is None:
         from agent import main as app_main  # import tardío: arrastra FastAPI, dashboard y las claves de entorno
         generar_respuesta = generar_respuesta or app_main._generar_y_enviar_respuesta_ia
         resolver_canal = resolver_canal or app_main.proveedor.resolver_canal
+    derivar = derivar or _derivar_real
 
     casos = await listar_mensajes_sin_respuesta_de_gabi(
         negocio_id=negocio_id, min_minutos=MIN_MINUTOS, max_horas=MAX_HORAS, limite=LIMITE,
         max_intentos=MAX_INTENTOS_POR_MENSAJE,
     )
-    resumen = {
-        "encontrados": len(casos), "intentados": 0, "sin_canal": 0, "con_error": 0,
-        "fallos_ia": 0, "ia_caida": False,
-    }
+    resumen["encontrados"] = len(casos)
     fallos_ia_seguidos = 0
 
     for caso in casos:
@@ -117,6 +154,13 @@ async def recuperar_mensajes_sin_respuesta(
             resumen["con_error"] += 1
             fallo_ia = True
         else:
+            # Un fallo por saldo/tope/credencial abre el circuito y `_generar_y_enviar_respuesta_ia`
+            # ya derivó al cliente: no es un intento fallido (el lead sale solo de los candidatos) y
+            # el barrido se detiene — seguir solo gastaría llamadas que van a fallar.
+            if await circuito_ia.esta_abierto():
+                resumen["intentados"] -= 1
+                resumen["circuito_abierto"] = True
+                break
             # `_generar_y_enviar_respuesta_ia` no lanza cuando Claude falla: cuenta la
             # falla en el lead (fallos_tecnicos) y responde con el aviso de reintento.
             lead = await obtener_lead(telefono, negocio_id=neg_id)
@@ -131,17 +175,42 @@ async def recuperar_mensajes_sin_respuesta(
         else:
             fallos_ia_seguidos = 0
 
+    # Los que ya agotaron sus intentos sin respuesta no se abandonan: se derivan a una persona.
+    if not resumen["circuito_abierto"]:
+        agotados = await listar_mensajes_sin_respuesta_de_gabi(
+            negocio_id=negocio_id, min_minutos=MIN_MINUTOS, max_horas=MAX_HORAS_AGOTADOS, limite=LIMITE,
+        )
+        for caso in agotados:
+            if caso["intentos"] < MAX_INTENTOS_POR_MENSAJE:
+                continue
+            canal = await resolver_canal(caso["numero_whatsapp_id"], negocio_id=caso["negocio_id"])
+            if not canal:
+                resumen["sin_canal"] += 1
+                continue
+            try:
+                await derivar(caso["telefono"], canal, "mensaje_sin_respuesta")
+                resumen["derivados_agotados"] += 1
+            except Exception as e:
+                print(f"  No se pudo derivar a {caso['telefono']}: {e}", file=sys.stderr)
+                resumen["con_error"] += 1
+
     return resumen
 
 
 async def main() -> None:
     await esperar_base_de_datos()
     r = await recuperar_mensajes_sin_respuesta()
+    if r["circuito_abierto"] and not r["intentados"] and not r["encontrados"]:
+        print("Mensajes sin respuesta: omitido — Gabi está en modo sin IA (circuito de la IA abierto).")
+        return
     print(
         f"Mensajes sin respuesta: {r['encontrados']} encontrado(s), {r['intentados']} recuperación(es) "
         f"intentada(s) (máx. {MAX_INTENTOS_POR_MENSAJE} por mensaje), {r['sin_canal']} sin canal, "
-        f"{r['con_error']} con error, {r['fallos_ia']} con falla de la IA."
+        f"{r['con_error']} con error, {r['fallos_ia']} con falla de la IA, "
+        f"{r['derivados_agotados']} derivado(s) a una persona tras agotar sus intentos."
     )
+    if r["circuito_abierto"]:
+        print("  El circuito de la IA se abrió durante la corrida: el barrido se detuvo (los casos quedaron derivados).")
     if r["ia_caida"]:
         print(
             f"  La IA parece caída ({MAX_FALLOS_IA_SEGUIDOS} fallas seguidas): el barrido se detuvo para no "

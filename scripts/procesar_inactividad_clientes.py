@@ -41,7 +41,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from agent.memory import esperar_base_de_datos, listar_leads_inactividad_cliente, actualizar_lead, guardar_mensaje
 from agent.providers import obtener_proveedor
-from agent import envios
+from agent import circuito_ia, envios
 from agent.tiempo_real import gestor_conexiones
 
 HORAS_REENGANCHE = 2.0
@@ -54,6 +54,14 @@ MENSAJE_REENGANCHE = (
 
 async def main() -> None:
     await esperar_base_de_datos()
+    # Modo sin IA (Fase 1): con el circuito de la IA abierto Gabi no está conversando — los clientes
+    # que escribieron ya se derivaron a una persona. Reenganchar ("¡Hola de nuevo!") o cerrar como
+    # "sin_respuesta" a quien está esperando a un asesor sería un error. Antes de rendirse se intenta
+    # el sondeo (1 token, como mucho cada 5 min): este Cron puede ser quien detecte que ya volvió.
+    await circuito_ia.sondear_si_corresponde()
+    if await circuito_ia.esta_abierto():
+        print("Inactividad de clientes: omitida — Gabi está en modo sin IA (circuito de la IA abierto). No se reengancha ni se cierra a nadie.")
+        return
     candidatos_reenganche, candidatos_cierre = await listar_leads_inactividad_cliente(
         horas_reenganche=HORAS_REENGANCHE, horas_cierre=HORAS_CIERRE,
     )

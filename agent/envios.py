@@ -30,6 +30,10 @@ logger = logging.getLogger("agentkit")
 # origen → política.
 # `esencial`: un envío que el cliente espera; ningún interruptor ni tope de gasto
 #   lo frena (salvo el modo B explícito `envios_tope_bloquea_esenciales`).
+# `exento_tope`: ni el tope mensual ni la Opción B (`envios_tope_bloquea_esenciales`)
+#   lo frenan, nunca. Solo para lo que NO se puede dejar de mandar aunque se haya
+#   acabado el presupuesto (hoy, el aviso del modo sin IA: sin él el cliente que
+#   escribió se quedaría callado sin saber que lo atenderá una persona).
 # `modo`: interruptor por defecto de un origen no esencial
 #   (siempre | solo_gratis | nunca), cambiable con `envios_modo_<origen>`.
 # `agrupar_minutos`: no repetir este origen al mismo cliente dentro de esa
@@ -39,6 +43,9 @@ logger = logging.getLogger("agentkit")
 ORIGENES: dict[str, dict] = {
     "gabi_respuesta": {"esencial": True},
     "gabi_aviso_derivacion": {"esencial": True},
+    # Modo sin IA (Fase 1): el aviso automático cuando la IA no está disponible y el caso se
+    # deriva a una persona. UNA vez por cliente en 60 min, y exento del tope de gasto.
+    "gabi_respaldo_sin_ia": {"esencial": True, "agrupar_minutos": 60, "exento_tope": True},
     "gabi_aviso_no_legible": {"esencial": False, "modo": "solo_gratis", "agrupar_minutos": 10},
     "reenganche_inactividad": {"esencial": False, "modo": "solo_gratis"},
     "asesor_texto": {"esencial": True},

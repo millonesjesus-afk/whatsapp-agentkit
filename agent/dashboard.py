@@ -84,6 +84,7 @@ from agent.services.servicio_conversacion import servicio_conversacion
 from agent.http_utils import get_con_reintentos, post_con_reintentos
 from agent.meta_timezones import zona_iana_de_meta
 from agent import envios
+from agent import circuito_ia
 
 # Paleta de colores para distinguir canales de WhatsApp en el panel — se
 # asigna por posición (orden de creación), no por nombre, así que un canal
@@ -3437,10 +3438,49 @@ def _aviso(id_: str, nivel: str, titulo: str, detalle: str) -> dict:
     return {"id": id_, "nivel": nivel, "titulo": titulo, "detalle": detalle, "enlace": _RUTA_USO}
 
 
+async def _avisos_circuito_ia(negocio_id: str) -> list[dict]:
+    """Aviso de que Gabi está en modo sin IA (Fase 1): el circuito de la IA está abierto.
+    Detalle: desde qué hora (Lima) y cuántos clientes ya se transfirieron a un asesor con el
+    mensaje automático / cuántos no tuvieron asesor y están en la cola de supervisión (sale de los
+    eventos `derivado_sin_ia` desde que se abrió). Sin enlace: no hay a dónde ir a arreglarlo
+    desde el panel. Nunca rompe Inicio."""
+    try:
+        estado = await circuito_ia.obtener_estado()
+        if estado.get("estado") != "abierto":
+            return []
+        abierto_en = circuito_ia.parsear_momento(estado.get("abierto_en"))
+        if abierto_en is None:
+            return []
+        from agent.memory import contar_derivados_sin_ia
+        from agent.tools import TZ_LIMA
+        from zoneinfo import ZoneInfo
+        conteo = await contar_derivados_sin_ia(abierto_en, negocio_id)
+        hora = abierto_en.replace(tzinfo=ZoneInfo("UTC")).astimezone(TZ_LIMA).strftime("%H:%M")
+        return [{
+            "id": "ia_circuito_abierto", "nivel": "error", "titulo": "Gabi está en modo sin IA",
+            "detalle": (
+                f"Desde las {hora}. {conteo['total']} clientes ya fueron transferidos a tu equipo con un mensaje "
+                f"automático; {conteo['en_cola']} no tuvieron asesor disponible y están en la cola de supervisión."
+            ),
+            "enlace": None,
+        }]
+    except Exception:
+        logger.exception("Inicio: no se pudo calcular el aviso del circuito de la IA")
+        return []
+
+
 async def _avisos_inicio(usuario: dict) -> list[dict]:
-    """Avisos de uso/costos de WhatsApp para Inicio — SOLO para el rol
-    'admin' (decisión del usuario: supervisor y asesor no los ven). Nunca
-    rompe Inicio: ante cualquier falla se registra y devuelve []."""
+    """Avisos para Inicio — SOLO para el rol 'admin' (decisión del usuario: supervisor y
+    asesor no los ven): el del modo sin IA (si está activo) y los de uso/costos de WhatsApp.
+    Nunca rompe Inicio: ante cualquier falla se registra y devuelve lo que sí se pudo calcular."""
+    if usuario.get("rol") != "admin":
+        return []
+    avisos = await _avisos_circuito_ia(usuario["negocio_id"])
+    return avisos + await _avisos_uso_inicio(usuario)
+
+
+async def _avisos_uso_inicio(usuario: dict) -> list[dict]:
+    """Avisos de uso/costos de WhatsApp para Inicio (ver `_avisos_inicio`)."""
     if usuario.get("rol") != "admin":
         return []
     try:
