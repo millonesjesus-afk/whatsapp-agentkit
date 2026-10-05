@@ -38,6 +38,13 @@ class MensajeEntrante:
     # None para "text" y para cualquier tipo no soportado (video, sticker,
     # ubicación, etc. — fuera de alcance).
     media: dict | None = None
+    # Mensajes interactivos (toque en un botón de respuesta o en una fila de
+    # lista): `interactivo_id` es el id del botón/fila que tocó el cliente
+    # (el `texto` ya trae su título, tratado como si lo hubiera escrito) y
+    # `contexto_id` es el wamid del mensaje original al que responde
+    # (`context.id` del payload de Meta). Vacíos si no aplican.
+    interactivo_id: str = ""
+    contexto_id: str = ""
 
 
 class ProveedorWhatsApp(ABC):

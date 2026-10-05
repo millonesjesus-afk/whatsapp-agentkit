@@ -20,7 +20,10 @@ import logging
 import weakref
 
 from agent import politica_envios
-from agent.memory import cerrar_envio_meta, obtener_configuracion, registrar_envio_bloqueado, reservar_envio_meta
+from agent.http_utils import EnvioIncierto
+from agent.memory import (
+    cerrar_envio_meta, marcar_envio_incierto, obtener_configuracion, registrar_envio_bloqueado, reservar_envio_meta,
+)
 
 logger = logging.getLogger("agentkit")
 
@@ -48,10 +51,19 @@ ORIGENES: dict[str, dict] = {
 class ResultadoEnvio:
     """Resultado de un envío. Se desempaqueta como `(enviado, wamid)` y es
     verdadero si se envió, para que los llamadores que antes recibían una
-    tupla o un booleano no cambien."""
+    tupla o un booleano no cambien.
 
-    def __init__(self, enviado: bool, wamid: str | None = None, bloqueado: bool = False, motivo: str | None = None):
-        self.enviado, self.wamid, self.bloqueado, self.motivo = enviado, wamid, bloqueado, motivo
+    `incierto` (2026-10-05): el POST a Meta pudo haber llegado pero no se supo
+    el resultado (ReadTimeout, 5xx) y tampoco apareció el mensaje en
+    `uso_mensajes_meta`. Ahí `enviado` es False —no se confirmó— pero NO es un
+    fallo definitivo: el mensaje pudo salir, así que quien llama no debe
+    reenviarlo a ciegas ni ofrecer "Reintentar" como si no hubiera salido."""
+
+    def __init__(
+        self, enviado: bool, wamid: str | None = None, bloqueado: bool = False, motivo: str | None = None,
+        incierto: bool = False,
+    ):
+        self.enviado, self.wamid, self.bloqueado, self.motivo, self.incierto = enviado, wamid, bloqueado, motivo, incierto
 
     def __iter__(self):
         yield self.enviado
@@ -60,8 +72,20 @@ class ResultadoEnvio:
     def __bool__(self) -> bool:
         return self.enviado
 
+    @property
+    def estado_envio(self) -> str | None:
+        """Valor para `Mensaje.estado_envio` al guardar el mensaje que se
+        intentó enviar: None si salió, "incierto" si pudo haber salido y no se
+        supo, "fallido" en cualquier otro caso."""
+        if self.enviado:
+            return None
+        return "incierto" if self.incierto else "fallido"
+
     def __repr__(self) -> str:
-        return f"ResultadoEnvio(enviado={self.enviado}, wamid={self.wamid!r}, bloqueado={self.bloqueado}, motivo={self.motivo!r})"
+        return (
+            f"ResultadoEnvio(enviado={self.enviado}, wamid={self.wamid!r}, bloqueado={self.bloqueado}, "
+            f"motivo={self.motivo!r}, incierto={self.incierto})"
+        )
 
 
 # Un candado por event loop: el chequeo de agrupación y la reserva tienen que ser
@@ -128,11 +152,27 @@ async def _enviar(origen: str, tipo: str, telefono: str, canal: dict | None, lla
 
     try:
         enviado, wamid = _normalizar(await llamada())
+    except EnvioIncierto as incierto:
+        # El mensaje pudo haber salido (y Meta cobrarlo): no es "fallido", no se
+        # reenvía solo y no cuenta como enviado para la agrupación.
+        motivo = f"incierto: {incierto.motivo} — el mensaje pudo haberse enviado, no se reenvía automáticamente"
+        logger.warning(f"Envío {origen} a {telefono} con resultado incierto — {motivo}")
+        await _cerrar_incierto(envio_id, motivo)
+        return ResultadoEnvio(False, None, motivo=motivo, incierto=True)
     except BaseException:
         await _cerrar(envio_id, False, None)
         raise
     await _cerrar(envio_id, enviado, wamid)
     return ResultadoEnvio(enviado, wamid)
+
+
+async def _cerrar_incierto(envio_id: int | None, motivo: str) -> None:
+    if envio_id is None:
+        return
+    try:
+        await marcar_envio_incierto(envio_id, motivo)
+    except Exception:
+        logger.exception(f"No se pudo marcar como incierto el registro de envío {envio_id}")
 
 
 async def _cerrar(envio_id: int | None, enviado: bool, wamid: str | None) -> None:

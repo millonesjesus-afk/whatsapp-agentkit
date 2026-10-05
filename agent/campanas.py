@@ -324,6 +324,10 @@ async def procesar_leads_formulario(body: dict, proveedor) -> None:
             )
             if enviado:
                 logger.info(f"Plantilla '{nombre_plantilla}' enviada a {telefono} (lead de formulario)")
+            elif getattr(enviado, "incierto", False):
+                logger.warning(f"Plantilla '{nombre_plantilla}' a {telefono} sin confirmar: Meta pudo haberla aceptado; no se reenvía (revisar la conciliación)")
+            elif getattr(enviado, "bloqueado", False):
+                logger.warning(f"Plantilla '{nombre_plantilla}' a {telefono} frenada por la política de envíos: {enviado.motivo}")
             else:
                 logger.error(f"No se pudo enviar la plantilla a {telefono} (lead de formulario)")
 

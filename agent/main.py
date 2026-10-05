@@ -27,6 +27,7 @@ from agent.memory import (
     marcar_mensaje_procesado, obtener_negocio_por_codigo,
     resolver_conversation_activa, medir_latencia_db, obtener_conversation_activa_de_telefono,
     enrutar_posventa_si_corresponde, registrar_estado_mensaje_meta,
+    existe_mensaje_con_id_meta, liberar_marca_mensaje_procesado,
 )
 from agent.providers import obtener_proveedor
 from agent import envios
@@ -428,7 +429,7 @@ async def _atender_mensaje_no_legible(msg, canal: dict | None, contenido: str, a
     enviado, wamid = resultado
     mensaje_guardado = await servicio_conversacion.guardar_mensaje(
         msg.telefono, "assistant", respuesta, negocio_id=negocio_id,
-        mensaje_id_meta=wamid, estado_envio=None if enviado else "fallido",
+        mensaje_id_meta=wamid, estado_envio=resultado.estado_envio,
     )
     await gestor_conexiones.emitir_mensaje_nuevo(mensaje_guardado["conversation_id"])
 
@@ -530,10 +531,12 @@ async def _generar_y_enviar_respuesta_ia(telefono: str, canal: dict | None) -> N
 
     # El mensaje del cliente ya se guardó al llegar (ver webhook_handler) —
     # acá solo falta la respuesta de Gabi.
-    enviado, wamid = await envios.enviar_texto(proveedor, telefono, respuesta, origen="gabi_respuesta", canal=canal)
+    resultado = await envios.enviar_texto(proveedor, telefono, respuesta, origen="gabi_respuesta", canal=canal)
+    enviado, wamid = resultado
     mensaje_guardado = await servicio_conversacion.guardar_mensaje(
         telefono, "assistant", respuesta, negocio_id=canal.get("negocio_id") if canal else None,
-        mensaje_id_meta=wamid, estado_envio=None if enviado else "fallido",
+        # "incierto" = Meta pudo haberlo aceptado (respuesta perdida): nunca "fallido", para que no se reenvíe a ciegas.
+        mensaje_id_meta=wamid, estado_envio=resultado.estado_envio,
     )
     await gestor_conexiones.emitir_mensaje_nuevo(mensaje_guardado["conversation_id"])
     logger.info(f"Respuesta a {telefono}: {respuesta}")
@@ -623,10 +626,11 @@ async def _avisar_derivacion_si_falto(telefono: str, respuesta: str, canal: dict
     negocio_id = canal.get("negocio_id") if canal else None
     estado = await obtener_estado_horario_atencion(negocio_id)
     aviso = servicio_inteligencia.obtener_mensaje_derivacion(estado["dentro_de_horario"])
-    enviado, wamid = await envios.enviar_texto(proveedor, telefono, aviso, origen="gabi_aviso_derivacion", canal=canal)
+    resultado = await envios.enviar_texto(proveedor, telefono, aviso, origen="gabi_aviso_derivacion", canal=canal)
+    enviado, wamid = resultado
     mensaje_guardado = await servicio_conversacion.guardar_mensaje(
         telefono, "assistant", aviso, negocio_id=negocio_id,
-        mensaje_id_meta=wamid, estado_envio=None if enviado else "fallido",
+        mensaje_id_meta=wamid, estado_envio=resultado.estado_envio,
     )
     await gestor_conexiones.emitir_mensaje_nuevo(mensaje_guardado["conversation_id"])
     logger.info(f"Derivación de {telefono} sin aviso en la respuesta de Gabi — se envió el aviso de respaldo")
@@ -655,6 +659,36 @@ async def _registrar_estados_de_mensajes(body: dict) -> None:
                 logger.exception("No se pudo registrar un estado de mensaje de Meta")
     except Exception:
         logger.exception("No se pudieron leer los estados de mensajes del webhook")
+
+
+async def _liberar_marca_si_no_se_guardo(msg, estado: dict) -> None:
+    """Tras un fallo procesando `msg`: libera su marca de idempotencia SOLO si
+    el mensaje del cliente todavía no quedó guardado, para que el reintento de
+    Meta lo procese de nuevo (sin esto el reintento se descartaba como "ya
+    procesado" y el mensaje se perdía). Si ya se guardó, la marca se conserva:
+    no hay nada que reprocesar y reintentar solo duplicaría efectos.
+
+    Si no se puede comprobar si se guardó (la base falló justo ahora), se libera
+    igual: es seguro porque el reintento vuelve a comprobar `existe_mensaje_con_
+    id_meta` antes de guardar, así que nunca duplica. Esta función no lanza
+    nunca: está en el camino de un fallo que ya se va a reportar."""
+    if not msg.mensaje_id or not estado.get("marca_tomada"):
+        return
+    try:
+        negocio_id = estado.get("negocio_id")
+        ya_guardado = False
+        if negocio_id:
+            try:
+                ya_guardado = await existe_mensaje_con_id_meta(negocio_id, msg.mensaje_id)
+            except Exception:
+                logger.exception(f"No se pudo comprobar si {msg.mensaje_id} quedó guardado — se libera la marca por seguridad")
+        if ya_guardado:
+            logger.info(f"Mensaje {msg.mensaje_id} falló DESPUÉS de guardarse — se conserva su marca de idempotencia")
+            return
+        await liberar_marca_mensaje_procesado(msg.mensaje_id)
+        logger.warning(f"Mensaje {msg.mensaje_id} falló ANTES de guardarse — marca liberada para el reintento de Meta")
+    except Exception:
+        logger.exception(f"No se pudo liberar la marca de idempotencia de {msg.mensaje_id}")
 
 
 @app.post("/webhook")
@@ -692,10 +726,18 @@ async def webhook_handler(request: Request):
         # Parsear webhook — el proveedor normaliza el formato
         mensajes = await proveedor.parsear_webhook(request)
 
-        for msg in mensajes:
+        # 2026-10-05 (mensajes perdidos) — el procesamiento de CADA mensaje vive
+        # en `_procesar_mensaje` (misma sangría que tenía el cuerpo del `for`;
+        # los `continue` pasaron a `return`) para poder aislar sus fallos: antes,
+        # una excepción en el mensaje 1 de un payload dejaba sin procesar a los
+        # siguientes, y como la marca de idempotencia ya estaba puesta, el
+        # reintento de Meta se descartaba como "ya procesado" y el mensaje del
+        # cliente se perdía sin rastro. `estado` lo comparte con el `for` de abajo
+        # (marca tomada, negocio resuelto) para decidir si la marca se libera.
+        async def _procesar_mensaje(msg, estado: dict):
             # Ignorar mensajes propios
             if msg.es_propio:
-                continue
+                return
             cron = _Cronometro()
 
             # Idempotencia general (API Architecture) — Meta puede reentregar
@@ -707,7 +749,8 @@ async def webhook_handler(request: Request):
                 ya_procesado = await marcar_mensaje_procesado(msg.mensaje_id)
                 if ya_procesado:
                     logger.info(f"Mensaje {msg.mensaje_id} ya procesado antes — ignorado (idempotencia)")
-                    continue
+                    return
+                estado["marca_tomada"] = True
 
             cron.marca("idempotencia")
 
@@ -718,6 +761,17 @@ async def webhook_handler(request: Request):
             # desde el panel) también sepan por cuál número contestar.
             canal = await proveedor.resolver_canal(msg.numero_whatsapp_id)
             cron.marca("canal")
+            estado["negocio_id"] = canal.get("negocio_id") if canal else None
+
+            # No duplicar: si este wamid YA está guardado en este negocio, el
+            # mensaje ya se procesó aunque la marca de arriba no existiera (se
+            # liberó tras un fallo, o se perdió) — no se guarda ni se responde
+            # de nuevo. Los ecos de coexistencia quedan fuera: siguen su camino.
+            if msg.mensaje_id and msg.tipo_evento != "echo" and estado["negocio_id"]:
+                if await existe_mensaje_con_id_meta(estado["negocio_id"], msg.mensaje_id):
+                    logger.info(f"Mensaje {msg.mensaje_id} ya estaba guardado — ignorado (sin duplicar)")
+                    return
+            cron.marca("dedupe")
             if msg.numero_whatsapp_id:
                 # Gate 5.2 (corrección H2): negocio_id se resuelve del Canal
                 # ya identificado por su phone_number_id — nunca un default
@@ -788,7 +842,7 @@ async def webhook_handler(request: Request):
                     await pausar_gabi_manual(msg.telefono)
                 logger.info(f"Echo de app registrado para {msg.telefono}: {contenido}")
                 await gestor_conexiones.emitir_mensaje_nuevo(mensaje_guardado["conversation_id"])
-                continue
+                return
 
             # Reacción a un mensaje (👍, ❤️…): se deja como una línea en el
             # historial para que el asesor vea que el cliente reaccionó, y
@@ -803,7 +857,7 @@ async def webhook_handler(request: Request):
                         mensaje_id_meta=msg.mensaje_id or None,
                     )
                     await gestor_conexiones.emitir_mensaje_nuevo(mensaje_guardado["conversation_id"])
-                continue
+                return
 
             # Multimedia entrante soportada (imagen, documento, nota de voz,
             # sticker, video/GIF) — se descarga el archivo real de Meta y se guarda como adjunto
@@ -819,17 +873,17 @@ async def webhook_handler(request: Request):
                 archivo_id_creado = await _guardar_media_entrante(msg, canal)
                 contenido_usuario = (msg.media or {}).get("caption") or f"[{msg.tipo}]"
                 await _atender_mensaje_no_legible(msg, canal, contenido_usuario, archivo_id_creado)
-                continue
+                return
 
             # Tipos que aún no procesamos (ubicación ya no: llega como texto;
             # queda p. ej. lo desconocido): mismo tratamiento que la media.
             if msg.tipo != "text":
                 logger.info(f"Mensaje no soportado ({msg.tipo}) de {msg.telefono}")
                 await _atender_mensaje_no_legible(msg, canal, f"[{msg.tipo}]")
-                continue
+                return
 
             if not msg.texto:
-                continue
+                return
 
             logger.info(f"Mensaje de {msg.telefono}: {msg.texto}")
 
@@ -917,7 +971,7 @@ async def webhook_handler(request: Request):
                     await gestor_conexiones.emitir_mensaje_nuevo(mensaje_guardado["conversation_id"])
                     cron.marca("emitir")
                     logger.info(f"webhook_tiempos {cron.resumen()}")
-                    continue
+                    return
 
             # Gate 2026-09-23 (fix #3, debounce) — el mensaje se guarda de
             # inmediato (aparece en el panel en tiempo real apenas llega, un
@@ -936,13 +990,24 @@ async def webhook_handler(request: Request):
                 msg.telefono, "user", msg.texto, negocio_id=canal.get("negocio_id") if canal else None,
                 mensaje_id_meta=msg.mensaje_id or None,
             )
-            await gestor_conexiones.emitir_mensaje_nuevo(mensaje_guardado["conversation_id"])
+            # Desde acá el mensaje YA está guardado: el aviso al panel y el
+            # "escribiendo..." son cosméticos y NUNCA pueden impedir que se
+            # programe la respuesta de Gabi (2026-10-05, mensajes perdidos: si
+            # alguno fallaba, el mensaje quedaba guardado, sin respuesta, y el
+            # reintento de Meta se descartaba como duplicado).
+            try:
+                await gestor_conexiones.emitir_mensaje_nuevo(mensaje_guardado["conversation_id"])
+            except Exception:
+                logger.exception(f"No se pudo avisar al panel del mensaje nuevo de {msg.telefono}")
 
             # Le muestra "escribiendo..." en WhatsApp de una vez — aunque la
             # respuesta real todavía no arranca (está en la ventana de
             # espera), esto ya le confirma al cliente que su mensaje llegó.
             cron.marca("guardar")
-            await proveedor.marcar_leido_y_escribiendo(msg.mensaje_id, canal=canal)
+            try:
+                await proveedor.marcar_leido_y_escribiendo(msg.mensaje_id, canal=canal)
+            except Exception:
+                logger.exception(f"No se pudo marcar como leído / escribiendo a {msg.telefono}")
             cron.marca("meta_escribiendo")
             logger.info(f"webhook_tiempos {cron.resumen()}")
 
@@ -951,6 +1016,25 @@ async def webhook_handler(request: Request):
                 clave_debounce,
                 lambda telefono=msg.telefono, canal=canal: _generar_y_enviar_respuesta_ia(telefono, canal),
             )
+
+        # Cada mensaje del payload se procesa por separado: el fallo de uno NO
+        # pierde a los que vienen después. Si el mensaje falla ANTES de
+        # guardarse, se libera su marca de idempotencia para que el reintento de
+        # Meta (que llega por el 500 de abajo) sí lo procese; si falla DESPUÉS de
+        # guardarse, la marca se conserva (el reintento ya no tiene nada que
+        # hacer, y lo que faltó —la respuesta de Gabi— lo recupera el barrido
+        # scripts/recuperar_mensajes_sin_respuesta.py).
+        fallos = 0
+        for msg in mensajes:
+            estado: dict = {"marca_tomada": False, "negocio_id": None}
+            try:
+                await _procesar_mensaje(msg, estado)
+            except Exception:
+                fallos += 1
+                logger.exception(f"Error procesando el mensaje {msg.mensaje_id!r} de {msg.telefono!r}")
+                await _liberar_marca_si_no_se_guardo(msg, estado)
+        if fallos:
+            raise RuntimeError(f"{fallos} mensaje(s) del webhook fallaron al procesarse")
 
         return {"status": "ok"}
 

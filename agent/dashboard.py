@@ -47,6 +47,7 @@ from agent.memory import (
     estimar_uso_previo_servicio,
     primer_momento_de_uso_registrado,
     resumen_envios_por_origen,
+    listar_envios_inciertos_o_huerfanos,
     obtener_configuracion_envios,
     listar_cambios_configuracion,
     _limites_de_mes_utc,
@@ -5493,7 +5494,8 @@ async def responder_cliente(
 
     proveedor = obtener_proveedor()
     canal = await proveedor.resolver_canal(lead.get("numero_whatsapp_id"))
-    enviado, wamid = await envios.enviar_texto(proveedor, telefono, mensaje, origen="asesor_texto", canal=canal, mensaje_id_citado=wamid_citado)
+    resultado_envio = await envios.enviar_texto(proveedor, telefono, mensaje, origen="asesor_texto", canal=canal, mensaje_id_citado=wamid_citado)
+    enviado, wamid = resultado_envio
 
     # A diferencia del comportamiento anterior (no guardar nada si el envío
     # fallaba), el mensaje se persiste igual con estado_envio="fallido" —
@@ -5503,7 +5505,7 @@ async def responder_cliente(
     # pueda ofrecer "reintentar" sobre ÉL, no solo mostrar un error genérico.
     mensaje_guardado = await servicio_conversacion.guardar_mensaje(
         telefono, "asesor", mensaje, negocio_id=usuario["negocio_id"],
-        mensaje_id_meta=wamid, estado_envio=None if enviado else "fallido",
+        mensaje_id_meta=wamid, estado_envio=_estado_envio_guardado(resultado_envio),
         # Persiste la relación con el mensaje citado (Reply/Quote) — antes
         # solo se resolvía el wamid para el envío a Meta y se perdía acá, así
         # que la cita salía bien por WhatsApp pero desaparecía del panel en
@@ -5514,6 +5516,8 @@ async def responder_cliente(
     )
     await gestor_conexiones.emitir_mensaje_nuevo(mensaje_guardado["conversation_id"])
 
+    if resultado_envio.incierto:
+        return _respuesta_envio_incierto(mensaje_guardado["id"])
     if not enviado:
         return _respuesta_envio_fallido(
             "No se pudo enviar el mensaje por WhatsApp — el mensaje quedó guardado, puedes reintentar.",
@@ -5567,7 +5571,7 @@ def _guardar_archivo_en_disco(nombre_original: str, contenido: bytes) -> str:
     return ruta_disco
 
 
-async def _subir_y_enviar_media(telefono: str, nombre_archivo: str, content_type: str, contenido: bytes, caption: str, canal: dict | None = None) -> tuple[bool, str | None]:
+async def _subir_y_enviar_media(telefono: str, nombre_archivo: str, content_type: str, contenido: bytes, caption: str, canal: dict | None = None) -> "envios.ResultadoEnvio":
     """Sube el archivo a WhatsApp y lo envía como imagen o documento según
     su tipo — común entre el envío de una proforma nueva y el reenvío de un
     catálogo ya guardado. Retorna (enviado, wamid) — a diferencia de antes,
@@ -5580,14 +5584,35 @@ async def _subir_y_enviar_media(telefono: str, nombre_archivo: str, content_type
     proveedor = obtener_proveedor()
     media_id = await proveedor.subir_media(contenido, nombre_archivo, content_type, canal=canal)
     if not media_id:
-        return False, None
+        return envios.ResultadoEnvio(False, None)
     es_imagen = content_type.startswith("image/")
-    enviado, wamid = (
+    # Devuelve el ResultadoEnvio completo (se desempaqueta igual que la tupla
+    # `(enviado, wamid)` de antes) para que el llamador vea `.incierto`.
+    return (
         await envios.enviar_imagen(proveedor, telefono, media_id, caption, origen="asesor_archivo", canal=canal)
         if es_imagen else
         await envios.enviar_documento(proveedor, telefono, media_id, nombre_archivo, caption, origen="asesor_archivo", canal=canal)
     )
-    return enviado, wamid
+
+
+def _estado_envio_guardado(resultado) -> str | None:
+    """Valor de `Mensaje.estado_envio` para un envío del asesor: None si salió,
+    "incierto" si el POST pudo llegar a Meta y no se supo el resultado (NO es
+    "fallido": el cliente pudo recibirlo y reenviarlo a ciegas lo duplicaría),
+    "fallido" en cualquier otro caso."""
+    if resultado.enviado:
+        return None
+    return "incierto" if getattr(resultado, "incierto", False) else "fallido"
+
+
+def _respuesta_envio_incierto(mensaje_id: int) -> JSONResponse:
+    """Respuesta de los 4 endpoints de envío cuando el resultado es incierto.
+    Es un 200 a propósito: un error HTTP hace que el panel marque la burbuja
+    como fallida y ofrezca "Reintentar", justo lo que duplicaría el mensaje."""
+    return JSONResponse({
+        "status": "incierto", "estado_envio": "incierto", "mensaje_id": mensaje_id,
+        "detail": "WhatsApp no confirmó el envío — el mensaje pudo haber llegado. No lo reenvíes sin revisar antes con el cliente.",
+    })
 
 
 def _respuesta_envio_fallido(detalle: str, mensaje_id: int) -> JSONResponse:
@@ -5636,7 +5661,8 @@ async def enviar_archivo_chat(
 
     content_type = archivo.content_type or "application/octet-stream"
     canal = await obtener_proveedor().resolver_canal(lead.get("numero_whatsapp_id"))
-    enviado, wamid = await _subir_y_enviar_media(telefono, archivo.filename, content_type, contenido, caption.strip(), canal=canal)
+    resultado_envio = await _subir_y_enviar_media(telefono, archivo.filename, content_type, contenido, caption.strip(), canal=canal)
+    enviado, wamid = resultado_envio
 
     # El archivo se guarda en disco y el mensaje se persiste SIEMPRE, haya
     # llegado o no a Meta — igual que responder_cliente: si el envío falla,
@@ -5649,10 +5675,12 @@ async def enviar_archivo_chat(
     )
     mensaje_guardado = await servicio_conversacion.guardar_mensaje(
         telefono, "asesor", caption.strip() or archivo.filename, negocio_id=usuario["negocio_id"],
-        archivo_id=archivo_guardado["id"], mensaje_id_meta=wamid, estado_envio=None if enviado else "fallido",
+        archivo_id=archivo_guardado["id"], mensaje_id_meta=wamid, estado_envio=_estado_envio_guardado(resultado_envio),
     )
     await gestor_conexiones.emitir_mensaje_nuevo(mensaje_guardado["conversation_id"])
 
+    if resultado_envio.incierto:
+        return _respuesta_envio_incierto(mensaje_guardado["id"])
     if not enviado:
         return _respuesta_envio_fallido(
             "No se pudo enviar el archivo por WhatsApp — el mensaje quedó guardado, puedes reintentar.",
@@ -5699,9 +5727,10 @@ async def enviar_audio_chat(
     proveedor = obtener_proveedor()
     canal = await proveedor.resolver_canal(lead.get("numero_whatsapp_id"))
     media_id = await proveedor.subir_media(contenido_ogg, "nota_de_voz.ogg", "audio/ogg", canal=canal)
-    enviado, wamid = (False, None)
+    resultado_envio = envios.ResultadoEnvio(False, None)
     if media_id:
-        enviado, wamid = await envios.enviar_audio(proveedor, telefono, media_id, origen="asesor_audio", canal=canal)
+        resultado_envio = await envios.enviar_audio(proveedor, telefono, media_id, origen="asesor_audio", canal=canal)
+    enviado, wamid = resultado_envio
 
     # Mismo criterio que enviar-archivo: la nota de voz ya convertida se
     # guarda y el mensaje se persiste SIEMPRE, para que un envío fallido se
@@ -5713,10 +5742,12 @@ async def enviar_audio_chat(
     )
     mensaje_guardado = await servicio_conversacion.guardar_mensaje(
         telefono, "asesor", "Nota de voz", negocio_id=usuario["negocio_id"], archivo_id=archivo_guardado["id"],
-        mensaje_id_meta=wamid, estado_envio=None if enviado else "fallido",
+        mensaje_id_meta=wamid, estado_envio=_estado_envio_guardado(resultado_envio),
     )
     await gestor_conexiones.emitir_mensaje_nuevo(mensaje_guardado["conversation_id"])
 
+    if resultado_envio.incierto:
+        return _respuesta_envio_incierto(mensaje_guardado["id"])
     if not enviado:
         return _respuesta_envio_fallido(
             "No se pudo enviar el audio por WhatsApp — el mensaje quedó guardado, puedes reintentar.",
@@ -5750,7 +5781,8 @@ async def enviar_catalogo_chat(telefono: str, archivo_id: int, usuario: dict = D
     with open(archivo["ruta_disco"], "rb") as f:
         contenido = f.read()
     canal = await obtener_proveedor().resolver_canal(lead.get("numero_whatsapp_id"))
-    enviado, wamid = await _subir_y_enviar_media(telefono, archivo["nombre_original"], archivo["content_type"], contenido, "", canal=canal)
+    resultado_envio = await _subir_y_enviar_media(telefono, archivo["nombre_original"], archivo["content_type"], contenido, "", canal=canal)
+    enviado, wamid = resultado_envio
 
     # No hay nada nuevo que guardar en disco acá (el catálogo ya vive en la
     # librería reutilizable) — pero el mensaje se persiste igual con
@@ -5758,10 +5790,12 @@ async def enviar_catalogo_chat(telefono: str, archivo_id: int, usuario: dict = D
     # otros 3 endpoints de envío.
     mensaje_guardado = await servicio_conversacion.guardar_mensaje(
         telefono, "asesor", archivo["nombre_original"], negocio_id=usuario["negocio_id"], archivo_id=archivo["id"],
-        mensaje_id_meta=wamid, estado_envio=None if enviado else "fallido",
+        mensaje_id_meta=wamid, estado_envio=_estado_envio_guardado(resultado_envio),
     )
     await gestor_conexiones.emitir_mensaje_nuevo(mensaje_guardado["conversation_id"])
 
+    if resultado_envio.incierto:
+        return _respuesta_envio_incierto(mensaje_guardado["id"])
     if not enviado:
         return _respuesta_envio_fallido(
             "No se pudo enviar el catálogo por WhatsApp — el mensaje quedó guardado, puedes reintentar.",
@@ -6904,6 +6938,21 @@ async def uso_mensajes_envios_json(
     if mes and not re.fullmatch(r"\d{4}-(0[1-9]|1[0-2])", mes):
         raise HTTPException(status_code=400, detail="El mes debe tener el formato AAAA-MM")
     return JSONResponse(await resumen_envios_por_origen(usuario["negocio_id"], mes or None))
+
+
+@router.get("/uso-mensajes/conciliacion.json")
+async def uso_mensajes_conciliacion_json(
+    dias: int = 7, usuario: dict = Depends(servicio_identidad.requiere_rol("admin")),
+):
+    """Informe de conciliación de envíos de los últimos `dias` días (1 a 90, por
+    defecto 7): envíos de la capa central con resultado incierto (el POST pudo
+    llegar a Meta y no se supo) o "enviado" sin wamid, y mensajes que Meta
+    informó (y cobra) que el sistema no tiene registrados — posibles copias
+    duplicadas o envíos hechos fuera de la capa (ver
+    `listar_envios_inciertos_o_huerfanos`). Solo lectura; solo Admin."""
+    if not 1 <= dias <= 90:
+        raise HTTPException(status_code=400, detail="`dias` debe estar entre 1 y 90")
+    return JSONResponse(await listar_envios_inciertos_o_huerfanos(usuario["negocio_id"], datetime.utcnow() - timedelta(days=dias)))
 
 
 @router.get("/uso-mensajes/estimacion-previa.json")

@@ -10,9 +10,15 @@ from datetime import datetime, timezone
 from fastapi import Request
 from agent.providers.base import ProveedorWhatsApp, MensajeEntrante
 from agent.memory import listar_canales_whatsapp
-from agent.http_utils import post_con_reintentos, get_con_reintentos
+from agent.http_utils import post_con_reintentos, get_con_reintentos, post_sin_duplicar, EnvioIncierto
+from agent.memory import buscar_wamid_huerfano
+import asyncio
 
 logger = logging.getLogger("agentkit")
+
+# Cuánto se espera, ante un envío incierto, a que llegue el webhook de estado
+# "sent" de Meta antes de buscar el wamid en `uso_mensajes_meta`.
+ESPERA_CONCILIACION_SEGUNDOS = 5
 
 
 def _es_bsuid(telefono: str) -> bool:
@@ -45,6 +51,43 @@ def _extraer_wamid(respuesta) -> str | None:
         return mensajes[0].get("id") or None
     except (ValueError, IndexError, AttributeError, KeyError):
         return None
+
+
+async def _esperar(segundos: float) -> None:
+    # Función aparte para poder sustituirla en las pruebas.
+    await asyncio.sleep(segundos)
+
+
+async def _enviar_a_meta(url: str, payload: dict, headers: dict, telefono: str, canal: dict, tipo: str = "") -> tuple[bool, str | None]:
+    """POST de un envío a /messages SIN reintentos que puedan duplicarlo (ver
+    `http_utils.post_sin_duplicar`; Meta Cloud API no tiene clave de
+    idempotencia, así que cada copia sería un mensaje más, cobrado y recibido
+    por el cliente). Retorna (enviado, wamid) como siempre.
+
+    Si el resultado es incierto (ReadTimeout, 5xx, conexión cortada tras
+    enviar) NO reenvía: espera unos segundos, y busca en `uso_mensajes_meta` un
+    mensaje a ese cliente, enviado justo ahora, cuyo wamid nadie haya
+    reclamado. Si aparece, lo da por enviado con ese wamid. Si no, relanza
+    `EnvioIncierto` — NO es un fallo definitivo: el mensaje pudo salir."""
+    momento = datetime.utcnow()
+    try:
+        r = await post_sin_duplicar(url, json=payload, headers=headers)
+    except EnvioIncierto as incierto:
+        await _esperar(ESPERA_CONCILIACION_SEGUNDOS)
+        try:
+            wamid = await buscar_wamid_huerfano(canal.get("phone_number_id"), telefono, momento)
+        except Exception:
+            logger.exception(f"No se pudo consultar uso_mensajes_meta para conciliar el envío incierto a {telefono}")
+            wamid = None
+        if wamid:
+            logger.warning(f"Envío incierto a {telefono} ({incierto.motivo}) conciliado: Meta sí lo recibió ({wamid})")
+            return True, wamid
+        logger.error(f"Envío incierto a {telefono} ({incierto.motivo}): no apareció en uso_mensajes_meta — no se reenvía")
+        raise
+    if r.status_code != 200:
+        logger.error(f"Error Meta API{f' ({tipo})' if tipo else ''}: {r.status_code} — {r.text}")
+        return False, None
+    return True, _extraer_wamid(r)
 
 
 class ProveedorMeta(ProveedorWhatsApp):
@@ -260,8 +303,22 @@ class ProveedorMeta(ProveedorWhatsApp):
                 for msg in value.get("messages", []):
                     tipo = msg.get("type", "unknown")
                     media = None
+                    interactivo_id = ""
                     if tipo == "text":
                         texto = msg.get("text", {}).get("body", "")
+                    elif tipo == "interactive" and (msg.get("interactive") or {}).get("type") in ("button_reply", "list_reply"):
+                        # Toque en un botón de respuesta o en una fila de lista
+                        # de un mensaje interactivo — se trata igual que si el
+                        # cliente hubiera escrito ese título a mano (como el
+                        # tipo "button" de plantillas, abajo). El id del botón/
+                        # fila queda aparte en `interactivo_id`. Otros subtipos
+                        # (nfm_reply de Flows, etc.) siguen como antes: caen en
+                        # el `else` final con texto vacío y tipo "interactive".
+                        interactivo = msg.get("interactive") or {}
+                        respuesta_interactiva = interactivo.get(interactivo["type"]) or {}
+                        texto = respuesta_interactiva.get("title") or ""
+                        interactivo_id = respuesta_interactiva.get("id") or ""
+                        tipo = "text"
                     elif tipo == "button":
                         # Clic en un botón de respuesta rápida de una
                         # plantilla (ej. "Sí, cuéntame más" / "No, gracias")
@@ -345,6 +402,10 @@ class ProveedorMeta(ProveedorWhatsApp):
                         referral=msg.get("referral"),
                         numero_whatsapp_id=numero_whatsapp_id,
                         media=media,
+                        interactivo_id=interactivo_id,
+                        # wamid del mensaje al que el cliente respondió (si
+                        # respondió/tocó un botón de uno nuestro).
+                        contexto_id=(msg.get("context") or {}).get("id") or "",
                     ))
                 # Coexistencia: un asesor respondió al cliente directo desde
                 # la app de WhatsApp Business en el celular (no desde Gabi ni
@@ -422,11 +483,7 @@ class ProveedorMeta(ProveedorWhatsApp):
         }
         if mensaje_id_citado:
             payload["context"] = {"message_id": mensaje_id_citado}
-        r = await post_con_reintentos(url, json=payload, headers=headers)
-        if r.status_code != 200:
-            logger.error(f"Error Meta API: {r.status_code} — {r.text}")
-            return False, None
-        return True, _extraer_wamid(r)
+        return await _enviar_a_meta(url, payload, headers, telefono, canal)
 
     async def subir_media(self, contenido: bytes, nombre_archivo: str, content_type: str, canal: dict | None = None) -> str | None:
         """Sube un archivo a los servidores de Meta (quedan alojados ahí
@@ -467,11 +524,7 @@ class ProveedorMeta(ProveedorWhatsApp):
             "type": "document",
             "document": documento,
         }
-        r = await post_con_reintentos(url, json=payload, headers=headers)
-        if r.status_code != 200:
-            logger.error(f"Error Meta API (documento): {r.status_code} — {r.text}")
-            return False, None
-        return True, _extraer_wamid(r)
+        return await _enviar_a_meta(url, payload, headers, telefono, canal, "documento")
 
     async def enviar_imagen(self, telefono: str, media_id: str, caption: str = "", canal: dict | None = None) -> tuple[bool, str | None]:
         """Envía una imagen ya subida con subir_media."""
@@ -493,11 +546,7 @@ class ProveedorMeta(ProveedorWhatsApp):
             "type": "image",
             "image": imagen,
         }
-        r = await post_con_reintentos(url, json=payload, headers=headers)
-        if r.status_code != 200:
-            logger.error(f"Error Meta API (imagen): {r.status_code} — {r.text}")
-            return False, None
-        return True, _extraer_wamid(r)
+        return await _enviar_a_meta(url, payload, headers, telefono, canal, "imagen")
 
     async def enviar_audio(self, telefono: str, media_id: str, canal: dict | None = None) -> tuple[bool, str | None]:
         """Envía una nota de voz ya subida con subir_media (debe ser OGG/Opus
@@ -517,11 +566,7 @@ class ProveedorMeta(ProveedorWhatsApp):
             "type": "audio",
             "audio": {"id": media_id},
         }
-        r = await post_con_reintentos(url, json=payload, headers=headers)
-        if r.status_code != 200:
-            logger.error(f"Error Meta API (audio): {r.status_code} — {r.text}")
-            return False, None
-        return True, _extraer_wamid(r)
+        return await _enviar_a_meta(url, payload, headers, telefono, canal, "audio")
 
     async def descargar_media(self, media_id: str, canal: dict | None = None) -> tuple[bytes, str] | None:
         """Descarga un adjunto ENTRANTE (imagen/documento/nota de voz) desde
@@ -585,13 +630,16 @@ class ProveedorMeta(ProveedorWhatsApp):
 
     async def enviar_plantilla(
         self, telefono: str, nombre_plantilla: str, parametros: list[str], idioma: str = "es", canal: dict | None = None
-    ) -> bool:
+    ) -> tuple[bool, str | None]:
         """Envía una plantilla de mensaje aprobada por Meta — necesaria para
-        iniciar una conversación con alguien que nunca escribió primero."""
+        iniciar una conversación con alguien que nunca escribió primero.
+        Retorna (enviado, wamid), como los demás envíos (antes solo un
+        booleano: sin el wamid no se podía cruzar con lo que Meta cobró). La
+        capa central (agent/envios.py) acepta ambas formas."""
         canal = canal or await self.resolver_canal(None)
         if not canal or not canal.get("access_token"):
             logger.warning("Ningún canal de WhatsApp configurado")
-            return False
+            return False, None
         url = f"https://graph.facebook.com/{self.api_version}/{canal['phone_number_id']}/messages"
         headers = {
             "Authorization": f"Bearer {canal['access_token']}",
@@ -613,7 +661,4 @@ class ProveedorMeta(ProveedorWhatsApp):
                 "components": componentes,
             },
         }
-        r = await post_con_reintentos(url, json=payload, headers=headers)
-        if r.status_code != 200:
-            logger.error(f"Error Meta API (plantilla): {r.status_code} — {r.text}")
-        return r.status_code == 200
+        return await _enviar_a_meta(url, payload, headers, telefono, canal, "plantilla")

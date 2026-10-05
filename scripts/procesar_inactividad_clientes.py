@@ -61,6 +61,7 @@ async def main() -> None:
     proveedor = obtener_proveedor()
     reenganchados: list[str] = []
     bloqueados: list[str] = []
+    inciertos: list[str] = []
     fallidos: list[str] = []
     invalidos: list[str] = []
     for fila in candidatos_reenganche:
@@ -77,6 +78,15 @@ async def main() -> None:
             bloqueados.append(fila["telefono"])
             continue
         enviado, wamid = resultado
+        if resultado.incierto:
+            # Meta pudo haber aceptado el mensaje (se perdió la respuesta): NO se reenvía en la
+            # próxima corrida. Se guarda como "incierto" para que el lead no siga de candidato.
+            await guardar_mensaje(
+                fila["telefono"], "assistant", MENSAJE_REENGANCHE,
+                negocio_id=fila["negocio_id"], mensaje_id_meta=None, estado_envio="incierto",
+            )
+            inciertos.append(fila["telefono"])
+            continue
         if not enviado:
             fallidos.append(fila["telefono"])
             continue
@@ -92,7 +102,7 @@ async def main() -> None:
 
     print(
         f"Inactividad de clientes: {len(reenganchados)} reenganchado(s) tras {HORAS_REENGANCHE}h "
-        f"({len(fallidos)} fallo(s) de envío, {len(bloqueados)} frenado(s) por la política de costo), "
+        f"({len(fallidos)} fallo(s) de envío, {len(inciertos)} sin confirmar, {len(bloqueados)} frenado(s) por la política de costo), "
         f"{len(candidatos_cierre)} cerrado(s) por sin respuesta tras {HORAS_CIERRE}h."
     )
     if fallidos:

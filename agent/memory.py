@@ -2607,7 +2607,7 @@ class EnvioMeta(Base):
     # 150, como Mensaje.telefono (un BSUID de Meta puede ser más largo que un teléfono).
     telefono: Mapped[str] = mapped_column(String(150), nullable=False)
     tipo: Mapped[str] = mapped_column(String(20), nullable=False)  # texto | imagen | documento | audio | plantilla
-    decision: Mapped[str] = mapped_column(String(20), nullable=False)  # enviado | fallido | bloqueado
+    decision: Mapped[str] = mapped_column(String(20), nullable=False)  # enviado | fallido | bloqueado | incierto
     motivo: Mapped[str | None] = mapped_column(String(200), nullable=True)
     wamid: Mapped[str | None] = mapped_column(String(100), nullable=True, index=True)
     # Fase B: lo que la política estimó ANTES de enviar. `gratis_esperado` y
@@ -2690,6 +2690,105 @@ async def cerrar_envio_meta(envio_id: int, enviado: bool, wamid: str | None) -> 
         envio.decision = "enviado" if enviado else "fallido"
         envio.wamid = wamid if enviado else None
         await session.commit()
+
+
+async def marcar_envio_incierto(envio_id: int, motivo: str) -> None:
+    """Cierra una reserva cuyo resultado se desconoce (2026-10-05): el POST a
+    Meta pudo haber llegado (ReadTimeout, 5xx...) pero no se supo si Meta
+    creó el mensaje ni con qué wamid. Queda en "incierto", NO en "fallido":
+    no se reenvía solo ni cuenta como enviado para la agrupación, y el informe
+    de conciliación (`listar_envios_inciertos_o_huerfanos`) lo muestra."""
+    async with async_session() as session:
+        envio = await session.get(EnvioMeta, envio_id)
+        if envio is None:
+            return
+        envio.decision = "incierto"
+        envio.wamid = None
+        envio.motivo = (motivo or "resultado desconocido")[:200]
+        await session.commit()
+
+
+async def buscar_wamid_huerfano(phone_number_id: str | None, telefono: str, desde: datetime, margen_segundos: int = 10) -> str | None:
+    """Busca en `uso_mensajes_meta` un mensaje saliente al cliente `telefono`
+    (desde el número `phone_number_id`, si se conoce) enviado desde `desde` −
+    `margen_segundos` y que NADIE reclamó todavía: su wamid no está en
+    `mensajes.mensaje_id_meta` ni en `envios_meta.wamid`. Sirve para resolver un
+    envío incierto: si Meta aceptó el mensaje aunque la respuesta se perdió, su
+    estado "sent" llega por webhook con ese wamid. Ignora los "failed" (no
+    se entregó). Con varios candidatos devuelve el más antiguo. None si no hay."""
+    desde_con_margen = desde - timedelta(seconds=margen_segundos)
+    destinos = {telefono, telefono.lstrip("+"), "+" + telefono.lstrip("+")}
+    consulta = (
+        select(UsoMensajeMeta.wamid)
+        .where(
+            UsoMensajeMeta.destinatario.in_(destinos),
+            UsoMensajeMeta.estado.in_(("sent", "delivered", "read")),
+            sa_or(
+                UsoMensajeMeta.enviado_en >= desde_con_margen,
+                sa_and(UsoMensajeMeta.enviado_en.is_(None), UsoMensajeMeta.creado >= desde_con_margen),
+            ),
+            ~sa_exists().where(Mensaje.mensaje_id_meta == UsoMensajeMeta.wamid),
+            ~sa_exists().where(EnvioMeta.wamid == UsoMensajeMeta.wamid),
+        )
+        .order_by(func.coalesce(UsoMensajeMeta.enviado_en, UsoMensajeMeta.creado))
+        .limit(1)
+    )
+    if phone_number_id:
+        consulta = consulta.where(UsoMensajeMeta.phone_number_id == phone_number_id)
+    async with async_session() as session:
+        return (await session.execute(consulta)).scalar_one_or_none()
+
+
+async def listar_envios_inciertos_o_huerfanos(negocio_id: str, desde: datetime, minutos_sin_wamid: int = 5) -> dict:
+    """Informe de conciliación entre lo que el sistema cree que envió y lo que
+    Meta informó haber enviado (cobrado), desde `desde` (UTC naive):
+
+    - `envios_inciertos`: filas de `envios_meta` en decision "incierto" (el
+      POST pudo llegar a Meta y no se supo el resultado) o "enviado" SIN wamid
+      con más de `minutos_sin_wamid` min (la fila quedó abierta o el
+      proveedor no devolvió wamid — hoy no pasa con los envíos de texto).
+    - `uso_sin_envio`: filas de `uso_mensajes_meta` cuyo wamid no está en
+      `envios_meta.wamid` ni en `mensajes.mensaje_id_meta`: posibles copias
+      duplicadas de un envío, o mensajes enviados fuera de la capa central
+      (por ejemplo, el asesor desde la app de WhatsApp Business).
+    Solo lectura."""
+    limite_sin_wamid = datetime.utcnow() - timedelta(minutes=minutos_sin_wamid)
+    async with async_session() as session:
+        envios = (await session.execute(
+            select(EnvioMeta).where(
+                EnvioMeta.negocio_id == negocio_id, EnvioMeta.creado >= desde,
+                sa_or(
+                    EnvioMeta.decision == "incierto",
+                    sa_and(EnvioMeta.decision == "enviado", EnvioMeta.wamid.is_(None), EnvioMeta.creado < limite_sin_wamid),
+                ),
+            ).order_by(EnvioMeta.creado.desc()).limit(500)
+        )).scalars().all()
+        huerfanos = (await session.execute(
+            select(UsoMensajeMeta).where(
+                UsoMensajeMeta.negocio_id == negocio_id,
+                func.coalesce(UsoMensajeMeta.enviado_en, UsoMensajeMeta.creado) >= desde,
+                ~sa_exists().where(EnvioMeta.wamid == UsoMensajeMeta.wamid),
+                ~sa_exists().where(Mensaje.mensaje_id_meta == UsoMensajeMeta.wamid),
+            ).order_by(func.coalesce(UsoMensajeMeta.enviado_en, UsoMensajeMeta.creado).desc()).limit(500)
+        )).scalars().all()
+    return {
+        "desde": desde.isoformat(),
+        "envios_inciertos": [
+            {
+                "id": e.id, "origen": e.origen, "telefono": e.telefono, "tipo": e.tipo, "decision": e.decision,
+                "motivo": e.motivo, "wamid": e.wamid, "creado": e.creado.isoformat() + "Z",
+            }
+            for e in envios
+        ],
+        "uso_sin_envio": [
+            {
+                "wamid": u.wamid, "destinatario": u.destinatario, "phone_number_id": u.phone_number_id, "estado": u.estado,
+                "enviado_en": u.enviado_en.isoformat() + "Z" if u.enviado_en else None,
+                "pricing_type": u.pricing_type, "pricing_categoria": u.pricing_categoria,
+            }
+            for u in huerfanos
+        ],
+    }
 
 
 class Producto(Base):
@@ -2954,6 +3053,157 @@ async def marcar_mensaje_procesado(mensaje_id: str) -> bool:
         except IntegrityError:
             await session.rollback()
             return True
+
+
+async def liberar_marca_mensaje_procesado(mensaje_id: str) -> bool:
+    """Borra la marca de idempotencia de `mensaje_id` (2026-10-05, mensajes
+    perdidos): el webhook la usa cuando el procesamiento de un mensaje falló
+    ANTES de guardarlo, para que el reintento de Meta sí lo procese en vez de
+    descartarlo como "ya procesado". Retorna True si había una marca y se
+    borró. Idempotente: sin marca no hace nada."""
+    async with async_session() as session:
+        resultado = await session.execute(delete(MensajeProcesado).where(MensajeProcesado.mensaje_id == mensaje_id))
+        await session.commit()
+        return (resultado.rowcount or 0) > 0
+
+
+async def existe_mensaje_con_id_meta(negocio_id: str, mensaje_id_meta: str) -> bool:
+    """¿Ya hay un Mensaje guardado con este wamid en este Negocio? — el
+    candado contra duplicados del webhook (no hay índice único sobre
+    `mensaje_id_meta`, a propósito: el historial anterior no lo tiene y no se
+    migra). Filtra por `negocio_id` (el mismo wamid nunca debería repetirse
+    entre Negocios, pero el aislamiento no se negocia)."""
+    if not negocio_id or not mensaje_id_meta:
+        return False
+    async with async_session() as session:
+        fila = await session.execute(
+            select(Mensaje.id).where(
+                Mensaje.negocio_id == negocio_id, Mensaje.mensaje_id_meta == mensaje_id_meta,
+            ).limit(1)
+        )
+        return fila.first() is not None
+
+
+# Tipo del evento que deja cada reintento del barrido de mensajes sin
+# respuesta (scripts/recuperar_mensajes_sin_respuesta.py) — 20 caracteres,
+# cabe de sobra en eventos_lead.tipo (TIPO_EVENTO_LARGO_MAX).
+TIPO_EVENTO_RESPUESTA_RECUPERADA = "respuesta_recuperada"
+
+# Resultados con los que el barrido NUNCA toca un lead: los cerrados de
+# siempre más "agendado" y "postventa", que no son "cerrados" para el resto del
+# sistema pero sí están en manos de una persona (regla crítica: nunca se
+# modifica un lead vendido/agendado/postventa desde un proceso automático).
+RESULTADOS_QUE_EL_BARRIDO_NO_TOCA = RESULTADOS_CERRADOS + ("agendado", "postventa")
+
+_PLACEHOLDER_ADJUNTO = re.compile(r"^\[[a-z_]+\]$")
+
+
+async def listar_mensajes_sin_respuesta_de_gabi(
+    negocio_id: str | None = None, min_minutos: float = 3, max_horas: float = 20, limite: int = 50,
+    max_intentos: int | None = None,
+) -> list[dict]:
+    """Barrido de recuperación (2026-10-05, mensajes perdidos): leads que Gabi
+    atiende SOLA —sin asesor, sin pausar, sin escalar a supervisión, sin
+    cierre y con la conversación activa— cuyo ÚLTIMO mensaje real es del
+    cliente (`role == "user"`) y lleva entre `min_minutos` y `max_horas` sin
+    respuesta. Es lo que queda cuando la respuesta de Gabi se pierde después
+    de guardar el mensaje (la tarea de debounce vive en memoria: un redeploy,
+    un reinicio o una excepción la borran sin dejar rastro).
+
+    Criterios, en orden:
+      · Lead sin `asesor_asignado`, `pausado_manual` falso,
+        `escalado_supervision_en` y `cerrado_definitivamente_en` vacíos, y
+        `resultado` vacío o fuera de RESULTADOS_QUE_EL_BARRIDO_NO_TOCA (incluye
+        vendido/agendado/postventa). Lo mismo se exige a la Conversation activa
+        y a su Opportunity vigente (las dos fuentes, por si una quedó atrasada).
+      · Las reacciones ("Reaccionó con …") se IGNORAN al buscar el último
+        mensaje: nadie espera respuesta a un 👍, ni un 👍 tapa un mensaje real
+        sin contestar.
+      · Si el último mensaje real del cliente es un adjunto (`archivo_id`) o un
+        placeholder "[audio]", "[image]"…, no se recupera: ese camino nunca
+        pasa por Claude (se avisa al cliente que no se lee y que escriba), no
+        hay una respuesta de IA que reconstruir.
+      · `min_minutos` deja pasar a los mensajes recientes (el debounce normal,
+        3 s, todavía puede estar trabajando); `max_horas` deja fuera a los muy
+        viejos (contestarlos tarde confunde más de lo que ayuda; además de las
+        20 h la ventana de servicio de 24 h de Meta ya está por cerrarse).
+      · `max_intentos` (None = sin tope): excluye el mensaje que ya acumuló
+        tantos eventos `respuesta_recuperada`.
+
+    Cada fila: {telefono, negocio_id, numero_whatsapp_id, conversation_id,
+    mensaje_id (Mensaje.id INTERNO del mensaje del cliente — es lo que lleva el
+    payload de los eventos), mensaje_id_meta, ultimo_mensaje_en, intentos}.
+    Del más antiguo al más reciente; `limite` se aplica DESPUÉS de filtrar."""
+    ahora = datetime.utcnow()
+    corte_reciente = ahora - timedelta(minutes=min_minutos)
+    corte_viejo = ahora - timedelta(hours=max_horas)
+    filas: list[dict] = []
+
+    async with async_session() as session:
+        hay_mensaje_del_cliente_en_ventana = sa_exists().where(
+            Mensaje.telefono == Lead.telefono, Mensaje.negocio_id == Lead.negocio_id,
+            Mensaje.role == "user", Mensaje.timestamp >= corte_viejo, Mensaje.timestamp <= corte_reciente,
+        )
+        query = select(Lead).where(
+            Lead.asesor_asignado.is_(None),
+            Lead.pausado_manual.is_(False),
+            Lead.escalado_supervision_en.is_(None),
+            Lead.cerrado_definitivamente_en.is_(None),
+            sa_or(Lead.resultado.is_(None), Lead.resultado.notin_(RESULTADOS_QUE_EL_BARRIDO_NO_TOCA)),
+            hay_mensaje_del_cliente_en_ventana,
+        )
+        if negocio_id is not None:
+            query = query.where(Lead.negocio_id == negocio_id)
+        leads = (await session.execute(query)).scalars().all()
+
+        for lead in leads:
+            contact = await _obtener_contact(session, lead.negocio_id, lead.telefono)
+            conversation = await _obtener_conversation_activa(session, contact.id) if contact else None
+            if (
+                conversation is None or conversation.asesor_asignado_id is not None
+                or conversation.pausado_manual or conversation.cerrado_definitivamente_en is not None
+            ):
+                continue
+            opportunity = await _obtener_opportunity_vigente(session, conversation.id)
+            if opportunity is not None and opportunity.resultado in RESULTADOS_QUE_EL_BARRIDO_NO_TOCA:
+                continue
+
+            recientes = (await session.execute(
+                select(Mensaje)
+                .where(Mensaje.telefono == lead.telefono, Mensaje.negocio_id == lead.negocio_id)
+                .order_by(Mensaje.timestamp.desc(), Mensaje.id.desc())
+                .limit(15)
+            )).scalars().all()
+            ultimo = next(
+                (m for m in recientes if not (m.role == "user" and (m.content or "").startswith("Reaccionó con"))),
+                None,
+            )
+            if ultimo is None or ultimo.role != "user":
+                continue
+            if ultimo.archivo_id is not None or _PLACEHOLDER_ADJUNTO.match((ultimo.content or "").strip()):
+                continue
+            if not (corte_viejo <= ultimo.timestamp <= corte_reciente):
+                continue
+
+            eventos = (await session.execute(
+                select(EventoLead.payload).where(
+                    EventoLead.conversation_id == conversation.id, EventoLead.negocio_id == lead.negocio_id,
+                    EventoLead.tipo == TIPO_EVENTO_RESPUESTA_RECUPERADA,
+                )
+            )).scalars().all()
+            intentos = sum(1 for p in eventos if isinstance(p, dict) and p.get("mensaje_id") == ultimo.id)
+            if max_intentos is not None and intentos >= max_intentos:
+                continue
+
+            filas.append({
+                "telefono": lead.telefono, "negocio_id": lead.negocio_id,
+                "numero_whatsapp_id": lead.numero_whatsapp_id, "conversation_id": conversation.id,
+                "mensaje_id": ultimo.id, "mensaje_id_meta": ultimo.mensaje_id_meta,
+                "ultimo_mensaje_en": ultimo.timestamp, "intentos": intentos,
+            })
+
+    filas.sort(key=lambda f: f["ultimo_mensaje_en"])
+    return filas[:limite]
 
 
 _RANGO_ESTADO_MENSAJE = {"sent": 1, "delivered": 2, "read": 3}
@@ -3510,7 +3760,7 @@ async def resumen_envios_por_origen(negocio_id: str, mes: str | None = None) -> 
 
     def _origen(nombre: str) -> dict:
         return origenes.setdefault(nombre, {
-            "origen": nombre, "enviados": 0, "fallidos": 0, "bloqueados": 0, "motivos_bloqueo": {},
+            "origen": nombre, "enviados": 0, "fallidos": 0, "inciertos": 0, "bloqueados": 0, "motivos_bloqueo": {},
             "gratis_cuota": 0, "gratis_ventana_anuncio": 0, "cobrables": {}, "sin_estado": 0,
         })
 
@@ -3541,6 +3791,8 @@ async def resumen_envios_por_origen(negocio_id: str, mes: str | None = None) -> 
             d["enviados"] += n
         elif decision == "fallido":
             d["fallidos"] += n
+        elif decision == "incierto":
+            d["inciertos"] += n   # el POST pudo llegar a Meta: no es ni enviado ni fallido (ver marcar_envio_incierto)
         elif decision == "bloqueado":
             d["bloqueados"] += n
     for nombre, motivo, n in motivos:

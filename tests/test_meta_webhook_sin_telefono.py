@@ -101,7 +101,7 @@ async def test_enviar_mensaje_manda_recipient_en_vez_de_to_para_un_bsuid(monkeyp
         payloads_enviados.append(json)
         return _RespuestaFalsa()
 
-    monkeypatch.setattr(meta_provider, "post_con_reintentos", post_falso)
+    monkeypatch.setattr(meta_provider, "post_sin_duplicar", post_falso)   # los envíos ya no usan post_con_reintentos
     canal = {"access_token": "token-falso", "phone_number_id": "123"}
 
     enviado, wamid = await ProveedorMeta().enviar_mensaje(
@@ -120,7 +120,7 @@ async def test_enviar_mensaje_sigue_mandando_to_para_un_telefono_real(monkeypatc
         payloads_enviados.append(json)
         return _RespuestaFalsa()
 
-    monkeypatch.setattr(meta_provider, "post_con_reintentos", post_falso)
+    monkeypatch.setattr(meta_provider, "post_sin_duplicar", post_falso)
     canal = {"access_token": "token-falso", "phone_number_id": "123"}
 
     await ProveedorMeta().enviar_mensaje("51987654321", "Hola", canal=canal)
