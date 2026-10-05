@@ -3338,6 +3338,12 @@ async def guardar_configuracion_uso_meta(negocio_id: str, datos: dict, autor: st
             raise ValueError("La cuota gratis debe ser un entero entre 0 y 1 000 000.")
         cambios["meta_cuota_gratis_servicio"] = str(cuota)
 
+    if datos.get("tipo_cambio_pen_por_usd") is not None:
+        tc = datos["tipo_cambio_pen_por_usd"]
+        if isinstance(tc, bool) or not isinstance(tc, (int, float)) or not 1 <= tc <= 10:
+            raise ValueError("El tipo de cambio debe ser un número de soles por dólar entre 1 y 10.")
+        cambios["meta_tipo_cambio_pen_por_usd"] = repr(float(tc))
+
     if datos.get("zona_horaria_mes") is not None:
         from zoneinfo import ZoneInfo
 
@@ -3533,6 +3539,9 @@ async def obtener_configuracion_envios(negocio_id: str) -> dict:
         "meta_fep_horas": _a_numero(await obtener_configuracion("meta_fep_horas", "72", negocio_id=negocio_id), 72),
         "cuota_gratis_servicio": int(_a_numero(await obtener_configuracion("meta_cuota_gratis_servicio", "1000", negocio_id=negocio_id), 1000) or 0),
         "zona_horaria": await obtener_configuracion("meta_zona_horaria_mes", "UTC", negocio_id=negocio_id),
+        # Soles por dólar para mostrar equivalentes APROXIMADOS. 3.327 sale de las rate cards de Meta
+        # para Perú (0.0998 PEN / 0.0300 USD); es referencial y editable, nunca se usa para cobrar.
+        "tipo_cambio_pen_por_usd": _a_numero(await obtener_configuracion("meta_tipo_cambio_pen_por_usd", "3.327", negocio_id=negocio_id), 3.327),
         "tarifas_usd": tarifas,
     }
 

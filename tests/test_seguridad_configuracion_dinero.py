@@ -178,3 +178,13 @@ def test_toda_clave_de_configuracion_generada_cabe_en_la_columna():
         claves += [f"envios_modo_{origen}", f"envios_agrupar_minutos_{origen}", f"envios_categoria_{origen}"]
     largas = [c for c in claves if len(c) > limite]
     assert limite >= 100 and largas == []
+
+
+async def test_tipo_de_cambio_referencial_por_defecto_editable_y_validado():
+    nid = await _negocio("seg-tc")
+    assert (await mem.obtener_configuracion_envios(nid))["tipo_cambio_pen_por_usd"] == 3.327
+    await mem.guardar_configuracion_uso_meta(nid, {"tipo_cambio_pen_por_usd": 3.4}, autor="a")
+    assert (await mem.obtener_configuracion_envios(nid))["tipo_cambio_pen_por_usd"] == 3.4
+    for malo in (0, 11, "3.3", True):
+        with pytest.raises(ValueError):
+            await mem.guardar_configuracion_uso_meta(nid, {"tipo_cambio_pen_por_usd": malo})
