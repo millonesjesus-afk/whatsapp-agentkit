@@ -29,6 +29,9 @@ from agent.memory import (
     enrutar_posventa_si_corresponde, registrar_estado_mensaje_meta,
     existe_mensaje_con_id_meta, liberar_marca_mensaje_procesado,
 )
+from agent.memory import (
+    es_texto_de_error_tecnico, es_texto_de_reenganche_automatico, textos_de_error_tecnico_conocidos,
+)
 from agent.providers import obtener_proveedor
 from agent import envios
 from agent import circuito_ia, respaldo_sin_ia
@@ -396,6 +399,17 @@ async def webhook_verificacion(request: Request):
     return {"status": "ok"}
 
 
+def _debe_limpiar_sin_respuesta(lead: dict | None) -> bool:
+    """¿Se borra el "sin_respuesta" cuando el cliente vuelve a escribir? Solo el AUTOMÁTICO
+    (el que pone scripts/procesar_inactividad_clientes.py en un lead sin asesor y sin pausar).
+    Un "sin_respuesta" puesto por una PERSONA (el lead tiene asesor o Gabi pausada) nunca se
+    borra solo: es una decisión humana y solo otra acción humana debe cambiarla (2026-10-06,
+    caso lelespuru: el resultado que ella marcó se perdía en silencio, sin evento en el Timeline)."""
+    if not lead or lead.get("resultado") != "sin_respuesta":
+        return False
+    return not lead.get("asesor_asignado") and not lead.get("pausado_manual")
+
+
 async def _registrar_referral_seguro(msg, canal: dict | None, texto: str = "") -> None:
     """Atribución del `referral` de un anuncio de Click-to-WhatsApp para los
     mensajes que NO pasan por la rama de texto (foto, audio, documento, sticker,
@@ -482,6 +496,27 @@ async def _avisar_que_gabi_escribe(telefono: str, canal: dict | None) -> None:
         logger.warning(f"No se pudo avisar al panel que Gabi está escribiendo ({telefono}): {e}")
 
 
+def _sin_avisos_automaticos_finales(historial: list[dict]) -> list[dict]:
+    """Recuperación tras una falla transitoria de la IA (2026-10-06): si el historial termina en
+    «mensaje del cliente → texto de error técnico de Gabi» (y, a veces, el reenganche automático), ese
+    mensaje del cliente en realidad NUNCA se contestó. Se quitan esos avisos del final para que el último
+    turno vuelva a ser el del cliente —sin esto el guarda de abajo descartaría el reintento— y para que
+    Claude no vea su propio «problema técnico» como si fuera una respuesta ya dada. Solo se aplica si
+    lo que se quita incluye al menos un texto de error técnico; en cualquier otro caso el historial
+    queda tal cual."""
+    conocidos = textos_de_error_tecnico_conocidos()
+    fin = len(historial)
+    hubo_error = False
+    while fin > 0 and historial[fin - 1]["role"] == "assistant":
+        contenido = historial[fin - 1].get("content")
+        if es_texto_de_error_tecnico(contenido, conocidos):
+            hubo_error = True
+        elif not es_texto_de_reenganche_automatico(contenido):
+            break
+        fin -= 1
+    return historial[:fin] if hubo_error else historial
+
+
 async def _generar_y_enviar_respuesta_ia(telefono: str, canal: dict | None) -> None:
     """Gate 2026-09-23 (fix #3, debounce) — el trabajo REAL que antes corría
     inline dentro de `webhook_handler` para cada mensaje de texto: arma el
@@ -518,7 +553,7 @@ async def _generar_y_enviar_respuesta_ia(telefono: str, canal: dict | None) -> N
         )
         return
 
-    historial_completo = await servicio_conversacion.obtener_historial(telefono)
+    historial_completo = _sin_avisos_automaticos_finales(await servicio_conversacion.obtener_historial(telefono))
     if not historial_completo or historial_completo[-1]["role"] != "user":
         # No debería pasar (esto se programa siempre justo después de
         # guardar un mensaje "user") — fail-safe, nunca se inventa una
@@ -962,7 +997,7 @@ async def webhook_handler(request: Request):
             # flujo, para que el pipeline/bandeja no siga mostrando
             # "Sin respuesta" sobre una conversación que ya está activa de
             # nuevo.
-            if lead and lead.get("resultado") == "sin_respuesta":
+            if _debe_limpiar_sin_respuesta(lead):
                 await actualizar_lead(msg.telefono, campos_explicitos=("resultado",), resultado=None)
                 lead = await obtener_lead(msg.telefono, negocio_id=canal.get("negocio_id") if canal else None)
 

@@ -2717,7 +2717,11 @@ async def bandeja_conversaciones(
     # catálogo que ya usa la Ficha del Lead, así que un valor fuera de
     # RESULTADOS es un cliente desactualizado o manipulando la URL a mano,
     # nunca un caso real; se ignora en vez de fallar.
-    if resultado not in RESULTADOS:
+    # 2026-10-06: además de los resultados del catálogo, `sin_resultado` pide
+    # las conversaciones SIN resultado (Opportunity vigente con resultado
+    # vacío) — no es un valor guardado, es la ausencia de uno (ver
+    # `listar_conversaciones_activas`). Mismo literal que usa Analítica.
+    if resultado != "sin_resultado" and resultado not in RESULTADOS:
         resultado = ""
     pagina = max(1, pagina)
     por_pagina = min(max(1, por_pagina), POR_PAGINA_PIPELINE_MAXIMO)

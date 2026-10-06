@@ -19,6 +19,13 @@ desde el reenganche):
     cualquier momento después Gabi le responde normal (ver el bloque en
     agent/main.py que limpia "sin_respuesta" apenas eso pasa).
 
+Excepción (2026-10-06, falla transitoria de la IA): si lo ÚNICO que el cliente recibió tras su último
+mensaje fue el texto de error técnico de Gabi ("Uy, estoy teniendo un problema técnico…"), Gabi nunca le
+respondió de verdad. Esos leads vienen marcados `tras_falla_ia` y NO se reenganchan ni se cierran: se derivan
+a una persona con `respaldo_sin_ia.derivar_por_falla_ia` (motivo "sin_respuesta_por_falla_ia": asesor, o cola
+de supervisión si no hay asesor o la ventana de 24 h ya cerró — sin texto libre en ese caso). Si la
+derivación falla, el lead sigue de candidato en la próxima corrida; nunca queda cerrado en silencio.
+
 Ver agent/memory.py::listar_leads_inactividad_cliente para la consulta
 real — este script es el único punto que hace I/O externo (enviar por
 WhatsApp), a propósito fuera de memory.py.
@@ -46,12 +53,20 @@ from agent.providers import obtener_proveedor
 from agent import circuito_ia, envios
 from agent.tiempo_real import gestor_conexiones
 
+MOTIVO_DERIVACION_FALLA_IA = "sin_respuesta_por_falla_ia"
 HORAS_REENGANCHE = 2.0
 HORAS_CIERRE = 15.0
 MENSAJE_REENGANCHE = (
     "¡Hola de nuevo! 👋 Sigo por aquí si tienes alguna otra pregunta o quieres "
     "retomar donde quedamos. Cuéntame en qué te puedo ayudar 😊"
 )
+
+
+async def _derivar_real(proveedor, telefono: str, canal: dict, motivo: str) -> dict:
+    """Deriva por el mismo camino que el webhook (asesor o cola de supervisión, un solo texto)."""
+    from agent import respaldo_sin_ia  # import tardío: arrastra servicio_inteligencia (Claude) y el panel en tiempo real
+
+    return await respaldo_sin_ia.derivar_por_falla_ia(telefono, canal, motivo, proveedor=proveedor)
 
 
 async def main() -> None:
@@ -67,6 +82,11 @@ async def main() -> None:
     candidatos_reenganche, candidatos_cierre = await listar_leads_inactividad_cliente(
         horas_reenganche=HORAS_REENGANCHE, horas_cierre=HORAS_CIERRE,
     )
+
+    # Los marcados `tras_falla_ia` se derivan (más abajo); el resto sigue el camino de siempre.
+    con_falla_ia = [f for f in candidatos_reenganche + candidatos_cierre if f.get("tras_falla_ia")]
+    candidatos_reenganche = [f for f in candidatos_reenganche if not f.get("tras_falla_ia")]
+    candidatos_cierre = [f for f in candidatos_cierre if not f.get("tras_falla_ia")]
 
     proveedor = obtener_proveedor()
     reenganchados: list[str] = []
@@ -115,6 +135,24 @@ async def main() -> None:
             errores.append(fila.get("telefono", "?"))
             print(f"ERROR reenganchando a {fila.get('telefono', '?')}: {type(e).__name__}: {e}", file=sys.stderr)
 
+    derivados: list[str] = []
+    for fila in con_falla_ia:
+        try:
+            if not fila["telefono"].isdigit():
+                invalidos.append(repr(fila["telefono"]))
+                continue
+            canal = await proveedor.resolver_canal(fila["numero_whatsapp_id"], negocio_id=fila["negocio_id"])
+            if not canal:
+                # Sin canal no se sabe por cuál número contestar (responder desde otro sería peor): se
+                # cuenta como error y el lead sigue de candidato.
+                raise RuntimeError("no se pudo resolver el canal de WhatsApp del lead")
+            resultado = await _derivar_real(proveedor, fila["telefono"], canal, MOTIVO_DERIVACION_FALLA_IA)
+            if resultado.get("accion") in ("derivado_asesor", "cola_supervision"):
+                derivados.append(fila["telefono"])
+        except Exception as e:  # noqa: BLE001 — un lead con problemas no frena a los demás; se reintenta
+            errores.append(fila.get("telefono", "?"))
+            print(f"ERROR derivando por falla de la IA a {fila.get('telefono', '?')}: {type(e).__name__}: {e}", file=sys.stderr)
+
     cerrados = 0
     for fila in candidatos_cierre:
         try:
@@ -128,6 +166,7 @@ async def main() -> None:
         f"Inactividad de clientes: {len(reenganchados)} reenganchado(s) tras {HORAS_REENGANCHE}h "
         f"({len(fallidos)} fallo(s) de envío, {len(inciertos)} sin confirmar, {len(bloqueados)} frenado(s) por la política de costo), "
         f"{cerrados} cerrado(s) por sin respuesta tras {HORAS_CIERRE}h, {len(errores)} error(es)."
+        + (f" {len(derivados)} derivado(s) a una persona por falla de la IA." if con_falla_ia else "")
     )
     if fallidos:
         print(f"  Envíos fallidos a: {', '.join(fallidos)}")

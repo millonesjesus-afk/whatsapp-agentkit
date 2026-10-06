@@ -1988,7 +1988,22 @@ async def listar_conversaciones_activas(
         )
         if asesor_asignado:
             query = query.where(Conversation.asesor_asignado_id == asesor_asignado)
-        if resultado:
+        if resultado == "sin_resultado":
+            # 2026-10-06 — filtro "Sin resultado" de la Bandeja: Conversations
+            # ACTIVAS cuya Opportunity vigente no tiene resultado (NULL o
+            # vacío), más las que todavía no tienen ninguna Opportunity (el
+            # outerjoin deja `resultado` en NULL — la fila se pinta con el
+            # mismo badge "Sin resultado"). NO es un resultado cerrado como
+            # `sin_respuesta` (ese sí es un valor guardado, puesto por un
+            # asesor o por un Cron). Es la ausencia de resultado: justo lo
+            # que `ejecutar_ciclo_de_espera` considera "sin resolver", y lo
+            # que el equipo necesita encontrar para asignarle uno. No se
+            # restringe a "con gestión": toda fila de la Bandeja con este
+            # badge debe aparecer al filtrar por él (ver el reporte del cambio).
+            query = query.where(
+                sa_or(opportunity_vigente.resultado.is_(None), opportunity_vigente.resultado == "")
+            )
+        elif resultado:
             query = query.where(opportunity_vigente.resultado == resultado)
         if busqueda:
             # Punto 4 (pedido explícito del usuario, 2026-09-28: "que el
@@ -3271,6 +3286,157 @@ RESULTADOS_QUE_EL_BARRIDO_NO_TOCA = RESULTADOS_CERRADOS + ("agendado", "postvent
 _PLACEHOLDER_ADJUNTO = re.compile(r"^\[[a-z_]+\]$")
 
 
+# ── Falla transitoria de la IA con el cliente que no vuelve (2026-10-06) ─────────────────────────
+# Caso real (Sandra, 04/10): Claude falló UNA vez (5xx/429/timeout) en el primer turno; el webhook
+# guardó como respuesta de Gabi el texto técnico de `error_message` ("Uy, estoy teniendo un problema
+# técnico…") y, como el cliente no volvió a escribir, el contador `fallos_tecnicos` nunca llegó a 2:
+# nadie lo derivó, el Cron de inactividad le mandó "¡Hola de nuevo!" y a las 15 h lo cerró como
+# `sin_respuesta`, y el barrido de mensajes sin respuesta no lo veía porque ese texto contaba como
+# "respuesta de Gabi".
+#
+# Cómo se reconoce ese texto — decisión de diseño (sin migración):
+#   · NO se reutiliza `Mensaje.estado_envio`: significa "cómo salió el ENVÍO" (None/incierto/fallido) y
+#     el panel lo usa para ofrecer el reintento; mezclarle "es un error de IA" lo rompería.
+#   · NO se agrega una columna/evento marcador: no cubriría el historial ya guardado (justo los casos
+#     reales que hay que rescatar) y el evento ensuciaría el Timeline que ven los asesores.
+#   · Se reconoce el TEXTO, normalizado (sin tildes, mayúsculas, emojis ni puntuación): el que está hoy en
+#     config/prompts.yaml (`error_message`), los dos que ya existieron (variantes por defecto) y,
+#     como red, cualquier texto corto que diga a la vez "problema(s) técnico(s)" e "intenta de nuevo"
+#     —tolera que alguien retoque la redacción del YAML—. Un mensaje real de Gabi o de un asesor
+#     nunca cumple las dos cosas con menos de 200 caracteres.
+_TEXTOS_ERROR_TECNICO_HISTORICOS = (
+    "Uy, estoy teniendo un problema técnico. Por favor intenta de nuevo en unos minutos 🙏",
+    "Lo siento, estoy teniendo problemas técnicos. Por favor intenta de nuevo en unos minutos.",
+)
+_LARGO_MAXIMO_TEXTO_ERROR_TECNICO = 200
+# Texto del reenganche automático de scripts/procesar_inactividad_clientes.py (MENSAJE_REENGANCHE).
+_FRAGMENTOS_REENGANCHE_AUTOMATICO = ("hola de nuevo", "sigo por aqui")
+_PREFIJO_REACCION = "Reaccionó con"
+
+
+def _normalizar_para_comparar(texto: str | None) -> str:
+    t = unicodedata.normalize("NFKD", (texto or "").lower())
+    t = "".join(c for c in t if not unicodedata.combining(c))
+    return " ".join(re.sub(r"[^a-z0-9]+", " ", t).split())
+
+
+def textos_de_error_tecnico_conocidos() -> frozenset[str]:
+    """Los textos de error técnico que Gabi guarda como respuesta cuando Claude falla, ya normalizados:
+    los históricos más el que esté configurado AHORA en prompts.yaml (`error_message`). Léelo una vez por
+    consulta y pásalo a `es_texto_de_error_tecnico` (leer el YAML por cada mensaje sería un desperdicio)."""
+    textos = list(_TEXTOS_ERROR_TECNICO_HISTORICOS)
+    try:
+        from agent import brain  # import tardío: brain importa memory
+        textos.append(brain.obtener_mensaje_error())
+    except Exception:  # noqa: BLE001 — sin el YAML igual sirven los históricos y la heurística
+        pass
+    return frozenset(n for n in (_normalizar_para_comparar(t) for t in textos) if n)
+
+
+def es_texto_de_error_tecnico(texto: str | None, conocidos: frozenset[str] | None = None) -> bool:
+    """¿Este texto es el aviso técnico automático de Gabi (y no una respuesta real)? Ver el comentario
+    de arriba. `conocidos` = `textos_de_error_tecnico_conocidos()` (se calcula si no se pasa)."""
+    normalizado = _normalizar_para_comparar(texto)
+    if not normalizado or len(normalizado) > _LARGO_MAXIMO_TEXTO_ERROR_TECNICO:
+        return False
+    if normalizado in (conocidos if conocidos is not None else textos_de_error_tecnico_conocidos()):
+        return True
+    return ("problema tecnico" in normalizado or "problemas tecnicos" in normalizado) and "intenta de nuevo" in normalizado
+
+
+def es_texto_de_reenganche_automatico(texto: str | None) -> bool:
+    """¿Es el mensaje "¡Hola de nuevo! Sigo por aquí…" que manda el Cron de inactividad?"""
+    normalizado = _normalizar_para_comparar(texto)
+    return bool(normalizado) and all(f in normalizado for f in _FRAGMENTOS_REENGANCHE_AUTOMATICO)
+
+
+def _recorrer_cola_de_mensajes(recientes: list, conocidos: frozenset[str]) -> tuple["Mensaje | None", list]:
+    """`recientes`: mensajes del más nuevo al más antiguo. Salta las reacciones, los textos de error
+    técnico y el reenganche automático (ninguno es una respuesta real) y devuelve (el primer mensaje REAL,
+    los textos de error saltados). Un mensaje real es del cliente, o de Gabi/un asesor con contenido de
+    verdad (incluido el aviso del modo sin IA, que ya derivó el caso a una persona)."""
+    errores: list = []
+    for m in recientes:
+        if m.role == "user" and (m.content or "").startswith(_PREFIJO_REACCION):
+            continue
+        if m.role == "assistant":
+            if es_texto_de_error_tecnico(m.content, conocidos):
+                errores.append(m)
+                continue
+            if es_texto_de_reenganche_automatico(m.content):
+                continue
+        return m, errores
+    return None, errores
+
+
+async def listar_leads_afectados_por_falla_ia(
+    dias: float = 14, negocio_id: str | None = None, solo_ventana_abierta: bool = False, limite: int = 500,
+) -> list[dict]:
+    """DIAGNÓSTICO de solo lectura (2026-10-06): leads de los últimos `dias` días cuyo último intercambio
+    REAL fue «el cliente escribió → Gabi contestó solo el texto de error técnico» y a quienes nadie
+    respondió después (ningún asesor ni Gabi escribió algo real; el reenganche automático y las reacciones
+    no cuentan). Es el rastro que dejó la falla transitoria única con el cliente que no volvió.
+
+    No modifica nada. Cada fila: telefono, nombre, interes, resultado, negocio_id, numero_whatsapp_id,
+    asesor_asignado, pausado_manual, escalado_supervision_en, ya_derivado (con asesor, pausado o en la
+    cola de supervisión), ultimo_mensaje_cliente (extracto), ultimo_mensaje_cliente_en (UTC, ISO),
+    ultimo_mensaje_cliente_lima (hora de Lima, `AAAA-MM-DD HH:MM`), error_en (UTC, ISO),
+    ventana_24h_abierta, ventana_cierra_en_lima (None si ya cerró) y horas_desde_mensaje.
+    Primero los de ventana abierta (todavía se les puede escribir libre), luego del más reciente al más
+    antiguo. `solo_ventana_abierta=True` deja solo los primeros."""
+    ahora = datetime.utcnow()
+    corte = ahora - timedelta(days=dias)
+    conocidos = textos_de_error_tecnico_conocidos()
+    lima = timedelta(hours=-5)  # Perú no observa horario de verano: UTC-5 fijo
+    filas: list[dict] = []
+
+    async with async_session() as session:
+        query = select(Mensaje.telefono, Mensaje.negocio_id, Mensaje.content).where(
+            Mensaje.role == "assistant", Mensaje.timestamp >= corte,
+            func.length(Mensaje.content) <= _LARGO_MAXIMO_TEXTO_ERROR_TECNICO * 2,
+        )
+        if negocio_id is not None:
+            query = query.where(Mensaje.negocio_id == negocio_id)
+        pares = {
+            (neg, tel) for tel, neg, contenido in (await session.execute(query)).all()
+            if es_texto_de_error_tecnico(contenido, conocidos)
+        }
+
+        for neg, telefono in sorted(pares):
+            lead = await session.get(Lead, telefono)
+            if lead is None or lead.negocio_id != neg:
+                continue
+            recientes = (await session.execute(
+                select(Mensaje).where(Mensaje.telefono == telefono, Mensaje.negocio_id == neg)
+                .order_by(Mensaje.timestamp.desc(), Mensaje.id.desc()).limit(25)
+            )).scalars().all()
+            ultimo, errores = _recorrer_cola_de_mensajes(recientes, conocidos)
+            if ultimo is None or ultimo.role != "user" or not errores:
+                continue
+            texto_cliente = (ultimo.content or "")[:120]
+            edad = ahora - ultimo.timestamp
+            ventana_abierta = edad <= timedelta(hours=24)
+            filas.append({
+                "telefono": telefono, "nombre": lead.nombre, "interes": lead.interes, "resultado": lead.resultado,
+                "negocio_id": neg, "numero_whatsapp_id": lead.numero_whatsapp_id,
+                "asesor_asignado": lead.asesor_asignado, "pausado_manual": bool(lead.pausado_manual),
+                "escalado_supervision_en": lead.escalado_supervision_en.isoformat() if lead.escalado_supervision_en else None,
+                "ya_derivado": bool(lead.asesor_asignado or lead.pausado_manual or lead.escalado_supervision_en),
+                "ultimo_mensaje_cliente": texto_cliente,
+                "ultimo_mensaje_cliente_en": ultimo.timestamp.isoformat(),
+                "ultimo_mensaje_cliente_lima": (ultimo.timestamp + lima).strftime("%Y-%m-%d %H:%M"),
+                "error_en": errores[-1].timestamp.isoformat(),
+                "ventana_24h_abierta": ventana_abierta,
+                "ventana_cierra_en_lima": (ultimo.timestamp + timedelta(hours=24) + lima).strftime("%Y-%m-%d %H:%M") if ventana_abierta else None,
+                "horas_desde_mensaje": round(edad.total_seconds() / 3600, 1),
+            })
+
+    if solo_ventana_abierta:
+        filas = [f for f in filas if f["ventana_24h_abierta"]]
+    filas.sort(key=lambda f: (not f["ventana_24h_abierta"], -datetime.fromisoformat(f["ultimo_mensaje_cliente_en"]).timestamp()))
+    return filas[:limite]
+
+
 async def listar_mensajes_sin_respuesta_de_gabi(
     negocio_id: str | None = None, min_minutos: float = 3, max_horas: float = 20, limite: int = 50,
     max_intentos: int | None = None,
@@ -3303,14 +3469,22 @@ async def listar_mensajes_sin_respuesta_de_gabi(
       · `max_intentos` (None = sin tope): excluye el mensaje que ya acumuló
         tantos eventos `respuesta_recuperada`.
 
+    Falla transitoria de la IA (2026-10-06): el texto de error técnico de Gabi
+    ("Uy, estoy teniendo un problema técnico…") y el reenganche automático que
+    pudo seguirlo NO cuentan como respuesta: un mensaje del cliente seguido solo
+    de eso se trata como sin respuesta (`tras_falla_ia` = True). Ver
+    `es_texto_de_error_tecnico`.
+
     Cada fila: {telefono, negocio_id, numero_whatsapp_id, conversation_id,
     mensaje_id (Mensaje.id INTERNO del mensaje del cliente — es lo que lleva el
-    payload de los eventos), mensaje_id_meta, ultimo_mensaje_en, intentos}.
+    payload de los eventos), mensaje_id_meta, ultimo_mensaje_en, intentos,
+    tras_falla_ia}.
     Del más antiguo al más reciente; `limite` se aplica DESPUÉS de filtrar."""
     ahora = datetime.utcnow()
     corte_reciente = ahora - timedelta(minutes=min_minutos)
     corte_viejo = ahora - timedelta(hours=max_horas)
     filas: list[dict] = []
+    conocidos_error = textos_de_error_tecnico_conocidos()
 
     async with async_session() as session:
         hay_mensaje_del_cliente_en_ventana = sa_exists().where(
@@ -3348,11 +3522,20 @@ async def listar_mensajes_sin_respuesta_de_gabi(
                 .limit(15)
             )).scalars().all()
             ultimo = next(
-                (m for m in recientes if not (m.role == "user" and (m.content or "").startswith("Reaccionó con"))),
+                (m for m in recientes if not (m.role == "user" and (m.content or "").startswith(_PREFIJO_REACCION))),
                 None,
             )
-            if ultimo is None or ultimo.role != "user":
+            if ultimo is None:
                 continue
+            tras_falla_ia = False
+            if ultimo.role != "user":
+                # Falla transitoria de la IA (2026-10-06): si lo único que sigue al último mensaje real del
+                # cliente es el texto de error técnico (y/o el reenganche automático que lo siguió), Gabi
+                # NUNCA le respondió de verdad — cuenta como sin respuesta, igual que un mensaje perdido.
+                real, errores = _recorrer_cola_de_mensajes(recientes, conocidos_error)
+                if real is None or real.role != "user" or not errores:
+                    continue
+                ultimo, tras_falla_ia = real, True
             if ultimo.archivo_id is not None or _PLACEHOLDER_ADJUNTO.match((ultimo.content or "").strip()):
                 continue
             if not (corte_viejo <= ultimo.timestamp <= corte_reciente):
@@ -3372,7 +3555,7 @@ async def listar_mensajes_sin_respuesta_de_gabi(
                 "telefono": lead.telefono, "negocio_id": lead.negocio_id,
                 "numero_whatsapp_id": lead.numero_whatsapp_id, "conversation_id": conversation.id,
                 "mensaje_id": ultimo.id, "mensaje_id_meta": ultimo.mensaje_id_meta,
-                "ultimo_mensaje_en": ultimo.timestamp, "intentos": intentos,
+                "ultimo_mensaje_en": ultimo.timestamp, "intentos": intentos, "tras_falla_ia": tras_falla_ia,
             })
 
     filas.sort(key=lambda f: f["ultimo_mensaje_en"])
@@ -6323,13 +6506,19 @@ async def listar_leads_inactividad_cliente(
     {telefono, negocio_id, numero_whatsapp_id}, lo mínimo que el script
     necesita para resolver el Canal y enviar/actualizar. Un lead nunca
     aparece en las dos listas a la vez (cierre tiene prioridad si por
-    algún motivo ya cruzó ambos umbrales)."""
+    algún motivo ya cruzó ambos umbrales).
+
+    Excepción (2026-10-06, falla transitoria de la IA): si lo único que el
+    cliente recibió tras su último mensaje fue el texto de error técnico de
+    Gabi, la fila lleva además `tras_falla_ia: True` y el script NO la
+    reengancha ni la cierra: la deriva a una persona (ver el script)."""
     ahora = datetime.utcnow()
     corte_reenganche = ahora - timedelta(hours=horas_reenganche)
     corte_cierre = ahora - timedelta(hours=horas_cierre)
 
     candidatos_reenganche: list[dict] = []
     candidatos_cierre: list[dict] = []
+    conocidos_error = textos_de_error_tecnico_conocidos()
 
     async with async_session() as session:
         query = select(Lead).where(
@@ -6370,6 +6559,28 @@ async def listar_leads_inactividad_cliente(
                 "telefono": lead.telefono, "negocio_id": lead.negocio_id,
                 "numero_whatsapp_id": lead.numero_whatsapp_id,
             }
+
+            # Falla transitoria de la IA (2026-10-06): lo ÚNICO que el cliente recibió después de su
+            # último mensaje es el texto de error técnico (y, en casos viejos, el reenganche que lo
+            # siguió) — Gabi nunca le respondió de verdad. Reenganchar con "¡Hola de nuevo!" o cerrarlo
+            # como sin_respuesta sería enterrar un caso que falló por culpa nuestra: se marca con
+            # `tras_falla_ia` para que el script lo DERIVE a una persona. Se lista (en la lista que le
+            # toca por tiempo) aunque ya tuviera el reenganche.
+            posteriores = recientes[:recientes.index(ultimo_cliente)]
+            if (
+                any(es_texto_de_error_tecnico(m.content, conocidos_error) for m in posteriores)
+                and all(
+                    es_texto_de_error_tecnico(m.content, conocidos_error) or es_texto_de_reenganche_automatico(m.content)
+                    for m in posteriores
+                )
+            ):
+                fila["tras_falla_ia"] = True
+                if ultimo_cliente.timestamp < corte_cierre:
+                    candidatos_cierre.append(fila)
+                elif ultimo_cliente.timestamp < corte_reenganche:
+                    candidatos_reenganche.append(fila)
+                continue
+
             if ultimo_cliente.timestamp < corte_cierre:
                 candidatos_cierre.append(fila)
             elif not ya_reenganchado and ultimo_cliente.timestamp < corte_reenganche:

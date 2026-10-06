@@ -17,6 +17,13 @@ cliente y lleva entre 3 minutos y 20 horas sin respuesta. NUNCA toca leads con
 asesor, pausados, escalados ni cerrados (vendido / agendado / postventa
 incluidos): el filtro vive en la consulta, no aquí.
 
+Falla transitoria de la IA (2026-10-06): si Claude falló UNA vez (5xx/429/timeout) y el cliente no volvió a
+escribir, lo último que hay guardado es «mensaje del cliente → texto de error técnico de Gabi». Ese texto NO
+cuenta como respuesta (agent/memory.py::es_texto_de_error_tecnico): el mensaje se recupera como cualquier otro
+(`tras_falla_ia` en la fila). Si el reintento vuelve a fallar, `_generar_y_enviar_respuesta_ia` ya lo deriva
+(2.ª falla) sin repetirle el texto técnico al cliente. Y un caso así que pasó de las 20 h sin que se alcanzara a
+reintentar se deriva igual (a la cola de supervisión si ya pasaron 24 h): nunca se abandona.
+
 Tope por mensaje: MÁXIMO 2 intentos de recuperación por mensaje del cliente.
 Cada intento queda registrado ANTES de ejecutarse como un evento
 `respuesta_recuperada` (payload {mensaje_id}) en el Timeline del lead, así que
@@ -55,9 +62,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from scripts._cron import ejecutar_cron  # latido: ver scripts/_cron.py
 
 from agent import circuito_ia
+from datetime import datetime
+
 from agent.memory import (
     esperar_base_de_datos, listar_mensajes_sin_respuesta_de_gabi, registrar_evento_lead,
-    obtener_lead, TIPO_EVENTO_RESPUESTA_RECUPERADA,
+    obtener_lead, contar_derivados_sin_ia, TIPO_EVENTO_RESPUESTA_RECUPERADA,
 )
 
 MIN_MINUTOS = 3
@@ -149,6 +158,7 @@ async def recuperar_mensajes_sin_respuesta(
 
         resumen["intentados"] += 1
         fallo_ia = False
+        inicio_intento = datetime.utcnow()
         try:
             await generar_respuesta(telefono, canal)
         except Exception as e:
@@ -167,6 +177,11 @@ async def recuperar_mensajes_sin_respuesta(
             # falla en el lead (fallos_tecnicos) y responde con el aviso de reintento.
             lead = await obtener_lead(telefono, negocio_id=neg_id)
             fallo_ia = bool(lead and (lead.get("fallos_tecnicos") or 0) > 0)
+            if not fallo_ia:
+                # La 2.ª falla técnica deriva al cliente y REINICIA el contador (fallos_tecnicos = 0): esa
+                # falla se reconoce por el evento `derivado_sin_ia` que dejó durante este intento. Sin esto
+                # el barrido creería que funcionó y seguiría golpeando a una IA caída.
+                fallo_ia = (await contar_derivados_sin_ia(inicio_intento, negocio_id=neg_id))["total"] > 0
 
         if fallo_ia:
             resumen["fallos_ia"] += 1
@@ -183,14 +198,23 @@ async def recuperar_mensajes_sin_respuesta(
             negocio_id=negocio_id, min_minutos=MIN_MINUTOS, max_horas=MAX_HORAS_AGOTADOS, limite=LIMITE,
         )
         for caso in agotados:
-            if caso["intentos"] < MAX_INTENTOS_POR_MENSAJE:
+            # Agotó sus intentos, o es una falla transitoria de la IA que ya pasó de las 20 h sin alcanzar a
+            # reintentarse (fuera de la ventana de recuperación): en ambos casos lo atiende una persona.
+            vencido_tras_falla = (
+                caso.get("tras_falla_ia")
+                and (datetime.utcnow() - caso["ultimo_mensaje_en"]).total_seconds() > MAX_HORAS * 3600
+            )
+            if caso["intentos"] < MAX_INTENTOS_POR_MENSAJE and not vencido_tras_falla:
                 continue
             canal = await resolver_canal(caso["numero_whatsapp_id"], negocio_id=caso["negocio_id"])
             if not canal:
                 resumen["sin_canal"] += 1
                 continue
             try:
-                await derivar(caso["telefono"], canal, "mensaje_sin_respuesta")
+                await derivar(
+                    caso["telefono"], canal,
+                    "sin_respuesta_por_falla_ia" if caso.get("tras_falla_ia") else "mensaje_sin_respuesta",
+                )
                 resumen["derivados_agotados"] += 1
             except Exception as e:
                 print(f"  No se pudo derivar a {caso['telefono']}: {e}", file=sys.stderr)
