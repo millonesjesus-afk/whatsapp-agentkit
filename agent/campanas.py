@@ -30,6 +30,7 @@ from agent import envios
 from agent.memory import (
     listar_campanas, asignar_campana_origen, obtener_campana_por_nombre,
     obtener_lead, actualizar_lead, registrar_attribution_event,
+    registrar_attribution_event_adicional, existe_attribution_event_reciente,
 )
 from agent.tools import obtener_producto_por_codigo, obtener_familia_producto, formatear_producto
 
@@ -138,6 +139,60 @@ def generar_link_whatsapp(texto_saludo: str) -> str:
     return f"https://wa.me/{WHATSAPP_NUMERO_PUBLICO}?text={texto_codificado}"
 
 
+def _resolver_campana_por_referral(campanas: list[dict], referral: dict) -> dict | None:
+    """Campaña "referral_meta" cuyo patrón aparece en los datos del anuncio
+    (source_id, headline, body). Si coinciden varias (p. ej. "terma" y el ID
+    exacto de un anuncio), gana la de patrón más largo: la más específica."""
+    fuente_meta = _normalizar(
+        f"{referral.get('source_id', '')} {referral.get('headline', '')} {referral.get('body', '')}"
+    )
+    coincidencias = [
+        c for c in campanas
+        if c["tipo_deteccion"] == "referral_meta" and _normalizar(c["patron"]) and _normalizar(c["patron"]) in fuente_meta
+    ]
+    if not coincidencias:
+        return None
+    return max(coincidencias, key=lambda c: len(_normalizar(c["patron"])))
+
+
+# Ventana en la que el MISMO referral (mismo anuncio y mismo clic) no vuelve a
+# registrarse: cubre los reintentos de Meta de un mismo mensaje.
+VENTANA_DEDUPE_REFERRAL_MINUTOS = 30
+
+
+async def registrar_referral_entrante(
+    telefono: str, texto_mensaje: str, referral: dict | None, negocio_id: str | None,
+) -> dict | None:
+    """Atribución de un mensaje entrante que trae `referral` de un anuncio de
+    Click-to-WhatsApp, sea cual sea su tipo (foto, audio, documento, texto…).
+    `texto_mensaje` es el pie de foto o cadena vacía; solo sirve para el saludo
+    de wa.link, igual que en `detectar_y_asignar_campana`.
+
+      · Lead sin campaña de origen: se delega en `detectar_y_asignar_campana`
+        (evento 'meta_ads' / 'meta_ads_no_resuelto' y campaña si se resuelve).
+      · Lead que YA tenía campaña (first-touch): NO se cambia `campana_origen`;
+        el referral nuevo queda como evento con first_touch=False.
+      · El mismo referral recibido hace poco (reintento de Meta) no se duplica.
+
+    Sin referral o sin negocio resuelto no hace nada. Retorna la campaña
+    detectada, solo cuando se asignó una ahora."""
+    if not referral or negocio_id is None:
+        return None
+    if await existe_attribution_event_reciente(telefono, negocio_id, referral, VENTANA_DEDUPE_REFERRAL_MINUTOS):
+        logger.info(f"Referral de {telefono} ya registrado hace poco — no se duplica el evento de atribución")
+        return None
+    lead = await obtener_lead(telefono, negocio_id=negocio_id)
+    if not (lead and lead.get("campana_origen")):
+        return await detectar_y_asignar_campana(telefono, texto_mensaje, referral, negocio_id)
+    # Ya tenía campaña: solo queda evidencia, sin tocar el first-touch.
+    campana = _resolver_campana_por_referral(await listar_campanas(negocio_id, solo_activas=True), referral)
+    if campana:
+        await registrar_attribution_event_adicional(telefono, "meta_ads", referral=referral, campana_nombre=campana["nombre"])
+    else:
+        await registrar_attribution_event_adicional(telefono, "meta_ads_no_resuelto", referral=referral)
+    return None
+
+
 async def detectar_y_asignar_campana(
     telefono: str, texto_mensaje: str, referral: dict | None, negocio_id: str | None,
 ) -> dict | None:
@@ -173,17 +228,8 @@ async def detectar_y_asignar_campana(
 
     # 1. Anuncios de Meta (Click-to-WhatsApp) — más específico y confiable
     if referral:
-        fuente_meta = _normalizar(
-            f"{referral.get('source_id', '')} {referral.get('headline', '')} {referral.get('body', '')}"
-        )
-        # Si coinciden varias (p. ej. "terma" y el ID exacto de un anuncio),
-        # gana la de patrón más largo: la más específica.
-        coincidencias = [
-            c for c in campanas
-            if c["tipo_deteccion"] == "referral_meta" and _normalizar(c["patron"]) and _normalizar(c["patron"]) in fuente_meta
-        ]
-        if coincidencias:
-            campana = max(coincidencias, key=lambda c: len(_normalizar(c["patron"])))
+        campana = _resolver_campana_por_referral(campanas, referral)
+        if campana:
             await asignar_campana_origen(telefono, campana["nombre"])
             logger.info(f"Campaña detectada (Meta Ads) para {telefono}: {campana['nombre']}")
             # Attribution V2 — Fase 1: evidencia adicional, no reemplaza

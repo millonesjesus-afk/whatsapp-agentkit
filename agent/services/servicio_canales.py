@@ -41,6 +41,11 @@ class ServicioCanales:
     ) -> dict | None:
         return await campanas.detectar_y_asignar_campana(telefono, texto_mensaje, referral, negocio_id)
 
+    async def registrar_referral_entrante(
+        self, telefono: str, texto_mensaje: str, referral: dict | None, negocio_id: str | None,
+    ) -> dict | None:
+        return await campanas.registrar_referral_entrante(telefono, texto_mensaje, referral, negocio_id)
+
     async def sembrar_campanas_iniciales(self, negocio_id: str | None):
         return await campanas.sembrar_campanas_iniciales(negocio_id)
 

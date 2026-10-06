@@ -52,6 +52,8 @@ from typing import Awaitable, Callable
 # scripts/procesar_inactividad_clientes.py.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from scripts._cron import ejecutar_cron  # latido: ver scripts/_cron.py
+
 from agent import circuito_ia
 from agent.memory import (
     esperar_base_de_datos, listar_mensajes_sin_respuesta_de_gabi, registrar_evento_lead,
@@ -220,7 +222,7 @@ async def main() -> None:
 
 if __name__ == "__main__":
     try:
-        asyncio.run(main())
+        asyncio.run(ejecutar_cron("recuperar_mensajes_sin_respuesta", main, 10))
     except Exception as e:
         print(f"ERROR: la recuperación de mensajes sin respuesta falló — {e}", file=sys.stderr)
         sys.exit(1)

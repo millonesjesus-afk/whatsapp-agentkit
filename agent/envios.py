@@ -119,13 +119,20 @@ async def _minutos_de_agrupacion(origen: str, negocio_id: str | None) -> int:
         return por_defecto
 
 
+def _con_asesor(asesor: str | None) -> dict:
+    """`asesor` solo viaja al registro cuando hay uno (los envíos de Gabi y de los scripts no lo
+    llevan): así los sustitutos de prueba de `reservar_envio_meta` con la firma anterior siguen
+    funcionando. NUNCA se reenvía al proveedor."""
+    return {"asesor": asesor} if asesor else {}
+
+
 def _normalizar(respuesta) -> tuple[bool, str | None]:
     if isinstance(respuesta, tuple):
         return bool(respuesta[0]), (respuesta[1] if len(respuesta) > 1 else None)
     return bool(respuesta), None
 
 
-async def _enviar(origen: str, tipo: str, telefono: str, canal: dict | None, llamada) -> ResultadoEnvio:
+async def _enviar(origen: str, tipo: str, telefono: str, canal: dict | None, llamada, asesor: str | None = None) -> ResultadoEnvio:
     if origen not in ORIGENES:
         raise ValueError(f"Origen de envío desconocido: {origen!r}. Registrarlo en agent/envios.py::ORIGENES.")
     negocio_id = (canal or {}).get("negocio_id")
@@ -136,7 +143,10 @@ async def _enviar(origen: str, tipo: str, telefono: str, canal: dict | None, lla
     if decision.bloquear:
         logger.info(f"Envío {origen} a {telefono} omitido — {decision.motivo}")
         try:
-            await registrar_envio_bloqueado(negocio_id, origen, telefono, tipo, decision.motivo or "bloqueado", decision.estimacion)
+            await registrar_envio_bloqueado(
+                negocio_id, origen, telefono, tipo, decision.motivo or "bloqueado", decision.estimacion,
+                **_con_asesor(asesor),
+            )
         except Exception:
             logger.exception(f"No se pudo registrar el envío bloqueado {origen} a {telefono}")
         return ResultadoEnvio(False, None, bloqueado=True, motivo=decision.motivo)
@@ -147,9 +157,9 @@ async def _enviar(origen: str, tipo: str, telefono: str, canal: dict | None, lla
         agrupar = await _minutos_de_agrupacion(origen, negocio_id)
         if agrupar:
             async with _candado_de_reserva():
-                envio_id, motivo = await reservar_envio_meta(negocio_id, origen, telefono, tipo, agrupar, decision.estimacion)
+                envio_id, motivo = await reservar_envio_meta(negocio_id, origen, telefono, tipo, agrupar, decision.estimacion, **_con_asesor(asesor))
         else:
-            envio_id, motivo = await reservar_envio_meta(negocio_id, origen, telefono, tipo, 0, decision.estimacion)
+            envio_id, motivo = await reservar_envio_meta(negocio_id, origen, telefono, tipo, 0, decision.estimacion, **_con_asesor(asesor))
         if envio_id is None and motivo:
             logger.info(f"Envío {origen} a {telefono} omitido — {motivo}")
             return ResultadoEnvio(False, None, bloqueado=True, motivo=motivo)
@@ -191,23 +201,31 @@ async def _cerrar(envio_id: int | None, enviado: bool, wamid: str | None) -> Non
         logger.exception(f"No se pudo cerrar el registro de envío {envio_id}")
 
 
-async def enviar_texto(proveedor, telefono: str, texto: str, *, origen: str, canal: dict | None = None, **extra) -> ResultadoEnvio:
-    """`extra` se reenvía tal cual al proveedor (ej. `mensaje_id_citado`)."""
-    return await _enviar(origen, "texto", telefono, canal, lambda: proveedor.enviar_mensaje(telefono, texto, canal=canal, **extra))
+async def enviar_texto(
+    proveedor, telefono: str, texto: str, *, origen: str, canal: dict | None = None, asesor: str | None = None, **extra,
+) -> ResultadoEnvio:
+    """`extra` se reenvía tal cual al proveedor (ej. `mensaje_id_citado`). `asesor` (username de
+    quien envía desde el panel) solo se guarda en el registro; no llega al proveedor."""
+    return await _enviar(origen, "texto", telefono, canal, lambda: proveedor.enviar_mensaje(telefono, texto, canal=canal, **extra), asesor)
 
 
-async def enviar_imagen(proveedor, telefono: str, media_id: str, caption: str = "", *, origen: str, canal: dict | None = None) -> ResultadoEnvio:
-    return await _enviar(origen, "imagen", telefono, canal, lambda: proveedor.enviar_imagen(telefono, media_id, caption, canal=canal))
+async def enviar_imagen(
+    proveedor, telefono: str, media_id: str, caption: str = "", *, origen: str, canal: dict | None = None, asesor: str | None = None,
+) -> ResultadoEnvio:
+    return await _enviar(origen, "imagen", telefono, canal, lambda: proveedor.enviar_imagen(telefono, media_id, caption, canal=canal), asesor)
 
 
 async def enviar_documento(
     proveedor, telefono: str, media_id: str, nombre_archivo: str, caption: str = "", *, origen: str, canal: dict | None = None,
+    asesor: str | None = None,
 ) -> ResultadoEnvio:
-    return await _enviar(origen, "documento", telefono, canal, lambda: proveedor.enviar_documento(telefono, media_id, nombre_archivo, caption, canal=canal))
+    return await _enviar(origen, "documento", telefono, canal, lambda: proveedor.enviar_documento(telefono, media_id, nombre_archivo, caption, canal=canal), asesor)
 
 
-async def enviar_audio(proveedor, telefono: str, media_id: str, *, origen: str, canal: dict | None = None) -> ResultadoEnvio:
-    return await _enviar(origen, "audio", telefono, canal, lambda: proveedor.enviar_audio(telefono, media_id, canal=canal))
+async def enviar_audio(
+    proveedor, telefono: str, media_id: str, *, origen: str, canal: dict | None = None, asesor: str | None = None,
+) -> ResultadoEnvio:
+    return await _enviar(origen, "audio", telefono, canal, lambda: proveedor.enviar_audio(telefono, media_id, canal=canal), asesor)
 
 
 async def enviar_plantilla(

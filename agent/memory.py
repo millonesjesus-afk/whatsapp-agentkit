@@ -826,6 +826,68 @@ async def listar_attribution_events(telefono: str, negocio_id: str | None = None
         ]
 
 
+async def registrar_attribution_event_adicional(
+    telefono: str, tipo_origen: str, referral: dict | None = None,
+    campana_nombre: str | None = None,
+) -> dict | None:
+    """Igual que `registrar_attribution_event`, pero SIEMPRE con
+    `first_touch=False`: es evidencia de un referral que llega cuando el lead
+    ya tenía campaña de origen (un segundo clic en otro anuncio). La campaña
+    original no se toca; solo queda el rastro del clic nuevo. Mismo patrón
+    fail-closed: sin Conversation activa no inventa nada y retorna None."""
+    async with async_session() as session:
+        conversation = await _obtener_conversation_activa_por_telefono(session, telefono)
+        if conversation is None:
+            logger.warning(
+                f"registrar_attribution_event_adicional(): no existe una Conversation activa para "
+                f"telefono={telefono} — evento de atribución descartado."
+            )
+            return None
+        evento = AttributionEvent(
+            negocio_id=conversation.negocio_id, conversation_id=conversation.id, lead_telefono=telefono,
+            tipo_origen=tipo_origen,
+            referral_raw=referral,
+            source_id=(referral or {}).get("source_id"),
+            headline=(referral or {}).get("headline"),
+            body=(referral or {}).get("body"),
+            ctwa_clid=(referral or {}).get("ctwa_clid"),
+            campana_nombre=campana_nombre,
+            first_touch=False,
+        )
+        session.add(evento)
+        await session.commit()
+        return {
+            "id": evento.id, "negocio_id": evento.negocio_id, "conversation_id": evento.conversation_id,
+            "lead_telefono": evento.lead_telefono, "tipo_origen": evento.tipo_origen,
+            "source_id": evento.source_id, "headline": evento.headline, "body": evento.body,
+            "ctwa_clid": evento.ctwa_clid, "campana_nombre": evento.campana_nombre,
+            "first_touch": evento.first_touch, "creado": evento.creado,
+        }
+
+
+async def existe_attribution_event_reciente(
+    telefono: str, negocio_id: str, referral: dict | None, minutos: int = 30,
+) -> bool:
+    """¿Ya hay un evento de atribución de este mismo lead con el MISMO referral
+    (source_id, ctwa_clid, headline y body iguales) creado en los últimos
+    `minutos`? Sirve para que un reintento de Meta del mismo mensaje no duplique
+    la evidencia. Un clic nuevo trae otro `ctwa_clid`, así que no se confunde."""
+    referral = referral or {}
+    condiciones = [
+        AttributionEvent.negocio_id == negocio_id, AttributionEvent.lead_telefono == telefono,
+        AttributionEvent.creado >= datetime.utcnow() - timedelta(minutes=minutos),
+    ]
+    for columna, clave in (
+        (AttributionEvent.source_id, "source_id"), (AttributionEvent.ctwa_clid, "ctwa_clid"),
+        (AttributionEvent.headline, "headline"), (AttributionEvent.body, "body"),
+    ):
+        valor = referral.get(clave)
+        condiciones.append(columna.is_(None) if valor is None else columna == valor)
+    async with async_session() as session:
+        encontrado = await session.execute(select(AttributionEvent.id).where(*condiciones).limit(1))
+        return encontrado.scalars().first() is not None
+
+
 _TIPOS_ORIGEN_ANUNCIO = ("meta_ads", "meta_ads_no_resuelto")
 
 
@@ -2616,11 +2678,113 @@ class EnvioMeta(Base):
     categoria_esperada: Mapped[str | None] = mapped_column(String(30), nullable=True)
     gratis_esperado: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     costo_esperado_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # Username del asesor que mandó el mensaje desde el panel (2026-10-05, decisión D5: atribuir
+    # quién envía). NULL en los envíos de Gabi y de los scripts; los mensajes que el asesor manda
+    # desde el celular (coexistencia) no pasan por esta capa y por eso no se atribuyen.
+    asesor_usuario: Mapped[str | None] = mapped_column(String(50), nullable=True)
     creado: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
     __table_args__ = (
         Index("ix_envios_meta_agrupacion", "negocio_id", "origen", "telefono", "creado"),
     )
+
+
+class CronEjecucion(Base):
+    """Latido de los procesos programados (Cron de Railway), 2026-10-05: una fila por corrida de
+    cada script de `scripts/`, escrita por `scripts/_cron.py`. La fila se crea al EMPEZAR
+    (`ok` NULL, `fin` NULL) y se cierra al terminar con `ok` y el `resumen` (lo que el script
+    imprimió). Sirve para avisar en Inicio cuando un proceso falló en su última corrida o dejó de
+    correr — hasta hoy un Cron caído pasaba inadvertido. Una corrida que arrancó y nunca cerró
+    (el proceso murió) queda con `ok` NULL. No lleva `negocio_id`: los Cron son del sistema, no de
+    un negocio."""
+    __tablename__ = "cron_ejecuciones"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    script: Mapped[str] = mapped_column(String(60), nullable=False)
+    inicio: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
+    fin: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    ok: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    resumen: Mapped[str | None] = mapped_column(String(300), nullable=True)
+
+    __table_args__ = (
+        Index("ix_cron_ejecuciones_script_inicio", "script", "inicio"),
+    )
+
+# Procesos programados que el panel vigila (aviso en Inicio, solo admin): nombre del script →
+# (nombre legible, cada cuántos minutos debería correr). Si cambias un intervalo, cámbialo también
+# en la llamada a `ejecutar_cron` del script (hay un test que verifica que coincidan).
+CRONES_ESPERADOS: dict[str, tuple[str, int]] = {
+    "liberar_leads_inactivos": ("Rotación de leads inactivos", 5),
+    "procesar_inactividad_clientes": ("Reenganche y cierre de clientes sin respuesta", 30),
+    "purgar_archivos_expirados": ("Purga de archivos expirados", 1440),
+    "cerrar_leads_definitivamente": ("Cierre definitivo de leads", 1440),
+    "cerrar_ventas_sin_seguimiento": ("Cierre de ventas sin seguimiento", 1440),
+    "backup_postgres": ("Respaldo de la base de datos", 1440),
+    "recuperar_mensajes_sin_respuesta": ("Recuperación de mensajes sin respuesta", 10),
+}
+DIAS_RETENCION_CRON_EJECUCIONES = 30
+
+
+async def registrar_inicio_cron(script: str, inicio: datetime | None = None) -> int:
+    """Anota que `script` empezó a correr y devuelve el id de la fila. De paso borra las corridas
+    de ese mismo script con más de `DIAS_RETENCION_CRON_EJECUCIONES` días (el de 5 min genera ~288
+    filas al día; sin esto la tabla crecería sin límite)."""
+    async with async_session() as session:
+        await session.execute(
+            delete(CronEjecucion).where(
+                CronEjecucion.script == script[:60],
+                CronEjecucion.inicio < datetime.utcnow() - timedelta(days=DIAS_RETENCION_CRON_EJECUCIONES),
+            )
+        )
+        fila = CronEjecucion(script=script[:60], inicio=inicio or datetime.utcnow())
+        session.add(fila)
+        await session.commit()
+        return fila.id
+
+
+async def registrar_fin_cron(
+    ejecucion_id: int | None, script: str, inicio: datetime, ok: bool, resumen: str | None = None,
+) -> None:
+    """Cierra la corrida `ejecucion_id` con su resultado. Si no hay id (no se pudo anotar el
+    inicio: la base aún no contestaba) inserta la fila completa de una vez."""
+    resumen = (resumen or "")[:300] or None
+    async with async_session() as session:
+        fila = await session.get(CronEjecucion, ejecucion_id) if ejecucion_id is not None else None
+        if fila is None:
+            fila = CronEjecucion(script=script[:60], inicio=inicio)
+            session.add(fila)
+        fila.fin, fila.ok, fila.resumen = datetime.utcnow(), ok, resumen
+        await session.commit()
+
+
+async def resumen_corridas_cron(scripts: list[str]) -> dict[str, dict]:
+    """Última corrida de cada script de `scripts` que alguna vez corrió (los que nunca corrieron no
+    aparecen). Por script: `ultima` {inicio, fin, ok, resumen} y `ultimo_ok_fin` (cuándo terminó
+    la última corrida exitosa, o None). Dos consultas agrupadas, no una por script."""
+    if not scripts:
+        return {}
+    async with async_session() as session:
+        ultimos_inicios = (
+            select(CronEjecucion.script.label("script"), func.max(CronEjecucion.inicio).label("inicio"))
+            .where(CronEjecucion.script.in_(scripts)).group_by(CronEjecucion.script).subquery()
+        )
+        ultimas = (await session.execute(
+            select(CronEjecucion).join(
+                ultimos_inicios,
+                sa_and(CronEjecucion.script == ultimos_inicios.c.script, CronEjecucion.inicio == ultimos_inicios.c.inicio),
+            ).order_by(CronEjecucion.id)
+        )).scalars().all()
+        oks = dict((await session.execute(
+            select(CronEjecucion.script, func.max(CronEjecucion.fin))
+            .where(CronEjecucion.script.in_(scripts), CronEjecucion.ok.is_(True)).group_by(CronEjecucion.script)
+        )).all())
+    resultado: dict[str, dict] = {}
+    for f in ultimas:   # si dos filas empatan en `inicio`, gana la de id mayor (orden ascendente)
+        resultado[f.script] = {
+            "ultima": {"inicio": f.inicio, "fin": f.fin, "ok": f.ok, "resumen": f.resumen},
+            "ultimo_ok_fin": oks.get(f.script),
+        }
+    return resultado
 
 
 def _campos_de_estimacion(estimacion) -> dict:
@@ -2632,7 +2796,9 @@ def _campos_de_estimacion(estimacion) -> dict:
     }
 
 
-async def registrar_envio_bloqueado(negocio_id: str | None, origen: str, telefono: str, tipo: str, motivo: str, estimacion=None) -> None:
+async def registrar_envio_bloqueado(
+    negocio_id: str | None, origen: str, telefono: str, tipo: str, motivo: str, estimacion=None, asesor: str | None = None,
+) -> None:
     """Deja constancia de un envío que la política decidió no hacer. Un mismo
     bloqueo (origen + cliente + motivo) se anota una vez por hora: un proceso
     que reintenta en cada corrida (el reenganche) no llena la tabla."""
@@ -2648,13 +2814,14 @@ async def registrar_envio_bloqueado(negocio_id: str | None, origen: str, telefon
             return
         session.add(EnvioMeta(
             negocio_id=negocio_id, origen=origen, telefono=telefono, tipo=tipo, decision="bloqueado",
-            motivo=motivo[:200], **_campos_de_estimacion(estimacion),
+            motivo=motivo[:200], asesor_usuario=(asesor[:50] if asesor else None), **_campos_de_estimacion(estimacion),
         ))
         await session.commit()
 
 
 async def reservar_envio_meta(
     negocio_id: str | None, origen: str, telefono: str, tipo: str, agrupar_minutos: int = 0, estimacion=None,
+    asesor: str | None = None,
 ) -> tuple[int | None, str | None]:
     """Registra el intento de envío. Con `agrupar_minutos` > 0, si ya hay un
     envío "enviado" del mismo origen al mismo cliente dentro de esa ventana no
@@ -2671,10 +2838,16 @@ async def reservar_envio_meta(
             )).scalar_one_or_none()
             if previo is not None:
                 motivo = f"agrupado: ya se envió este aviso hace menos de {agrupar_minutos} min"
-                session.add(EnvioMeta(negocio_id=negocio_id, origen=origen, telefono=telefono, tipo=tipo, decision="bloqueado", motivo=motivo, **_campos_de_estimacion(estimacion)))
+                session.add(EnvioMeta(
+                    negocio_id=negocio_id, origen=origen, telefono=telefono, tipo=tipo, decision="bloqueado", motivo=motivo,
+                    asesor_usuario=(asesor[:50] if asesor else None), **_campos_de_estimacion(estimacion),
+                ))
                 await session.commit()
                 return None, motivo
-        envio = EnvioMeta(negocio_id=negocio_id, origen=origen, telefono=telefono, tipo=tipo, decision="enviado", **_campos_de_estimacion(estimacion))
+        envio = EnvioMeta(
+            negocio_id=negocio_id, origen=origen, telefono=telefono, tipo=tipo, decision="enviado",
+            asesor_usuario=(asesor[:50] if asesor else None), **_campos_de_estimacion(estimacion),
+        )
         session.add(envio)
         await session.commit()
         return envio.id, None
@@ -3785,6 +3958,14 @@ async def resumen_envios_por_origen(negocio_id: str, mes: str | None = None) -> 
             .where(EnvioMeta.negocio_id == negocio_id, EnvioMeta.decision == "bloqueado", EnvioMeta.creado >= inicio, EnvioMeta.creado < fin)
             .group_by(EnvioMeta.origen, EnvioMeta.motivo)
         )).all()
+        asesores_conteos = (await session.execute(
+            select(EnvioMeta.asesor_usuario, EnvioMeta.tipo, EnvioMeta.decision, func.count())
+            .where(
+                EnvioMeta.negocio_id == negocio_id, EnvioMeta.asesor_usuario.is_not(None),
+                EnvioMeta.creado >= inicio, EnvioMeta.creado < fin,
+            )
+            .group_by(EnvioMeta.asesor_usuario, EnvioMeta.tipo, EnvioMeta.decision)
+        )).all()
         cruzados = (await session.execute(
             select(EnvioMeta.origen, UsoMensajeMeta.pricing_type, UsoMensajeMeta.pricing_categoria, func.count())
             .join(UsoMensajeMeta, UsoMensajeMeta.wamid == EnvioMeta.wamid)
@@ -3807,6 +3988,16 @@ async def resumen_envios_por_origen(negocio_id: str, mes: str | None = None) -> 
             d["bloqueados"] += n
     for nombre, motivo, n in motivos:
         _origen(nombre)["motivos_bloqueo"][motivo or "sin motivo"] = n
+    # Por asesor (solo lo que mandó desde el panel; sin dinero): mensajes = texto, archivos =
+    # imagen + documento + audio, bloqueados = lo que la política frenó. Los fallidos/inciertos
+    # no cuentan como mensajes. Ordenado por mensajes de mayor a menor.
+    por_asesor: dict[str, dict] = {}
+    for asesor_u, tipo, decision, n in asesores_conteos:
+        d = por_asesor.setdefault(asesor_u, {"asesor": asesor_u, "mensajes": 0, "archivos": 0, "bloqueados": 0})
+        if decision == "bloqueado":
+            d["bloqueados"] += n
+        elif decision == "enviado":
+            d["mensajes" if tipo == "texto" else "archivos"] += n
     medidos: dict[str, int] = {}
     for nombre, tipo, categoria, n in cruzados:
         d = _origen(nombre)
@@ -3827,7 +4018,10 @@ async def resumen_envios_por_origen(negocio_id: str, mes: str | None = None) -> 
                 tarifas[categoria] = _a_numero(await obtener_configuracion(f"meta_tarifa_usd_{categoria}", "", negocio_id=negocio_id))
             costo = None if (costo is None or tarifas[categoria] is None) else costo + n * tarifas[categoria]
         d["costo_estimado_usd"] = None if costo is None else round(costo, 4)
-    return {"mes": mes_normalizado, "zona_horaria": zona, "origenes": sorted(origenes.values(), key=lambda d: d["origen"])}
+    return {
+        "mes": mes_normalizado, "zona_horaria": zona, "origenes": sorted(origenes.values(), key=lambda d: d["origen"]),
+        "por_asesor": sorted(por_asesor.values(), key=lambda d: (-d["mensajes"], d["asesor"])),
+    }
 
 
 def _canal_a_dict(c: CanalWhatsApp) -> dict:

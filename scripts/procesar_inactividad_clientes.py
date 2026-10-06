@@ -39,6 +39,8 @@ from pathlib import Path
 # patrón que scripts/liberar_leads_inactivos.py.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from scripts._cron import ejecutar_cron  # latido: ver scripts/_cron.py
+
 from agent.memory import esperar_base_de_datos, listar_leads_inactividad_cliente, actualizar_lead, guardar_mensaje
 from agent.providers import obtener_proveedor
 from agent import circuito_ia, envios
@@ -72,56 +74,72 @@ async def main() -> None:
     inciertos: list[str] = []
     fallidos: list[str] = []
     invalidos: list[str] = []
+    errores: list[str] = []
     for fila in candidatos_reenganche:
-        if not fila["telefono"].isdigit():
-            invalidos.append(repr(fila["telefono"]))
-            continue
-        canal = await proveedor.resolver_canal(fila["numero_whatsapp_id"], negocio_id=fila["negocio_id"])
-        resultado = await envios.enviar_texto(
-            proveedor, fila["telefono"], MENSAJE_REENGANCHE, origen="reenganche_inactividad", canal=canal,
-        )
-        if resultado.bloqueado:
-            # La política de costo lo frenó (ver agent/politica_envios.py): no es una falla.
-            # Sigue siendo candidato y se vuelve a evaluar en la próxima corrida.
-            bloqueados.append(fila["telefono"])
-            continue
-        enviado, wamid = resultado
-        if resultado.incierto:
-            # Meta pudo haber aceptado el mensaje (se perdió la respuesta): NO se reenvía en la
-            # próxima corrida. Se guarda como "incierto" para que el lead no siga de candidato.
-            await guardar_mensaje(
-                fila["telefono"], "assistant", MENSAJE_REENGANCHE,
-                negocio_id=fila["negocio_id"], mensaje_id_meta=None, estado_envio="incierto",
+        # Un fallo inesperado con UN lead (red, Meta, base) no aborta la corrida: ni a los demás
+        # leads ni al cierre por sin_respuesta de más abajo. Se cuenta como "error" y ese lead
+        # sigue de candidato para la próxima corrida.
+        try:
+            if not fila["telefono"].isdigit():
+                invalidos.append(repr(fila["telefono"]))
+                continue
+            canal = await proveedor.resolver_canal(fila["numero_whatsapp_id"], negocio_id=fila["negocio_id"])
+            resultado = await envios.enviar_texto(
+                proveedor, fila["telefono"], MENSAJE_REENGANCHE, origen="reenganche_inactividad", canal=canal,
             )
-            inciertos.append(fila["telefono"])
-            continue
-        if not enviado:
-            fallidos.append(fila["telefono"])
-            continue
-        mensaje_guardado = await guardar_mensaje(
-            fila["telefono"], "assistant", MENSAJE_REENGANCHE,
-            negocio_id=fila["negocio_id"], mensaje_id_meta=wamid,
-        )
-        await gestor_conexiones.emitir_mensaje_nuevo(mensaje_guardado["conversation_id"])
-        reenganchados.append(fila["telefono"])
+            if resultado.bloqueado:
+                # La política de costo lo frenó (ver agent/politica_envios.py): no es una falla.
+                # Sigue siendo candidato y se vuelve a evaluar en la próxima corrida.
+                bloqueados.append(fila["telefono"])
+                continue
+            enviado, wamid = resultado
+            if resultado.incierto:
+                # Meta pudo haber aceptado el mensaje (se perdió la respuesta): NO se reenvía en la
+                # próxima corrida. Se guarda como "incierto" para que el lead no siga de candidato.
+                await guardar_mensaje(
+                    fila["telefono"], "assistant", MENSAJE_REENGANCHE,
+                    negocio_id=fila["negocio_id"], mensaje_id_meta=None, estado_envio="incierto",
+                )
+                inciertos.append(fila["telefono"])
+                continue
+            if not enviado:
+                fallidos.append(fila["telefono"])
+                continue
+            mensaje_guardado = await guardar_mensaje(
+                fila["telefono"], "assistant", MENSAJE_REENGANCHE,
+                negocio_id=fila["negocio_id"], mensaje_id_meta=wamid,
+            )
+            await gestor_conexiones.emitir_mensaje_nuevo(mensaje_guardado["conversation_id"])
+            reenganchados.append(fila["telefono"])
+        except Exception as e:  # noqa: BLE001 — ver el comentario de arriba
+            errores.append(fila.get("telefono", "?"))
+            print(f"ERROR reenganchando a {fila.get('telefono', '?')}: {type(e).__name__}: {e}", file=sys.stderr)
 
+    cerrados = 0
     for fila in candidatos_cierre:
-        await actualizar_lead(fila["telefono"], resultado="sin_respuesta")
+        try:
+            await actualizar_lead(fila["telefono"], resultado="sin_respuesta")
+            cerrados += 1
+        except Exception as e:  # noqa: BLE001
+            errores.append(fila.get("telefono", "?"))
+            print(f"ERROR cerrando por sin respuesta a {fila.get('telefono', '?')}: {type(e).__name__}: {e}", file=sys.stderr)
 
     print(
         f"Inactividad de clientes: {len(reenganchados)} reenganchado(s) tras {HORAS_REENGANCHE}h "
         f"({len(fallidos)} fallo(s) de envío, {len(inciertos)} sin confirmar, {len(bloqueados)} frenado(s) por la política de costo), "
-        f"{len(candidatos_cierre)} cerrado(s) por sin respuesta tras {HORAS_CIERRE}h."
+        f"{cerrados} cerrado(s) por sin respuesta tras {HORAS_CIERRE}h, {len(errores)} error(es)."
     )
     if fallidos:
         print(f"  Envíos fallidos a: {', '.join(fallidos)}")
+    if errores:
+        print(f"  Con error inesperado (se reintentan en la próxima corrida): {', '.join(errores)}")
     if invalidos:
         print(f"  Omitidos por teléfono inválido: {', '.join(invalidos)}")
 
 
 if __name__ == "__main__":
     try:
-        asyncio.run(main())
+        asyncio.run(ejecutar_cron("procesar_inactividad_clientes", main, 30))
     except Exception as e:
         print(f"ERROR: procesamiento de inactividad de clientes falló — {e}", file=sys.stderr)
         sys.exit(1)

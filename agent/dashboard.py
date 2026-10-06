@@ -3469,6 +3469,55 @@ async def _avisos_circuito_ia(negocio_id: str) -> list[dict]:
         return []
 
 
+def _duracion_legible(delta: timedelta) -> str:
+    """"7 min", "3 h 10 min", "2 días" — para "no corre desde hace …"."""
+    minutos = max(0, int(delta.total_seconds() // 60))
+    if minutos < 60:
+        return f"{minutos} min"
+    if minutos < 48 * 60:
+        horas, resto = divmod(minutos, 60)
+        return f"{horas} h {resto} min" if resto else f"{horas} h"
+    return f"{minutos // (24 * 60)} días"
+
+
+async def _avisos_procesos_programados() -> list[dict]:
+    """Avisos del latido de los procesos programados (Cron de Railway), solo para el admin (lo
+    llama `_avisos_inicio`). Por cada script vigilado (`CRONES_ESPERADOS`) que haya corrido ALGUNA
+    vez: si su última corrida falló → aviso de error; si la última corrida exitosa terminó hace
+    más del doble de su intervalo → aviso de advertencia. Un script que nunca corrió no avisa (el
+    Cron puede no estar creado todavía). Una sola consulta agrupada; nunca rompe Inicio."""
+    try:
+        from agent.memory import CRONES_ESPERADOS, resumen_corridas_cron
+
+        corridas = await resumen_corridas_cron(list(CRONES_ESPERADOS))
+        ahora = datetime.utcnow()
+        avisos: list[dict] = []
+        for script, (nombre, intervalo_min) in CRONES_ESPERADOS.items():
+            datos = corridas.get(script)
+            if not datos:
+                continue
+            ultima = datos["ultima"]
+            if ultima["ok"] is False:
+                avisos.append({
+                    "id": f"cron-{script}-fallo", "nivel": "error",
+                    "titulo": f'El proceso programado "{nombre}" falló en su última corrida',
+                    "detalle": (ultima.get("resumen") or "Sin detalle del error.")[:300], "enlace": None,
+                })
+                continue
+            referencia = datos["ultimo_ok_fin"] or ultima["inicio"]
+            if ahora - referencia > timedelta(minutes=2 * intervalo_min):
+                avisos.append({
+                    "id": f"cron-{script}-atrasado", "nivel": "warning",
+                    "titulo": f'El proceso programado "{nombre}" no corre desde hace {_duracion_legible(ahora - referencia)}',
+                    "detalle": f"Debería correr cada {_duracion_legible(timedelta(minutes=intervalo_min))}. Revisa el servicio Cron en Railway.",
+                    "enlace": None,
+                })
+        return avisos
+    except Exception:
+        logger.exception("Inicio: no se pudieron calcular los avisos de procesos programados")
+        return []
+
+
 async def _avisos_inicio(usuario: dict) -> list[dict]:
     """Avisos para Inicio — SOLO para el rol 'admin' (decisión del usuario: supervisor y
     asesor no los ven): el del modo sin IA (si está activo) y los de uso/costos de WhatsApp.
@@ -3476,7 +3525,7 @@ async def _avisos_inicio(usuario: dict) -> list[dict]:
     if usuario.get("rol") != "admin":
         return []
     avisos = await _avisos_circuito_ia(usuario["negocio_id"])
-    return avisos + await _avisos_uso_inicio(usuario)
+    return avisos + await _avisos_procesos_programados() + await _avisos_uso_inicio(usuario)
 
 
 async def _avisos_uso_inicio(usuario: dict) -> list[dict]:
@@ -5534,7 +5583,7 @@ async def responder_cliente(
 
     proveedor = obtener_proveedor()
     canal = await proveedor.resolver_canal(lead.get("numero_whatsapp_id"))
-    resultado_envio = await envios.enviar_texto(proveedor, telefono, mensaje, origen="asesor_texto", canal=canal, mensaje_id_citado=wamid_citado)
+    resultado_envio = await envios.enviar_texto(proveedor, telefono, mensaje, origen="asesor_texto", canal=canal, mensaje_id_citado=wamid_citado, asesor=usuario["username"])
     enviado, wamid = resultado_envio
 
     # A diferencia del comportamiento anterior (no guardar nada si el envío
@@ -5611,7 +5660,7 @@ def _guardar_archivo_en_disco(nombre_original: str, contenido: bytes) -> str:
     return ruta_disco
 
 
-async def _subir_y_enviar_media(telefono: str, nombre_archivo: str, content_type: str, contenido: bytes, caption: str, canal: dict | None = None) -> "envios.ResultadoEnvio":
+async def _subir_y_enviar_media(telefono: str, nombre_archivo: str, content_type: str, contenido: bytes, caption: str, canal: dict | None = None, asesor: str | None = None) -> "envios.ResultadoEnvio":
     """Sube el archivo a WhatsApp y lo envía como imagen o documento según
     su tipo — común entre el envío de una proforma nueva y el reenvío de un
     catálogo ya guardado. Retorna (enviado, wamid) — a diferencia de antes,
@@ -5629,9 +5678,9 @@ async def _subir_y_enviar_media(telefono: str, nombre_archivo: str, content_type
     # Devuelve el ResultadoEnvio completo (se desempaqueta igual que la tupla
     # `(enviado, wamid)` de antes) para que el llamador vea `.incierto`.
     return (
-        await envios.enviar_imagen(proveedor, telefono, media_id, caption, origen="asesor_archivo", canal=canal)
+        await envios.enviar_imagen(proveedor, telefono, media_id, caption, origen="asesor_archivo", canal=canal, asesor=asesor)
         if es_imagen else
-        await envios.enviar_documento(proveedor, telefono, media_id, nombre_archivo, caption, origen="asesor_archivo", canal=canal)
+        await envios.enviar_documento(proveedor, telefono, media_id, nombre_archivo, caption, origen="asesor_archivo", canal=canal, asesor=asesor)
     )
 
 
@@ -5701,7 +5750,7 @@ async def enviar_archivo_chat(
 
     content_type = archivo.content_type or "application/octet-stream"
     canal = await obtener_proveedor().resolver_canal(lead.get("numero_whatsapp_id"))
-    resultado_envio = await _subir_y_enviar_media(telefono, archivo.filename, content_type, contenido, caption.strip(), canal=canal)
+    resultado_envio = await _subir_y_enviar_media(telefono, archivo.filename, content_type, contenido, caption.strip(), canal=canal, asesor=usuario["username"])
     enviado, wamid = resultado_envio
 
     # El archivo se guarda en disco y el mensaje se persiste SIEMPRE, haya
@@ -5769,7 +5818,7 @@ async def enviar_audio_chat(
     media_id = await proveedor.subir_media(contenido_ogg, "nota_de_voz.ogg", "audio/ogg", canal=canal)
     resultado_envio = envios.ResultadoEnvio(False, None)
     if media_id:
-        resultado_envio = await envios.enviar_audio(proveedor, telefono, media_id, origen="asesor_audio", canal=canal)
+        resultado_envio = await envios.enviar_audio(proveedor, telefono, media_id, origen="asesor_audio", canal=canal, asesor=usuario["username"])
     enviado, wamid = resultado_envio
 
     # Mismo criterio que enviar-archivo: la nota de voz ya convertida se
@@ -5821,7 +5870,7 @@ async def enviar_catalogo_chat(telefono: str, archivo_id: int, usuario: dict = D
     with open(archivo["ruta_disco"], "rb") as f:
         contenido = f.read()
     canal = await obtener_proveedor().resolver_canal(lead.get("numero_whatsapp_id"))
-    resultado_envio = await _subir_y_enviar_media(telefono, archivo["nombre_original"], archivo["content_type"], contenido, "", canal=canal)
+    resultado_envio = await _subir_y_enviar_media(telefono, archivo["nombre_original"], archivo["content_type"], contenido, "", canal=canal, asesor=usuario["username"])
     enviado, wamid = resultado_envio
 
     # No hay nada nuevo que guardar en disco acá (el catálogo ya vive en la

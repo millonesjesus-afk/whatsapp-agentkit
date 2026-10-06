@@ -396,6 +396,23 @@ async def webhook_verificacion(request: Request):
     return {"status": "ok"}
 
 
+async def _registrar_referral_seguro(msg, canal: dict | None, texto: str = "") -> None:
+    """Atribución del `referral` de un anuncio de Click-to-WhatsApp para los
+    mensajes que NO pasan por la rama de texto (foto, audio, documento, sticker,
+    video, tipos no soportados): si el primer mensaje del cliente es un adjunto,
+    el referral igual debe quedar registrado (evento de atribución y campaña de
+    origen). Sin referral no hace nada. Falla segura: un error aquí se registra
+    y NUNCA impide guardar el mensaje ni responder."""
+    if not getattr(msg, "referral", None) or not canal or not canal.get("negocio_id"):
+        return
+    try:
+        await servicio_canales.registrar_referral_entrante(
+            msg.telefono, texto, msg.referral, canal["negocio_id"],
+        )
+    except Exception as e:
+        logger.error(f"No se pudo registrar la atribución del referral de {msg.telefono}: {e}")
+
+
 async def _atender_mensaje_no_legible(msg, canal: dict | None, contenido: str, archivo_id: int | None = None) -> None:
     """Un mensaje que Gabi no puede leer (nota de voz, imagen, sticker, video/GIF,
     documento, tipo desconocido). Siempre se guarda —con su archivo, si lo hay—
@@ -889,6 +906,13 @@ async def webhook_handler(request: Request):
             # fase posterior, decisión del usuario 2026-09-24): al cliente se
             # le sigue avisando, con una frase según el tipo, que ese contenido
             # no se lee y que lo escriba (ver `_atender_mensaje_no_legible`).
+            # Atribución de anuncio ANTES de la rama de media/no legible: si el
+            # primer mensaje del cliente llega con `referral` (foto, audio,
+            # documento…), el evento y la campaña se registran igual que en un
+            # texto. No cambia nada del resto del flujo (guardado, avisos, pausas).
+            if msg.tipo != "text":
+                await _registrar_referral_seguro(msg, canal, (msg.media or {}).get("caption") or "")
+
             if msg.tipo in TIPOS_MEDIA_SOPORTADOS:
                 logger.info(f"Media entrante ({msg.tipo}) de {msg.telefono}")
                 archivo_id_creado = await _guardar_media_entrante(msg, canal)
@@ -922,6 +946,10 @@ async def webhook_handler(request: Request):
                 )
                 if campana:
                     lead = await obtener_lead(msg.telefono, negocio_id=canal.get("negocio_id") if canal else None)
+            elif msg.referral:
+                # El lead ya tenía campaña (first-touch intacto): un referral
+                # nuevo solo deja evidencia (evento con first_touch=False).
+                await _registrar_referral_seguro(msg, canal, msg.texto)
 
             # Cierre automático por inactividad del CLIENTE (2026-09-17,
             # pedido explícito del usuario) — scripts/procesar_inactividad_

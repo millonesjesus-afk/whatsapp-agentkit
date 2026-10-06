@@ -35,6 +35,8 @@ from pathlib import Path
 # patrón que scripts/migrar_usuarios_a_railway.py.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from scripts._cron import ejecutar_cron  # latido: ver scripts/_cron.py
+
 from agent.memory import esperar_base_de_datos
 from agent.asignacion import ejecutar_ciclo_de_rotacion
 
@@ -58,7 +60,7 @@ async def main() -> None:
 
 if __name__ == "__main__":
     try:
-        asyncio.run(main())
+        asyncio.run(ejecutar_cron("liberar_leads_inactivos", main, 5))
     except Exception as e:
         print(f"ERROR: rotación de leads inactivos falló — {e}", file=sys.stderr)
         sys.exit(1)

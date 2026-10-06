@@ -38,6 +38,8 @@ from pathlib import Path
 # patrón que scripts/liberar_leads_inactivos.py.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from scripts._cron import ejecutar_cron  # latido: ver scripts/_cron.py
+
 from agent.memory import esperar_base_de_datos, listar_archivos_no_reutilizables_antes_de
 
 DIAS_RETENCION = 90
@@ -77,7 +79,7 @@ async def main() -> None:
 
 if __name__ == "__main__":
     try:
-        asyncio.run(main())
+        asyncio.run(ejecutar_cron("purgar_archivos_expirados", main, 1440))
     except Exception as e:
         print(f"ERROR: purga de adjuntos expirados falló — {e}", file=sys.stderr)
         sys.exit(1)
