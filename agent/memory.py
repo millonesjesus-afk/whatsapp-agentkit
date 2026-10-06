@@ -1570,6 +1570,103 @@ def _debe_abrir_conversation_nueva(conversation: "Conversation | None") -> bool:
     return conversation.cerrado_definitivamente_en is not None
 
 
+# ── Reapertura por el cliente tras un cierre definitivo (P4, 2026-10-06) ──
+# Duplicado a propósito de dashboard.py::ETIQUETAS_RESULTADO (dashboard.py
+# importa memory.py, no al revés): solo para redactar la `descripcion` del
+# evento; el frontend arma su propia frase desde el payload.
+_ETIQUETAS_RESULTADO_REAPERTURA = {
+    "agendado": "Agendado", "vendido": "Vendido", "no_interesado": "No interesado",
+    "no_califica": "No califica", "no_es_cliente_calidda": "No es cliente Calidda",
+    "producto_sin_stock": "Producto sin stock", "otro": "Otro", "consulta_atc": "Consulta ATC",
+    "sin_saldo": "Sin saldo", "servicio_postventa": "Servicio adicional Gas",
+    "cartera_fnb": "Cartera FNB", "sin_respuesta": "Sin respuesta", "postventa": "Postventa",
+}
+
+
+def descripcion_reapertura(resultado_anterior: str | None, asesor_anterior: str | None) -> str:
+    """Texto del evento `reabierto_por_cliente` (lo comparten el webhook y
+    scripts/backfill_reaperturas.py para que digan exactamente lo mismo)."""
+    etiqueta = (
+        _ETIQUETAS_RESULTADO_REAPERTURA.get(resultado_anterior, resultado_anterior)
+        if resultado_anterior else "Sin resultado"
+    )
+    descripcion = f"Reabierto por el cliente — antes: {etiqueta}"
+    if asesor_anterior:
+        descripcion += f" (gestionado por {asesor_anterior})"
+    return descripcion[:300]
+
+
+async def _registrar_reapertura_por_cliente(
+    session, telefono: str, negocio_id: str,
+    conversation_anterior: "Conversation | None", opportunity_anterior: "Opportunity | None",
+    conversation_nueva: "Conversation", opportunity_nueva: "Opportunity",
+) -> bool:
+    """Se llama SOLO desde `resolver_conversation_activa`, en la misma
+    transacción en que DR-4 cierra la Conversation vieja y abre la nueva (el
+    cliente volvió a escribir tras un CIERRE DEFINITIVO). Hace dos cosas:
+
+    1. Deja el evento `reabierto_por_cliente` en el Timeline de la
+       Conversation NUEVA (payload: resultado_anterior, asesor_anterior,
+       conversation_anterior_id, cerrado_en). Antes la conversación nueva
+       arrancaba sin ninguna huella de lo anterior: el resultado y quién lo
+       gestionó solo existían en la Conversation cerrada.
+    2. R4: `Lead.resultado` vuelve a NULL (junto con la Opportunity nueva,
+       que nace sin resultado). Antes el Lead conservaba el resultado viejo:
+       el Pipeline (que lee Lead) lo mostraba y la Bandeja (que lee
+       Opportunity) no — dos fuentes que divergían — y un resultado viejo
+       sacaba al lead del ciclo de espera/rotación del asesor
+       (`ejecutar_ciclo_de_espera` solo mira leads sin resultado). Se limpia
+       también lo que dependía de ese resultado: `fecha_agendada` (la cita
+       del ciclo anterior; la Opportunity nueva ya nace sin ella) y los
+       contadores de espera/rotación del ciclo anterior.
+
+    NO aplica a "vendido": un cliente con una venta cerrada que vuelve a
+    escribir va por `enrutar_posventa_si_corresponde` (mismo asesor,
+    resultado="postventa", Gabi nunca responde) — reiniciarlo acá le
+    borraría el resultado a un flujo que además deja su propio evento.
+    Tampoco si no había Conversation anterior (primer contacto).
+
+    Retorna True si registró la reapertura."""
+    if conversation_anterior is None:
+        return False
+    lead = await session.get(Lead, telefono)
+    if lead is not None and lead.negocio_id not in (None, negocio_id):
+        lead = None  # mismo teléfono en otro Negocio: nunca se toca el Lead ajeno
+    resultado_anterior = opportunity_anterior.resultado if opportunity_anterior is not None else None
+    if resultado_anterior is None and lead is not None:
+        resultado_anterior = lead.resultado
+    if resultado_anterior == "vendido" or (lead is not None and lead.resultado == "vendido"):
+        return False
+
+    asesor_anterior = conversation_anterior.asesor_asignado_id or (lead.asesor_asignado if lead else None)
+    cerrado_en = conversation_anterior.cerrado_definitivamente_en
+    payload = {
+        "resultado_anterior": resultado_anterior,
+        "asesor_anterior": asesor_anterior,
+        "conversation_anterior_id": conversation_anterior.id,
+        "cerrado_en": cerrado_en.isoformat() if cerrado_en else None,
+    }
+
+    if lead is not None:
+        if lead.fecha_agendada is not None:
+            payload["fecha_agendada_anterior"] = lead.fecha_agendada.isoformat()
+        lead.resultado = None
+        lead.fecha_agendada = None
+        lead.derivado_en = None
+        lead.minutos_espera_asesor = 0
+        lead.veces_rotado_espera = 0
+        _avanzar_version(lead)
+        lead.actualizado = datetime.utcnow()
+
+    session.add(EventoLead(
+        conversation_id=conversation_nueva.id, negocio_id=conversation_nueva.negocio_id,
+        opportunity_id=opportunity_nueva.id,
+        tipo="reabierto_por_cliente",
+        descripcion=descripcion_reapertura(resultado_anterior, asesor_anterior), autor=None, payload=payload,
+    ))
+    return True
+
+
 async def resolver_conversation_activa(
     telefono: str, negocio_id: str, canal_id: int, unidad_id: str | None = None,
     campana_origen_id: int | None = None, origen_contacto: str | None = None, nombre: str | None = None,
@@ -1623,6 +1720,7 @@ async def resolver_conversation_activa(
                         # SÍ hay una fila activa) — pero no se inventa nada.
                         raise
                     return conversation, opportunity
+            conversation_anterior, opportunity_anterior = conversation, opportunity
             conversation = conversation_nueva
             opportunity = Opportunity(
                 negocio_id=negocio_id, unidad_id=unidad_id,
@@ -1630,6 +1728,16 @@ async def resolver_conversation_activa(
             )
             session.add(opportunity)
             await session.flush()
+            # 2026-10-06 (P4) — el ciclo nuevo deja rastro de lo anterior y
+            # el Lead (legacy) vuelve a "sin resultado" junto con la
+            # Opportunity nueva. Misma transacción: o entra todo o nada, y
+            # por eso un reintento del webhook no puede duplicar el evento
+            # (la Conversation vieja ya quedó cerrada, DR-4 no vuelve a
+            # dispararse).
+            await _registrar_reapertura_por_cliente(
+                session, telefono, negocio_id, conversation_anterior, opportunity_anterior,
+                conversation, opportunity,
+            )
 
         await session.commit()
         await session.refresh(conversation)
@@ -1942,7 +2050,7 @@ def _es_transicion_a_vendido_opportunity(opportunity: "Opportunity", campos: dic
 async def listar_conversaciones_activas(
     negocio_id: str, asesor_asignado: str | None = None, busqueda: str = "",
     resultado: str = "", orden: str = "actividad", direccion: str = "desc",
-    pagina: int = 1, por_pagina: int = 20,
+    pagina: int = 1, por_pagina: int = 20, ids_ordenados: list[str] | None = None,
 ) -> tuple[list[dict], int]:
     """Bandeja de Conversaciones (Diseño Técnico Gate 5.3 §13/§18) — a
     diferencia de Pipeline (que lista Opportunity), esto lista `Conversation`
@@ -1986,7 +2094,12 @@ async def listar_conversaciones_activas(
             )
             .where(Conversation.negocio_id == negocio_id, Conversation.estado == "activa")
         )
-        if asesor_asignado:
+        if asesor_asignado and ids_ordenados is None:
+            # Con `ids_ordenados` (vista de Inicio) el alcance por asesor ya lo
+            # aplicaron las funciones que arman los ids (con el Lead, igual que
+            # Inicio); repetirlo contra `Conversation.asesor_asignado_id` haria
+            # que la lista pudiera perder un caso que Inicio si cuenta si ambas
+            # columnas llegaran a diferir.
             query = query.where(Conversation.asesor_asignado_id == asesor_asignado)
         if resultado == "sin_resultado":
             # 2026-10-06 — filtro "Sin resultado" de la Bandeja: Conversations
@@ -2027,12 +2140,39 @@ async def listar_conversaciones_activas(
                 | existe_mensaje_con_texto
             )
 
-        total = (await session.execute(select(func.count()).select_from(query.subquery()))).scalar_one()
+        if ids_ordenados is None:
+            total = (await session.execute(select(func.count()).select_from(query.subquery()))).scalar_one()
 
-        orden_columna = columna.asc() if direccion == "asc" else columna.desc()
-        query = query.order_by(orden_columna).offset((pagina - 1) * por_pagina).limit(por_pagina)
-        result = await session.execute(query)
-        filas_crudas = result.all()
+            orden_columna = columna.asc() if direccion == "asc" else columna.desc()
+            query = query.order_by(orden_columna).offset((pagina - 1) * por_pagina).limit(por_pagina)
+            result = await session.execute(query)
+            filas_crudas = result.all()
+        else:
+            # Vista de Inicio (2026-10-06): el conjunto y su ORDEN vienen de
+            # `ids_ordenados` (ya priorizado por quien llama), no de una
+            # columna. Sin q/resultado se pagina sobre los ids y se traen solo
+            # las filas de esa página (una consulta); con q/resultado hay que
+            # filtrar primero, así que se traen las coincidencias (acotadas por
+            # el tamaño de la vista) y se pagina después. Siempre en lote.
+            desde = (pagina - 1) * por_pagina
+            posicion = {cid: i for i, cid in enumerate(ids_ordenados)}
+            if not busqueda and not resultado:
+                total = len(ids_ordenados)
+                ids_pagina = ids_ordenados[desde:desde + por_pagina]
+                crudas = (
+                    (await session.execute(query.where(Conversation.id.in_(ids_pagina)))).all()
+                    if ids_pagina else []
+                )
+                crudas.sort(key=lambda fila_: posicion[fila_[0].id])
+                filas_crudas = crudas
+            else:
+                crudas = (
+                    (await session.execute(query.where(Conversation.id.in_(ids_ordenados)))).all()
+                    if ids_ordenados else []
+                )
+                crudas.sort(key=lambda fila_: posicion[fila_[0].id])
+                total = len(crudas)
+                filas_crudas = crudas[desde:desde + por_pagina]
 
         # Bandeja — "bolita" con pendientes + último mensaje (QA, 2026-09-15):
         # dos consultas EN LOTE (no una por fila — la página trae como mucho
@@ -2113,6 +2253,95 @@ async def listar_conversaciones_activas(
                 "ultimo_mensaje": ultimo_mensaje_por_conv.get(conversation.id),
             })
         return filas, total
+
+
+# ── Vistas de Inicio dentro de la Bandeja (2026-10-06, paquete P2) ──────
+#
+# "Ver los N en Conversaciones" de Inicio debe llevar a una lista donde estén
+# EXACTAMENTE esos casos. El criterio de cada grupo NO se reimplementa acá:
+# lo deciden `listar_clientes_esperando`, `listar_leads_esperando_asesor` y
+# las citas de Inicio (`dashboard._citas_inicio`); quien llama (la ruta de la
+# Bandeja) las invoca con los mismos argumentos que `inicio_json` y pasa los
+# resultados a `componer_vista_inicio`, que solo los combina y ordena. Así
+# cualquier corrección de esas funciones llega sola a la lista.
+
+VISTAS_INICIO = ("responde_ahora", "sin_asesor", "escalados", "esperando", "citas", "citas_vencidas")
+
+
+def componer_vista_inicio(
+    vista: str, esperando: list[dict], esperando_asignar: list[dict],
+    proximas: list[dict], vencidas: list[dict], incluir_supervision: bool,
+) -> list[dict]:
+    """Casos de una vista de Inicio, ya priorizados y sin repetir teléfono.
+
+    Entradas = las mismas listas que usa Inicio. `incluir_supervision` es la
+    visión total sin filtrar por asesor: solo ahí existen los grupos
+    `sin_asesor` y `escalados` (un asesor no los ve). Cada entrada:
+    `telefono`, `conversation_id` (None si todavía no se resolvió),
+    `categoria` (mismos nombres que `zona_accion.items[].categoria`) y los
+    datos de ventana de Meta cuando el cliente también está esperando.
+
+    Orden de `responde_ahora`: escalados, sin asesor, y luego los clientes
+    esperando en el orden que ya trae `listar_clientes_esperando` (ventana
+    abierta por vencimiento, luego cerradas)."""
+    por_telefono = {c["telefono"]: c for c in esperando}
+
+    def _entrada(fuente: dict, categoria: str) -> dict:
+        espera = por_telefono.get(fuente["telefono"])
+        return {
+            "telefono": fuente["telefono"],
+            "conversation_id": fuente.get("conversation_id") or (espera or {}).get("conversation_id"),
+            "categoria": categoria,
+            "ultimo_mensaje_cliente_en": espera["ultimo_mensaje_cliente_en"] if espera else None,
+            "ventana_vence_en": espera["ventana_vence_en"] if espera else None,
+            "ventana_abierta": espera["ventana_abierta"] if espera else None,
+        }
+
+    escalados = [l for l in esperando_asignar if l.get("escalado_supervision_en")] if incluir_supervision else []
+    sin_asesor = [l for l in esperando_asignar if not l.get("escalado_supervision_en")] if incluir_supervision else []
+
+    entradas: list[dict] = []
+    if vista == "escalados":
+        entradas = [_entrada(l, "escalado") for l in escalados]
+    elif vista == "sin_asesor":
+        entradas = [_entrada(l, "sin_asesor") for l in sin_asesor]
+    elif vista == "esperando":
+        entradas = [_entrada(c, "cliente_esperando") for c in esperando]
+    elif vista == "citas":
+        entradas = [_entrada(l, "cita") for l in proximas]
+    elif vista == "citas_vencidas":
+        entradas = [_entrada(l, "cita_vencida") for l in vencidas]
+    elif vista == "responde_ahora":
+        entradas = (
+            [_entrada(l, "escalado") for l in escalados]
+            + [_entrada(l, "sin_asesor") for l in sin_asesor]
+            + [_entrada(c, "cliente_esperando") for c in esperando]
+        )
+    vistos: set[str] = set()
+    unicas = []
+    for e in entradas:
+        if e["telefono"] in vistos:
+            continue
+        vistos.add(e["telefono"])
+        unicas.append(e)
+    return unicas
+
+
+async def resolver_entradas_vista_inicio(negocio_id: str, entradas: list[dict]) -> list[dict]:
+    """Completa el `conversation_id` de las entradas que no lo traen (una sola
+    consulta, no una por caso) y descarta las que no tienen Conversation
+    activa — no hay chat al que llevarlas — y los `conversation_id`
+    repetidos. Conserva el orden."""
+    faltantes = [e["telefono"] for e in entradas if not e["conversation_id"]]
+    resueltos = await resolver_conversation_ids_por_telefono(negocio_id, faltantes) if faltantes else {}
+    resultado, vistos = [], set()
+    for e in entradas:
+        conversation_id = e["conversation_id"] or resueltos.get(e["telefono"])
+        if not conversation_id or conversation_id in vistos:
+            continue
+        vistos.add(conversation_id)
+        resultado.append({**e, "conversation_id": conversation_id})
+    return resultado
 
 
 def _dto_contact(contact: "Contact") -> dict:
@@ -4674,19 +4903,146 @@ async def obtener_timestamp_ultimo_mensaje_usuario(telefono: str) -> datetime | 
     `obtener_historial`/`limpiar_historial`). Se agrega como filtro
     adicional — defensa en profundidad, no cambia el resultado hoy (un
     teléfono sigue siendo único por Lead), pero cierra el mismo patrón de
-    "columna presente, filtro ausente" ya corregido en el resto del Gate."""
+    "columna presente, filtro ausente" ya corregido en el resto del Gate.
+
+    2026-10-06 — REGLA ÚNICA sobre las reacciones ("Reaccionó con 👍"): NO cuentan
+    como mensaje del cliente. Inicio ya las ignoraba, pero esta función las
+    contaba, y no consta en la documentación de Meta que una reacción abra o
+    renueve la ventana de servicio de 24 h. Lo prudente es no contarlas para
+    PERMITIR texto libre: si en la práctica Meta sí la abriera, lo peor que pasa
+    es que el panel ofrezca la plantilla de más; al revés, el asesor escribiría
+    libre y Meta rechazaría el envío (error 131047)."""
     async with async_session() as session:
         lead = await session.get(Lead, telefono)
         if lead is None:
             return None
         query = (
             select(Mensaje.timestamp)
-            .where(Mensaje.telefono == telefono, Mensaje.negocio_id == lead.negocio_id, Mensaje.role == "user")
+            .where(
+                Mensaje.telefono == telefono, Mensaje.negocio_id == lead.negocio_id, Mensaje.role == "user",
+                ~func.coalesce(Mensaje.content, "").startswith(_PREFIJO_REACCION),
+            )
             .order_by(Mensaje.timestamp.desc())
             .limit(1)
         )
         result = await session.execute(query)
         return result.scalar_one_or_none()
+
+
+# ── Estado de la ventana de WhatsApp de un cliente (2026-10-06, P3) ─────────────────────
+# Responde, para un cliente, "¿puedo escribirle libre o solo con plantilla?" y "¿lo que
+# le mande hoy sería gratis por ser de un anuncio?". Solo lectura, sin migración.
+#
+# Hechos de Meta (doc oficial leída el 2026-10-06):
+#  - La ventana de servicio de 24 h se abre o renueva SOLO con un mensaje del CLIENTE. Con
+#    ella cerrada solo se pueden mandar plantillas aprobadas, nunca texto libre.
+#  - La ventana gratuita de 72 h de los anuncios Click-to-WhatsApp (Free Entry Point) es de
+#    PRECIO, no de permiso: la abre NUESTRA respuesta dentro de las 24 h del mensaje del
+#    anuncio y, dentro de ella, todos los mensajes (también las plantillas) salen gratis. El
+#    texto libre sigue exigiendo las 24 h.
+VENTANA_SERVICIO_HORAS = 24
+
+
+async def obtener_estado_ventana(
+    telefono: str, negocio_id: str | None = None, ahora: datetime | None = None, con_fep: bool = True,
+) -> dict:
+    """Estado de la ventana de WhatsApp de un cliente. `negocio_id` se resuelve desde el lead si
+    no se pasa; un teléfono sin lead queda todo cerrado. Fechas en UTC naive (usar `iso_utc`).
+
+    Devuelve: ventana_24h_abierta, vence_en (fin de las 24 h, o None), ultimo_mensaje_cliente_en,
+    fep_abierta, fep_vence_en, fep_origen ("visto" | "por_abrir" | None), puede_texto_libre,
+    puede_plantilla, negocio_id (el resuelto).
+
+    `fep_abierta` = un envío AHORA caería en el intervalo gratuito de un anuncio. Dos señales (las
+    mismas de `politica_envios._ventana_de_anuncio_abierta`, que decide el costo real): (1) Meta ya
+    marcó como `free_entry_point` mensajes recientes a este cliente → la ventana va desde el primero
+    de la racha hasta +`meta_fep_horas` (72 por defecto) y `fep_vence_en` es ese instante
+    (`fep_origen="visto"`); (2) el cliente llegó por anuncio hace menos de 24 h y nadie le ha
+    respondido → nuestra respuesta la abrirá (`fep_origen="por_abrir"`, sin `fep_vence_en`: aún no
+    empezó a correr).
+
+    Reacciones: no cuentan como mensaje del cliente (ver `obtener_timestamp_ultimo_mensaje_usuario`).
+    `puede_plantilla` es siempre verdadero: Meta permite una plantilla aprobada en cualquier momento;
+    si hay una configurada lo decide la capa del panel (`plantilla_disponible`).
+
+    `con_fep=False` salta las consultas de anuncio (camino de envío, donde solo importa la ventana de
+    24 h): `fep_abierta` queda en False, sin que signifique "no hay anuncio"."""
+    ahora = ahora or datetime.utcnow()
+    cerrado = {
+        "ventana_24h_abierta": False, "vence_en": None, "ultimo_mensaje_cliente_en": None,
+        "fep_abierta": False, "fep_vence_en": None, "fep_origen": None,
+        "puede_texto_libre": False, "puede_plantilla": True, "negocio_id": negocio_id,
+    }
+    if negocio_id is None:
+        async with async_session() as session:
+            lead = await session.get(Lead, telefono)
+        if lead is None:
+            return cerrado
+        negocio_id = lead.negocio_id
+        cerrado["negocio_id"] = negocio_id
+    horas_fep = (_a_numero(await obtener_configuracion("meta_fep_horas", "72", negocio_id=negocio_id), 72) or 72) if con_fep else 72
+
+    async with async_session() as session:
+        ultimo = (await session.execute(
+            select(func.max(Mensaje.timestamp)).where(
+                Mensaje.telefono == telefono, Mensaje.negocio_id == negocio_id, Mensaje.role == "user",
+                ~func.coalesce(Mensaje.content, "").startswith(_PREFIJO_REACCION),
+            )
+        )).scalar_one_or_none()
+        vence = ultimo + timedelta(hours=VENTANA_SERVICIO_HORAS) if ultimo else None
+        abierta = bool(vence and vence > ahora)
+        if not con_fep:
+            return {
+                "ventana_24h_abierta": abierta, "vence_en": vence if abierta else None, "ultimo_mensaje_cliente_en": ultimo,
+                "fep_abierta": False, "fep_vence_en": None, "fep_origen": None,
+                "puede_texto_libre": abierta, "puede_plantilla": True, "negocio_id": negocio_id,
+            }
+
+        # (1) Racha de mensajes que Meta marcó como Free Entry Point. Se agrupan en ventanas de
+        # `horas_fep` desde el primer mensaje de cada una y se mira la última.
+        instantes = [
+            t for t in (await session.execute(
+                select(func.coalesce(UsoMensajeMeta.entregado_en, UsoMensajeMeta.enviado_en))
+                .where(
+                    UsoMensajeMeta.negocio_id == negocio_id, UsoMensajeMeta.destinatario == telefono,
+                    UsoMensajeMeta.pricing_type == "free_entry_point",
+                    func.coalesce(UsoMensajeMeta.entregado_en, UsoMensajeMeta.enviado_en) >= ahora - timedelta(hours=2 * horas_fep),
+                ).order_by(func.coalesce(UsoMensajeMeta.entregado_en, UsoMensajeMeta.enviado_en))
+            )).scalars().all() if t is not None
+        ]
+        fep_vence, inicio = None, None
+        for t in instantes:
+            if inicio is None or t - inicio > timedelta(hours=horas_fep):
+                inicio = t
+        if inicio is not None:
+            fep_vence = inicio + timedelta(hours=horas_fep)
+        fep_abierta = bool(fep_vence and fep_vence > ahora)
+        fep_origen = "visto" if fep_abierta else None
+        if not fep_abierta:
+            fep_vence = None
+            # (2) Llegó por anuncio hace menos de 24 h y nadie le ha respondido todavía.
+            clic = (await session.execute(
+                select(func.max(AttributionEvent.creado)).where(
+                    AttributionEvent.negocio_id == negocio_id, AttributionEvent.lead_telefono == telefono,
+                    AttributionEvent.tipo_origen.in_(("meta_ads", "meta_ads_no_resuelto")),
+                    AttributionEvent.creado >= ahora - timedelta(hours=VENTANA_SERVICIO_HORAS),
+                )
+            )).scalar_one_or_none()
+            if clic is not None:
+                respondido = (await session.execute(
+                    select(Mensaje.id).where(
+                        Mensaje.negocio_id == negocio_id, Mensaje.telefono == telefono, Mensaje.timestamp >= clic,
+                        Mensaje.role.in_(("assistant", "asesor")), Mensaje.via_app.is_(False),
+                    ).limit(1)
+                )).scalar_one_or_none()
+                if respondido is None:
+                    fep_abierta, fep_origen = True, "por_abrir"
+
+    return {
+        "ventana_24h_abierta": abierta, "vence_en": vence if abierta else None, "ultimo_mensaje_cliente_en": ultimo,
+        "fep_abierta": fep_abierta, "fep_vence_en": fep_vence, "fep_origen": fep_origen,
+        "puede_texto_libre": abierta, "puede_plantilla": True, "negocio_id": negocio_id,
+    }
 
 
 async def obtener_historial(telefono: str, limite: int = 20) -> list[dict]:
@@ -5160,6 +5516,85 @@ async def listar_leads_pipeline(
         return leads, total
 
 
+# ── Casos ya gestionados (2026-10-06, paquete P1) ───────────────────────
+#
+# Inicio y la campana mostraban como pendientes casos que alguien ya resolvió
+# (un lead cerrado definitivamente, un cliente al que un humano ya le contestó
+# por el celular). REGLA ÚNICA: se decide por TIMESTAMP, nunca por un booleano
+# suelto — "el cierre es igual o posterior al último mensaje real del cliente"
+# saca el caso; si el cliente escribe DESPUÉS del cierre, vuelve a aparecer. Un
+# mensaje real excluye las reacciones (`PREFIJO_REACCION`).
+
+def _cierre_vigente(*cierres: datetime | None) -> datetime | None:
+    """El cierre definitivo más reciente entre Lead y Conversation (los dos se
+    escriben juntos, pero uno puede quedar sin espejo)."""
+    validos = [c for c in cierres if c is not None]
+    return max(validos) if validos else None
+
+
+def cierre_cubre_mensaje(cierre: datetime | None, ultimo_cliente: datetime | None) -> bool:
+    """True si el cierre definitivo es igual o posterior al último mensaje real
+    del cliente (o el cliente nunca escribió): el caso ya está gestionado."""
+    if cierre is None:
+        return False
+    return ultimo_cliente is None or cierre >= ultimo_cliente
+
+
+def humano_atendio(ultimo_humano: datetime | None, ultimo_cliente: datetime | None) -> bool:
+    """True si un humano (asesor, o la línea escrita desde el celular) escribió
+    igual o después del último mensaje real del cliente."""
+    if ultimo_humano is None:
+        return False
+    return ultimo_cliente is None or ultimo_humano >= ultimo_cliente
+
+
+async def _estado_atencion_por_telefono(session, negocio_id: str, telefonos: list[str]) -> dict[str, dict]:
+    """Por teléfono: `ultimo_cliente` (último mensaje real del cliente),
+    `ultimo_humano` (último mensaje de un asesor, o de la línea escrito desde
+    la app del celular: `role == "assistant"` con `via_app`; un envío fallido
+    no cuenta como respuesta), `conversaciones` (cuántas tiene), `hay_activa` y
+    `cierre_conversacion` (cierre definitivo de la Conversation activa). Tres
+    consultas agrupadas para toda la lista, sin N+1."""
+    if not telefonos:
+        return {}
+    no_reaccion = ~func.coalesce(Mensaje.content, "").startswith(PREFIJO_REACCION)
+    base = (Mensaje.negocio_id == negocio_id, Mensaje.telefono.in_(telefonos), no_reaccion)
+    clientes = {
+        t: ts for t, ts in (await session.execute(
+            select(Mensaje.telefono, func.max(Mensaje.timestamp)).where(*base, Mensaje.role == "user").group_by(Mensaje.telefono)
+        )).all()
+    }
+    es_humano = sa_or(Mensaje.role == "asesor", sa_and(Mensaje.role == "assistant", Mensaje.via_app.is_(True)))
+    humanos = {
+        t: ts for t, ts in (await session.execute(
+            select(Mensaje.telefono, func.max(Mensaje.timestamp))
+            .where(*base, es_humano, func.coalesce(Mensaje.estado_envio, "") != "fallido")
+            .group_by(Mensaje.telefono)
+        )).all()
+    }
+    filas = (await session.execute(
+        select(Contact.telefono, Conversation.estado, Conversation.cerrado_definitivamente_en)
+        .join(Conversation, Conversation.contact_id == Contact.id)
+        .where(
+            Contact.negocio_id == negocio_id, Conversation.negocio_id == negocio_id, Contact.telefono.in_(telefonos),
+        )
+    )).all()
+    estado = {
+        t: {
+            "ultimo_cliente": clientes.get(t), "ultimo_humano": humanos.get(t),
+            "conversaciones": 0, "hay_activa": False, "cierre_conversacion": None,
+        }
+        for t in telefonos
+    }
+    for telefono, estado_conv, cierre in filas:
+        e = estado[telefono]
+        e["conversaciones"] += 1
+        if estado_conv == "activa":
+            e["hay_activa"] = True
+            e["cierre_conversacion"] = cierre
+    return estado
+
+
 async def listar_leads_agendados(negocio_id: str, asesor_asignado: str | None = None) -> list[dict]:
     """Leads con una cita agendada (resultado == 'agendado' y fecha_agendada
     definida), de la más próxima a la más lejana — para el aviso de "Próximas
@@ -5172,6 +5607,10 @@ async def listar_leads_agendados(negocio_id: str, asesor_asignado: str | None = 
             .where(
                 Lead.negocio_id == negocio_id,
                 Lead.resultado == "agendado", Lead.fecha_agendada.is_not(None),
+                # 2026-10-06: un lead cerrado definitivamente no tiene una cita viva
+                # (resguardo para datos que quedaron a medias: cerrar exige un
+                # resultado cerrado, y reactivar limpia este campo).
+                Lead.cerrado_definitivamente_en.is_(None),
             )
             .order_by(Lead.fecha_agendada.asc())
         )
@@ -5181,7 +5620,7 @@ async def listar_leads_agendados(negocio_id: str, asesor_asignado: str | None = 
         return [_lead_a_dict(lead) for lead in result.scalars().all()]
 
 
-async def listar_leads_esperando_asesor(negocio_id: str) -> list[dict]:
+async def listar_leads_esperando_asesor(negocio_id: str, excluir_atendidos: bool = True) -> list[dict]:
     """Leads derivados a un asesor que se quedaron sin nadie disponible en su
     momento (asesor_asignado sigue vacío), del más antiguo al más reciente —
     para poder asignarlos apenas un asesor se ponga disponible, en vez de
@@ -5191,6 +5630,19 @@ async def listar_leads_esperando_asesor(negocio_id: str) -> list[dict]:
     la mayoría de estos leads tiene resultado NULL (pendiente) — un
     `NOT IN` en SQL excluiría también esas filas por cómo SQL trata NULL en
     comparaciones, que no es lo que queremos.
+
+    2026-10-06 — casos ya gestionados (ver el bloque de arriba): además del
+    resultado cerrado, se descartan (por timestamp)
+      · los cerrados definitivamente (Lead o Conversation activa) cuyo cierre
+        es igual o posterior al último mensaje real del cliente;
+      · los que ya no tienen una Conversation activa (todas cerradas);
+      · con `excluir_atendidos` (por defecto), los que un humano ya contestó
+        (último mensaje real de un asesor, o de la línea desde el celular) igual
+        o después del último del cliente — `pausar_gabi_manual` deja el lead en
+        `derivado_asesor` sin asesor A PROPÓSITO y esa atención no es un
+        pendiente. Si el cliente escribe de nuevo, reaparece.
+    `agendado` y `postventa` NO están en `RESULTADOS_CERRADOS` y se mantienen
+    así: un lead agendado o en postventa sin asesor sigue necesitando dueño.
 
     `negocio_id` (Gate 5.4, T2) obligatorio — mismo hallazgo que listar_leads."""
     async with async_session() as session:
@@ -5203,8 +5655,21 @@ async def listar_leads_esperando_asesor(negocio_id: str) -> list[dict]:
             .order_by(Lead.actualizado.asc())
         )
         result = await session.execute(query)
-        leads = result.scalars().all()
-        return [_lead_a_dict(l) for l in leads if l.resultado not in RESULTADOS_CERRADOS]
+        candidatos = [l for l in result.scalars().all() if l.resultado not in RESULTADOS_CERRADOS]
+        estado = await _estado_atencion_por_telefono(session, negocio_id, [l.telefono for l in candidatos])
+
+    pendientes = []
+    for lead in candidatos:
+        e = estado[lead.telefono]
+        cierre = _cierre_vigente(lead.cerrado_definitivamente_en, e["cierre_conversacion"])
+        if cierre_cubre_mensaje(cierre, e["ultimo_cliente"]):
+            continue
+        if e["conversaciones"] and not e["hay_activa"]:
+            continue
+        if excluir_atendidos and humano_atendio(e["ultimo_humano"], e["ultimo_cliente"]):
+            continue
+        pendientes.append(_lead_a_dict(lead))
+    return pendientes
 
 
 # ── Inicio verdadero (paquete B, 2026-10-05) ────────────────────────────
@@ -5266,6 +5731,12 @@ async def listar_clientes_esperando(
     agendado — un cliente ya vendido que escribe de nuevo también espera.
     `asesor` acota a los leads de ese asesor (el asesor ve solo los suyos).
 
+    2026-10-06 — NO esperan los cerrados definitivamente (`cerrado_definitivamente_en`
+    del Lead o de la Conversation) cuyo cierre es igual o posterior al último
+    mensaje real del cliente (p. ej. una venta cuyo último mensaje fue
+    "gracias"). Se compara por timestamp: si el cliente escribe DESPUÉS del
+    cierre, vuelve a esperar.
+
     Una sola consulta (ROW_NUMBER por conversación, sin N+1). Cada ítem:
     `conversation_id`, `telefono`, `nombre`, `asesor_asignado`, `resultado`,
     `ultimo_mensaje_cliente_en` (UTC naive), `escalado`, `probable_cierre`,
@@ -5307,6 +5778,7 @@ async def listar_clientes_esperando(
             select(
                 Conversation.id, Contact.telefono, Contact.nombre, Lead.nombre, Lead.asesor_asignado,
                 Lead.resultado, Lead.escalado_supervision_en, ultimos.c.content, ultimos.c.ts,
+                Lead.cerrado_definitivamente_en, Conversation.cerrado_definitivamente_en,
             )
             .join(ultimos, sa_and(ultimos.c.conversation_id == Conversation.id, ultimos.c.fila == 1))
             .join(Contact, Contact.id == Conversation.contact_id)
@@ -5321,7 +5793,14 @@ async def listar_clientes_esperando(
         filas = (await session.execute(query)).all()
 
     items = []
-    for conv_id, telefono, nombre_contact, nombre_lead, asesor_asignado, resultado, escalado_en, contenido, ts in filas:
+    for (
+        conv_id, telefono, nombre_contact, nombre_lead, asesor_asignado, resultado, escalado_en, contenido, ts,
+        cierre_lead, cierre_conversacion,
+    ) in filas:
+        # Ya gestionado: el cierre definitivo es igual o posterior a lo último
+        # que escribió el cliente. Si escribe DESPUÉS del cierre, sí espera.
+        if cierre_cubre_mensaje(_cierre_vigente(cierre_lead, cierre_conversacion), ts):
+            continue
         vence = ts + timedelta(hours=VENTANA_META_HORAS)
         items.append({
             "conversation_id": conv_id, "telefono": telefono, "nombre": nombre_lead or nombre_contact,

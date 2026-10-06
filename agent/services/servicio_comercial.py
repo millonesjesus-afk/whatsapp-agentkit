@@ -238,6 +238,8 @@ class ServicioComercial:
         # estado anterior del lead DENTRO de la misma transacción.
         if lineas:
             campos["resultado"] = "vendido"
+            # Una venta cierra la cita: la fecha no puede quedar huérfana.
+            campos["fecha_agendada"] = None
         if pacto is not None:
             campos.update(pacto)
 
@@ -250,7 +252,7 @@ class ServicioComercial:
         # el vacío viene de una regla de negocio, no de "no sé".
         await guardar_venta(
             telefono, lineas, campos,
-            campos_explicitos=("cuotas",) + (CAMPOS_PACTO if pacto is not None else ()),
+            campos_explicitos=("cuotas",) + (("fecha_agendada",) if lineas else ()) + (CAMPOS_PACTO if pacto is not None else ()),
             revertir_resultado_al_vaciar=True,
         )
 

@@ -77,6 +77,7 @@ from agent.memory import (
     iso_utc, ROLES_CON_VISION_TOTAL, tiene_acceso_a_lead, liberar_asignacion,
     obtener_conversation_realtime, obtener_conversation_activa_de_telefono,
     resolver_conversation_ids_por_telefono, listar_clientes_esperando, contar_casos_activos,
+    VISTAS_INICIO, componer_vista_inicio, resolver_entradas_vista_inicio,
     obtener_negocio, obtener_identidad_agente, listar_horarios_atencion,
     actualizar_negocio, crear_o_actualizar_identidad_agente, guardar_horario_atencion,
 )
@@ -85,6 +86,8 @@ from agent.http_utils import get_con_reintentos, post_con_reintentos
 from agent.meta_timezones import zona_iana_de_meta
 from agent import envios
 from agent import circuito_ia
+from agent import plantilla_retomar
+from agent.memory import obtener_estado_ventana
 
 # Paleta de colores para distinguir canales de WhatsApp en el panel — se
 # asigna por posición (orden de creación), no por nombre, así que un canal
@@ -2696,6 +2699,7 @@ async def bandeja_conversaciones(
     dir: str = "desc",
     pagina: int = 1,
     por_pagina: int = POR_PAGINA_PIPELINE,
+    vista: str = "",
 ):
     """Gate 5.3 — Bandeja de Conversaciones, endpoint JSON dedicado (Diseño
     Técnico §13/§18). Reemplaza el reuso de `/pipeline` que hacía
@@ -2725,10 +2729,55 @@ async def bandeja_conversaciones(
         resultado = ""
     pagina = max(1, pagina)
     por_pagina = min(max(1, por_pagina), POR_PAGINA_PIPELINE_MAXIMO)
+    # 2026-10-06 (P2) — `vista`: los grupos de Inicio ("Ver los N en
+    # Conversaciones"). Un valor desconocido se ignora, igual que `resultado`.
+    # El criterio NO se reimplementa: se invocan las MISMAS funciones, con los
+    # mismos argumentos, que `inicio_json` (`_zona_accion_datos`), así la
+    # lista y los totales de Inicio coinciden siempre. Con vista la página es
+    # de 50 salvo que el cliente pida otro tamaño.
+    vista = vista if vista in VISTAS_INICIO else ""
+    ids_ordenados: list[str] | None = None
+    entradas_vista: dict[str, dict] = {}
+    if vista:
+        vision_total = usuario["rol"] in ROLES_CON_VISION_TOTAL
+        negocio_id = usuario["negocio_id"]
+        ahora = datetime.utcnow()
+        es_vista_de_citas = vista in ("citas", "citas_vencidas")
+        esperando = [] if es_vista_de_citas else await listar_clientes_esperando(
+            negocio_id, asesor=asesor_filtro, ahora=ahora,
+        )
+        proximas, vencidas = [], []
+        if es_vista_de_citas:
+            proximas, vencidas, _ = await _citas_inicio(negocio_id, asesor_filtro, ahora)
+        # Escalados / sin asesor: solo visión total y sin acotar a un asesor
+        # (un lead sin asesor no pertenece a la cartera de nadie).
+        incluir_supervision = vision_total and not asesor_filtro
+        esperando_asignar = (
+            await listar_leads_esperando_asesor(negocio_id)
+            if incluir_supervision and vista in ("responde_ahora", "sin_asesor", "escalados") else []
+        )
+        entradas = await resolver_entradas_vista_inicio(
+            negocio_id,
+            componer_vista_inicio(vista, esperando, esperando_asignar, proximas, vencidas, incluir_supervision),
+        )
+        ids_ordenados = [e["conversation_id"] for e in entradas]
+        entradas_vista = {e["conversation_id"]: e for e in entradas}
+        if "por_pagina" not in request.query_params:
+            por_pagina = 50
     conversaciones, total = await listar_conversaciones_activas(
         negocio_id=usuario["negocio_id"], asesor_asignado=asesor_filtro, busqueda=q.strip(),
         resultado=resultado, orden=orden, direccion=dir, pagina=pagina, por_pagina=por_pagina,
+        ids_ordenados=ids_ordenados,
     )
+    if vista:
+        for fila in conversaciones:
+            e = entradas_vista[fila["id"]]
+            fila["inicio"] = {
+                "categoria": e["categoria"],
+                "ultimo_mensaje_cliente_en": iso_utc(e["ultimo_mensaje_cliente_en"]) if e["ultimo_mensaje_cliente_en"] else None,
+                "ventana_vence_en": iso_utc(e["ventana_vence_en"]) if e["ventana_vence_en"] else None,
+                "ventana_abierta": e["ventana_abierta"],
+            }
     # Misma señal de actividad real para el idle timeout de conexiones WS
     # (Gate 4.1) que ya usan `mensajes_json`/`obtener_mensajes_conversation`
     # — la conexión de LISTA de `ConversacionesVista` (sin `ver_lead`,
@@ -2736,7 +2785,10 @@ async def bandeja_conversaciones(
     # sin este golpe el barrido de inactividad la cerraría cada ~2 min
     # aunque el navegador siga ahí (ver `tocar_actividad`).
     gestor_conexiones.tocar_actividad(usuario["username"], None)
-    return JSONResponse({"conversaciones": conversaciones, "total": total, "pagina": pagina, "por_pagina": por_pagina})
+    return JSONResponse({
+        "conversaciones": conversaciones, "total": total, "pagina": pagina, "por_pagina": por_pagina,
+        **({"vista": vista} if vista else {}),
+    })
 
 
 def _verificar_acceso_conversation(usuario: dict, asesor_asignado: str | None):
@@ -2855,7 +2907,14 @@ async def conversation_detalle(conversation_id: str, usuario: dict = Depends(_us
     if conversation.get("opportunity_id"):
         lineas = await listar_lineas_venta_por_opportunity(conversation["opportunity_id"], usuario["negocio_id"])
     eventos = await listar_eventos_de_conversation(conversation_id, usuario["negocio_id"])
-    return JSONResponse(_dto_conversation_detalle(conversation, lineas, eventos))
+    dto = _dto_conversation_detalle(conversation, lineas, eventos)
+    # P3 (2026-10-06): estado de la ventana de WhatsApp, ADITIVO. Nunca rompe el detalle si falla.
+    try:
+        dto["ventana_whatsapp"] = await _dto_ventana_whatsapp(conversation["telefono"], usuario["negocio_id"])
+    except Exception:
+        logger.exception(f"No se pudo calcular el estado de la ventana de la conversación {conversation_id}")
+        dto["ventana_whatsapp"] = None
+    return JSONResponse(dto)
 
 
 @router.get("/conversation/{conversation_id}/timeline")
@@ -2965,6 +3024,10 @@ async def opportunity_resultado(
                 campos["fecha_agendada"] = datetime.fromisoformat(fecha_agendada)
             except ValueError:
                 raise HTTPException(status_code=400, detail="Fecha de la cita inválida")
+        elif opp.get("resultado") != "agendado":
+            # Volver a 'agendado' sin fecha nueva dejaba la fecha vieja de otra
+            # cita (o ninguna): un dato huérfano en "Citas" de Inicio.
+            raise HTTPException(status_code=400, detail="Indica la fecha y hora de la cita para marcarla como agendada")
 
     descripcion = (
         f"Cambió el resultado a «{ETIQUETAS_RESULTADO.get(resultado, resultado)}»"
@@ -3027,6 +3090,9 @@ async def opportunity_venta(
     }
     if venta["lineas"]:
         campos["resultado"] = "vendido"
+        # Una venta cierra la cita: sin esto la fecha quedaba huérfana en Lead y
+        # Opportunity (aparecía en "Citas" si el resultado volvía a 'agendado').
+        campos["fecha_agendada"] = None
 
     evento = {
         "tipo": "venta_registrada",
@@ -3289,6 +3355,10 @@ TOPES_ZONA_ACCION = {
 # timestamp) NO se mueve: va con iso_utc.
 _OFFSET_LIMA = timedelta(hours=5)
 _VENTANA_POR_VENCER = timedelta(hours=4)
+# La campana avisa de clientes con la ventana de WhatsApp abierta o cerrada hace
+# menos de estas horas; un cliente que dejó de escribir hace días sigue en
+# Inicio pero ya no suma al badge.
+HORAS_CAMPANA_VENTANA_CERRADA = 72
 _MENSAJE_VACIO_ASESOR = "No tienes conversaciones que requieran tu atención ahora mismo."
 _MENSAJE_VACIO_ADMIN = "El equipo no tiene conversaciones que requieran tu intervención ahora mismo."
 _RUTA_USO = "/configuracion/uso"
@@ -3325,16 +3395,39 @@ def _item_cliente_esperando(cliente: dict, vista_admin: bool) -> dict:
     return item
 
 
-async def _citas_inicio(negocio_id: str, asesor: str | None, ahora_utc: datetime) -> tuple[list, list, int]:
-    """(próximas, vencidas, cuántas en los próximos 7 días). Próximas: la más
-    cercana primero (antes mostraba las 3 más VIEJAS). Vencidas: la fecha ya
-    pasó y el lead sigue 'agendado' (nadie la cerró) — la más reciente primero."""
+# Una cita vencida sin cerrar solo se ofrece en Inicio durante esta ventana;
+# las más viejas ya no son "pendientes del día": se cuentan aparte
+# (`totales.citas_vencidas_antiguas`) para que no desaparezcan sin dejar rastro.
+DIAS_CITA_VENCIDA_VIGENTE = 7
+
+
+async def _citas_inicio_detalle(
+    negocio_id: str, asesor: str | None, ahora_utc: datetime,
+) -> tuple[list, list, int, int]:
+    """(próximas, vencidas de los últimos 7 días, cuántas próximas en 7 días,
+    cuántas vencidas MÁS antiguas). Próximas: la más cercana primero (antes
+    mostraba las 3 más VIEJAS). Vencidas: la fecha ya pasó y el lead sigue
+    'agendado' (nadie la cerró) — la más reciente primero. Un lead cerrado
+    definitivamente ya no entra (lo filtra `listar_leads_agendados`)."""
     agendados = await listar_leads_agendados(negocio_id, asesor_asignado=asesor)
     ahora_lima = ahora_utc - _OFFSET_LIMA
+    limite_vencidas = ahora_lima - timedelta(days=DIAS_CITA_VENCIDA_VIGENTE)
     con_fecha = [l for l in agendados if l.get("fecha_agendada")]
     proximas = sorted((l for l in con_fecha if l["fecha_agendada"] >= ahora_lima), key=lambda l: l["fecha_agendada"])
-    vencidas = sorted((l for l in con_fecha if l["fecha_agendada"] < ahora_lima), key=lambda l: l["fecha_agendada"], reverse=True)
+    vencidas_todas = [l for l in con_fecha if l["fecha_agendada"] < ahora_lima]
+    vencidas = sorted(
+        (l for l in vencidas_todas if l["fecha_agendada"] >= limite_vencidas),
+        key=lambda l: l["fecha_agendada"], reverse=True,
+    )
     en_7_dias = sum(1 for l in proximas if l["fecha_agendada"] <= ahora_lima + timedelta(days=7))
+    return proximas, vencidas, en_7_dias, len(vencidas_todas) - len(vencidas)
+
+
+async def _citas_inicio(negocio_id: str, asesor: str | None, ahora_utc: datetime) -> tuple[list, list, int]:
+    """(próximas, vencidas de los últimos 7 días, cuántas en los próximos 7
+    días). Misma firma de siempre; ver `_citas_inicio_detalle` para el conteo
+    de las vencidas más antiguas."""
+    proximas, vencidas, en_7_dias, _antiguas = await _citas_inicio_detalle(negocio_id, asesor, ahora_utc)
     return proximas, vencidas, en_7_dias
 
 
@@ -3344,7 +3437,7 @@ async def _zona_accion_datos(negocio_id: str, asesor: str | None, vista_admin: b
     los que están sin asesor / escalados a supervisión."""
     ahora = datetime.utcnow()
     esperando = await listar_clientes_esperando(negocio_id, asesor=asesor, ahora=ahora)
-    proximas, vencidas, citas_7_dias = await _citas_inicio(negocio_id, asesor, ahora)
+    proximas, vencidas, citas_7_dias, vencidas_antiguas = await _citas_inicio_detalle(negocio_id, asesor, ahora)
 
     escalados: list[dict] = []
     sin_asesor: list[dict] = []
@@ -3373,9 +3466,16 @@ async def _zona_accion_datos(negocio_id: str, asesor: str | None, vista_admin: b
         pares.append((l, _item_zona(l, _texto_cita(l, "Cita vencida sin cerrar"), "cita_vencida")))
 
     abiertas = [c for c in esperando if c["ventana_abierta"]]
+    # Aditivo — alimenta SOLO el badge de la campana: ventana abierta o cerrada
+    # hace menos de HORAS_CAMPANA_VENTANA_CERRADA (los demás siguen en Inicio).
+    para_campana = [
+        c for c in esperando
+        if c["ventana_abierta"] or ahora - c["ventana_vence_en"] < timedelta(hours=HORAS_CAMPANA_VENTANA_CERRADA)
+    ]
     totales = {
         "cliente_esperando": len(esperando),
         "ventana_abierta": len(abiertas),
+        "esperando_campana": len(para_campana),
         "ventana_por_vencer": sum(1 for c in abiertas if c["ventana_vence_en"] - ahora < _VENTANA_POR_VENCER),
         "escalados": len(escalados), "sin_asesor": len(sin_asesor),
         # Casos DISTINTOS de la sección "Responde ahora" (escalados + sin asesor +
@@ -3385,6 +3485,8 @@ async def _zona_accion_datos(negocio_id: str, asesor: str | None, vista_admin: b
             {l["telefono"] for l in escalados} | {l["telefono"] for l in sin_asesor} | {c["telefono"] for c in esperando}
         ),
         "citas_proximas": len(proximas), "citas_vencidas": len(vencidas),
+        # Aditivo: vencidas de hace MÁS de 7 días (no se listan en Inicio).
+        "citas_vencidas_antiguas": vencidas_antiguas,
         # Extra (no estaba en el contrato original): alimenta el indicador
         # "Citas próximas (7 días)" de la vista Asesor.
         "citas_7_dias": citas_7_dias,
@@ -5515,9 +5617,67 @@ async def notificaciones_json(usuario: dict = Depends(_usuario_actual)):
 # Ventana de atención de 24 horas de WhatsApp (Meta): un negocio solo puede
 # mandar mensajes "libres" (no-plantilla) dentro de las 24h desde el ÚLTIMO
 # mensaje entrante real del cliente — pasado ese plazo, Meta rechaza el envío
-# y solo una plantilla aprobada puede reabrir la conversación (enviar_plantilla,
-# fuera de alcance de este Gate: "no actives ningún envío de plantilla real").
+# y solo una plantilla aprobada puede reabrir la conversación. Desde el 2026-10-06
+# el asesor puede mandar esa plantilla desde el chat (`/lead/{tel}/responder-plantilla`,
+# ver agent/plantilla_retomar.py). La regla de "último mensaje del cliente" (sin
+# contar reacciones) vive en `memory.obtener_estado_ventana`.
 VENTANA_ATENCION_HORAS = 24
+
+TEXTO_VENTANA_CERRADA = (
+    "La ventana de 24 horas de WhatsApp está cerrada para este cliente: Meta solo permite enviarle "
+    "una plantilla aprobada hasta que él vuelva a escribir."
+)
+
+
+class ErrorConCodigo(HTTPException):
+    """HTTPException con un `codigo` semántico y campos propios en el cuerpo (ver `api_contrato`: suma
+    `cuerpo_extra` al cuerpo uniforme del error, que sigue trayendo `mensaje`; aquí además `detail`)."""
+
+    def __init__(self, status_code: int, detail: str, codigo: str, **extra):
+        super().__init__(status_code=status_code, detail=detail)
+        self.cuerpo_extra = {"codigo": codigo, "detail": detail, **extra}
+
+
+class VentanaCerradaError(ErrorConCodigo):
+    """409 de "ventana de 24 h cerrada" con cuerpo estructurado: además del `mensaje`/`detail` en
+    español, el cuerpo trae `codigo: "ventana_cerrada"`, `puede_plantilla`, `plantilla_disponible`
+    y los datos del anuncio (`fep_abierta`, `fep_vence_en`) para que el panel ofrezca la
+    plantilla sin adivinar."""
+
+    def __init__(self, extra: dict):
+        super().__init__(409, TEXTO_VENTANA_CERRADA, "ventana_cerrada", **extra)
+
+
+async def _dto_ventana_whatsapp(telefono: str, negocio_id: str | None, estado: dict | None = None) -> dict:
+    """Estado de la ventana de WhatsApp de un cliente listo para el panel. Los nombres
+    `ventana_abierta` / `ventana_vence_en` son los mismos que ya usa Inicio (el panel los pasa tal
+    cual a `calcularVentana`)."""
+    estado = estado or await obtener_estado_ventana(telefono, negocio_id)
+    negocio_id = negocio_id or estado.get("negocio_id")
+    plantilla = await plantilla_retomar.obtener_plantilla(negocio_id)
+    return {
+        "ventana_abierta": estado["ventana_24h_abierta"],
+        "ventana_vence_en": iso_utc(estado["vence_en"]) if estado["vence_en"] else None,
+        "ultimo_mensaje_cliente_en": iso_utc(estado["ultimo_mensaje_cliente_en"]) if estado["ultimo_mensaje_cliente_en"] else None,
+        "puede_texto_libre": estado["puede_texto_libre"],
+        "puede_plantilla": estado["puede_plantilla"],
+        "plantilla_disponible": plantilla["disponible"],
+        "fep_abierta": estado["fep_abierta"],
+        "fep_vence_en": iso_utc(estado["fep_vence_en"]) if estado["fep_vence_en"] else None,
+        "fep_origen": estado["fep_origen"],
+    }
+
+
+async def _error_ventana_cerrada(telefono: str, negocio_id: str | None = None, estado: dict | None = None) -> VentanaCerradaError:
+    """El 409 estructurado. Siempre dice `ventana_abierta: False` (es lo que acaba de ocurrir, aunque
+    Meta la haya dado por cerrada con un 131047 mientras nuestro cálculo aún la veía abierta)."""
+    try:
+        dto = await _dto_ventana_whatsapp(telefono, negocio_id, estado)
+    except Exception:
+        logger.exception(f"No se pudo armar el estado de la ventana de {telefono} para el 409")
+        dto = {"puede_plantilla": True, "plantilla_disponible": False, "fep_abierta": False, "fep_vence_en": None}
+    dto.update({"ventana_abierta": False, "puede_texto_libre": False})
+    return VentanaCerradaError(dto)
 
 
 async def _verificar_ventana_atencion(telefono: str):
@@ -5525,17 +5685,13 @@ async def _verificar_ventana_atencion(telefono: str):
     ventana de 24h, se rechaza acá con un error diferenciado (409) en vez de
     dejar que Meta lo rechace y mostrar el mismo 502 genérico que cualquier
     otra falla (token vencido, canal caído, etc.) — el asesor necesita saber
-    que ESTO puntualmente es la ventana cerrada, no un problema técnico."""
-    ultimo = await servicio_conversacion.obtener_timestamp_ultimo_mensaje_usuario(telefono)
-    if ultimo is None or (datetime.utcnow() - ultimo) > timedelta(hours=VENTANA_ATENCION_HORAS):
-        raise HTTPException(
-            status_code=409,
-            detail=(
-                "La ventana de atención de 24 horas de WhatsApp está cerrada para este "
-                "cliente — Meta ya no permite enviarle mensajes libres hasta que él vuelva "
-                "a escribir, o mediante una plantilla aprobada (no disponible todavía)."
-            ),
-        )
+    que ESTO puntualmente es la ventana cerrada, no un problema técnico. El 409
+    es estructurado (`VentanaCerradaError`): dice si hay plantilla para ofrecer."""
+    estado = await obtener_estado_ventana(telefono, con_fep=False)   # camino de envío: solo importan las 24 h
+    if not estado["puede_texto_libre"]:
+        # Recién ahora, ya fallando, se consulta lo del anuncio y la plantilla.
+        completo = await obtener_estado_ventana(telefono)
+        raise await _error_ventana_cerrada(telefono, estado=completo)
 
 
 @router.post("/lead/{telefono}/responder")
@@ -5590,6 +5746,12 @@ async def responder_cliente(
     resultado_envio = await envios.enviar_texto(proveedor, telefono, mensaje, origen="asesor_texto", canal=canal, mensaje_id_citado=wamid_citado, asesor=usuario["username"])
     enviado, wamid = resultado_envio
 
+    # Meta dijo "fuera de la ventana de 24 h" (131047) aunque nuestro cálculo la veía abierta: es el
+    # mismo caso que el 409 de arriba. El mensaje no llegó ni hay nada que reintentar, así que no se
+    # guarda; el panel recibe el 409 estructurado y ofrece la plantilla.
+    if getattr(resultado_envio, "fuera_de_ventana", False):
+        raise await _error_ventana_cerrada(telefono, negocio_id=usuario["negocio_id"])
+
     # A diferencia del comportamiento anterior (no guardar nada si el envío
     # fallaba), el mensaje se persiste igual con estado_envio="fallido" —
     # para que el frontend lo muestre con opción de reintento en vez de
@@ -5617,6 +5779,115 @@ async def responder_cliente(
             mensaje_guardado["id"],
         )
     return JSONResponse({"status": "ok", "mensaje_id": mensaje_guardado["id"]})
+
+
+@router.get("/conversation/{conversation_id}/ventana-whatsapp")
+async def conversation_ventana_whatsapp(conversation_id: str, usuario: dict = Depends(_usuario_actual)):
+    """Estado de la ventana de WhatsApp de ESTA conversación (P3, 2026-10-06): si se le puede escribir
+    libre o solo con plantilla, cuándo vence y si un envío ahora sería gratis por anuncio. Ligero y de
+    solo lectura — el panel lo pide al abrir el chat y cuando llega un mensaje del cliente. Mismo control
+    de acceso de dos capas que el resto de `/conversation/{id}/...`."""
+    conversation = await obtener_conversation_detalle(conversation_id, usuario["negocio_id"])
+    if conversation is None:
+        raise HTTPException(status_code=404, detail="Conversación no encontrada")
+    _verificar_acceso_conversation(usuario, conversation["asesor_asignado"])
+    return JSONResponse(await _dto_ventana_whatsapp(conversation["telefono"], usuario["negocio_id"]))
+
+
+def _variables_plantilla_del_lead(lead: dict, usuario: dict) -> list[str]:
+    return plantilla_retomar.variables_de_plantilla(
+        lead.get("nombre"), usuario.get("nombre") or usuario.get("username"), lead.get("interes"),
+    )
+
+
+@router.get("/lead/{telefono}/plantilla-retomar")
+async def plantilla_retomar_del_lead(telefono: str, usuario: dict = Depends(_usuario_actual)):
+    """La plantilla de "retomar consulta" configurada, con su vista previa YA rellena para este lead
+    (cliente, asesor que la manda e interés) y el estado de su ventana — lo que el asesor ve antes de
+    confirmar el envío. Mismo control de acceso que `/responder`. `disponible: false` si todavía no hay
+    una plantilla aprobada configurada (clave `plantilla_retomar_nombre`)."""
+    lead = await obtener_lead(telefono, negocio_id=usuario["negocio_id"])
+    if lead is None:
+        raise HTTPException(status_code=404, detail="Lead no encontrado")
+    _verificar_acceso_lead(usuario, lead)
+    plantilla = await plantilla_retomar.obtener_plantilla(usuario["negocio_id"])
+    variables = _variables_plantilla_del_lead(lead, usuario)
+    ventana = await _dto_ventana_whatsapp(telefono, usuario["negocio_id"])
+    return JSONResponse({
+        **plantilla,
+        "variables_valores": variables[:plantilla_retomar.cantidad_de_variables(plantilla["cuerpo"])],
+        "texto": plantilla_retomar.renderizar(plantilla["cuerpo"], variables),
+        "categoria_supuesta": await obtener_configuracion(
+            "envios_categoria_asesor_plantilla", envios.ORIGENES["asesor_plantilla"]["categoria_plantilla"], negocio_id=usuario["negocio_id"],
+        ),
+        "ventana": ventana,
+    })
+
+
+@router.post("/lead/{telefono}/responder-plantilla")
+async def responder_cliente_con_plantilla(
+    telefono: str,
+    usuario: dict = Depends(_usuario_actual),
+    _csrf: None = Depends(verificar_csrf),
+):
+    """El asesor manda la plantilla aprobada de "retomar consulta" cuando la ventana de 24 h cerró
+    (P3, 2026-10-06). Mismos permisos que `/responder`. Sale por la capa central de envíos con el
+    origen `asesor_plantilla` (no esencial: respeta el interruptor y el tope mensual de costo; dentro
+    de la ventana gratuita de un anuncio pasa sin costo) y atribuida al asesor. Con la ventana abierta
+    se rechaza: ahí corresponde escribirle libre. El mensaje se guarda en el chat con el texto que ve
+    el cliente y su `estado_envio` (enviado / incierto / fallido), igual que `/responder`. Cuando el
+    cliente toca un botón o responde, entra como mensaje suyo y abre una ventana nueva de 24 h."""
+    lead = await obtener_lead(telefono, negocio_id=usuario["negocio_id"])
+    if lead is None:
+        raise HTTPException(status_code=404, detail="Lead no encontrado")
+    _verificar_acceso_lead(usuario, lead)
+
+    plantilla = await plantilla_retomar.obtener_plantilla(usuario["negocio_id"])
+    if not plantilla["disponible"]:
+        raise ErrorConCodigo(
+            409, "Todavía no hay una plantilla aprobada configurada. Pide a un administrador que la configure.",
+            "plantilla_no_configurada",
+        )
+
+    estado = await obtener_estado_ventana(telefono, usuario["negocio_id"])
+    if estado["puede_texto_libre"]:
+        raise ErrorConCodigo(409, "La ventana de 24 horas sigue abierta: puedes escribirle directamente, sin plantilla.", "ventana_abierta")
+
+    variables = _variables_plantilla_del_lead(lead, usuario)
+    parametros = plantilla_retomar.parametros_para_envio(plantilla["cuerpo"], variables)
+    texto = plantilla_retomar.renderizar(plantilla["cuerpo"], variables)
+
+    proveedor = obtener_proveedor()
+    canal = await proveedor.resolver_canal(lead.get("numero_whatsapp_id"))
+    resultado_envio = await envios.enviar_plantilla(
+        proveedor, telefono, plantilla["nombre"], parametros, plantilla["idioma"],
+        origen="asesor_plantilla", canal=canal, asesor=usuario["username"],
+    )
+    enviado, wamid = resultado_envio
+
+    # La política de costo la frenó (interruptor en "nunca" o tope mensual): no salió nada, no hay
+    # mensaje que guardar ni reintentar.
+    if resultado_envio.bloqueado:
+        raise ErrorConCodigo(
+            409,
+            f"La plantilla no se envió: {resultado_envio.motivo}. Un administrador puede ajustarlo en Uso y envíos.",
+            "plantilla_bloqueada_por_costo", motivo=resultado_envio.motivo, fep_abierta=estado["fep_abierta"],
+        )
+
+    mensaje_guardado = await servicio_conversacion.guardar_mensaje(
+        telefono, "asesor", texto, negocio_id=usuario["negocio_id"],
+        mensaje_id_meta=wamid, estado_envio=_estado_envio_guardado(resultado_envio),
+    )
+    await gestor_conexiones.emitir_mensaje_nuevo(mensaje_guardado["conversation_id"])
+
+    if resultado_envio.incierto:
+        return _respuesta_envio_incierto(mensaje_guardado["id"])
+    if not enviado:
+        return _respuesta_envio_fallido(
+            "No se pudo enviar la plantilla por WhatsApp. Revisa que su nombre e idioma coincidan con los aprobados en Meta.",
+            mensaje_guardado["id"],
+        )
+    return JSONResponse({"status": "ok", "mensaje_id": mensaje_guardado["id"], "texto": texto})
 
 
 def _convertir_a_ogg_opus(contenido_webm: bytes) -> bytes:
@@ -6120,6 +6391,9 @@ async def actualizar_resultado(
                 campos["fecha_agendada"] = datetime.fromisoformat(fecha_agendada)
             except ValueError:
                 raise HTTPException(status_code=400, detail="Fecha de la cita inválida")
+        elif lead.get("resultado") != "agendado":
+            # Volver a 'agendado' sin fecha nueva: antes conservaba la vieja (huérfana).
+            raise HTTPException(status_code=400, detail="Indica la fecha y hora de la cita para marcarla como agendada")
 
     # Concurrencia optimista sobre Lead.version — SIGUE siendo el gate de
     # ESTE endpoint (el panel HTML legacy nunca conoció opportunity_version,
@@ -6274,6 +6548,7 @@ async def registrar_venta(
     }
     if venta["lineas"]:
         campos["resultado"] = "vendido"
+        campos["fecha_agendada"] = None  # la venta cierra la cita (ver /opportunity/{id}/venta)
 
     ids = await resolver_ids_operables_por_telefono(telefono)
     if ids is not None:

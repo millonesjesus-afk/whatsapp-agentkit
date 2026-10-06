@@ -37,6 +37,14 @@ def test_el_detector_encuentra_los_tipos_que_antes_no_cabian():
     assert {"cerrado_definitivamente_automatico", "rotado_automatico_sin_respuesta"} <= tipos
 
 
+def test_reabierto_por_cliente_se_detecta_y_cabe_hasta_en_30():
+    # P4 (2026-10-06): el tipo nuevo respeta incluso el VARCHAR(30) viejo, por
+    # si alguna base todavía no corrió la migración que lo amplió a 60.
+    tipos = _tipos_de_evento_en_el_codigo()
+    assert "reabierto_por_cliente" in tipos
+    assert len("reabierto_por_cliente") <= 30
+
+
 def test_todo_tipo_de_evento_cabe_en_la_columna():
     demasiado_largos = {t: len(t) for t in _tipos_de_evento_en_el_codigo() if len(t) > mem.TIPO_EVENTO_LARGO_MAX}
     assert not demasiado_largos, f"Tipos de evento que no caben en eventos_lead.tipo: {demasiado_largos}"

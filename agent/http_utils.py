@@ -120,6 +120,24 @@ class EnvioIncierto(Exception):
         self.status_code = status_code
 
 
+# Código de error de Meta (Cloud API) "fuera de la ventana de 24 h": se intentó un mensaje
+# libre —no plantilla— a un cliente que no escribió en las últimas 24 h.
+CODIGO_META_FUERA_DE_VENTANA = 131047
+
+
+class RespuestaEnvio(tuple):
+    """`(enviado, wamid)` de un envío —se desempaqueta igual que la tupla de siempre y es igual a
+    ella— que además lleva `codigo_error`: el código de error que Meta devolvió (p. ej. 131047,
+    fuera de la ventana de 24 h) cuando no fue 200, o None. Así la capa central de envíos
+    (agent/envios.py) puede distinguir "ventana cerrada" de cualquier otra falla sin cambiar la
+    firma que usan todos los llamadores."""
+
+    def __new__(cls, enviado: bool, wamid: str | None = None, codigo_error: int | None = None):
+        obj = super().__new__(cls, (enviado, wamid))
+        obj.codigo_error = codigo_error
+        return obj
+
+
 async def _dormir(segundos: float) -> None:
     # Función aparte para poder sustituirla en las pruebas sin tocar asyncio.sleep.
     await asyncio.sleep(segundos)

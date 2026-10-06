@@ -78,6 +78,9 @@ def registrar_contrato_interno(app: FastAPI) -> None:
                 "mensaje": str(exc.detail),
                 "detalle": None,
                 "request_id": request_id,
+                # Un error con campos propios (ej. `VentanaCerradaError`, 2026-10-06) los suma al cuerpo
+                # y puede sobrescribir `codigo` con uno semántico; el resto sigue igual.
+                **(getattr(exc, "cuerpo_extra", None) or {}),
             },
             headers={"X-Request-Id": request_id, **(exc.headers or {})},
         )

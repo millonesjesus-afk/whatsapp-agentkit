@@ -116,11 +116,11 @@ async def test_el_historial_es_por_negocio():
 
 # ── Lectura de la configuración y rutas ──────────────────────────────────
 
-async def test_la_configuracion_vigente_trae_los_nueve_origenes_con_sus_defaults_y_lo_que_se_cambio():
+async def test_la_configuracion_vigente_trae_los_diez_origenes_con_sus_defaults_y_lo_que_se_cambio():
     nid = await _negocio("seg-8")
     c = await mem.obtener_configuracion_envios(nid)
     por = {o["origen"]: o for o in c["origenes"]}
-    assert len(por) == 9
+    assert len(por) == 10
     assert all(por[o]["esencial"] and por[o]["modo"] == "siempre" for o in ("gabi_respuesta", "gabi_aviso_derivacion", "gabi_respaldo_sin_ia", "asesor_texto", "asesor_archivo", "asesor_audio"))
     # El aviso del modo sin IA no se agrupa menos de 60 min y queda fuera del tope de gasto.
     assert (por["gabi_respaldo_sin_ia"]["agrupar_minutos"], por["gabi_respaldo_sin_ia"]["exento_tope"]) == (60, True)

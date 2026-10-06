@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from fastapi import Request
 from agent.providers.base import ProveedorWhatsApp, MensajeEntrante
 from agent.memory import listar_canales_whatsapp
-from agent.http_utils import post_con_reintentos, get_con_reintentos, post_sin_duplicar, EnvioIncierto
+from agent.http_utils import post_con_reintentos, get_con_reintentos, post_sin_duplicar, EnvioIncierto, RespuestaEnvio
 from agent.memory import buscar_wamid_huerfano
 import asyncio
 
@@ -53,6 +53,16 @@ def _extraer_wamid(respuesta) -> str | None:
         return None
 
 
+def _extraer_codigo_error(respuesta) -> int | None:
+    """Código numérico del error que Meta devuelve en el body de una respuesta no-200
+    (`{"error": {"code": 131047, ...}}`). None si no viene o no es legible."""
+    try:
+        codigo = (respuesta.json().get("error") or {}).get("code")
+        return int(codigo) if codigo is not None else None
+    except (ValueError, TypeError, AttributeError):
+        return None
+
+
 async def _esperar(segundos: float) -> None:
     # Función aparte para poder sustituirla en las pruebas.
     await asyncio.sleep(segundos)
@@ -85,8 +95,11 @@ async def _enviar_a_meta(url: str, payload: dict, headers: dict, telefono: str, 
         logger.error(f"Envío incierto a {telefono} ({incierto.motivo}): no apareció en uso_mensajes_meta — no se reenvía")
         raise
     if r.status_code != 200:
+        codigo = _extraer_codigo_error(r)
         logger.error(f"Error Meta API{f' ({tipo})' if tipo else ''}: {r.status_code} — {r.text}")
-        return False, None
+        # Con el código de Meta a la vista, la capa de envíos distingue "fuera de la ventana de 24 h"
+        # (131047) de cualquier otra falla (token vencido, canal caído…). Sigue desempaquetándose como (False, None).
+        return RespuestaEnvio(False, None, codigo)
     return True, _extraer_wamid(r)
 
 

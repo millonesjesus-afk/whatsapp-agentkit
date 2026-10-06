@@ -702,7 +702,10 @@ async def test_listar_eventos_de_conversation_sirve_timeline_de_conversation_cer
     # porque se pide por conversation_id directo, sin pasar por el puente.
     eventos_puente = await mem.listar_eventos_lead(telefono)
     eventos_directos = await mem.listar_eventos_de_conversation(conv1.id, negocio["id"])
-    assert eventos_puente == []
+    # P4 (2026-10-06): la Conversation nueva ya nace con su evento
+    # `reabierto_por_cliente` (el cierre definitivo de conv1 la abrió) — pero
+    # ningún evento propio de conv1 se mezcla en ella.
+    assert [e["tipo"] for e in eventos_puente] == ["reabierto_por_cliente"]
     assert len(eventos_directos) == 1
     assert eventos_directos[0]["descripcion"] == "Asignado a asesor1"
 

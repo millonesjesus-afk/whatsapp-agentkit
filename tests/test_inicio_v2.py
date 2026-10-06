@@ -170,6 +170,18 @@ async def test_vendido_y_agendado_siempre_aparecen_y_no_se_modifican():
     # Nada de esto toca el estado de los leads.
     assert [await _estado_lead("51910000005"), await _estado_lead("51910000006")] == antes
 
+    # Matiz (2026-10-06, por timestamp): si el caso se cerró definitivamente DESPUÉS del
+    # último mensaje del cliente, ya no espera; si el cliente escribe después del cierre, sí.
+    async with mem.async_session() as session:
+        await session.execute(
+            update(mem.Lead).where(mem.Lead.telefono == "51910000005")
+            .values(cerrado_definitivamente_en=datetime.utcnow() - _h(1))
+        )
+        await session.commit()
+    assert {c["telefono"] for c in await _esperando(negocio)} == {"51910000006"}
+    await _mensaje(negocio, "51910000005", "user", "Sigue fallando", _h(0.5))
+    assert {c["telefono"] for c in await _esperando(negocio)} == {"51910000005", "51910000006"}
+
 
 async def test_lo_que_atiende_gabi_sin_asesor_no_aparece_pero_pausado_o_escalado_si():
     negocio, canal = await _negocio_con_canal("iv2-f", "40100000006")
@@ -371,10 +383,13 @@ async def test_citas_muestra_las_proximas_no_las_viejas_y_las_vencidas_aparte():
     vencidas = [i for i in z["items"] if i["categoria"] == "cita_vencida"]
     assert [i["telefono"] for i in proximas] == ["51910000072", "51910000073", "51910000074"]  # ascendente, top 3
     assert all(i["motivo"].startswith("Cita agendada — ") for i in proximas)
-    assert [i["telefono"] for i in vencidas] == ["51910000071", "51910000070"]
+    # 2026-10-06: la de hace 10 días ya no se lista (solo vencidas de los últimos 7 días);
+    # se cuenta aparte en `citas_vencidas_antiguas`.
+    assert [i["telefono"] for i in vencidas] == ["51910000071"]
     expected = (ahora_lima - timedelta(days=2)).strftime("%d/%m %H:%M")
     assert vencidas[0]["motivo"] == f"Cita vencida sin cerrar — {expected}"
-    assert (z["totales"]["citas_proximas"], z["totales"]["citas_vencidas"]) == (4, 2)
+    assert (z["totales"]["citas_proximas"], z["totales"]["citas_vencidas"]) == (4, 1)
+    assert z["totales"]["citas_vencidas_antiguas"] == 1
 
 
 async def test_admin_ve_las_citas_de_todos():

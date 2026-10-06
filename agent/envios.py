@@ -20,7 +20,7 @@ import logging
 import weakref
 
 from agent import politica_envios
-from agent.http_utils import EnvioIncierto
+from agent.http_utils import CODIGO_META_FUERA_DE_VENTANA, EnvioIncierto
 from agent.memory import (
     cerrar_envio_meta, marcar_envio_incierto, obtener_configuracion, registrar_envio_bloqueado, reservar_envio_meta,
 )
@@ -52,6 +52,12 @@ ORIGENES: dict[str, dict] = {
     "asesor_archivo": {"esencial": True},
     "asesor_audio": {"esencial": True},
     "plantilla_formulario": {"esencial": False, "modo": "siempre", "categoria_plantilla": "marketing"},
+    # Plantilla aprobada que un asesor manda a mano desde el chat cuando la ventana de 24 h de WhatsApp ya
+    # cerró (2026-10-06). No es esencial: puede cobrarse, así que respeta el interruptor y el tope mensual
+    # (un anuncio Click-to-WhatsApp con su ventana gratuita abierta la deja pasar sin costo). Modo "siempre"
+    # porque la decide una persona, no un proceso automático; el tope sigue frenándola. Categoría supuesta
+    # "marketing" (la más cara) hasta que se configure `envios_categoria_asesor_plantilla`.
+    "asesor_plantilla": {"esencial": False, "modo": "siempre", "categoria_plantilla": "marketing"},
 }
 
 
@@ -68,9 +74,11 @@ class ResultadoEnvio:
 
     def __init__(
         self, enviado: bool, wamid: str | None = None, bloqueado: bool = False, motivo: str | None = None,
-        incierto: bool = False,
+        incierto: bool = False, codigo_error: int | None = None,
     ):
         self.enviado, self.wamid, self.bloqueado, self.motivo, self.incierto = enviado, wamid, bloqueado, motivo, incierto
+        # Código de error que Meta devolvió (si el proveedor lo informa), p. ej. 131047.
+        self.codigo_error = codigo_error
 
     def __iter__(self):
         yield self.enviado
@@ -88,10 +96,16 @@ class ResultadoEnvio:
             return None
         return "incierto" if self.incierto else "fallido"
 
+    @property
+    def fuera_de_ventana(self) -> bool:
+        """Meta rechazó el envío por estar fuera de la ventana de 24 h (error 131047): el cliente no
+        escribió en las últimas 24 h y solo se le puede mandar una plantilla aprobada."""
+        return self.codigo_error == CODIGO_META_FUERA_DE_VENTANA
+
     def __repr__(self) -> str:
         return (
             f"ResultadoEnvio(enviado={self.enviado}, wamid={self.wamid!r}, bloqueado={self.bloqueado}, "
-            f"motivo={self.motivo!r}, incierto={self.incierto})"
+            f"motivo={self.motivo!r}, incierto={self.incierto}, codigo_error={self.codigo_error!r})"
         )
 
 
@@ -132,6 +146,13 @@ def _normalizar(respuesta) -> tuple[bool, str | None]:
     return bool(respuesta), None
 
 
+def _codigo_error(respuesta) -> int | None:
+    """Código de error de Meta que el proveedor adjuntó a su respuesta (ver
+    `http_utils.RespuestaEnvio`); None si no lo informó (sustitutos de prueba, otros proveedores)."""
+    codigo = getattr(respuesta, "codigo_error", None)
+    return codigo if isinstance(codigo, int) and not isinstance(codigo, bool) else None
+
+
 async def _enviar(origen: str, tipo: str, telefono: str, canal: dict | None, llamada, asesor: str | None = None) -> ResultadoEnvio:
     if origen not in ORIGENES:
         raise ValueError(f"Origen de envío desconocido: {origen!r}. Registrarlo en agent/envios.py::ORIGENES.")
@@ -168,7 +189,8 @@ async def _enviar(origen: str, tipo: str, telefono: str, canal: dict | None, lla
         envio_id = None
 
     try:
-        enviado, wamid = _normalizar(await llamada())
+        respuesta = await llamada()
+        enviado, wamid = _normalizar(respuesta)
     except EnvioIncierto as incierto:
         # El mensaje pudo haber salido (y Meta cobrarlo): no es "fallido", no se
         # reenvía solo y no cuenta como enviado para la agrupación.
@@ -180,7 +202,10 @@ async def _enviar(origen: str, tipo: str, telefono: str, canal: dict | None, lla
         await _cerrar(envio_id, False, None)
         raise
     await _cerrar(envio_id, enviado, wamid)
-    return ResultadoEnvio(enviado, wamid)
+    codigo = _codigo_error(respuesta) if not enviado else None
+    if codigo == CODIGO_META_FUERA_DE_VENTANA:
+        logger.warning(f"Envío {origen} a {telefono} rechazado por Meta: fuera de la ventana de 24 h (131047)")
+    return ResultadoEnvio(enviado, wamid, codigo_error=codigo)
 
 
 async def _cerrar_incierto(envio_id: int | None, motivo: str) -> None:
@@ -230,5 +255,7 @@ async def enviar_audio(
 
 async def enviar_plantilla(
     proveedor, telefono: str, nombre_plantilla: str, parametros: list[str], idioma: str = "es", *, origen: str, canal: dict | None = None,
+    asesor: str | None = None,
 ) -> ResultadoEnvio:
-    return await _enviar(origen, "plantilla", telefono, canal, lambda: proveedor.enviar_plantilla(telefono, nombre_plantilla, parametros, idioma, canal=canal))
+    """`asesor` (username de quien la manda desde el panel) solo se guarda en el registro."""
+    return await _enviar(origen, "plantilla", telefono, canal, lambda: proveedor.enviar_plantilla(telefono, nombre_plantilla, parametros, idioma, canal=canal), asesor)
