@@ -440,3 +440,12 @@ def test_el_script_no_registra_latido_ni_esta_en_crones_esperados(pr):
     codigo = (RAIZ / "scripts" / "probar_restauracion_respaldo.py").read_text(encoding="utf-8")
     assert "ejecutar_cron(" not in codigo
     assert "probar_restauracion_respaldo" not in mem.CRONES_ESPERADOS
+
+
+def test_eventos_lead_tiene_un_piso_menor_porque_crece_mas_rapido(pr):
+    # 83 %: lo que se vio en una restauración sana con un respaldo de ~14 h.
+    ok = pr._evaluar(dict(CONTEOS_VIVA, eventos_lead=4150), CONTEOS_VIVA, datetime.utcnow() - timedelta(hours=2))
+    assert ok[1] == []
+    # 65 %: ahí sí es alerta, y el mensaje cita el piso real de esa tabla (70 %).
+    mal = pr._evaluar(dict(CONTEOS_VIVA, eventos_lead=3250), CONTEOS_VIVA, datetime.utcnow() - timedelta(hours=2))
+    assert len(mal[1]) == 1 and "eventos_lead" in mal[1][0] and "70%" in mal[1][0]

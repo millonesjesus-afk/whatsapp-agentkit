@@ -54,6 +54,9 @@ PATRON_BASE_TEMPORAL = re.compile(r"^restauracion_prueba_\d{14}$")
 TABLAS_PRINCIPALES = ["leads", "mensajes", "conversations", "opportunities", "eventos_lead"]
 TABLAS_SECUNDARIAS = ["usuarios", "configuracion", "uso_mensajes_meta", "envios_meta"]
 PORCENTAJE_MINIMO = 0.90
+# `eventos_lead` crece mucho más rápido que las demás (cada Cron, asignación y cambio deja eventos): con
+# un respaldo de ~14 h pasó de 899 a 1.079 filas (83 %) en una restauración sana. Se le exige un piso menor.
+PORCENTAJE_MINIMO_POR_TABLA = {"eventos_lead": 0.70}
 HORAS_MAX_ULTIMO_MENSAJE = 36
 BASES_ADMIN = ["postgres", "template1"]
 TIMEOUT_RESTAURACION_SEG = 1800
@@ -248,9 +251,9 @@ def _evaluar(restaurado: dict, vivo: dict, ultimo_mensaje: datetime | None, ahor
         elif v > 0 and r == 0:
             estado = "ALERTA"
             alertas.append(f"{t}: la restauración está vacía pero la base viva tiene {v} filas.")
-        elif t in TABLAS_PRINCIPALES and v > 0 and r < v * PORCENTAJE_MINIMO:
+        elif t in TABLAS_PRINCIPALES and v > 0 and r < v * PORCENTAJE_MINIMO_POR_TABLA.get(t, PORCENTAJE_MINIMO):
             estado = "ALERTA"
-            alertas.append(f"{t}: la restauración tiene {r} filas, menos del {PORCENTAJE_MINIMO:.0%} de las {v} de la base viva.")
+            alertas.append(f"{t}: la restauración tiene {r} filas, menos del {PORCENTAJE_MINIMO_POR_TABLA.get(t, PORCENTAJE_MINIMO):.0%} de las {v} de la base viva.")
         else:
             estado = "OK"
         filas.append({"tabla": t, "restaurado": r, "vivo": v, "estado": estado})
