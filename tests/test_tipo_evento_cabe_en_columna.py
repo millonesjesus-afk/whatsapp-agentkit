@@ -48,3 +48,14 @@ def test_reabierto_por_cliente_se_detecta_y_cabe_hasta_en_30():
 def test_todo_tipo_de_evento_cabe_en_la_columna():
     demasiado_largos = {t: len(t) for t in _tipos_de_evento_en_el_codigo() if len(t) > mem.TIPO_EVENTO_LARGO_MAX}
     assert not demasiado_largos, f"Tipos de evento que no caben en eventos_lead.tipo: {demasiado_largos}"
+
+
+def test_los_eventos_del_cierre_de_cortesia_y_del_agradecimiento_caben_hasta_en_30():
+    # 2026-10-07: `mensaje_de_cierre_sin_reabrir` (con `payload.tardio` pasado el lapso de gracia),
+    # `cierre_deshecho` (con el motivo) y `agradecimiento_cierre_enviado` (constante, por eso el
+    # detector de arriba no la ve) respetan incluso el VARCHAR(30) viejo.
+    tipos = _tipos_de_evento_en_el_codigo()
+    assert {"mensaje_de_cierre_sin_reabrir", "cierre_deshecho"} <= tipos
+    nuevos = {"mensaje_de_cierre_sin_reabrir", "cierre_deshecho", mem.EVENTO_AGRADECIMIENTO_CIERRE}
+    assert mem.EVENTO_AGRADECIMIENTO_CIERRE == "agradecimiento_cierre_enviado"
+    assert all(len(t) <= 30 for t in nuevos)

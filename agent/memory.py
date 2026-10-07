@@ -2242,9 +2242,20 @@ async def listar_conversaciones_activas(
             c.id: c.cerrado_definitivamente_en for c, _, _ in filas_crudas if c.cerrado_definitivamente_en is not None
         })
 
+        # Lapso de gracia (2026-10-07): el chip "Respondió tras el cierre" solo vive dentro del
+        # lapso (24 h por defecto). Pasado el lapso, lo que el cliente escriba queda como mensaje
+        # suelto: sigue sin contar como pendiente (`descontar_pendientes`), pero sin chip.
+        gracia_horas = await obtener_cierre_gracia_horas(negocio_id)
+        ahora_lista = datetime.utcnow()
+
         filas = []
         for conversation, contact, opportunity in filas_crudas:
             tras_cierre = tras_cierre_por_conv.get(conversation.id)
+            en_lapso = cierre_en_lapso_de_gracia(conversation.cerrado_definitivamente_en, ahora_lista, gracia_horas)
+            if tras_cierre is not None and not en_lapso:
+                visible_tras_cierre = None
+            else:
+                visible_tras_cierre = tras_cierre
             filas.append({
                 "id": conversation.id, "telefono": contact.telefono,
                 "version": conversation.version,
@@ -2264,8 +2275,9 @@ async def listar_conversaciones_activas(
                 ),
                 "ultimo_mensaje": ultimo_mensaje_por_conv.get(conversation.id),
                 "cerrado_definitivamente_en": iso_utc(conversation.cerrado_definitivamente_en),
-                "respondio_tras_cierre_en": iso_utc(tras_cierre["ultimo_en"]) if tras_cierre else None,
-                "mensajes_tras_cierre": tras_cierre["mensajes"] if tras_cierre else 0,
+                "respondio_tras_cierre_en": iso_utc(visible_tras_cierre["ultimo_en"]) if visible_tras_cierre else None,
+                "mensajes_tras_cierre": visible_tras_cierre["mensajes"] if visible_tras_cierre else 0,
+                "cierre_gracia_horas": gracia_horas,
             })
         return filas, total
 
@@ -2404,7 +2416,11 @@ async def obtener_conversation_detalle(conversation_id: str, negocio_id: str) ->
     esto con `listar_lineas_venta_por_opportunity` + `listar_eventos_de_
     conversation` para armar `venta`/`eventos` — mismo patrón que
     `_dto_lead_detalle` (memory.py trae los datos, dashboard.py arma el DTO
-    final, ninguna de las dos capas duplica a la otra)."""
+    final, ninguna de las dos capas duplica a la otra).
+
+    `cierre_gracia_horas` (2026-10-07): lapso de gracia del cierre definitivo del negocio; el
+    frontend decide con él si "Reabrir caso" pide motivo y si se muestra el banner."""
+    gracia_horas = await obtener_cierre_gracia_horas(negocio_id)
     async with async_session() as session:
         conversation = await session.get(Conversation, conversation_id)
         if conversation is None or conversation.negocio_id != negocio_id:
@@ -2412,6 +2428,7 @@ async def obtener_conversation_detalle(conversation_id: str, negocio_id: str) ->
         contact = await session.get(Contact, conversation.contact_id)
         opportunity = await _obtener_opportunity_vigente(session, conversation.id)
         return {
+            "cierre_gracia_horas": gracia_horas,
             "id": conversation.id,
             "telefono": contact.telefono if contact else None,
             "nombre": contact.nombre if contact else None,
@@ -5842,6 +5859,119 @@ def saliente_deja_algo_pendiente(texto: str | None) -> bool:
     return _RE_COMPROMISO_SALIENTE.search(_norm_contexto(texto)) is not None
 
 
+# ── Lapso de gracia del cierre definitivo y agradecimiento automático (2026-10-07) ──
+#
+# Benchmarking (Gladly, Front/WhatsApp, WATI: 24 h; Zendesk, Help Scout): un cierre se puede
+# deshacer sin papeleo mientras la conversación siga "caliente"; pasado ese lapso reabrir es una
+# decisión de supervisión con motivo. `cierre_gracia_horas` (por negocio, default 24) manda en las
+# tres piezas: cuándo se muestran el banner y el chip, quién puede reabrir y si hace falta motivo.
+
+CIERRE_GRACIA_HORAS_POR_DEFECTO = 24
+CLAVE_CIERRE_GRACIA_HORAS = "cierre_gracia_horas"
+CLAVE_AGRADECIMIENTO_ACTIVO = "agradecimiento_cierre_activo"
+CLAVE_AGRADECIMIENTO_TEXTO = "agradecimiento_cierre_texto"
+AGRADECIMIENTO_CIERRE_TEXTO_POR_DEFECTO = "¡Gracias a ti! Si necesitas algo más, escríbenos cuando quieras. 😊"
+EVENTO_AGRADECIMIENTO_CIERRE = "agradecimiento_cierre_enviado"
+MOTIVO_REABRIR_MAXIMO = 300
+
+
+def normalizar_cierre_gracia_horas(valor) -> float | int:
+    """Horas del lapso de gracia. Valor ausente, inválido, no finito o <= 0 -> 24."""
+    try:
+        horas = float(str(valor).strip().replace(",", "."))
+    except (TypeError, ValueError):
+        return CIERRE_GRACIA_HORAS_POR_DEFECTO
+    if horas != horas or horas in (float("inf"), float("-inf")) or horas <= 0:
+        return CIERRE_GRACIA_HORAS_POR_DEFECTO
+    return int(horas) if horas == int(horas) else horas
+
+
+async def obtener_cierre_gracia_horas(negocio_id: str | None) -> float | int:
+    """Lapso de gracia del negocio (clave `cierre_gracia_horas`, default 24 h). Nunca lanza."""
+    try:
+        valor = await obtener_configuracion(
+            CLAVE_CIERRE_GRACIA_HORAS, str(CIERRE_GRACIA_HORAS_POR_DEFECTO), negocio_id=negocio_id,
+        )
+    except Exception:
+        return CIERRE_GRACIA_HORAS_POR_DEFECTO
+    return normalizar_cierre_gracia_horas(valor)
+
+
+def cierre_en_lapso_de_gracia(cierre: datetime | None, ahora: datetime, horas: float | int) -> bool:
+    """True si desde el cierre pasaron `horas` o menos (el borde exacto cuenta como dentro)."""
+    return cierre is not None and (ahora - cierre) <= timedelta(hours=horas)
+
+
+def contiene_gratitud(texto: str | None) -> bool:
+    """True si el texto es un cierre de cortesía que incluye la palabra "gracias" (cualquier
+    nivel: "gracias", "muchas gracias", "ok gracias"). Un "ok"/"listo" solo, un emoji solo o una
+    reacción NO la contienen."""
+    if not es_cierre_cortesia(texto):
+        return False
+    return "gracias" in _normalizar_cortesia((texto or "").strip()).split()
+
+
+async def agradecimiento_cierre_activo(negocio_id: str | None) -> bool:
+    """Interruptor `agradecimiento_cierre_activo` (default "1" = encendido; "0" lo apaga)."""
+    try:
+        valor = await obtener_configuracion(CLAVE_AGRADECIMIENTO_ACTIVO, "1", negocio_id=negocio_id)
+    except Exception:
+        return False
+    return str(valor).strip().lower() not in ("0", "false", "no", "off", "apagado")
+
+
+async def obtener_texto_agradecimiento_cierre(negocio_id: str | None) -> str:
+    """Frase fija del agradecimiento (clave `agradecimiento_cierre_texto`); vacía -> la de siempre."""
+    try:
+        valor = await obtener_configuracion(CLAVE_AGRADECIMIENTO_TEXTO, "", negocio_id=negocio_id)
+    except Exception:
+        valor = ""
+    return (valor or "").strip() or AGRADECIMIENTO_CIERRE_TEXTO_POR_DEFECTO
+
+
+async def agradecimiento_cierre_ya_enviado(conversation_id: str, cierre_en: datetime) -> bool:
+    """¿Ya se registró un agradecimiento automático DESPUÉS de este cierre? (una vez por cierre)."""
+    async with async_session() as session:
+        return (await session.execute(
+            select(EventoLead.id).where(
+                EventoLead.conversation_id == conversation_id, EventoLead.tipo == EVENTO_AGRADECIMIENTO_CIERRE,
+                EventoLead.creado > cierre_en,
+            ).limit(1)
+        )).first() is not None
+
+
+async def registrar_agradecimiento_cierre(
+    conversation_id: str, negocio_id: str, cierre_en: datetime, texto: str, resultado: str, wamid: str | None = None,
+) -> None:
+    """Deja la marca de "ya se agradeció tras este cierre" con el texto enviado (el filtro de
+    contexto lo usa para NO tratar ese mensaje como una respuesta humana) y cómo terminó el envío
+    (`enviado` | `incierto` | `fallido` | `bloqueado`)."""
+    async with async_session() as session:
+        session.add(EventoLead(
+            conversation_id=conversation_id, negocio_id=negocio_id, tipo=EVENTO_AGRADECIMIENTO_CIERRE,
+            descripcion="Agradecimiento automático al cliente tras el cierre"[:300], autor=None,
+            payload={"texto": texto, "cierre_en": cierre_en.isoformat(), "resultado": resultado, "wamid": wamid},
+        ))
+        await session.commit()
+
+
+async def _textos_de_agradecimiento(session, conversation_id: str, cierre: datetime) -> set[str]:
+    """Textos (normalizados) de los agradecimientos automáticos registrados tras el cierre."""
+    eventos = (await session.execute(
+        select(EventoLead.payload).where(
+            EventoLead.conversation_id == conversation_id, EventoLead.tipo == EVENTO_AGRADECIMIENTO_CIERRE,
+            EventoLead.creado > cierre,
+        )
+    )).scalars().all()
+    return {
+        _norm_contexto(p["texto"]).strip() for p in eventos if isinstance(p, dict) and isinstance(p.get("texto"), str)
+    }
+
+
+def _es_agradecimiento_automatico(mensaje: "Mensaje", textos: set[str]) -> bool:
+    return bool(textos) and mensaje.role == "assistant" and _norm_contexto(mensaje.content).strip() in textos
+
+
 def _es_saliente_valido(mensaje: "Mensaje") -> bool:
     return mensaje.role in ("assistant", "asesor") and (mensaje.estado_envio or "") != "fallido"
 
@@ -5885,6 +6015,7 @@ async def _resumen_tras_cierre(session, cierres: dict[str, datetime]) -> dict[st
 async def evaluar_cierre_cortesia(
     telefono: str, negocio_id: str, texto: str | None, tipo: str = "texto", *,
     tiene_referral: bool = False, interactivo_id: str = "", contexto_id: str = "",
+    ahora: datetime | None = None,
 ) -> dict | None:
     """SOLO LECTURA. ¿Este mensaje entrante debe quedarse en la conversación
     cerrada definitivamente, SIN abrir un ciclo nuevo (DR-4), sin despertar a
@@ -5908,7 +6039,15 @@ async def evaluar_cierre_cortesia(
       pendiente; C4 nadie (humano o Gabi) escribió DESPUÉS del cierre.
     Nivel A (solo gratitud/emoji) exige C1 y C4; Nivel B (con acuse: "ok",
     "listo"…) exige además C2 y C3. Tope: `TOPE_CIERRES_DE_CORTESIA` mensajes
-    absorbidos por cierre; el siguiente reabre."""
+    absorbidos por cierre dentro del lapso de gracia; el siguiente reabre.
+
+    Lapso de gracia (2026-10-07, `cierre_gracia_horas`, default 24 h): el contexto trae
+    `tardio` (True si pasaron más horas que el lapso desde el cierre: el mensaje se guarda
+    como "mensaje suelto", sin banner, chip ni alerta; el tope no aplica porque nadie se
+    entera), `gracia_horas` y `gratitud` (el texto contiene "gracias": dispara el
+    agradecimiento automático). El agradecimiento automático (evento
+    `agradecimiento_cierre_enviado`) NO cuenta como un saliente: ni en C4, ni como
+    "último saliente" para C2/C3, ni como mensaje citado."""
     if tipo not in ("texto", "reaccion", "echo"):
         return None
     nivel = None
@@ -5918,6 +6057,8 @@ async def evaluar_cierre_cortesia(
         nivel = nivel_cierre_cortesia(texto)
         if nivel is None:
             return None
+    ahora = ahora or datetime.utcnow()
+    gracia_horas = await obtener_cierre_gracia_horas(negocio_id)
     async with async_session() as session:
         contact = await _obtener_contact(session, negocio_id, telefono)
         if contact is None:
@@ -5937,14 +6078,20 @@ async def evaluar_cierre_cortesia(
             Mensaje.conversation_id == conversation.id, Mensaje.negocio_id == negocio_id,
             Mensaje.role.in_(("assistant", "asesor")), func.coalesce(Mensaje.estado_envio, "") != "fallido",
         )
-        ultimo_saliente = (await session.execute(
-            select(Mensaje).where(*salientes).order_by(Mensaje.timestamp.desc(), Mensaje.id.desc()).limit(1)
-        )).scalar_one_or_none()
+        # El agradecimiento automático (frase fija, sin IA) no es una respuesta de nadie: se excluye
+        # del "último saliente" y de C4 para que un "ok" posterior del cliente siga absorbiéndose.
+        textos_agradecimiento = await _textos_de_agradecimiento(session, conversation.id, cierre)
+        recientes = (await session.execute(
+            select(Mensaje).where(*salientes).order_by(Mensaje.timestamp.desc(), Mensaje.id.desc()).limit(8)
+        )).scalars().all()
+        ultimo_saliente = next((m for m in recientes if not _es_agradecimiento_automatico(m, textos_agradecimiento)), None)
 
+        tardio = not cierre_en_lapso_de_gracia(cierre, ahora, gracia_horas)
         if tipo != "texto":
             return {
                 "conversation_id": conversation.id, "cierre_en": cierre, "nivel": None, "numero_absorbido": None,
                 "ultimo_saliente_id": ultimo_saliente.id if ultimo_saliente else None,
+                "tardio": tardio, "gracia_horas": gracia_horas, "gratitud": False,
             }
 
         # Tope: mensajes del cliente (no reacciones) ya absorbidos tras este cierre.
@@ -5955,14 +6102,16 @@ async def evaluar_cierre_cortesia(
                 ~func.coalesce(Mensaje.content, "").startswith(PREFIJO_REACCION),
             )
         )).scalar_one()
-        if previos >= TOPE_CIERRES_DE_CORTESIA:
+        # El tope solo rige dentro del lapso de gracia: pasado el lapso el mensaje es "suelto"
+        # y nadie se entera, así que no hay nada que acotar.
+        if not tardio and previos >= TOPE_CIERRES_DE_CORTESIA:
             return None
 
-        # C4: nadie escribió después del cierre.
-        escribio_despues = (await session.execute(
-            select(Mensaje.id).where(*salientes, Mensaje.timestamp > cierre).limit(1)
-        )).first()
-        if escribio_despues is not None:
+        # C4: nadie (humano o Gabi) escribió después del cierre, salvo el agradecimiento automático.
+        escritos_despues = (await session.execute(
+            select(Mensaje).where(*salientes, Mensaje.timestamp > cierre).order_by(Mensaje.id).limit(50)
+        )).scalars().all()
+        if any(not _es_agradecimiento_automatico(m, textos_agradecimiento) for m in escritos_despues):
             return None
 
         # Contexto: el mensaje que el cliente citó, si se puede resolver; si no, el último saliente.
@@ -5977,7 +6126,9 @@ async def evaluar_cierre_cortesia(
             if citado is not None:
                 if not _es_saliente_valido(citado):
                     return None
-                contexto = citado
+                # Citar nuestro agradecimiento automático no cambia el contexto real del caso.
+                if not _es_agradecimiento_automatico(citado, textos_agradecimiento):
+                    contexto = citado
         if contexto is None:
             return None  # C1
         if nivel == "B" and saliente_deja_algo_pendiente(contexto.content):
@@ -5985,6 +6136,7 @@ async def evaluar_cierre_cortesia(
         return {
             "conversation_id": conversation.id, "cierre_en": cierre, "nivel": nivel,
             "numero_absorbido": previos + 1, "ultimo_saliente_id": contexto.id,
+            "tardio": tardio, "gracia_horas": gracia_horas, "gratitud": contiene_gratitud(texto),
         }
 
 
@@ -7060,18 +7212,33 @@ async def cerrar_lead_definitivamente_via_conversation(conversation_id: str, neg
     return telefono
 
 
-async def reabrir_caso_cerrado(conversation_id: str, negocio_id: str, autor: str) -> str:
+async def reabrir_caso_cerrado(
+    conversation_id: str, negocio_id: str, autor: str, rol: str | None = None, motivo: str | None = None,
+    ahora: datetime | None = None,
+) -> str:
     """Deshace un cierre definitivo (botón "Reabrir caso", Q3 2026-10-07): el
     cierre pudo ser un error (caso real Mercy: se cerró como "no interesado"
     aunque la clienta sí quería). Limpia `cerrado_definitivamente_en` en el Lead
     y en la Conversation y deja el evento `cierre_deshecho` con el autor.
-    CONSERVA el asesor, el resultado (editable después), los mensajes y deja a
-    Gabi como esté: no reasigna, no libera y no responde nada.
+    CONSERVA el asesor, el resultado (editable después), los mensajes y deja a Gabi
+    como esté: no reasigna, no libera y no responde nada.
+
+    Lapso de gracia (2026-10-07, `cierre_gracia_horas`, default 24 h): DENTRO del lapso
+    lo puede hacer quien puede cerrar (el permiso lo resuelve el router) y el `motivo` es
+    opcional. PASADO el lapso solo un admin o supervisor (`rol`) y el `motivo` es
+    obligatorio (texto no vacío, máx. `MOTIVO_REABRIR_MAXIMO`): queda en el payload del
+    evento y en `RegistroAuditoria`.
 
     Retorna: "ok"; "no_encontrada" (no existe o es de otro Negocio);
     "sustituida" (el cliente ya reabrió el caso por su cuenta: hay una
     Conversation más nueva y esta quedó cerrada — no hay nada que deshacer);
-    "no_cerrada" (el caso ya estaba abierto)."""
+    "no_cerrada" (el caso ya estaba abierto); "sin_permiso_fuera_de_lapso" (403);
+    "motivo_requerido" y "motivo_largo" (400)."""
+    motivo = (motivo or "").strip()
+    if len(motivo) > MOTIVO_REABRIR_MAXIMO:
+        return "motivo_largo"
+    ahora = ahora or datetime.utcnow()
+    gracia_horas = await obtener_cierre_gracia_horas(negocio_id)
     async with async_session() as session:
         conversation = await session.get(Conversation, conversation_id)
         if conversation is None or conversation.negocio_id != negocio_id:
@@ -7088,7 +7255,13 @@ async def reabrir_caso_cerrado(conversation_id: str, negocio_id: str, autor: str
         if cierre is None:
             return "no_cerrada"
 
-        ahora = datetime.utcnow()
+        fuera_de_lapso = not cierre_en_lapso_de_gracia(cierre, ahora, gracia_horas)
+        if fuera_de_lapso:
+            if rol not in ROLES_CON_VISION_TOTAL:
+                return "sin_permiso_fuera_de_lapso"
+            if not motivo:
+                return "motivo_requerido"
+
         resumen = (await _resumen_tras_cierre(session, {conversation.id: cierre})).get(conversation.id)
         opportunity = await _obtener_opportunity_vigente(session, conversation.id)
         resultado = (lead.resultado if lead is not None else None) or (opportunity.resultado if opportunity else None)
@@ -7097,18 +7270,25 @@ async def reabrir_caso_cerrado(conversation_id: str, negocio_id: str, autor: str
         if lead is not None:
             lead.cerrado_definitivamente_en = None
             lead.actualizado = ahora
+        descripcion = "Reabrió el caso — se deshizo el cierre definitivo; el asesor y el resultado se conservan"
+        if fuera_de_lapso:
+            descripcion = f"Reabrió el caso pasado el lapso de {gracia_horas} h tras el cierre — motivo: {motivo}"
+        payload = {
+            "cierre_en": cierre.isoformat(), "resultado": resultado,
+            "asesor": conversation.asesor_asignado_id,
+            "mensajes_tras_cierre": resumen["mensajes"] if resumen else 0,
+            "fuera_de_lapso": fuera_de_lapso, "gracia_horas": gracia_horas, "motivo": motivo or None,
+        }
         session.add(EventoLead(
             conversation_id=conversation.id, negocio_id=conversation.negocio_id,
             opportunity_id=opportunity.id if opportunity else None,
-            tipo="cierre_deshecho",
-            descripcion="Reabrió el caso — se deshizo el cierre definitivo; el asesor y el resultado se conservan"[:300],
-            autor=autor,
-            payload={
-                "cierre_en": cierre.isoformat(), "resultado": resultado,
-                "asesor": conversation.asesor_asignado_id,
-                "mensajes_tras_cierre": resumen["mensajes"] if resumen else 0,
-            },
+            tipo="cierre_deshecho", descripcion=descripcion[:300], autor=autor, payload=payload,
         ))
+        if fuera_de_lapso:
+            session.add(RegistroAuditoria(
+                accion="caso_reabierto_fuera_de_lapso", actor=(autor or "")[:50] or None, negocio_id=conversation.negocio_id,
+                entidad_tipo="conversation", entidad_id=conversation.id, payload=payload,
+            ))
         await session.commit()
         return "ok"
 

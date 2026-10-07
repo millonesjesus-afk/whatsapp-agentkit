@@ -65,6 +65,13 @@ ORIGENES: dict[str, dict] = {
     # envíos y poder frenarla con su propio interruptor. No repite al mismo cliente en 12 h (red de seguridad
     # además de la marca `plantilla_auto_enviada` del script).
     "plantilla_automatica": {"esencial": False, "modo": "siempre", "categoria_plantilla": "marketing", "agrupar_minutos": 720},
+    # Agradecimiento automático tras un cierre definitivo (2026-10-07): UNA frase fija, sin IA, cuando el
+    # cliente escribe "gracias" a un caso ya cerrado. Es texto libre dentro de la ventana de 24 h que el
+    # propio cliente acaba de abrir (categoría de costo "service": gratis dentro de la cuota), así que no
+    # lleva `categoria_plantilla`. No es esencial (nadie lo espera): respeta el interruptor del origen y el
+    # tope mensual. Sin agrupar: la regla de "una vez por cierre" la aplica quien lo envía (idempotente por
+    # el evento `agradecimiento_cierre_enviado`), no la ventana de agrupación.
+    "agradecimiento_cierre": {"esencial": False, "modo": "siempre"},
 }
 
 

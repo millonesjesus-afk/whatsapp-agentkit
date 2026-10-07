@@ -29,6 +29,8 @@ from agent.memory import (
     enrutar_posventa_si_corresponde, registrar_estado_mensaje_meta,
     existe_mensaje_con_id_meta, liberar_marca_mensaje_procesado,
     evaluar_cierre_cortesia, registrar_evento_lead,
+    agradecimiento_cierre_activo, obtener_texto_agradecimiento_cierre, agradecimiento_cierre_ya_enviado,
+    registrar_agradecimiento_cierre, obtener_estado_ventana,
 )
 from agent.memory import (
     es_texto_de_error_tecnico, es_texto_de_reenganche_automatico, textos_de_error_tecnico_conocidos,
@@ -470,19 +472,30 @@ async def _absorber_si_cierre_sin_reabrir(msg, canal: dict) -> bool:
         except Exception:
             logger.exception(f"No se pudo pausar a Gabi tras el echo de {msg.telefono} en un caso cerrado")
     elif es_texto:
+        # Pasado el lapso de gracia (`cierre_gracia_horas`, 24 h) el mensaje es "suelto": se guarda y
+        # el evento queda SOLO como rastro (`payload.tardio`), con una descripción neutra; el frontend
+        # no lo destaca (ni banner, ni chip, ni alerta). Dentro del lapso es el aviso pasivo de siempre.
+        tardio = bool(contexto.get("tardio"))
         try:
             await registrar_evento_lead(
                 msg.telefono, tipo="mensaje_de_cierre_sin_reabrir",
-                descripcion=f"El cliente escribió «{msg.texto[:80]}» tras el cierre — el caso sigue cerrado"[:300],
+                descripcion=(
+                    f"Mensaje de cortesía «{msg.texto[:80]}» guardado en el caso cerrado (pasado el lapso de gracia)"
+                    if tardio else
+                    f"El cliente escribió «{msg.texto[:80]}» tras el cierre — el caso sigue cerrado"
+                )[:300],
                 autor=None,
                 payload={
                     "mensaje_id": guardado["id"] if guardado else None, "texto": msg.texto[:80],
                     "cierre_en": contexto["cierre_en"].isoformat(), "numero_absorbido": contexto["numero_absorbido"],
-                    "ultimo_saliente_id": contexto["ultimo_saliente_id"],
+                    "ultimo_saliente_id": contexto["ultimo_saliente_id"], "tardio": tardio,
+                    "gracia_horas": contexto.get("gracia_horas"),
                 },
             )
         except Exception:
             logger.exception(f"No se pudo registrar el evento de cierre sin reabrir de {msg.telefono}")
+        if contexto.get("gratitud"):
+            await _agradecer_tras_cierre(msg, canal, contexto)
     logger.info(
         f"Mensaje de {msg.telefono} tras cierre definitivo ({tipo}) guardado sin reabrir el caso, sin Gabi y sin avisos"
     )
@@ -492,6 +505,62 @@ async def _absorber_si_cierre_sin_reabrir(msg, canal: dict) -> bool:
         except Exception:
             logger.exception(f"No se pudo avisar al panel del mensaje de {msg.telefono} tras el cierre")
     return True
+
+
+# Candados por conversación: el chequeo "¿ya se agradeció tras este cierre?" y el registro de la marca
+# tienen que ser atómicos entre dos "gracias" que llegan casi a la vez.
+_candados_agradecimiento: dict[str, asyncio.Lock] = {}
+
+
+async def _agradecer_tras_cierre(msg, canal: dict, contexto: dict) -> None:
+    """Agradecimiento automático (2026-10-07): el cliente dijo "gracias" a un caso cerrado y se le
+    responde UNA sola vez por cierre con una frase fija (SIN IA), por la capa central de envíos con
+    el origen `agradecimiento_cierre`. Nunca lanza ni afecta a la absorción del mensaje:
+      · apagable (`agradecimiento_cierre_activo` = "0") y texto configurable por negocio;
+      · idempotente por cierre: la marca es el evento `agradecimiento_cierre_enviado`; se escribe
+        con CUALQUIER resultado (enviado, incierto, fallido o frenado por costo) para no reintentar
+        ni duplicar, y su texto sirve para que ese saliente NO cuente como una respuesta humana en
+        `evaluar_cierre_cortesia` (un "ok" posterior sigue absorbiéndose);
+      · solo si la ventana de 24 h de Meta está abierta (el cliente acaba de escribir)."""
+    negocio_id = canal.get("negocio_id")
+    conversation_id = contexto["conversation_id"]
+    candado = _candados_agradecimiento.setdefault(conversation_id, asyncio.Lock())
+    try:
+        async with candado:
+            if not await agradecimiento_cierre_activo(negocio_id):
+                return
+            if await agradecimiento_cierre_ya_enviado(conversation_id, contexto["cierre_en"]):
+                return
+            estado = await obtener_estado_ventana(msg.telefono, negocio_id, con_fep=False)
+            if not estado.get("puede_texto_libre"):
+                logger.info(f"Agradecimiento tras el cierre a {msg.telefono} omitido: la ventana de 24 h no está abierta")
+                return
+            texto = await obtener_texto_agradecimiento_cierre(negocio_id)
+            resultado = await envios.enviar_texto(proveedor, msg.telefono, texto, origen="agradecimiento_cierre", canal=canal)
+            estado_envio = (
+                "enviado" if resultado.enviado else "incierto" if resultado.incierto
+                else "bloqueado" if resultado.bloqueado else "fallido"
+            )
+            # La marca primero (aunque haya fallado: no se reintenta), el mensaje después.
+            await registrar_agradecimiento_cierre(
+                conversation_id, negocio_id, contexto["cierre_en"], texto, estado_envio, resultado.wamid,
+            )
+            if estado_envio not in ("enviado", "incierto"):
+                logger.info(f"Agradecimiento tras el cierre a {msg.telefono} no salió ({estado_envio}): {resultado.motivo}")
+                return
+            guardado = await servicio_conversacion.guardar_mensaje(
+                msg.telefono, "assistant", texto, negocio_id=negocio_id,
+                mensaje_id_meta=resultado.wamid, estado_envio=resultado.estado_envio,
+            )
+        try:
+            await gestor_conexiones.emitir_mensaje_nuevo(guardado["conversation_id"])
+        except Exception:
+            logger.exception(f"No se pudo avisar al panel del agradecimiento a {msg.telefono}")
+    except Exception:
+        logger.exception(f"No se pudo enviar el agradecimiento tras el cierre a {msg.telefono}")
+    finally:
+        if not candado.locked():
+            _candados_agradecimiento.pop(conversation_id, None)
 
 
 async def _registrar_referral_seguro(msg, canal: dict | None, texto: str = "") -> None:

@@ -57,7 +57,7 @@ from agent.memory import (
     toggle_usuario_activo, eliminar_usuario,
     listar_campanas, crear_campana, actualizar_campana, contar_opportunities_por_campana, eliminar_campana,
     obtener_campana, obtener_canal_whatsapp, listar_anuncios_detectados, asignar_anuncio_a_campana,
-    listar_atribucion_sin_campana_periodo, cerrar_lead_definitivamente_via_conversation, reabrir_caso_cerrado,
+    listar_atribucion_sin_campana_periodo, cerrar_lead_definitivamente_via_conversation, reabrir_caso_cerrado, MOTIVO_REABRIR_MAXIMO, CIERRE_GRACIA_HORAS_POR_DEFECTO,
     rango_periodo_utc, contar_flujo_periodo, calcular_embudo_comercial, contar_oportunidades_por_asesor,
     distribucion_resultados_periodo, resumen_ventas_periodo, productos_vendidos_periodo,
     cambiar_password, contar_conversations_activas_por_asesor, RESULTADOS_CERRADOS, listar_leads_agendados,
@@ -2878,6 +2878,9 @@ def _dto_conversation_detalle(conversation: dict, lineas: list[dict], eventos: l
         "asesor_asignado": conversation.get("asesor_asignado"),
         "pausado_manual": bool(conversation.get("pausado_manual")),
         "cerrado_definitivamente_en": iso_utc(conversation.get("cerrado_definitivamente_en")),
+        # Lapso de gracia del cierre definitivo (horas, por negocio): decide en el frontend si
+        # "Reabrir caso" pide motivo y si se muestra el banner "El cliente respondió tras el cierre".
+        "cierre_gracia_horas": conversation.get("cierre_gracia_horas", CIERRE_GRACIA_HORAS_POR_DEFECTO),
         "revision_prioritaria": bool(conversation.get("revision_prioritaria")),
         "conversation_version": conversation.get("conversation_version"),
         "opportunity_version": conversation.get("opportunity_version"),
@@ -3209,21 +3212,34 @@ async def conversation_cerrar_definitivamente(
 @router.post("/conversation/{conversation_id}/reabrir")
 async def conversation_reabrir(
     conversation_id: str,
+    motivo: str = Form(""),
     usuario: dict = Depends(_usuario_actual),
     _csrf: None = Depends(verificar_csrf),
 ):
     """Botón "Reabrir caso" (Q3, 2026-10-07): deshace un cierre definitivo que
-    fue un error. Mismos permisos que `cerrar-definitivamente` (cualquiera que
-    pueda operar la conversación). Limpia el cierre en Lead y Conversation y
-    CONSERVA asesor, resultado y mensajes; Gabi queda como estaba. 409 si el
-    cierre ya no se puede deshacer porque el cliente reabrió el caso por su
-    cuenta (hay una conversación más nueva) o si el caso ya estaba abierto."""
+    fue un error. Limpia el cierre en Lead y Conversation y CONSERVA asesor,
+    resultado y mensajes; Gabi queda como estaba.
+
+    Lapso de gracia (`cierre_gracia_horas`, default 24 h): DENTRO del lapso, mismos
+    permisos que `cerrar-definitivamente` (cualquiera que pueda operar la conversación) y
+    el `motivo` es opcional. PASADO el lapso, solo admin o supervisor (403 si no) y el
+    `motivo` es obligatorio (400 si falta; máx. 300 caracteres), y queda en el evento
+    `cierre_deshecho` y en la auditoría. 409 si el cierre ya no se puede deshacer porque el
+    cliente reabrió el caso por su cuenta (hay una conversación más nueva) o si el caso ya
+    estaba abierto."""
+    if not isinstance(motivo, str):   # llamada directa sin el campo (los tests): el default de Form
+        motivo = ""
+    motivo = motivo.strip()
+    if len(motivo) > MOTIVO_REABRIR_MAXIMO:
+        raise HTTPException(status_code=400, detail=f"El motivo no puede pasar de {MOTIVO_REABRIR_MAXIMO} caracteres.")
     conv = await resolver_conversation_operable(conversation_id, usuario["negocio_id"])
     if conv is None:
         raise HTTPException(status_code=404, detail="Conversación no encontrada")
     _verificar_acceso_conversation(usuario, conv["asesor_asignado"])
 
-    estado = await reabrir_caso_cerrado(conversation_id, usuario["negocio_id"], usuario["nombre"])
+    estado = await reabrir_caso_cerrado(
+        conversation_id, usuario["negocio_id"], usuario["nombre"], rol=usuario["rol"], motivo=motivo,
+    )
     if estado == "no_encontrada":
         raise HTTPException(status_code=404, detail="Conversación no encontrada")
     if estado == "sustituida":
@@ -3233,6 +3249,17 @@ async def conversation_reabrir(
         )
     if estado == "no_cerrada":
         raise HTTPException(status_code=409, detail="Este caso no está cerrado definitivamente.")
+    if estado == "sin_permiso_fuera_de_lapso":
+        raise HTTPException(
+            status_code=403,
+            detail="Pasado el lapso de gracia del cierre, solo un administrador o supervisor puede reabrir el caso.",
+        )
+    if estado == "motivo_requerido":
+        raise HTTPException(
+            status_code=400, detail="Escribe el motivo para reabrir el caso: pasó más tiempo que el lapso de gracia del cierre.",
+        )
+    if estado == "motivo_largo":
+        raise HTTPException(status_code=400, detail=f"El motivo no puede pasar de {MOTIVO_REABRIR_MAXIMO} caracteres.")
     return await _json_conversation_actualizada(conversation_id, usuario["negocio_id"])
 
 
