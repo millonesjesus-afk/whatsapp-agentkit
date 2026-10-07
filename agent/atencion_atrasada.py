@@ -14,10 +14,13 @@
 #                        "atrasado" a las 8:00 de la mañana siguiente, nadie pudo atenderlo. El horario sale de
 #                        `HorarioAtencion` (el mismo de `tools._rangos_de_atencion_por_dia`: lunes a sábado
 #                        8:00-19:00 si el negocio no configuró nada).
-#   · "urgente"        — edad de RELOJ >= `atencion_urgente_horas` (8 h) Y ya está "atrasada" por horas de
-#                        horario (o su ventana de 24 h ya cerró: sin texto libre posible, solo plantilla).
+#   · "urgente"        — ventana de 24 h ABIERTA, edad de RELOJ >= `atencion_urgente_horas` (8 h) Y ya está
+#                        "atrasada" por horas de horario.
 #   · "ultima_llamada" — la ventana de 24 h de WhatsApp sigue abierta y le quedan menos de
 #                        `atencion_ultima_llamada_horas` (6 h). Gana sobre los otros dos.
+#   · "ventana_cerrada" — (R4, 2026-10-07) la ventana de 24 h ya cerró: no hay texto libre posible (solo
+#                        llamar o enviar plantilla). NUNCA es "atrasada" ni "urgente": lo urgente es lo que aún
+#                        se puede atender por el chat; lo demás es un caso olvidado, no una emergencia.
 # Es independiente de `dashboard._VENTANA_POR_VENCER` (4 h), que se conserva para lo que ya lo usa.
 
 import logging
@@ -40,8 +43,9 @@ _CLAVES = {
     "atrasada": CLAVE_ATRASADA_HORAS, "urgente": CLAVE_URGENTE_HORAS, "ultima_llamada": CLAVE_ULTIMA_LLAMADA_HORAS,
 }
 
-NIVELES = ("atrasada", "urgente", "ultima_llamada")
-GRAVEDAD = {None: 0, "atrasada": 1, "urgente": 2, "ultima_llamada": 3}
+NIVELES = ("atrasada", "urgente", "ultima_llamada")          # solo con la ventana ABIERTA
+NIVEL_VENTANA_CERRADA = "ventana_cerrada"
+GRAVEDAD = {None: 0, NIVEL_VENTANA_CERRADA: 0, "atrasada": 1, "urgente": 2, "ultima_llamada": 3}
 
 # Perú no tiene horario de verano: Lima es UTC-5 todo el año (mismo criterio que dashboard._OFFSET_LIMA).
 _OFFSET_LIMA = timedelta(hours=5)
@@ -123,18 +127,22 @@ def calcular_atencion(
     esperando_desde: datetime, ventana_vence_en: datetime, ventana_abierta: bool, ahora: datetime,
     rangos: dict, umbrales: dict[str, float] | None = None,
 ) -> dict:
-    """`{"nivel": None | "atrasada" | "urgente" | "ultima_llamada", "edad_horas", "ventana_restante_horas"}`.
-    `edad_horas` es de reloj (desde el primer mensaje sin respuesta); `ventana_restante_horas` es None si la
-    ventana ya cerró. Las fechas son UTC naive."""
+    """`{"nivel": None | "atrasada" | "urgente" | "ultima_llamada" | "ventana_cerrada", "edad_horas",
+    "ventana_restante_horas"}`. `edad_horas` es de reloj (desde el primer mensaje sin respuesta);
+    `ventana_restante_horas` es None si la ventana ya cerró. Las fechas son UTC naive.
+    R4 (2026-10-07): con la ventana de 24 h cerrada el nivel es SIEMPRE `ventana_cerrada` (nunca
+    atrasada/urgente/ultima_llamada); esos tres solo existen con la ventana abierta."""
     umbrales = {**UMBRALES_POR_DEFECTO, **(umbrales or {})}
     edad = max(0.0, (ahora - esperando_desde).total_seconds() / 3600)
     restante = (ventana_vence_en - ahora).total_seconds() / 3600 if ventana_abierta else None
     if restante is not None and restante <= 0:
         restante = None
+    if restante is None:
+        return {"nivel": NIVEL_VENTANA_CERRADA, "edad_horas": round(edad, 1), "ventana_restante_horas": None}
     atrasada = horas_de_atencion_abierta(rangos, esperando_desde, ahora) >= umbrales["atrasada"]
-    if restante is not None and restante < umbrales["ultima_llamada"]:
+    if restante < umbrales["ultima_llamada"]:
         nivel = "ultima_llamada"
-    elif edad >= umbrales["urgente"] and (atrasada or restante is None):
+    elif edad >= umbrales["urgente"] and atrasada:
         nivel = "urgente"
     elif atrasada:
         nivel = "atrasada"
@@ -164,7 +172,10 @@ async def anotar_atencion(negocio_id: str, items: list[dict], ahora: datetime | 
             )
         except Exception:
             logger.exception("Atención atrasada: falló el cálculo para un ítem")
-            it["atencion"] = {"nivel": None, "edad_horas": 0.0, "ventana_restante_horas": None}
+            it["atencion"] = {
+                "nivel": None if it.get("ventana_abierta") else NIVEL_VENTANA_CERRADA,
+                "edad_horas": 0.0, "ventana_restante_horas": None,
+            }
     return items
 
 
@@ -174,8 +185,10 @@ def gravedad(item: dict) -> int:
 
 def totales_de_atencion(items: list[dict], para_campana: list[dict] | None = None) -> dict:
     """Totales ADITIVOS de `zona_accion.totales`. Los tres por nivel son excluyentes (cada ítem tiene uno)
-    y `atencion_total` los suma. `atencion_campana`/`atencion_campana_urgentes` acotan al mismo conjunto que
-    el badge de la campana (`esperando_campana`); "urgentes" = urgente + última llamada."""
+    y `atencion_total` los suma (todos con la ventana ABIERTA). `atencion_ventana_cerrada` (R4, 2026-10-07)
+    cuenta aparte los casos con la ventana de 24 h cerrada. `atencion_campana`/`atencion_campana_urgentes`
+    acotan al mismo conjunto que el badge de la campana (`esperando_campana`) y cuentan SOLO ventana abierta;
+    "urgentes" = urgente + última llamada."""
     def _contar(lista: list[dict], *niveles: str) -> int:
         return sum(1 for it in lista if (it.get("atencion") or {}).get("nivel") in niveles)
 
@@ -185,6 +198,7 @@ def totales_de_atencion(items: list[dict], para_campana: list[dict] | None = Non
         "atencion_urgente": _contar(items, "urgente"),
         "atencion_ultima_llamada": _contar(items, "ultima_llamada"),
         "atencion_total": _contar(items, *NIVELES),
+        "atencion_ventana_cerrada": _contar(items, NIVEL_VENTANA_CERRADA),
         "atencion_campana": _contar(campana, *NIVELES),
         "atencion_campana_urgentes": _contar(campana, "urgente", "ultima_llamada"),
     }

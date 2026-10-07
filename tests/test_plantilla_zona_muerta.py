@@ -184,6 +184,32 @@ async def test_se_excluyen_cerrados_vendidos_atendidos_y_los_que_nadie_tiene_asi
     assert await _candidatos(negocio) == {"51910000036"}
 
 
+async def test_no_es_candidato_quien_ya_fue_gestionado_por_resultado_o_ya_lo_atendi_pero_si_si_escribio_despues():
+    """R4 (2026-10-07): un resultado puesto, una venta o "Ya lo atendí" posteriores a su último mensaje lo sacan de
+    `listar_clientes_esperando` y por tanto de la plantilla automática; si escribe después, vuelve a ser candidato."""
+    negocio, canal = await _negocio("zm-4b")
+    hace = lima(10, 14)
+    for tel in ("51910000041", "51910000042", "51910000043", "51910000044"):
+        await _lead(negocio, canal, tel)
+        await _mensaje(negocio, tel, "user", "hola", hace)
+
+    async def _evento(tel, tipo, payload, instante):
+        conv_id = (await mem.resolver_conversation_ids_por_telefono(negocio["id"], [tel]))[tel]
+        async with mem.async_session() as session:
+            session.add(mem.EventoLead(
+                negocio_id=negocio["id"], conversation_id=conv_id, tipo=tipo, descripcion=tipo, autor="Ana",
+                payload=payload, creado=instante,
+            ))
+            await session.commit()
+
+    await _evento("51910000041", "resultado_cambiado", {"anterior": None, "nuevo": "agendado"}, lima(10, 15))
+    await _evento("51910000042", mem.EVENTO_ATENDIDO_MANUAL, {}, lima(10, 15))
+    await _evento("51910000043", "resultado_cambiado", {"anterior": "agendado", "nuevo": None}, lima(10, 15))   # quitado: no cuenta
+    await _evento("51910000044", mem.EVENTO_ATENDIDO_MANUAL, {}, lima(10, 15))
+    await _mensaje(negocio, "51910000044", "user", "¿me llaman?", lima(10, 15, 30))                                # escribió después
+    assert await _candidatos(negocio) == {"51910000043", "51910000044"}
+
+
 # ── El script ───────────────────────────────────────────────────────────────
 
 async def _escenario_basico(codigo: str):

@@ -132,17 +132,24 @@ async def test_responde_ahora_coincide_con_el_bloque_de_inicio_para_admin():
     inicio = await _inicio(admin)
     cuerpo = await _bandeja(admin, vista="responde_ahora")
 
-    assert cuerpo["total"] == inicio["zona_accion"]["totales"]["ahora_total"] == len(cuerpo["conversaciones"])
-    # Orden: escalado, sin asesor, esperando con ventana abierta (vence antes primero), luego cerradas.
-    assert _telefonos(cuerpo) == [t["escalado"], t["sin_asesor"], t["esp_a1"], t["esp_a2"], t["esp_cerrada"]]
+    # R4 (2026-10-07): "Responde ahora" = escalados + sin asesor + esperando con la ventana ABIERTA; los de
+    # ventana cerrada tienen su propia vista (`ventana_cerrada`). `ahora_total` conserva su significado de
+    # siempre (incluye los cerrados); el total del bloque es `responde_ahora_total`.
+    totales = inicio["zona_accion"]["totales"]
+    assert cuerpo["total"] == totales["responde_ahora_total"] == len(cuerpo["conversaciones"]) == 4
+    assert totales["ahora_total"] == 5
+    # Orden: escalado, sin asesor, esperando con ventana abierta (vence antes primero).
+    assert _telefonos(cuerpo) == [t["escalado"], t["sin_asesor"], t["esp_a1"], t["esp_a2"]]
     cats = [f["inicio"]["categoria"] for f in cuerpo["conversaciones"]]
-    assert cats == ["escalado", "sin_asesor", "cliente_esperando", "cliente_esperando", "cliente_esperando"]
-    # Los ítems de Inicio (cualquier categoría de "responde ahora") están en la lista.
+    assert cats == ["escalado", "sin_asesor", "cliente_esperando", "cliente_esperando"]
+    # Los ítems de Inicio del grupo "Responde ahora" están en la lista; los de ventana cerrada, en su vista.
     items_inicio = {
         i["conversation_id"] for i in inicio["zona_accion"]["items"]
-        if i["categoria"] in ("escalado", "sin_asesor", "cliente_esperando")
+        if i["categoria"] in ("escalado", "sin_asesor") or i.get("grupo") == "responde_ahora"
     }
-    assert items_inicio <= {f["id"] for f in cuerpo["conversaciones"]}
+    assert items_inicio == {f["id"] for f in cuerpo["conversaciones"]}
+    cerradas = await _bandeja(admin, vista="ventana_cerrada")
+    assert _telefonos(cerradas) == [t["esp_cerrada"]] and cerradas["total"] == totales["esperando_ventana_cerrada"] == 1
 
 
 async def test_cada_vista_tiene_el_mismo_total_que_su_bloque_en_inicio():
@@ -153,7 +160,8 @@ async def test_cada_vista_tiene_el_mismo_total_que_su_bloque_en_inicio():
     esperados = {
         "sin_asesor": totales["sin_asesor"], "escalados": totales["escalados"],
         "esperando": totales["cliente_esperando"], "citas": totales["citas_proximas"],
-        "citas_vencidas": totales["citas_vencidas"], "responde_ahora": totales["ahora_total"],
+        "citas_vencidas": totales["citas_vencidas"], "responde_ahora": totales["responde_ahora_total"],
+        "ventana_cerrada": totales["esperando_ventana_cerrada"],
     }
     for vista, total in esperados.items():
         cuerpo = await _bandeja(admin, vista=vista)
@@ -175,8 +183,12 @@ async def test_el_asesor_solo_ve_lo_suyo_y_coincide_con_su_inicio():
 
     inicio = await _inicio(asesor)
     cuerpo = await _bandeja(asesor, vista="responde_ahora")
-    assert cuerpo["total"] == inicio["zona_accion"]["totales"]["ahora_total"]
-    assert set(_telefonos(cuerpo)) == {t["esp_a1"], t["esp_cerrada"]}   # nada de asesor2 ni de supervisión
+    totales = inicio["zona_accion"]["totales"]
+    assert cuerpo["total"] == totales["responde_ahora_total"] == 1
+    assert totales["ahora_total"] == 2                                    # significado de siempre: incluye la cerrada
+    assert set(_telefonos(cuerpo)) == {t["esp_a1"]}                       # nada de asesor2 ni de supervisión
+    cerrada = await _bandeja(asesor, vista="ventana_cerrada")
+    assert _telefonos(cerrada) == [t["esp_cerrada"]] and cerrada["total"] == totales["esperando_ventana_cerrada"]
 
     # sin_asesor y escalados son solo de visión total: para un asesor, lista vacía (no su cartera).
     for vista in ("sin_asesor", "escalados"):
@@ -184,7 +196,9 @@ async def test_el_asesor_solo_ve_lo_suyo_y_coincide_con_su_inicio():
         assert vacio["total"] == 0 and vacio["conversaciones"] == []
     # Intentar ampliar el alcance con alcance=todos / asesor=otro no sirve.
     ampliado = await _bandeja(asesor, vista="responde_ahora", alcance="todos", asesor="asesor2")
-    assert set(_telefonos(ampliado)) == {t["esp_a1"], t["esp_cerrada"]}
+    assert set(_telefonos(ampliado)) == {t["esp_a1"]}
+    ampliada = await _bandeja(asesor, vista="ventana_cerrada", alcance="todos", asesor="asesor2")
+    assert set(_telefonos(ampliada)) == {t["esp_cerrada"]}
     assert _telefonos(await _bandeja(asesor, vista="citas")) == [t["cita"]]
 
 

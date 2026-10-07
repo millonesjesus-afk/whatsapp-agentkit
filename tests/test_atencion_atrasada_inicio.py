@@ -92,10 +92,14 @@ def test_ultima_llamada_gana_sobre_los_demas_aunque_el_negocio_estuviera_cerrado
     assert r["nivel"] == "ultima_llamada" and r["ventana_restante_horas"] == 4.5
 
 
-def test_con_la_ventana_cerrada_es_urgente_aunque_nadie_pudiera_atenderlo():
-    # escribió el sábado 20:00; el lunes 8:30 la ventana (domingo 20:00) ya cerró y solo hubo 30 min de horario abierto
+def test_con_la_ventana_cerrada_el_nivel_es_ventana_cerrada_nunca_urgente():
+    # R4 (2026-10-07): antes esto era "urgente"; con la ventana de 24 h cerrada ya no hay texto libre posible,
+    # es un caso olvidado (llamar o plantilla), no una emergencia. Se conservan edad y restante (None).
+    # escribió el sábado 20:00; el lunes 8:30 la ventana (domingo 20:00) ya cerró
     r = _atencion(lima(10, 20), lima(12, 8, 30), vence=lima(11, 20))
-    assert r["nivel"] == "urgente" and r["ventana_restante_horas"] is None and r["edad_horas"] == 36.5
+    assert r == {"nivel": "ventana_cerrada", "edad_horas": 36.5, "ventana_restante_horas": None}
+    # aunque lleve días: sigue siendo ventana_cerrada, jamás atrasada/urgente
+    assert _atencion(lima(1, 10), lima(12, 10), vence=lima(2, 10))["nivel"] == "ventana_cerrada"
 
 
 def test_los_umbrales_son_configurables():

@@ -2292,7 +2292,9 @@ async def listar_conversaciones_activas(
 # resultados a `componer_vista_inicio`, que solo los combina y ordena. Así
 # cualquier corrección de esas funciones llega sola a la lista.
 
-VISTAS_INICIO = ("responde_ahora", "sin_asesor", "escalados", "esperando", "citas", "citas_vencidas")
+VISTAS_INICIO = (
+    "responde_ahora", "ventana_cerrada", "sin_asesor", "escalados", "esperando", "citas", "citas_vencidas",
+)
 
 
 def componer_vista_inicio(
@@ -2309,8 +2311,11 @@ def componer_vista_inicio(
     datos de ventana de Meta cuando el cliente también está esperando.
 
     Orden de `responde_ahora`: escalados, sin asesor, y luego los clientes
-    esperando en el orden que ya trae `listar_clientes_esperando` (ventana
-    abierta por vencimiento, luego cerradas)."""
+    esperando CON LA VENTANA DE 24 H ABIERTA en el orden que ya trae
+    `listar_clientes_esperando` (la que vence antes, primero). R4 (2026-10-07):
+    `ventana_cerrada` = los clientes esperando con la ventana cerrada (hay que
+    llamar o enviar plantilla), del más reciente al más antiguo; `esperando` sigue
+    siendo todos."""
     por_telefono = {c["telefono"]: c for c in esperando}
 
     def _entrada(fuente: dict, categoria: str) -> dict:
@@ -2338,11 +2343,13 @@ def componer_vista_inicio(
         entradas = [_entrada(l, "cita") for l in proximas]
     elif vista == "citas_vencidas":
         entradas = [_entrada(l, "cita_vencida") for l in vencidas]
+    elif vista == "ventana_cerrada":
+        entradas = [_entrada(c, "cliente_esperando") for c in esperando if not c["ventana_abierta"]]
     elif vista == "responde_ahora":
         entradas = (
             [_entrada(l, "escalado") for l in escalados]
             + [_entrada(l, "sin_asesor") for l in sin_asesor]
-            + [_entrada(c, "cliente_esperando") for c in esperando]
+            + [_entrada(c, "cliente_esperando") for c in esperando if c["ventana_abierta"]]
         )
     vistos: set[str] = set()
     unicas = []
@@ -5627,6 +5634,107 @@ async def _estado_atencion_por_telefono(session, negocio_id: str, telefonos: lis
     return estado
 
 
+# ── Gestionado por resultado / venta / "ya lo atendí" (2026-10-07, R4) ───
+#
+# Un cliente cuyo último mensaje sigue sin respuesta deja de "esperar" también
+# cuando una persona ya lo gestionó SIN escribirle por el chat: le puso un
+# resultado (no_interesado, agendado, sin_respuesta…), registró la venta o
+# marcó "Ya lo atendí" (llamada, atención fuera de WhatsApp). Misma regla que
+# el cierre definitivo: por TIMESTAMP, nunca booleana — el evento cuenta si su
+# `creado` es igual o posterior al último mensaje real del cliente; si el
+# cliente escribe DESPUÉS, vuelve a esperar. Un resultado QUITADO
+# (`payload.nuevo` vacío) no es una gestión.
+
+EVENTO_ATENDIDO_MANUAL = "atendido_manual"
+MOTIVO_ATENDIDO_MAXIMO = 200
+TIPOS_EVENTO_GESTION = ("resultado_cambiado", "venta_registrada", EVENTO_ATENDIDO_MANUAL)
+
+
+def evento_cuenta_como_gestion(tipo: str | None, payload) -> bool:
+    """True si un evento de la conversación significa "una persona ya lo gestionó"."""
+    if tipo == "resultado_cambiado":
+        nuevo = payload.get("nuevo") if isinstance(payload, dict) else None
+        return bool(str(nuevo).strip()) if nuevo is not None else False
+    return tipo in ("venta_registrada", EVENTO_ATENDIDO_MANUAL)
+
+
+async def _ultima_gestion_por_conversacion(
+    session, negocio_id: str, conversation_ids: list[str], desde: datetime | None = None,
+) -> dict[str, datetime]:
+    """Por conversación: el `creado` del evento de gestión más reciente (ver arriba). `desde` acota la
+    consulta (nada anterior a esa fecha puede cubrir un mensaje posterior). Una consulta agrupada."""
+    if not conversation_ids:
+        return {}
+    query = select(EventoLead.conversation_id, EventoLead.tipo, EventoLead.payload, EventoLead.creado).where(
+        EventoLead.negocio_id == negocio_id, EventoLead.conversation_id.in_(conversation_ids),
+        EventoLead.tipo.in_(TIPOS_EVENTO_GESTION),
+    )
+    if desde is not None:
+        query = query.where(EventoLead.creado >= desde)
+    ultima: dict[str, datetime] = {}
+    for cid, tipo, payload, creado in (await session.execute(query)).all():
+        if creado is None or not evento_cuenta_como_gestion(tipo, payload):
+            continue
+        if cid not in ultima or creado > ultima[cid]:
+            ultima[cid] = creado
+    return ultima
+
+
+async def _atendido_manual_por_telefono(session, negocio_id: str, telefonos: list[str]) -> dict[str, datetime]:
+    """Por teléfono: el último "Ya lo atendí" de su Conversation activa. Una consulta agrupada."""
+    if not telefonos:
+        return {}
+    filas = (await session.execute(
+        select(Contact.telefono, func.max(EventoLead.creado))
+        .join(Conversation, Conversation.contact_id == Contact.id)
+        .join(EventoLead, EventoLead.conversation_id == Conversation.id)
+        .where(
+            Contact.negocio_id == negocio_id, Conversation.negocio_id == negocio_id,
+            Conversation.estado == "activa", EventoLead.negocio_id == negocio_id,
+            EventoLead.tipo == EVENTO_ATENDIDO_MANUAL, Contact.telefono.in_(telefonos),
+        )
+        .group_by(Contact.telefono)
+    )).all()
+    return {t: ts for t, ts in filas if ts is not None}
+
+
+async def registrar_atendido_manual(conversation_id: str, negocio_id: str, autor: str, motivo: str = "") -> str:
+    """"Ya lo atendí": deja el evento `atendido_manual` en la conversación (el caso sale de "esperando"
+    hasta que el cliente vuelva a escribir). Idempotente: si ya hay uno igual o posterior al último
+    mensaje real del cliente, no agrega otro. Devuelve "registrado", "ya_registrado", "motivo_largo" o
+    "no_encontrada" (la conversación no existe o es de otro negocio)."""
+    motivo = (motivo or "").strip()
+    if len(motivo) > MOTIVO_ATENDIDO_MAXIMO:
+        return "motivo_largo"
+    async with async_session() as session:
+        conversation = await session.get(Conversation, conversation_id)
+        if conversation is None or conversation.negocio_id != negocio_id:
+            return "no_encontrada"
+        ultimo_cliente = (await session.execute(
+            select(func.max(Mensaje.timestamp)).where(
+                Mensaje.conversation_id == conversation_id, Mensaje.negocio_id == negocio_id, Mensaje.role == "user",
+                ~func.coalesce(Mensaje.content, "").startswith(PREFIJO_REACCION),
+            )
+        )).scalar_one_or_none()
+        previo = (await session.execute(
+            select(func.max(EventoLead.creado)).where(
+                EventoLead.conversation_id == conversation_id, EventoLead.negocio_id == negocio_id,
+                EventoLead.tipo == EVENTO_ATENDIDO_MANUAL,
+            )
+        )).scalar_one_or_none()
+        if previo is not None and (ultimo_cliente is None or previo >= ultimo_cliente):
+            return "ya_registrado"
+        opportunity = await _obtener_opportunity_vigente(session, conversation.id)
+        session.add(EventoLead(
+            conversation_id=conversation.id, negocio_id=conversation.negocio_id,
+            opportunity_id=opportunity.id if opportunity else None,
+            tipo=EVENTO_ATENDIDO_MANUAL, descripcion="Marcó el caso como atendido fuera del chat", autor=autor,
+            payload={"motivo": motivo} if motivo else {},
+        ))
+        await session.commit()
+    return "registrado"
+
+
 async def listar_leads_agendados(negocio_id: str, asesor_asignado: str | None = None) -> list[dict]:
     """Leads con una cita agendada (resultado == 'agendado' y fecha_agendada
     definida), de la más próxima a la más lejana — para el aviso de "Próximas
@@ -5689,6 +5797,10 @@ async def listar_leads_esperando_asesor(negocio_id: str, excluir_atendidos: bool
         result = await session.execute(query)
         candidatos = [l for l in result.scalars().all() if l.resultado not in RESULTADOS_CERRADOS]
         estado = await _estado_atencion_por_telefono(session, negocio_id, [l.telefono for l in candidatos])
+        atendido_manual = (
+            await _atendido_manual_por_telefono(session, negocio_id, [l.telefono for l in candidatos])
+            if excluir_atendidos else {}
+        )
 
     pendientes = []
     for lead in candidatos:
@@ -5699,6 +5811,11 @@ async def listar_leads_esperando_asesor(negocio_id: str, excluir_atendidos: bool
         if e["conversaciones"] and not e["hay_activa"]:
             continue
         if excluir_atendidos and humano_atendio(e["ultimo_humano"], e["ultimo_cliente"]):
+            continue
+        # R4 (2026-10-07): "Ya lo atendí" (llamada, atención fuera del chat) igual o posterior al último
+        # mensaje del cliente. Solo este evento aplica acá: poner un resultado abierto (agendado, postventa)
+        # NO le quita al lead su necesidad de dueño, y los cerrados ya se descartan arriba.
+        if excluir_atendidos and humano_atendio(atendido_manual.get(lead.telefono), e["ultimo_cliente"]):
             continue
         pendientes.append(_lead_a_dict(lead))
     return pendientes
@@ -6192,7 +6309,14 @@ async def listar_clientes_esperando(
     "gracias"). Se compara por timestamp: si el cliente escribe DESPUÉS del
     cierre, vuelve a esperar.
 
-    Una sola consulta (ROW_NUMBER por conversación, sin N+1). Cada ítem:
+    2026-10-07 (R4) — tampoco esperan los que una persona ya GESTIONÓ sin escribir por el
+    chat: un EventoLead de su conversación con `creado` igual o posterior al último mensaje real
+    del cliente de tipo `resultado_cambiado` (con `payload.nuevo` no vacío; quitar el resultado
+    no cuenta), `venta_registrada` o `atendido_manual` ("Ya lo atendí"). Misma regla por
+    timestamp: si el cliente escribe DESPUÉS del evento, vuelve a esperar.
+
+    Una sola consulta (ROW_NUMBER por conversación, sin N+1) más una agrupada para los eventos de
+    gestión. Cada ítem:
     `conversation_id`, `telefono`, `nombre`, `asesor_asignado`, `resultado`,
     `ultimo_mensaje_cliente_en` (UTC naive), `escalado`, `probable_cierre`,
     `ventana_vence_en` (último mensaje + 24 h, UTC naive) y `ventana_abierta`.
@@ -6273,6 +6397,17 @@ async def listar_clientes_esperando(
             "probable_cierre": es_probable_cierre(contenido),
             "ventana_vence_en": vence, "ventana_abierta": vence > ahora,
         })
+    if items:
+        async with async_session() as session:
+            gestion = await _ultima_gestion_por_conversacion(
+                session, negocio_id, [it["conversation_id"] for it in items],
+                desde=min(it["ultimo_mensaje_cliente_en"] for it in items),
+            )
+        items = [
+            it for it in items
+            if not (gestion.get(it["conversation_id"]) is not None
+                    and gestion[it["conversation_id"]] >= it["ultimo_mensaje_cliente_en"])
+        ]
     desde_por_conversacion = (
         await _inicio_de_espera_por_conversacion(negocio_id, [it["conversation_id"] for it in items])
         if con_desde and items else {}

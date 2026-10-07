@@ -78,6 +78,7 @@ from agent.memory import (
     obtener_conversation_realtime, obtener_conversation_activa_de_telefono,
     resolver_conversation_ids_por_telefono, listar_clientes_esperando, contar_casos_activos,
     VISTAS_INICIO, componer_vista_inicio, resolver_entradas_vista_inicio,
+    MOTIVO_ATENDIDO_MAXIMO, registrar_atendido_manual,
     obtener_negocio, obtener_identidad_agente, listar_horarios_atencion,
     actualizar_negocio, crear_o_actualizar_identidad_agente, guardar_horario_atencion,
 )
@@ -3209,6 +3210,38 @@ async def conversation_cerrar_definitivamente(
     return await _json_conversation_actualizada(conversation_id, usuario["negocio_id"])
 
 
+@router.post("/conversation/{conversation_id}/atendido")
+async def conversation_atendido(
+    conversation_id: str,
+    motivo: str = Form(""),
+    usuario: dict = Depends(_usuario_actual),
+    _csrf: None = Depends(verificar_csrf),
+):
+    """"Ya lo atendí" (R4, 2026-10-07): la persona ya gestionó este caso fuera del chat (llamó, lo vio
+    en persona…) y no hay nada que contestar por WhatsApp. Registra el evento `atendido_manual`
+    (autor + `motivo` opcional, máx. `MOTIVO_ATENDIDO_MAXIMO` caracteres) y el cliente sale de "esperando"
+    hasta que vuelva a escribir. Mismos permisos que `cerrar-definitivamente`: el asesor asignado,
+    supervisor o admin (404 si la conversación no existe o es de otro negocio, 403 si no es suya).
+    Idempotente: repetirlo sin un mensaje nuevo del cliente no agrega otro evento. No cambia el
+    resultado, la asignación ni a Gabi. Responde `{"ok": true}`."""
+    if not isinstance(motivo, str):   # llamada directa sin el campo (los tests): el default de Form
+        motivo = ""
+    motivo = motivo.strip()
+    if len(motivo) > MOTIVO_ATENDIDO_MAXIMO:
+        raise HTTPException(status_code=400, detail=f"El motivo no puede pasar de {MOTIVO_ATENDIDO_MAXIMO} caracteres.")
+    conv = await resolver_conversation_operable(conversation_id, usuario["negocio_id"])
+    if conv is None:
+        raise HTTPException(status_code=404, detail="Conversación no encontrada")
+    _verificar_acceso_conversation(usuario, conv["asesor_asignado"])
+
+    estado = await registrar_atendido_manual(conversation_id, usuario["negocio_id"], usuario["nombre"], motivo)
+    if estado == "no_encontrada":
+        raise HTTPException(status_code=404, detail="Conversación no encontrada")
+    if estado == "motivo_largo":
+        raise HTTPException(status_code=400, detail=f"El motivo no puede pasar de {MOTIVO_ATENDIDO_MAXIMO} caracteres.")
+    return JSONResponse({"ok": True})
+
+
 @router.post("/conversation/{conversation_id}/reabrir")
 async def conversation_reabrir(
     conversation_id: str,
@@ -3404,8 +3437,11 @@ def _zona_accion_vacia(mensaje: str) -> str:
 # asesor/supervisión de por medio (ver `memory.listar_clientes_esperando`).
 # Aplica a cualquier resultado, incluido vendido y agendado.
 
+# R4 (2026-10-07): `cliente_esperando` (8) es SOLO el grupo "Responde ahora" (ventana de 24 h abierta);
+# `cliente_esperando_ventana_cerrada` (5) es el grupo secundario "Con ventana cerrada" (clave aditiva).
 TOPES_ZONA_ACCION = {
-    "escalados": 5, "sin_asesor": 5, "cliente_esperando": 8, "citas_proximas": 3, "citas_vencidas": 3,
+    "escalados": 5, "sin_asesor": 5, "cliente_esperando": 8, "cliente_esperando_ventana_cerrada": 5,
+    "citas_proximas": 3, "citas_vencidas": 3,
 }
 # fecha_agendada se guarda como hora local de Lima, SIN zona (la tipea un
 # humano en un datetime-local) — para compararla con "ahora" hay que llevar
@@ -3447,6 +3483,9 @@ def _item_cliente_esperando(cliente: dict, vista_admin: bool) -> dict:
         "ventana_abierta": cliente["ventana_abierta"],
         "probable_cierre": cliente["probable_cierre"],
         "resultado": cliente.get("resultado"),
+        # Aditivo (R4, 2026-10-07): a qué grupo de Inicio pertenece — "Responde ahora" (ventana abierta)
+        # o "Con ventana cerrada" (llamar o enviar plantilla).
+        "grupo": "responde_ahora" if cliente["ventana_abierta"] else "ventana_cerrada",
     })
     if cliente.get("atencion") is not None:
         # Aditivo (2026-10-07, Atención atrasada): {nivel, edad_horas, ventana_restante_horas}.
@@ -3524,8 +3563,14 @@ async def _zona_accion_datos(negocio_id: str, asesor: str | None, vista_admin: b
     for l in sin_asesor[:TOPES_ZONA_ACCION["sin_asesor"]]:
         pares.append((l, _item_zona(l, "Sin asesor asignado", "sin_asesor")))
         mostrados.add(l["telefono"])
-    # Un mismo cliente no aparece dos veces (escalado/sin asesor ya lo cubren).
-    for c in [c for c in esperando if c["telefono"] not in mostrados][:TOPES_ZONA_ACCION["cliente_esperando"]]:
+    # Un mismo cliente no aparece dos veces (escalado/sin asesor ya lo cubren). R4 (2026-10-07): dos
+    # grupos, cada uno con su tope — "Responde ahora" (ventana abierta, por gravedad) y "Con ventana
+    # cerrada" (del más reciente al más antiguo, que es el orden en que `listar_clientes_esperando` los
+    # entrega y la gravedad 0 de todos conserva).
+    por_mostrar = [c for c in esperando if c["telefono"] not in mostrados]
+    for c in [c for c in por_mostrar if c["ventana_abierta"]][:TOPES_ZONA_ACCION["cliente_esperando"]]:
+        pares.append((c, _item_cliente_esperando(c, vista_admin)))
+    for c in [c for c in por_mostrar if not c["ventana_abierta"]][:TOPES_ZONA_ACCION["cliente_esperando_ventana_cerrada"]]:
         pares.append((c, _item_cliente_esperando(c, vista_admin)))
     for l in proximas[:TOPES_ZONA_ACCION["citas_proximas"]]:
         pares.append((l, _item_zona(l, _texto_cita(l, "Cita agendada"), "cita")))
@@ -3542,6 +3587,15 @@ async def _zona_accion_datos(negocio_id: str, asesor: str | None, vista_admin: b
     totales = {
         "cliente_esperando": len(esperando),
         "ventana_abierta": len(abiertas),
+        # Aditivos (R4, 2026-10-07): el total de cada grupo de Inicio ("Responde ahora" / "Con ventana
+        # cerrada"); suman `cliente_esperando`. Un cliente escalado/sin asesor también cuenta aquí.
+        "esperando_ventana_abierta": len(abiertas),
+        "esperando_ventana_cerrada": len(esperando) - len(abiertas),
+        # Casos DISTINTOS de "Responde ahora" con ventana abierta (escalados + sin asesor + esperando con
+        # la ventana abierta) — es el total que lleva la vista `responde_ahora` de la Bandeja.
+        "responde_ahora_total": len(
+            {l["telefono"] for l in escalados} | {l["telefono"] for l in sin_asesor} | {c["telefono"] for c in abiertas}
+        ),
         "esperando_campana": len(para_campana),
         "ventana_por_vencer": sum(1 for c in abiertas if c["ventana_vence_en"] - ahora < _VENTANA_POR_VENCER),
         "escalados": len(escalados), "sin_asesor": len(sin_asesor),
@@ -5143,6 +5197,7 @@ _ICONOS_EVENTO_LEAD = {
     "asignado": "bi-person-check-fill",
     "desasignado": "bi-person-dash-fill",
     "venta_registrada": "bi-cash-coin",
+    "atendido_manual": "bi-check2-circle",
 }
 
 
