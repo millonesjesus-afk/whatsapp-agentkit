@@ -4,8 +4,10 @@ Guía para dejar funcionando el respaldo diario de la base de datos de producci�
 (`scripts/backup_postgres.py`, ADR-0001); lo que falta son cosas que solo puedes hacer tú: crear el
 bucket, crear el servicio Cron en Railway y probar una restauración.
 
-Estado a 2026-10-05: **el respaldo no está programado**. Hasta que completes los pasos 1 a 4 no hay
-ninguna copia de la base fuera de Railway.
+Estado a 2026-10-07: **verificado** que el respaldo sube bien con `pg_dump` 18 (la imagen ya instala `postgresql-client-18`, igual a la
+versión de la base de Railway): un dump de 1.1 MB, verificado con `pg_restore --list` y subido al bucket. Lo que sigue dependiendo de ti es
+que el servicio Cron esté programado en Railway (paso 3) y correr la **prueba de restauración** (paso 5) al menos una vez: hasta entonces
+el respaldo está probado para subir, no para restaurar.
 
 ## Qué hace el script
 
@@ -57,7 +59,7 @@ Se definen en el **servicio Cron** de Railway (no en el servicio web):
 4. Agrega las variables del paso 2.
 5. Despliega y fuerza una primera corrida a mano para no esperar hasta mañana.
 
-La imagen ya incluye `pg_dump` y `pg_restore` (el `Dockerfile` instala `postgresql-client`).
+La imagen ya incluye `pg_dump` y `pg_restore` (el `Dockerfile` instala `postgresql-client-18` desde el repositorio oficial de Postgres).
 
 ## Paso 4. Comprobar que funcionó
 
@@ -68,43 +70,92 @@ La imagen ya incluye `pg_dump` y `pg_restore` (el `Dockerfile` instala `postgres
 
 ### Si falla por versión distinta
 
-Si el log dice `server version mismatch`, el `pg_dump` de la imagen es más viejo que tu Postgres de Railway. El `Dockerfile` instala
-`postgresql-client` **sin fijar versión**, así que trae la que ofrece Debian por defecto, y Railway puede tener una base de una versión mayor.
-Esto **no se ha cambiado** en el repositorio: es una decisión tuya.
+Si el log dice `server version mismatch`, el `pg_dump` de la imagen es más viejo que tu Postgres de Railway. **Hoy esto ya está resuelto**: el
+`Dockerfile` instala `postgresql-client-18` desde el repositorio oficial de Postgres (PGDG), porque la base de Railway es la versión 18
+(imagen `postgres-ssl:18`), y el respaldo del 2026-10-07 subió bien con ese cliente. Si algún día Railway sube la base a otra versión mayor:
 
 1. Mira la versión de tu base: en la consola de Postgres de Railway, `SELECT version();`.
 2. Mira la del cliente de la imagen: en un servicio con esa imagen, `pg_dump --version`.
-3. Si el cliente es menor, hay que instalar uno de la misma versión mayor que el servidor (o mayor). La forma habitual es agregar el repositorio
-   oficial de Postgres (PGDG) en el `Dockerfile` y pedir `postgresql-client-<N>` (`N` = la versión mayor de tu base). Esquema, **sin probar**:
+3. Si el cliente es menor, cambia el número en la línea `postgresql-client-18` del `Dockerfile` por la versión mayor de tu base (o una mayor)
+   y vuelve a desplegar. Esa línea toca la misma imagen que usa el servicio web: pruébala primero en un despliegue de prueba.
 
-   ```dockerfile
-   RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl gnupg lsb-release ffmpeg \
-    && install -d /usr/share/postgresql-common/pgdg \
-    && curl -fsSL -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc https://www.postgresql.org/media/keys/ACCC4CF8.asc \
-    && echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" > /etc/apt/sources.list.d/pgdg.list \
-    && apt-get update && apt-get install -y --no-install-recommends postgresql-client-17 \
-    && rm -rf /var/lib/apt/lists/*
-   ```
+## Paso 5. Probar una restauración
 
-   Cambia `17` por la versión de tu base. Pruébalo primero en un despliegue de prueba: toca la misma imagen que usa el servicio web.
+Un respaldo que nunca se restauró no es un respaldo. Para eso existe `scripts/probar_restauracion_respaldo.py`: descarga el último respaldo,
+lo restaura en una base **temporal** y compara los datos con la base viva. Está pensado para producción: no escribe en la base viva.
 
-## Paso 5. Probar una restauración (hazlo UNA vez, de verdad)
+### Cómo correrla
 
-Un respaldo que nunca se restauró no es un respaldo. Restaura a una base **temporal**, nunca sobre la de producción.
+- **En Railway, como servicio temporal o Cron** (recomendado, porque la base solo se alcanza por la red privada): crea un servicio desde
+  el mismo repositorio, con las mismas variables que el Cron de respaldo (`DATABASE_URL` por red privada y las `S3_*`), y como comando de inicio:
 
-1. Baja un archivo `.dump` del bucket (desde el panel de R2/B2).
-2. Crea una base vacía temporal: un servicio Postgres nuevo en Railway (bórralo después), o un Postgres local.
-3. Restaura:
+  ```bash
+  python scripts/probar_restauracion_respaldo.py
+  ```
 
-   ```bash
-   pg_restore --no-owner --no-privileges --dbname "postgresql://USUARIO:CLAVE@HOST:PUERTO/BASE_TEMPORAL" archivo.dump
-   ```
+  Si lo dejas como Cron, una vez al mes alcanza (por ejemplo `0 9 1 * *`). Hoy **no** es un Cron programado ni está vigilado por el panel:
+  si falla, solo lo ves en los logs del servicio (el código de salida es 1). Bórralo cuando termines si lo usaste como servicio temporal.
+- **Desde tu computador:** posible solo si tienes `pg_restore` (cliente 18) y alcanzas la base (proxy público). No es lo recomendado.
 
-   Pueden salir avisos por roles o extensiones que no existen en la base temporal; lo que importa es que no haya errores en las tablas de datos.
-4. Comprueba que hay datos: por ejemplo, `SELECT count(*) FROM leads;` y `SELECT count(*) FROM mensajes;` y compáralos con producción.
-5. Borra la base temporal.
+Opciones:
 
-Para restaurar desde tu computador necesitas un Postgres con `pg_restore` instalado y, si la base temporal está en Railway, su URL pública.
+| Comando | Qué hace |
+| --- | --- |
+| `python scripts/probar_restauracion_respaldo.py --solo-listar` | Muestra los respaldos del bucket con tamaño y fecha. No toca ninguna base. |
+| `python scripts/probar_restauracion_respaldo.py --dry-run` | Descarga el último y lo verifica con `pg_restore --list`. No crea ninguna base. Úsalo primero. |
+| `python scripts/probar_restauracion_respaldo.py --clave backups/agentkit-AAAAMMDD-HHMMSS.dump` | Prueba ese respaldo en vez del más reciente. |
+| `python scripts/probar_restauracion_respaldo.py --base-admin NOMBRE` | Base a la que conectarse para crear/eliminar la temporal (por defecto `postgres`, luego `template1`). |
+
+El usuario de `DATABASE_URL` debe poder crear bases (en Railway es el superusuario `postgres`, así que sirve).
+
+### Qué hace, paso a paso
+
+1. Toma el respaldo más reciente bajo `BACKUP_PREFIJO` (o el de `--clave`), lo descarga a un directorio temporal y verifica que no esté vacío
+   y que `pg_restore --list` lo lea. Si el más reciente está vacío, falla: no salta al anterior.
+2. Crea en el **mismo servidor** una base nueva llamada `restauracion_prueba_<AAAAMMDDHHMMSS>`. La conexión administrativa va a la base
+   `postgres`, nunca a la viva. Si el nombre temporal coincidiera con el de la base viva, o no tuviera esa forma, aborta antes de crear nada.
+3. Restaura con `pg_restore --no-owner --no-privileges --exit-on-error` dentro de la base temporal.
+4. Cuenta las filas de las tablas clave en la restauración y en la base viva (abierta con `default_transaction_read_only=on`, solo `SELECT`) y
+   mira la fecha del último mensaje restaurado.
+5. **Siempre**, incluso si algo falló: elimina la base temporal (`DROP DATABASE ... WITH (FORCE)`, solo sobre esa base) y los archivos temporales,
+   y lo confirma por pantalla.
+6. Imprime el resumen (respaldo usado, tamaño, tiempos, conteos, veredicto) y sale con código 1 si hay ALERTA o error.
+
+### Qué NO toca
+
+- No escribe nada en la base viva (solo lectura, y la propia conexión lo impide).
+- No borra ni modifica nada del bucket.
+- No registra latido en `cron_ejecuciones` y no aparece en los avisos de Inicio.
+- No imprime la contraseña: viaja por `PGPASSWORD`, nunca en los argumentos ni en la URL.
+
+### Cómo leer la tabla
+
+```
+Tabla                    Restaurado    Base viva  Estado
+leads                         1,000        1,040  OK
+mensajes                     19,800       20,500  OK
+...
+```
+
+- El respaldo tiene hasta ~24 h de antigüedad, así que es normal que la base viva tenga **más** filas que la restauración.
+- `leads`, `mensajes`, `conversations`, `opportunities` y `eventos_lead` exigen que lo restaurado sea al menos el 90 % de la base viva.
+- Todas las tablas (también `usuarios`, `configuracion`, `uso_mensajes_meta` y `envios_meta`) exigen no estar vacías si la viva no lo está.
+  Una tabla que no existe en ninguna de las dos se muestra como "no existe" y se ignora.
+- El último mensaje restaurado debe tener menos de 36 horas.
+- **OK** en todo: el respaldo se restaura y es coherente. **ALERTA**: lee los motivos debajo del veredicto; lo más probable es que el respaldo
+  sea viejo, incompleto o que el Cron de respaldo esté fallando. Corre `--solo-listar` para ver las fechas.
+- Si aparece "No se pudo eliminar la base temporal", bórrala a mano (`DROP DATABASE restauracion_prueba_...;`) para no dejar basura en el servidor.
+
+### Restauración manual (si necesitas recuperar datos de verdad)
+
+Solo si el script no basta. Siempre contra una base temporal, nunca sobre producción:
+
+```bash
+createdb -h HOST -U USUARIO BASE_TEMPORAL
+pg_restore --no-owner --no-privileges --exit-on-error -h HOST -U USUARIO -d BASE_TEMPORAL archivo.dump
+```
+
+(la contraseña va en la variable de entorno `PGPASSWORD`). Después comprueba con `SELECT count(*) FROM leads;` y bórrala.
 
 ## Costo esperado
 

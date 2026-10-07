@@ -24,7 +24,7 @@ RAIZ = Path(__file__).resolve().parent.parent
 SCRIPTS = [
     "liberar_leads_inactivos", "procesar_inactividad_clientes", "purgar_archivos_expirados",
     "cerrar_leads_definitivamente", "cerrar_ventas_sin_seguimiento", "backup_postgres",
-    "recuperar_mensajes_sin_respuesta",
+    "recuperar_mensajes_sin_respuesta", "plantilla_zona_muerta",
 ]
 
 
@@ -235,15 +235,26 @@ def _llamada_a_ejecutar_cron(nombre_script: str):
     return None
 
 
+def _valor(nodo, arbol):
+    """Valor literal de un argumento; si es una constante de módulo (NOMBRE_CRON = "x"), la resuelve."""
+    if isinstance(nodo, ast.Constant):
+        return nodo.value
+    for n in arbol.body:
+        if isinstance(n, ast.Assign) and any(getattr(t, "id", None) == getattr(nodo, "id", object()) for t in n.targets):
+            return n.value.value
+    raise AssertionError("argumento de ejecutar_cron no resoluble")
+
+
 @pytest.mark.parametrize("nombre", SCRIPTS)
 def test_cada_script_usa_ejecutar_cron_con_su_nombre_y_el_intervalo_que_vigila_el_panel(nombre):
     llamada = _llamada_a_ejecutar_cron(nombre)
     assert llamada is not None, f"{nombre} no llama a ejecutar_cron"
-    assert llamada.args[0].value == nombre
-    assert llamada.args[2].value == mem.CRONES_ESPERADOS[nombre][1]
+    arbol = ast.parse((RAIZ / "scripts" / f"{nombre}.py").read_text(encoding="utf-8"))
+    assert _valor(llamada.args[0], arbol) == nombre
+    assert _valor(llamada.args[2], arbol) == mem.CRONES_ESPERADOS[nombre][1]
 
 
-def test_los_siete_scripts_estan_vigilados_y_cargan_por_ruta():
+def test_los_ocho_scripts_estan_vigilados_y_cargan_por_ruta():
     assert set(mem.CRONES_ESPERADOS) == set(SCRIPTS)
     for nombre in SCRIPTS:
         modulo = _cargar(nombre)

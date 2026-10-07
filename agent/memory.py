@@ -3004,6 +3004,7 @@ CRONES_ESPERADOS: dict[str, tuple[str, int]] = {
     "cerrar_ventas_sin_seguimiento": ("Cierre de ventas sin seguimiento", 1440),
     "backup_postgres": ("Respaldo de la base de datos", 1440),
     "recuperar_mensajes_sin_respuesta": ("Recuperación de mensajes sin respuesta", 10),
+    "plantilla_zona_muerta": ("Plantilla automática de fin de semana", 30),
 }
 DIAS_RETENCION_CRON_EJECUCIONES = 30
 

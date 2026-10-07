@@ -155,6 +155,41 @@ def _gabi_debe_pausarse(lead: dict | None) -> bool:
     return bool(lead and (lead.get("asesor_asignado") or lead.get("pausado_manual")))
 
 
+def _cierre_definitivo_pendiente_de_liberar(lead: dict | None) -> bool:
+    """¿El cliente volvió a escribir sobre un caso cerrado DEFINITIVAMENTE que aún conserva su asesor
+    (o la pausa) y NO es una venta? Entonces DR-4 ya abrió el ciclo nuevo (`resolver_conversation_activa`)
+    y falta liberar el Lead para que Gabi retome. Criterio ÚNICO que comparten la rama de texto y la de
+    adjuntos/audios (2026-10-07: antes un adjunto reabría el ciclo pero no liberaba, y quedaba una
+    Conversation nueva sin asesor con el Lead aún asignado). "vendido" jamás se libera aquí: va por
+    `enrutar_posventa_si_corresponde`, que además limpia `cerrado_definitivamente_en`."""
+    return bool(
+        _gabi_debe_pausarse(lead)
+        and lead.get("cerrado_definitivamente_en") is not None
+        and lead.get("resultado") != "vendido"
+    )
+
+
+async def _liberar_si_cierre_definitivo_vigente(telefono: str, negocio_id: str | None, lead: dict | None) -> dict | None:
+    """Para la rama de adjuntos/audios/tipos no soportados: deja el estado igual que la rama de texto
+    (`liberar_asignacion` con el motivo `cierre_definitivo`, que deja el evento `desasignado_automatico`
+    y limpia el cierre) y devuelve el Lead ya fresco. FAIL-SAFE: nunca lanza. Si algo falla devuelve el
+    Lead tal cual llegó (con asesor/pausa) y el llamador sigue por el camino de "hay un humano": el
+    adjunto se guarda igual y queda a la vista del asesor — nunca se pierde ni se bloquea el aviso."""
+    if not _cierre_definitivo_pendiente_de_liberar(lead):
+        return lead
+    try:
+        await liberar_asignacion(telefono, motivo="cierre_definitivo")
+    except Exception:
+        logger.exception(f"No se pudo liberar el caso cerrado de {telefono} al llegar un adjunto — se guarda sin respuesta automática")
+        return lead
+    logger.info(f"Caso de {telefono} estaba cerrado definitivamente (adjunto) — Gabi retoma la atención")
+    try:
+        return await obtener_lead(telefono, negocio_id=negocio_id)
+    except Exception:
+        logger.exception(f"No se pudo releer el lead de {telefono} tras liberar el caso cerrado")
+        return {**lead, "asesor_asignado": None, "pausado_manual": False, "cerrado_definitivamente_en": None}
+
+
 def _extension_permitida_para_media(tipo: str, mime_type: str, filename: str) -> str | None:
     """Resuelve y valida la extensión a usar para un adjunto ENTRANTE.
     Retorna None si el tipo/mime no está permitido — el llamador degrada
@@ -592,6 +627,11 @@ async def _atender_mensaje_no_legible(msg, canal: dict | None, contenido: str, a
         no se lee y que lo escriba."""
     negocio_id = canal.get("negocio_id") if canal else None
     lead = await obtener_lead(msg.telefono, negocio_id=negocio_id)
+    # Caso cerrado DEFINITIVAMENTE que el cliente reabre con un adjunto: DR-4 ya abrió el ciclo nuevo
+    # (webhook); aquí se deja el Lead igual que tras un texto (asesor liberado, Gabi activa) para que
+    # el adjunto —que sí se guarda— reciba el aviso de siempre y no quede una Conversation sin asesor
+    # con el Lead aún asignado. Los adjuntos nunca se absorben como cierre de cortesía.
+    lead = await _liberar_si_cierre_definitivo_vigente(msg.telefono, negocio_id, lead)
     if _gabi_debe_pausarse(lead):
         mensaje_guardado = await servicio_conversacion.guardar_mensaje(
             msg.telefono, "user", contenido, negocio_id=negocio_id,
@@ -1189,7 +1229,7 @@ async def webhook_handler(request: Request):
                 # ruteo no ocurrió, el lead sigue "vendido" con cierre: aquí
                 # NO se libera la asignación — cae al `else` (mensaje
                 # guardado para el asesor) en vez de entregárselo a Gabi.
-                if lead.get("cerrado_definitivamente_en") is not None and lead.get("resultado") != "vendido":
+                if _cierre_definitivo_pendiente_de_liberar(lead):
                     # El caso quedó cerrado de verdad — DR-4 (resolver_
                     # conversation_activa, ya corrió arriba con este mismo
                     # mensaje) ya abrió una Conversation nueva sin asesor;

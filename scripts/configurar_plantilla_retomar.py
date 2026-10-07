@@ -26,12 +26,12 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from agent import plantilla_retomar
-from agent.memory import esperar_base_de_datos
+from agent.memory import esperar_base_de_datos, listar_negocios
 
 
 def _argumentos(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Configura la plantilla de 'retomar consulta' de los asesores.")
-    parser.add_argument("--negocio-id", required=True, help="Id del negocio al que se aplica.")
+    parser.add_argument("--negocio-id", default=None, help="Id del negocio al que se aplica. Si se omite y existe un solo negocio activo, se usa ese.")
     parser.add_argument("--nombre", default=None, help="Nombre de la plantilla tal como la aprobó Meta (ej. retomar_consulta).")
     parser.add_argument("--idioma", default=plantilla_retomar.IDIOMA_POR_DEFECTO, help="Código de idioma aprobado en Meta (por defecto es).")
     parser.add_argument("--cuerpo", default=None, help="Texto aprobado del cuerpo, con {{1}} cliente, {{2}} asesor, {{3}} interés.")
@@ -39,9 +39,21 @@ def _argumentos(argv: list[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
+def resolver_negocio_id(negocio_id: str | None, negocios: list[dict]) -> str:
+    """El id indicado, o el del ÚNICO negocio activo si no se indicó. Con varios negocios exige --negocio-id."""
+    if negocio_id:
+        return negocio_id
+    activos = [n for n in negocios if n.get("activo", True)]
+    if len(activos) == 1:
+        return activos[0]["id"]
+    disponibles = ", ".join(f"{n.get('id')} ({n.get('nombre') or n.get('codigo') or '?'})" for n in activos) or "ninguno"
+    raise ValueError(f"Hay {len(activos)} negocios activos: indica --negocio-id. Disponibles: {disponibles}.")
+
+
 async def main(argv: list[str] | None = None) -> dict:
     args = _argumentos(argv)
     await esperar_base_de_datos()
+    args.negocio_id = resolver_negocio_id(args.negocio_id, await listar_negocios())
     if args.desactivar:
         resultado = await plantilla_retomar.configurar_plantilla(args.negocio_id, "", args.idioma, args.cuerpo)
     elif args.nombre is not None:
