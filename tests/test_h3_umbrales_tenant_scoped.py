@@ -80,6 +80,9 @@ async def test_elegir_asesor_automatico_respeta_umbral_por_negocio():
     nivel que el umbral DE ESE NEGOCIO exige — no el de otro."""
     negocio_a = await _negocio("h3-umb-c3")
     negocio_b = await _negocio("h3-umb-c4")
+    for negocio in (negocio_a, negocio_b):  # elegir_asesor_automatico respeta el horario de atención
+        for dia in range(7):
+            await mem.guardar_horario_atencion(negocio["id"], dia, True, "00:00", "23:59")
     await mem.crear_producto(
         {"tipo": "terma", "sub_tipo": "a gas", "marca": "MarcaA", "descripcion": "Terma A", "precio": "2000"},
         autor="test", negocio_id=negocio_a["id"],

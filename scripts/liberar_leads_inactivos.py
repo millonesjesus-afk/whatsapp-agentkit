@@ -14,6 +14,9 @@ Cuando el cliente vuelva a escribir, esa Conversation ya tiene un asesor
 (el rotado, o ninguno si se liberó) y el flujo normal de agent/main.py se
 encarga solo.
 
+2026-10-07: este mismo Cron también reparte la cola de leads derivados SIN asesor cuando el negocio abre
+(agent/asignacion.py::asignar_cola_pendiente_al_abrir).
+
 Ver agent/memory.py::listar_leads_para_rotar_o_liberar y
 agent/asignacion.py::rotar_leads_inactivos para la lógica real y el
 porqué completo — este script es solo el punto de entrada que Railway
@@ -38,7 +41,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from scripts._cron import ejecutar_cron  # latido: ver scripts/_cron.py
 
 from agent.memory import esperar_base_de_datos
-from agent.asignacion import ejecutar_ciclo_de_rotacion
+from agent.asignacion import ejecutar_ciclo_de_rotacion, asignar_cola_pendiente_al_abrir
 
 INTERVALO_MINUTOS = 5
 UMBRAL_ROTACION_MINUTOS = 30
@@ -56,6 +59,20 @@ async def main() -> None:
         print(f"Pasaron a la cola de supervisión {len(escalados)} lead(s) que ningún asesor atendió: {', '.join(escalados)}")
     if not rotados and not escalados:
         print("Ningún lead rotó ni pasó a supervisión en esta corrida.")
+
+    # 2026-10-07 (Fase 1 de la política de asignación): un lead derivado con el negocio cerrado queda sin
+    # asesor y con Gabi activa; apenas el negocio abre se reparte acá, primero el que antes cierra su
+    # ventana de 24 h de WhatsApp. Va DESPUÉS de la rotación: los que esta acaba de pasar a supervisión
+    # ya no están en la cola.
+    cola = await asignar_cola_pendiente_al_abrir()
+    asignados, pendientes = cola["asignados"], cola["pendientes"]
+    if asignados:
+        print(f"Cola al abrir: asignó {len(asignados)} lead(s) derivado(s) sin asesor: "
+              + ", ".join(f"{tel}->{asesor}" for tel, asesor in asignados))
+    else:
+        print("Cola al abrir: asignó 0 lead(s).")
+    if pendientes:
+        print(f"Quedan {pendientes} lead(s) derivado(s) esperando asesor (tope por corrida o sin asesores disponibles).")
 
 
 if __name__ == "__main__":

@@ -661,7 +661,7 @@ async def test_un_sondeo_que_revienta_nunca_rompe_el_mensaje(monkeypatch):
 
 def test_el_origen_del_modo_sin_ia_es_esencial_agrupa_60_minutos_y_esta_exento_del_tope():
     assert envios.ORIGENES["gabi_respaldo_sin_ia"] == {"esencial": True, "agrupar_minutos": 60, "exento_tope": True}
-    assert len(envios.ORIGENES) == 10
+    assert len(envios.ORIGENES) >= 11 and "plantilla_automatica" in envios.ORIGENES
 
 
 async def test_la_opcion_b_con_tope_cero_frena_a_gabi_pero_no_al_aviso_del_modo_sin_ia():

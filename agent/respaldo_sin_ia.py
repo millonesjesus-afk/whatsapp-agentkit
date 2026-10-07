@@ -73,7 +73,9 @@ async def elegir_asesor_para_modo_sin_ia(negocio_id: str | None, interes: str | 
     if not asesores:
         return None
     if any(a.get("disponible") for a in asesores):
-        elegido = await elegir_asesor_automatico(interes or "", negocio_id)
+        # respetar_horario=False: este modo tiene su propia regla fuera de horario (ver arriba) y no
+        # debe cambiar por la política de asignación del flujo normal (2026-10-07).
+        elegido = await elegir_asesor_automatico(interes or "", negocio_id, respetar_horario=False)
         if elegido:
             return elegido
     cargas = [(await contar_leads_activos(a["username"]), a.get("nombre") or "", a["username"]) for a in asesores]

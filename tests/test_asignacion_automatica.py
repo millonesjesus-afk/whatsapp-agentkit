@@ -46,6 +46,7 @@ async def _lead_asignado(telefono: str, negocio_id: str, canal_id: int, asesor: 
 
 async def test_no_elige_asesor_desactivado_aunque_siga_disponible():
     negocio = await mem.crear_negocio("Negocio Asignacion", "asig-1")
+    await _horario_siempre_abierto(negocio["id"])  # elegir_asesor_automatico respeta el horario de atención
     await mem.crear_usuario("ase_activo_asig1", "pw12345", "Asesor Activo", "asesor", negocio["id"])
     await mem.crear_usuario("ase_inactivo_asig1", "pw12345", "Asesor Inactivo", "asesor", negocio["id"])
     # Se desactiva la cuenta (Equipo) SIN tocar `disponible` — reproduce
@@ -64,6 +65,7 @@ async def test_no_elige_asesor_desactivado_aunque_siga_disponible():
 
 async def test_no_hay_candidatos_si_el_unico_disponible_esta_desactivado():
     negocio = await mem.crear_negocio("Negocio Asignacion Solo", "asig-2")
+    await _horario_siempre_abierto(negocio["id"])
     await mem.crear_usuario("ase_unico_asig2", "pw12345", "Asesor Único", "asesor", negocio["id"])
     await mem.toggle_usuario_activo("ase_unico_asig2", negocio["id"])
 
@@ -73,6 +75,7 @@ async def test_no_hay_candidatos_si_el_unico_disponible_esta_desactivado():
 
 async def test_elegir_asesor_automatico_excluye_al_pedido():
     negocio = await mem.crear_negocio("Negocio Asignacion Excluir", "asig-3")
+    await _horario_siempre_abierto(negocio["id"])
     await mem.crear_usuario("ase_a_asig3", "pw12345", "Asesor A", "asesor", negocio["id"])
     await mem.crear_usuario("ase_b_asig3", "pw12345", "Asesor B", "asesor", negocio["id"])
 

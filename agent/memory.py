@@ -2233,8 +2233,18 @@ async def listar_conversaciones_activas(
                 prefijo = "Tú: " if role != "user" else ""
                 ultimo_mensaje_por_conv[conv_id] = f"{prefijo}{texto}"[:140]
 
+        # Q3 (2026-10-07) — lo que el cliente escribió DESPUÉS de un cierre
+        # definitivo ("ok", "gracias", una reacción): se queda en la conversación
+        # cerrada, NO cuenta como pendiente (no hay nada que contestar) y la fila
+        # lo expone aparte (`respondio_tras_cierre_en`, `mensajes_tras_cierre`)
+        # para el chip pasivo del frontend. Una consulta en lote, sin N+1.
+        tras_cierre_por_conv = await _resumen_tras_cierre(session, {
+            c.id: c.cerrado_definitivamente_en for c, _, _ in filas_crudas if c.cerrado_definitivamente_en is not None
+        })
+
         filas = []
         for conversation, contact, opportunity in filas_crudas:
+            tras_cierre = tras_cierre_por_conv.get(conversation.id)
             filas.append({
                 "id": conversation.id, "telefono": contact.telefono,
                 "version": conversation.version,
@@ -2249,8 +2259,13 @@ async def listar_conversaciones_activas(
                 "creado": iso_utc(conversation.creado),
                 "fecha_agendada": opportunity.fecha_agendada.isoformat() if opportunity and opportunity.fecha_agendada else None,
                 "visto_asesor": conversation.visto_asesor,
-                "mensajes_pendientes": pendientes_por_conv.get(conversation.id, 0),
+                "mensajes_pendientes": max(
+                    0, pendientes_por_conv.get(conversation.id, 0) - (tras_cierre["descontar_pendientes"] if tras_cierre else 0),
+                ),
                 "ultimo_mensaje": ultimo_mensaje_por_conv.get(conversation.id),
+                "cerrado_definitivamente_en": iso_utc(conversation.cerrado_definitivamente_en),
+                "respondio_tras_cierre_en": iso_utc(tras_cierre["ultimo_en"]) if tras_cierre else None,
+                "mensajes_tras_cierre": tras_cierre["mensajes"] if tras_cierre else 0,
             })
         return filas, total
 
@@ -5718,8 +5733,296 @@ def es_probable_cierre(texto: str | None) -> bool:
     return all(p in permitidas for p in palabras) and any(p in _PALABRAS_NUCLEO_CIERRE for p in palabras)
 
 
+# ── Cierre de cortesía tras un cierre definitivo (Q3, 2026-10-07) ────────
+#
+# Caso real (Mercy 51939567302): la supervisora cerró definitivamente un caso
+# y 28 s después la cliente contestó "Oh ya ok" al último mensaje del asesor.
+# DR-4 abrió un ciclo nuevo, borró el resultado, liberó la asignación y Gabi
+# respondió largo. Un mensaje de pura cortesía NO debe reabrir un caso ya
+# cerrado: se guarda en la conversación cerrada y nadie recibe aviso.
+#
+# `es_cierre_cortesia` es una función PURA y deliberadamente más estricta que
+# `es_probable_cierre` (que solo etiqueta en Inicio y no se toca): lista
+# cerrada de palabras, sin verbos, sin "sí/dale/claro/no/entonces/mañana". Todo
+# lo dudoso cae en False = se reabre como siempre (falla hacia reabrir).
+
+_EMOJIS_CORTESIA = "👍🙏👌🙌😊😉✅🤝👏❤"
+_MARCA_EMOJI_CORTESIA = "xemojix"
+_CORTESIA_GRATITUD = frozenset({"gracias"})
+_CORTESIA_GRATITUD_MODIFICADORES = frozenset({"muchas", "mil", "infinitas"})
+_CORTESIA_ACUSE = frozenset({
+    "ok", "okay", "okey", "oki", "listo", "lista", "vale", "perfecto", "perfecta", "entendido", "entendida",
+    "genial", "excelente", "ya", "oh", "ah", "aja", "pe",
+})
+_CORTESIA_RELLENO = frozenset({
+    "por", "la", "el", "su", "tu", "info", "informacion", "ayuda", "atencion", "todo", "de", "nada", "igualmente",
+    "saludos", "buen", "buena", "buenos", "buenas", "dia", "dias", "tarde", "tardes", "noche", "noches", "bien",
+    "hasta", "luego", "quedo", "atento", "atenta",
+})
+_CORTESIA_PALABRAS_VALIDAS = (
+    _CORTESIA_GRATITUD | _CORTESIA_GRATITUD_MODIFICADORES | _CORTESIA_ACUSE | _CORTESIA_RELLENO
+    | {_MARCA_EMOJI_CORTESIA}
+)
+_LARGO_MAXIMO_CIERRE_CORTESIA = 40
+# Máximo de mensajes de cierre que se absorben por cada cierre definitivo; el siguiente reabre.
+TOPE_CIERRES_DE_CORTESIA = 5
+_RE_URL_CORTESIA = re.compile(r"https?://|www\.|\.(com|pe|net|org|io|me)\b", re.IGNORECASE)
+
+
+def _normalizar_cortesia(texto: str) -> str:
+    """Minúsculas, sin tildes, emojis de cortesía como marca, sin signos y con
+    las letras repetidas colapsadas ("graciass" -> "gracias", "okk" -> "ok")."""
+    t = unicodedata.normalize("NFKD", texto.lower())
+    t = "".join(c for c in t if not unicodedata.combining(c))
+    t = re.sub("[️\U0001F3FB-\U0001F3FF]", "", t)  # selector de variación y tonos de piel
+    t = re.sub(f"[{_EMOJIS_CORTESIA}]", f" {_MARCA_EMOJI_CORTESIA} ", t)
+    t = re.sub(r"[^\w\s]|_", " ", t)
+    return re.sub(r"([a-z])\1+", r"\1", t)
+
+
+def nivel_cierre_cortesia(texto: str | None) -> str | None:
+    """"A" (solo gratitud o emoji de cortesía: "gracias", "🙏"), "B" (con un
+    acuse: "ok", "listo", "oh ya ok"…) o None si NO es un cierre de cortesía.
+    Reglas (todas obligatorias): <= 40 caracteres, una sola línea, sin "?"/"¿",
+    sin dígitos ni URL, todas las palabras en la lista cerrada y al menos una
+    de gratitud ("gracias"), de acuse o un emoji de cortesía."""
+    t = (texto or "").strip()
+    if not t or len(t) > _LARGO_MAXIMO_CIERRE_CORTESIA:
+        return None
+    if "?" in t or "¿" in t or "\n" in t or "\r" in t or re.search(r"\d", t) or _RE_URL_CORTESIA.search(t):
+        return None
+    tokens = _normalizar_cortesia(t).split()
+    if not tokens or any(p not in _CORTESIA_PALABRAS_VALIDAS for p in tokens):
+        return None
+    hay_acuse = any(p in _CORTESIA_ACUSE for p in tokens)
+    hay_gratitud = any(p in _CORTESIA_GRATITUD for p in tokens)
+    hay_emoji = _MARCA_EMOJI_CORTESIA in tokens
+    if not (hay_acuse or hay_gratitud or hay_emoji):
+        return None
+    return "B" if hay_acuse else "A"
+
+
+def es_cierre_cortesia(texto: str | None) -> bool:
+    """True si el texto es un mensaje de cierre de cortesía (ver
+    `nivel_cierre_cortesia`). NO decide si se absorbe: eso lo hace
+    `evaluar_cierre_cortesia` mirando el contexto del caso cerrado."""
+    return nivel_cierre_cortesia(texto) is not None
+
+
+def es_mensaje_que_no_reabre(contenido: str | None) -> bool:
+    """Reacción ("Reaccionó con 👍") o cierre de cortesía: lo único que, con el
+    caso cerrado definitivamente, queda en la conversación cerrada sin
+    reabrirla (no cuenta como "pendiente" en la Bandeja ni en Inicio)."""
+    return (contenido or "").startswith(PREFIJO_REACCION) or es_cierre_cortesia(contenido)
+
+
+def _norm_contexto(texto: str | None) -> str:
+    t = unicodedata.normalize("NFKD", (texto or "").lower())
+    return "".join(c for c in t if not unicodedata.combining(c))
+
+
+_RE_COMPROMISO_SALIENTE = re.compile(
+    r"\b\d{1,2}(:\d\d)?\s?(am|pm|a\.\s?m\.?|p\.\s?m\.?|h|hrs?)\b|\b\d{1,2}:\d\d\b|\ba las? \d"
+    r"|\bmanana\b|\bhoy a las\b|\b(lunes|martes|miercoles|jueves|viernes|sabado|domingo)\b"
+    r"|\besta (tarde|noche|manana)\b|\bmas tarde\b"
+    r"|\b(envi\w*|pas[ae]\w*|confirm\w*|avis\w*|mand\w*|compart\w*|adjunt\w*|brind\w*|proporcion\w*"
+    r"|necesit\w*|indic\w*|dime|dame|cuent\w*|llam\w*|dni|foto\w*|documento\w*|voucher|comprobante)\b"
+)
+
+
+def saliente_deja_algo_pendiente(texto: str | None) -> bool:
+    """True si el último mensaje saliente cierra con una pregunta (C2: "?" o "¿"
+    en sus últimos ~160 caracteres) o contiene un compromiso o una petición
+    pendiente (C3: horario, "mañana", día de la semana, "envíame", "DNI",
+    "foto"…). Con cualquiera de las dos un "ok" del cliente ya es una respuesta
+    real y el caso se reabre. Tiende a decir True ante la duda."""
+    cola = (texto or "")[-160:]
+    if "?" in cola or "¿" in cola:
+        return True
+    return _RE_COMPROMISO_SALIENTE.search(_norm_contexto(texto)) is not None
+
+
+def _es_saliente_valido(mensaje: "Mensaje") -> bool:
+    return mensaje.role in ("assistant", "asesor") and (mensaje.estado_envio or "") != "fallido"
+
+
+async def _resumen_tras_cierre(session, cierres: dict[str, datetime]) -> dict[str, dict]:
+    """Por conversación con cierre definitivo: lo que el CLIENTE escribió DESPUÉS
+    de ese cierre (los mensajes `user` posteriores). Una consulta en lote para
+    toda la lista (sin N+1). Devuelve `{conversation_id: {"mensajes": n,
+    "ultimo_en": datetime|None, "descontar_pendientes": k}}` donde
+    `descontar_pendientes` son los que la Bandeja NO debe contar como
+    pendientes (reacciones y cierres de cortesía posteriores al último
+    mensaje que no es del cliente)."""
+    if not cierres:
+        return {}
+    ids = list(cierres)
+    ultimo_no_cliente = {
+        cid: ts for cid, ts in (await session.execute(
+            select(Mensaje.conversation_id, func.max(Mensaje.timestamp))
+            .where(Mensaje.conversation_id.in_(ids), Mensaje.role != "user")
+            .group_by(Mensaje.conversation_id)
+        )).all()
+    }
+    resumen: dict[str, dict] = {}
+    filas = (await session.execute(
+        select(Mensaje.conversation_id, Mensaje.content, Mensaje.timestamp)
+        .where(Mensaje.conversation_id.in_(ids), Mensaje.role == "user")
+    )).all()
+    for cid, contenido, ts in filas:
+        if ts is None or ts <= cierres[cid]:
+            continue
+        r = resumen.setdefault(cid, {"mensajes": 0, "ultimo_en": None, "descontar_pendientes": 0})
+        r["mensajes"] += 1
+        if r["ultimo_en"] is None or ts > r["ultimo_en"]:
+            r["ultimo_en"] = ts
+        pendiente_desde = ultimo_no_cliente.get(cid)
+        if es_mensaje_que_no_reabre(contenido) and (pendiente_desde is None or ts > pendiente_desde):
+            r["descontar_pendientes"] += 1
+    return resumen
+
+
+async def evaluar_cierre_cortesia(
+    telefono: str, negocio_id: str, texto: str | None, tipo: str = "texto", *,
+    tiene_referral: bool = False, interactivo_id: str = "", contexto_id: str = "",
+) -> dict | None:
+    """SOLO LECTURA. ¿Este mensaje entrante debe quedarse en la conversación
+    cerrada definitivamente, SIN abrir un ciclo nuevo (DR-4), sin despertar a
+    Gabi y sin avisar a nadie? Devuelve el contexto (`conversation_id`,
+    `cierre_en`, `nivel`, `numero_absorbido`, `ultimo_saliente_id`) o None =
+    seguir por el camino de siempre. TODO fallo se resuelve hacia None.
+
+    `tipo`: "texto" (mensaje del cliente: exige cierre de cortesía + C1-C4 +
+    tope), "reaccion" o "echo" (el asesor escribió desde el celular): con el
+    cierre vigente nunca abren ciclo, sin más filtros.
+
+    Aplica con cierre definitivo vigente de CUALQUIER resultado (incluido
+    vendido). El cierre se toma de la Conversation activa o del Lead, pero solo
+    si es posterior a la creación de esa Conversation (uno viejo y sobrante de
+    un ciclo anterior no cuenta).
+
+    Filtro de contexto (tipo "texto") sobre el ÚLTIMO mensaje saliente
+    (assistant o asesor, sin envío fallido) de la Conversation cerrada, o el
+    mensaje que el cliente citó (`contexto_id`) si se puede resolver:
+      C1 debe existir; C2 no termina en pregunta; C3 sin compromiso ni petición
+      pendiente; C4 nadie (humano o Gabi) escribió DESPUÉS del cierre.
+    Nivel A (solo gratitud/emoji) exige C1 y C4; Nivel B (con acuse: "ok",
+    "listo"…) exige además C2 y C3. Tope: `TOPE_CIERRES_DE_CORTESIA` mensajes
+    absorbidos por cierre; el siguiente reabre."""
+    if tipo not in ("texto", "reaccion", "echo"):
+        return None
+    nivel = None
+    if tipo == "texto":
+        if tiene_referral or interactivo_id:
+            return None
+        nivel = nivel_cierre_cortesia(texto)
+        if nivel is None:
+            return None
+    async with async_session() as session:
+        contact = await _obtener_contact(session, negocio_id, telefono)
+        if contact is None:
+            return None
+        conversation = await _obtener_conversation_activa(session, contact.id)
+        if conversation is None or conversation.negocio_id != negocio_id:
+            return None
+        lead = await session.get(Lead, telefono)
+        cierre_lead = lead.cerrado_definitivamente_en if lead is not None and lead.negocio_id in (None, negocio_id) else None
+        cierre = _cierre_vigente(conversation.cerrado_definitivamente_en, cierre_lead)
+        if cierre is None:
+            return None
+        if conversation.creado is not None and conversation.creado > cierre:
+            return None  # cierre sobrante de un ciclo anterior: esta conversación es posterior
+
+        salientes = (
+            Mensaje.conversation_id == conversation.id, Mensaje.negocio_id == negocio_id,
+            Mensaje.role.in_(("assistant", "asesor")), func.coalesce(Mensaje.estado_envio, "") != "fallido",
+        )
+        ultimo_saliente = (await session.execute(
+            select(Mensaje).where(*salientes).order_by(Mensaje.timestamp.desc(), Mensaje.id.desc()).limit(1)
+        )).scalar_one_or_none()
+
+        if tipo != "texto":
+            return {
+                "conversation_id": conversation.id, "cierre_en": cierre, "nivel": None, "numero_absorbido": None,
+                "ultimo_saliente_id": ultimo_saliente.id if ultimo_saliente else None,
+            }
+
+        # Tope: mensajes del cliente (no reacciones) ya absorbidos tras este cierre.
+        previos = (await session.execute(
+            select(func.count(Mensaje.id)).where(
+                Mensaje.conversation_id == conversation.id, Mensaje.negocio_id == negocio_id,
+                Mensaje.role == "user", Mensaje.timestamp > cierre,
+                ~func.coalesce(Mensaje.content, "").startswith(PREFIJO_REACCION),
+            )
+        )).scalar_one()
+        if previos >= TOPE_CIERRES_DE_CORTESIA:
+            return None
+
+        # C4: nadie escribió después del cierre.
+        escribio_despues = (await session.execute(
+            select(Mensaje.id).where(*salientes, Mensaje.timestamp > cierre).limit(1)
+        )).first()
+        if escribio_despues is not None:
+            return None
+
+        # Contexto: el mensaje que el cliente citó, si se puede resolver; si no, el último saliente.
+        contexto = ultimo_saliente
+        if contexto_id:
+            citado = (await session.execute(
+                select(Mensaje).where(
+                    Mensaje.conversation_id == conversation.id, Mensaje.negocio_id == negocio_id,
+                    Mensaje.mensaje_id_meta == contexto_id,
+                ).limit(1)
+            )).scalar_one_or_none()
+            if citado is not None:
+                if not _es_saliente_valido(citado):
+                    return None
+                contexto = citado
+        if contexto is None:
+            return None  # C1
+        if nivel == "B" and saliente_deja_algo_pendiente(contexto.content):
+            return None  # C2/C3
+        return {
+            "conversation_id": conversation.id, "cierre_en": cierre, "nivel": nivel,
+            "numero_absorbido": previos + 1, "ultimo_saliente_id": contexto.id,
+        }
+
+
+async def _inicio_de_espera_por_conversacion(negocio_id: str, conversation_ids: list[str]) -> dict[str, datetime]:
+    """Por conversación: el PRIMER mensaje real del cliente posterior al último mensaje saliente (de Gabi
+    o de una persona; los envíos fallidos y las reacciones no cuentan). Es desde cuándo el cliente está
+    sin respuesta (Atención atrasada, 2026-10-07). Una sola consulta agrupada. Se ancla al último saliente
+    de CUALQUIER rol, no solo al humano: lo que Gabi conversó antes de derivar no es espera de una persona,
+    y contarlo marcaría como "urgente" a un lead derivado hace minutos tras días de charla con Gabi."""
+    if not conversation_ids:
+        return {}
+    no_reaccion = ~func.coalesce(Mensaje.content, "").startswith(PREFIJO_REACCION)
+    ancla = (
+        select(Mensaje.conversation_id.label("cid"), func.max(Mensaje.timestamp).label("ancla"))
+        .where(
+            Mensaje.negocio_id == negocio_id, Mensaje.conversation_id.in_(conversation_ids),
+            Mensaje.role.in_(("assistant", "asesor")), func.coalesce(Mensaje.estado_envio, "") != "fallido", no_reaccion,
+        )
+        .group_by(Mensaje.conversation_id)
+        .subquery()
+    )
+    async with async_session() as session:
+        filas = (await session.execute(
+            select(Mensaje.conversation_id, func.min(Mensaje.timestamp))
+            .outerjoin(ancla, ancla.c.cid == Mensaje.conversation_id)
+            .where(
+                Mensaje.negocio_id == negocio_id, Mensaje.conversation_id.in_(conversation_ids),
+                Mensaje.role == "user", no_reaccion,
+                sa_or(ancla.c.ancla.is_(None), Mensaje.timestamp > ancla.c.ancla),
+            )
+            .group_by(Mensaje.conversation_id)
+        )).all()
+    return {cid: ts for cid, ts in filas if ts is not None}
+
+
 async def listar_clientes_esperando(
     negocio_id: str, asesor: str | None = None, limite: int | None = None, ahora: datetime | None = None,
+    con_desde: bool = True,
 ) -> list[dict]:
     """Clientes que esperan respuesta de una persona (Inicio verdadero).
 
@@ -5741,6 +6044,9 @@ async def listar_clientes_esperando(
     `conversation_id`, `telefono`, `nombre`, `asesor_asignado`, `resultado`,
     `ultimo_mensaje_cliente_en` (UTC naive), `escalado`, `probable_cierre`,
     `ventana_vence_en` (último mensaje + 24 h, UTC naive) y `ventana_abierta`.
+    2026-10-07 (aditivo): `esperando_desde` = el PRIMER mensaje real del cliente que sigue sin
+    respuesta saliente (de Gabi o de una persona) — ver `_inicio_de_espera_por_conversacion`.
+    Con `con_desde=False` no se calcula y `esperando_desde` = `ultimo_mensaje_cliente_en`.
 
     Orden: primero ventana abierta (la que vence antes, primero); luego
     ventanas cerradas (la más reciente primero). Dentro de cada grupo los
@@ -5799,7 +6105,13 @@ async def listar_clientes_esperando(
     ) in filas:
         # Ya gestionado: el cierre definitivo es igual o posterior a lo último
         # que escribió el cliente. Si escribe DESPUÉS del cierre, sí espera.
-        if cierre_cubre_mensaje(_cierre_vigente(cierre_lead, cierre_conversacion), ts):
+        cierre_efectivo = _cierre_vigente(cierre_lead, cierre_conversacion)
+        if cierre_cubre_mensaje(cierre_efectivo, ts):
+            continue
+        # Q3 (2026-10-07): el "ok"/"gracias" que llegó tras un cierre definitivo se
+        # queda en la conversación cerrada y nadie lo espera. Se decide por el
+        # texto (no por una marca) para que funcione también con datos viejos.
+        if cierre_efectivo is not None and es_cierre_cortesia(contenido):
             continue
         vence = ts + timedelta(hours=VENTANA_META_HORAS)
         items.append({
@@ -5809,6 +6121,12 @@ async def listar_clientes_esperando(
             "probable_cierre": es_probable_cierre(contenido),
             "ventana_vence_en": vence, "ventana_abierta": vence > ahora,
         })
+    desde_por_conversacion = (
+        await _inicio_de_espera_por_conversacion(negocio_id, [it["conversation_id"] for it in items])
+        if con_desde and items else {}
+    )
+    for it in items:
+        it["esperando_desde"] = desde_por_conversacion.get(it["conversation_id"]) or it["ultimo_mensaje_cliente_en"]
 
     def _clave(it: dict):
         ts = (it["ultimo_mensaje_cliente_en"] - datetime(1970, 1, 1)).total_seconds()
@@ -6280,6 +6598,14 @@ async def asignar_asesor_a_lead(telefono: str, asesor: str | None, automatico: b
         lead.asesor_asignado = asesor
         lead.visto_asesor = asesor is None
         lead.derivado_en = datetime.utcnow() if (automatico and asesor is not None) else None
+        if automatico and asesor is not None:
+            # 2026-10-07: una asignación automática NUEVA arranca el ciclo de espera de cero. Antes los
+            # contadores quedaban como estuvieran: un lead liberado a mano tras una rotación conservaba
+            # `veces_rotado_espera=1` (al reasignarlo iría directo a supervisión, sin segundo asesor) o
+            # minutos viejos (rotaba antes de los 30 min). `rotar_asignacion_por_inactividad` fija
+            # `veces_rotado_espera=1` DESPUÉS de llamar acá, así que la rotación no se afecta.
+            lead.minutos_espera_asesor = 0
+            lead.veces_rotado_espera = 0
         if asesor is not None:
             lead.escalado_supervision_en = None  # ya tiene dueño: sale de la cola de supervisión
         if automatico:
@@ -6734,6 +7060,59 @@ async def cerrar_lead_definitivamente_via_conversation(conversation_id: str, neg
     return telefono
 
 
+async def reabrir_caso_cerrado(conversation_id: str, negocio_id: str, autor: str) -> str:
+    """Deshace un cierre definitivo (botón "Reabrir caso", Q3 2026-10-07): el
+    cierre pudo ser un error (caso real Mercy: se cerró como "no interesado"
+    aunque la clienta sí quería). Limpia `cerrado_definitivamente_en` en el Lead
+    y en la Conversation y deja el evento `cierre_deshecho` con el autor.
+    CONSERVA el asesor, el resultado (editable después), los mensajes y deja a
+    Gabi como esté: no reasigna, no libera y no responde nada.
+
+    Retorna: "ok"; "no_encontrada" (no existe o es de otro Negocio);
+    "sustituida" (el cliente ya reabrió el caso por su cuenta: hay una
+    Conversation más nueva y esta quedó cerrada — no hay nada que deshacer);
+    "no_cerrada" (el caso ya estaba abierto)."""
+    async with async_session() as session:
+        conversation = await session.get(Conversation, conversation_id)
+        if conversation is None or conversation.negocio_id != negocio_id:
+            return "no_encontrada"
+        if conversation.estado != "activa":
+            return "sustituida"
+        contact = await session.get(Contact, conversation.contact_id)
+        lead = await session.get(Lead, contact.telefono) if contact is not None else None
+        if lead is not None and lead.negocio_id not in (None, negocio_id):
+            lead = None
+        cierre = _cierre_vigente(
+            conversation.cerrado_definitivamente_en, lead.cerrado_definitivamente_en if lead is not None else None,
+        )
+        if cierre is None:
+            return "no_cerrada"
+
+        ahora = datetime.utcnow()
+        resumen = (await _resumen_tras_cierre(session, {conversation.id: cierre})).get(conversation.id)
+        opportunity = await _obtener_opportunity_vigente(session, conversation.id)
+        resultado = (lead.resultado if lead is not None else None) or (opportunity.resultado if opportunity else None)
+        conversation.cerrado_definitivamente_en = None
+        conversation.actualizado = ahora
+        if lead is not None:
+            lead.cerrado_definitivamente_en = None
+            lead.actualizado = ahora
+        session.add(EventoLead(
+            conversation_id=conversation.id, negocio_id=conversation.negocio_id,
+            opportunity_id=opportunity.id if opportunity else None,
+            tipo="cierre_deshecho",
+            descripcion="Reabrió el caso — se deshizo el cierre definitivo; el asesor y el resultado se conservan"[:300],
+            autor=autor,
+            payload={
+                "cierre_en": cierre.isoformat(), "resultado": resultado,
+                "asesor": conversation.asesor_asignado_id,
+                "mensajes_tras_cierre": resumen["mensajes"] if resumen else 0,
+            },
+        ))
+        await session.commit()
+        return "ok"
+
+
 async def cerrar_leads_definitivamente_inactivos(dias: int = 7) -> list[str]:
     """Cierra definitivamente (ver `Lead.cerrado_definitivamente_en`) todo
     lead con asesor asignado, `resultado` ya cerrado (nunca "vendido"), que
@@ -7003,6 +7382,11 @@ async def listar_leads_inactividad_cliente(
         query = select(Lead).where(
             Lead.asesor_asignado.is_(None),
             Lead.pausado_manual.is_(False),
+            # 2026-10-07: un lead YA derivado a un asesor (con o sin asesor asignado todavía) o escalado a
+            # supervisión espera a una persona, no al cliente: no se le manda "¡Hola de nuevo!" ni se cierra
+            # como `sin_respuesta` (eso lo sacaba de la cola de pendientes antes de que alguien lo atendiera).
+            sa_or(Lead.paso_flujo.is_(None), Lead.paso_flujo != "derivado_asesor"),
+            Lead.escalado_supervision_en.is_(None),
             sa_or(Lead.resultado.is_(None), Lead.resultado.notin_(RESULTADOS_CERRADOS)),
         )
         candidatos = (await session.execute(query)).scalars().all()

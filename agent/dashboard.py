@@ -57,7 +57,7 @@ from agent.memory import (
     toggle_usuario_activo, eliminar_usuario,
     listar_campanas, crear_campana, actualizar_campana, contar_opportunities_por_campana, eliminar_campana,
     obtener_campana, obtener_canal_whatsapp, listar_anuncios_detectados, asignar_anuncio_a_campana,
-    listar_atribucion_sin_campana_periodo, cerrar_lead_definitivamente_via_conversation,
+    listar_atribucion_sin_campana_periodo, cerrar_lead_definitivamente_via_conversation, reabrir_caso_cerrado,
     rango_periodo_utc, contar_flujo_periodo, calcular_embudo_comercial, contar_oportunidades_por_asesor,
     distribucion_resultados_periodo, resumen_ventas_periodo, productos_vendidos_periodo,
     cambiar_password, contar_conversations_activas_por_asesor, RESULTADOS_CERRADOS, listar_leads_agendados,
@@ -87,6 +87,7 @@ from agent.meta_timezones import zona_iana_de_meta
 from agent import envios
 from agent import circuito_ia
 from agent import plantilla_retomar
+from agent import atencion_atrasada
 from agent.memory import obtener_estado_ventana
 
 # Paleta de colores para distinguir canales de WhatsApp en el panel — se
@@ -2744,7 +2745,7 @@ async def bandeja_conversaciones(
         ahora = datetime.utcnow()
         es_vista_de_citas = vista in ("citas", "citas_vencidas")
         esperando = [] if es_vista_de_citas else await listar_clientes_esperando(
-            negocio_id, asesor=asesor_filtro, ahora=ahora,
+            negocio_id, asesor=asesor_filtro, ahora=ahora, con_desde=False,
         )
         proximas, vencidas = [], []
         if es_vista_de_citas:
@@ -3205,6 +3206,36 @@ async def conversation_cerrar_definitivamente(
     return await _json_conversation_actualizada(conversation_id, usuario["negocio_id"])
 
 
+@router.post("/conversation/{conversation_id}/reabrir")
+async def conversation_reabrir(
+    conversation_id: str,
+    usuario: dict = Depends(_usuario_actual),
+    _csrf: None = Depends(verificar_csrf),
+):
+    """Botón "Reabrir caso" (Q3, 2026-10-07): deshace un cierre definitivo que
+    fue un error. Mismos permisos que `cerrar-definitivamente` (cualquiera que
+    pueda operar la conversación). Limpia el cierre en Lead y Conversation y
+    CONSERVA asesor, resultado y mensajes; Gabi queda como estaba. 409 si el
+    cierre ya no se puede deshacer porque el cliente reabrió el caso por su
+    cuenta (hay una conversación más nueva) o si el caso ya estaba abierto."""
+    conv = await resolver_conversation_operable(conversation_id, usuario["negocio_id"])
+    if conv is None:
+        raise HTTPException(status_code=404, detail="Conversación no encontrada")
+    _verificar_acceso_conversation(usuario, conv["asesor_asignado"])
+
+    estado = await reabrir_caso_cerrado(conversation_id, usuario["negocio_id"], usuario["nombre"])
+    if estado == "no_encontrada":
+        raise HTTPException(status_code=404, detail="Conversación no encontrada")
+    if estado == "sustituida":
+        raise HTTPException(
+            status_code=409,
+            detail="El cliente ya reabrió este caso por su cuenta: esta conversación quedó en el historial y no hay un cierre que deshacer.",
+        )
+    if estado == "no_cerrada":
+        raise HTTPException(status_code=409, detail="Este caso no está cerrado definitivamente.")
+    return await _json_conversation_actualizada(conversation_id, usuario["negocio_id"])
+
+
 COLUMNAS_EXPORTACION = [
     "telefono", "nombre", "interes", "producto_tipo", "producto_marca", "producto_modalidad",
     "paso_flujo", "estado_conversacion", "resultado", "asesor_asignado", "producto_vendido",
@@ -3390,6 +3421,9 @@ def _item_cliente_esperando(cliente: dict, vista_admin: bool) -> dict:
         "probable_cierre": cliente["probable_cierre"],
         "resultado": cliente.get("resultado"),
     })
+    if cliente.get("atencion") is not None:
+        # Aditivo (2026-10-07, Atención atrasada): {nivel, edad_horas, ventana_restante_horas}.
+        item["atencion"] = cliente["atencion"]
     if vista_admin:
         item["asesor"] = asesor
     return item
@@ -3437,6 +3471,12 @@ async def _zona_accion_datos(negocio_id: str, asesor: str | None, vista_admin: b
     los que están sin asesor / escalados a supervisión."""
     ahora = datetime.utcnow()
     esperando = await listar_clientes_esperando(negocio_id, asesor=asesor, ahora=ahora)
+    # Atención atrasada (2026-10-07): cada cliente esperando trae `atencion` {nivel, edad_horas,
+    # ventana_restante_horas}. Los más graves van primero (orden estable: dentro de un mismo nivel se
+    # conserva el de siempre) para que entren en el tope de ítems de Inicio.
+    await atencion_atrasada.anotar_atencion(negocio_id, esperando, ahora)
+    esperando.sort(key=lambda c: -atencion_atrasada.gravedad(c))
+    atencion_por_telefono = {c["telefono"]: c["atencion"] for c in esperando}
     proximas, vencidas, citas_7_dias, vencidas_antiguas = await _citas_inicio_detalle(negocio_id, asesor, ahora)
 
     escalados: list[dict] = []
@@ -3490,6 +3530,9 @@ async def _zona_accion_datos(negocio_id: str, asesor: str | None, vista_admin: b
         # Extra (no estaba en el contrato original): alimenta el indicador
         # "Citas próximas (7 días)" de la vista Asesor.
         "citas_7_dias": citas_7_dias,
+        # Aditivo (2026-10-07): atencion_atrasada | atencion_urgente | atencion_ultima_llamada (excluyentes),
+        # atencion_total y los dos de la campana (ver `atencion_atrasada.totales_de_atencion`).
+        **atencion_atrasada.totales_de_atencion(esperando, para_campana),
     }
 
     if not pares:
@@ -3504,6 +3547,9 @@ async def _zona_accion_datos(negocio_id: str, asesor: str | None, vista_admin: b
     for fuente, item in pares:
         if not item["conversation_id"]:
             item["conversation_id"] = conversation_ids.get(fuente["telefono"])
+        # Un escalado o sin asesor que además espera respuesta también muestra su antigüedad.
+        if "atencion" not in item and item["categoria"] in ("escalado", "sin_asesor") and fuente["telefono"] in atencion_por_telefono:
+            item["atencion"] = atencion_por_telefono[fuente["telefono"]]
         items.append(item)
     return {"vacio": False, "mensaje_vacio": None, "items": items, "totales": totales}
 

@@ -566,7 +566,7 @@ def test_las_rutas_nuevas_exigen_csrf_solo_las_que_escriben():
 
 def test_el_origen_nuevo_es_no_esencial_con_categoria_configurable():
     assert envios.ORIGENES["asesor_plantilla"] == {"esencial": False, "modo": "siempre", "categoria_plantilla": "marketing"}
-    assert len(envios.ORIGENES) == 10
+    assert len(envios.ORIGENES) >= 11 and "plantilla_automatica" in envios.ORIGENES
 
 
 # ═══ Estado en el detalle y en la ruta de la conversación ═══════════════════

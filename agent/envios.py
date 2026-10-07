@@ -58,6 +58,13 @@ ORIGENES: dict[str, dict] = {
     # porque la decide una persona, no un proceso automático; el tope sigue frenándola. Categoría supuesta
     # "marketing" (la más cara) hasta que se configure `envios_categoria_asesor_plantilla`.
     "asesor_plantilla": {"esencial": False, "modo": "siempre", "categoria_plantilla": "marketing"},
+    # Plantilla AUTOMÁTICA de la "zona muerta" (2026-10-07, apagada por defecto): sale de
+    # scripts/plantilla_zona_muerta.py cuando la ventana de 24 h de un cliente derivado se cierra antes de que
+    # el negocio vuelva a abrir. Mismo costo supuesto que la del asesor ("marketing", la más cara hasta que se
+    # configure `envios_categoria_plantilla_automatica`), pero con origen propio para verla aparte en Uso y
+    # envíos y poder frenarla con su propio interruptor. No repite al mismo cliente en 12 h (red de seguridad
+    # además de la marca `plantilla_auto_enviada` del script).
+    "plantilla_automatica": {"esencial": False, "modo": "siempre", "categoria_plantilla": "marketing", "agrupar_minutos": 720},
 }
 
 

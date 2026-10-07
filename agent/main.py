@@ -28,6 +28,7 @@ from agent.memory import (
     resolver_conversation_activa, medir_latencia_db, obtener_conversation_activa_de_telefono,
     enrutar_posventa_si_corresponde, registrar_estado_mensaje_meta,
     existe_mensaje_con_id_meta, liberar_marca_mensaje_procesado,
+    evaluar_cierre_cortesia, registrar_evento_lead,
 )
 from agent.memory import (
     es_texto_de_error_tecnico, es_texto_de_reenganche_automatico, textos_de_error_tecnico_conocidos,
@@ -408,6 +409,89 @@ def _debe_limpiar_sin_respuesta(lead: dict | None) -> bool:
     if not lead or lead.get("resultado") != "sin_respuesta":
         return False
     return not lead.get("asesor_asignado") and not lead.get("pausado_manual")
+
+
+async def _absorber_si_cierre_sin_reabrir(msg, canal: dict) -> bool:
+    """Q3 (2026-10-07) — con el caso cerrado DEFINITIVAMENTE, tres cosas entran
+    pero NO abren un ciclo nuevo (DR-4), no despiertan a Gabi y no avisan a nadie:
+      · un cierre de cortesía del cliente ("ok", "oh ya ok", "gracias") que
+        pasa el filtro de contexto y el tope de `evaluar_cierre_cortesia`;
+      · una reacción ("Reaccionó con 👍");
+      · el echo de coexistencia (un asesor escribió desde su celular). El echo
+        queda en la conversación cerrada SIN tratarse como reapertura del
+        cliente; cuenta como contacto humano (`via_app`: lo ven `humano_atendio`
+        y el filtro C4, así que un "ok" posterior ya reabre) y conserva la
+        pausa de Gabi si nadie estaba atendiendo, igual que el echo de siempre.
+    Devuelve True si el mensaje quedó atendido (el llamador hace `return`) y
+    False para seguir por el camino de siempre. FAIL-OPEN: cualquier error
+    ANTES de guardar el mensaje devuelve False; después de guardarlo nunca se
+    vuelve atrás (el camino normal lo duplicaría). Adjuntos, audios, `referral`
+    y botones jamás se absorben: reabren como hoy."""
+    negocio_id = canal.get("negocio_id")
+    es_echo = msg.tipo_evento == "echo"
+    es_reaccion = (not es_echo) and msg.tipo == "reaction"
+    es_texto = (not es_echo) and msg.tipo == "text" and bool(msg.texto)
+    if not (es_echo or es_reaccion or es_texto):
+        return False
+    tipo = "echo" if es_echo else "reaccion" if es_reaccion else "texto"
+    try:
+        contexto = await evaluar_cierre_cortesia(
+            msg.telefono, negocio_id, msg.texto, tipo,
+            tiene_referral=bool(msg.referral), interactivo_id=msg.interactivo_id or "",
+            contexto_id=msg.contexto_id or "",
+        )
+    except Exception:
+        logger.exception(f"No se pudo evaluar el cierre de cortesía de {msg.telefono} — se sigue por el camino normal")
+        return False
+    if contexto is None:
+        return False
+
+    try:
+        if es_echo:
+            guardado = await servicio_conversacion.guardar_mensaje(
+                msg.telefono, "assistant", msg.texto if msg.texto else f"[{msg.tipo}]", negocio_id=negocio_id,
+                via_app=True, mensaje_id_meta=msg.mensaje_id or None,
+            )
+        elif es_reaccion and not msg.texto:
+            guardado = None  # el cliente quitó su reacción: no hay nada que guardar
+        else:
+            guardado = await servicio_conversacion.guardar_mensaje(
+                msg.telefono, "user", msg.texto, negocio_id=negocio_id, mensaje_id_meta=msg.mensaje_id or None,
+            )
+    except Exception:
+        logger.exception(f"No se pudo guardar el mensaje de {msg.telefono} tras el cierre — se sigue por el camino normal")
+        return False
+
+    if es_echo:
+        try:
+            lead_actual = await obtener_lead(msg.telefono, negocio_id=negocio_id)
+            if not (lead_actual and lead_actual.get("asesor_asignado")):
+                await pausar_gabi_manual(msg.telefono)
+        except Exception:
+            logger.exception(f"No se pudo pausar a Gabi tras el echo de {msg.telefono} en un caso cerrado")
+    elif es_texto:
+        try:
+            await registrar_evento_lead(
+                msg.telefono, tipo="mensaje_de_cierre_sin_reabrir",
+                descripcion=f"El cliente escribió «{msg.texto[:80]}» tras el cierre — el caso sigue cerrado"[:300],
+                autor=None,
+                payload={
+                    "mensaje_id": guardado["id"] if guardado else None, "texto": msg.texto[:80],
+                    "cierre_en": contexto["cierre_en"].isoformat(), "numero_absorbido": contexto["numero_absorbido"],
+                    "ultimo_saliente_id": contexto["ultimo_saliente_id"],
+                },
+            )
+        except Exception:
+            logger.exception(f"No se pudo registrar el evento de cierre sin reabrir de {msg.telefono}")
+    logger.info(
+        f"Mensaje de {msg.telefono} tras cierre definitivo ({tipo}) guardado sin reabrir el caso, sin Gabi y sin avisos"
+    )
+    if guardado is not None:
+        try:
+            await gestor_conexiones.emitir_mensaje_nuevo(guardado["conversation_id"])
+        except Exception:
+            logger.exception(f"No se pudo avisar al panel del mensaje de {msg.telefono} tras el cierre")
+    return True
 
 
 async def _registrar_referral_seguro(msg, canal: dict | None, texto: str = "") -> None:
@@ -858,6 +942,15 @@ async def webhook_handler(request: Request):
                     negocio_id=canal.get("negocio_id") if canal else None,
                 )
                 if canal and canal.get("negocio_id"):
+                    # Q3 (2026-10-07) — con el caso cerrado definitivamente, un
+                    # "ok"/"gracias", una reacción o un echo del asesor se quedan
+                    # en la conversación cerrada: NO abren ciclo nuevo (DR-4), no
+                    # despiertan a Gabi ni avisan a nadie. Va ANTES de
+                    # resolver_conversation_activa; la idempotencia de Meta y el
+                    # dedupe por wamid ya corrieron arriba. Fail-open.
+                    if await _absorber_si_cierre_sin_reabrir(msg, canal):
+                        return
+
                     # Gate 5.3 — punto de entrada único para Contact/
                     # Conversation/Opportunity (Diseño Técnico Gate 5.3 §10).
                     # Aplica DR-4 acá mismo: si la Conversation activa está

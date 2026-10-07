@@ -24,13 +24,30 @@ DESTINATARIOS = [
 ]
 
 
-async def notificar_lead_derivado(telefono: str, lead: dict, ultimo_mensaje: str) -> bool:
+async def _negocio_cerrado_ahora(negocio_id: str | None) -> bool:
+    """True si el negocio está fuera de su horario de atención ahora. Nunca lanza: ante cualquier
+    duda (sin negocio, base caída) devuelve False y el correo usa el texto genérico."""
+    if not negocio_id:
+        return False
+    try:
+        from agent.tools import obtener_estado_horario_atencion  # import tardío: tools importa de memory
+        return not (await obtener_estado_horario_atencion(negocio_id))["dentro_de_horario"]
+    except Exception:
+        logger.exception("No se pudo consultar el horario de atención para el correo de derivación")
+        return False
+
+
+async def notificar_lead_derivado(telefono: str, lead: dict, ultimo_mensaje: str, fuera_de_horario: bool | None = None) -> bool:
     """
     Envía un correo al equipo comercial avisando que un cliente está listo
     para un asesor. El asunto y el cuerpo dejan explícito si quedó asignado
     automáticamente o si nadie estaba disponible — para que un supervisor
     sepa de inmediato si necesita asignarlo manualmente, en vez de asumir
     que ya lo está atendiendo alguien.
+
+    `fuera_de_horario` (2026-10-07): si el lead quedó sin asesor, dice si fue porque el negocio estaba
+    cerrado (el lead espera al primer asesor que abra turno) o porque nadie estaba conectado dentro
+    del horario. Si no se pasa, se calcula con el horario de atención del negocio del lead.
     """
     if not RESEND_API_KEY or not DESTINATARIOS:
         logger.warning("RESEND_API_KEY o destinatarios no configurados; no se envía notificación")
@@ -44,12 +61,22 @@ async def notificar_lead_derivado(telefono: str, lead: dict, ultimo_mensaje: str
         asunto = f"Nuevo lead Gaso+ asignado a {asesor_asignado} — {nombre}"
         aviso_asignacion = f"<p style='color:#15803d'><strong>✅ Asignado automáticamente a:</strong> {asesor_asignado}</p>"
     else:
-        asunto = f"⚠️ Lead Gaso+ SIN ASESOR DISPONIBLE — {nombre}"
-        aviso_asignacion = (
-            "<p style='color:#b91c1c'><strong>⚠️ Ningún asesor estaba disponible</strong> — "
-            "este lead quedó SIN asignar. Se le asignará automáticamente al primer asesor que "
-            "se conecte, o puedes asignarlo tú manualmente desde el panel ahora mismo.</p>"
-        )
+        if fuera_de_horario is None:
+            fuera_de_horario = await _negocio_cerrado_ahora(lead.get("negocio_id"))
+        if fuera_de_horario:
+            asunto = f"⚠️ Lead Gaso+ fuera de horario, sin asesor en turno — {nombre}"
+            aviso_asignacion = (
+                "<p style='color:#b91c1c'><strong>⚠️ No hay asesor en turno</strong> — el cliente escribió "
+                "fuera del horario de atención y este lead quedó SIN asignar. Se asignará al primer "
+                "asesor que abra turno, o puedes asignarlo tú manualmente desde el panel ahora mismo.</p>"
+            )
+        else:
+            asunto = f"⚠️ Lead Gaso+ SIN ASESOR DISPONIBLE — {nombre}"
+            aviso_asignacion = (
+                "<p style='color:#b91c1c'><strong>⚠️ Ningún asesor estaba disponible</strong> — "
+                "este lead quedó SIN asignar. Se le asignará automáticamente al primer asesor que "
+                "se conecte, o puedes asignarlo tú manualmente desde el panel ahora mismo.</p>"
+            )
 
     cuerpo_html = f"""
         <h2>Nuevo lead listo para atención de un asesor</h2>

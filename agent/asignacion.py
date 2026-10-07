@@ -9,11 +9,12 @@ El supervisor/admin siempre puede reasignar manualmente después.
 """
 
 import logging
-from agent.tools import buscar_productos
+from datetime import datetime, timedelta
+from agent.tools import buscar_productos, obtener_estado_horario_atencion
 from agent.memory import (
     listar_asesores, contar_leads_activos, listar_leads_esperando_asesor, asignar_asesor_a_lead,
     obtener_configuracion, ejecutar_ciclo_de_espera, rotar_asignacion_por_inactividad,
-    enviar_a_cola_de_supervision,
+    enviar_a_cola_de_supervision, listar_negocios, obtener_lead, obtener_timestamp_ultimo_mensaje_usuario,
 )
 
 logger = logging.getLogger("agentkit")
@@ -64,8 +65,25 @@ async def _nivel_requerido(interes: str, negocio_id: str | None) -> str:
     return "junior"
 
 
-async def elegir_asesor_automatico(interes: str, negocio_id: str | None, excluir: str | None = None) -> str | None:
+async def negocio_abierto_ahora(negocio_id: str | None) -> bool:
+    """¿El negocio atiende AHORA (hora de Lima, según su `HorarioAtencion`, con el fallback de siempre
+    lunes a sábado 8:00-19:00)? Misma función que usa Gabi para saber si hay asesores humanos."""
+    return bool((await obtener_estado_horario_atencion(negocio_id))["dentro_de_horario"])
+
+
+async def elegir_asesor_automatico(
+    interes: str, negocio_id: str | None, excluir: str | None = None, respetar_horario: bool = True,
+) -> str | None:
     """Retorna el username del asesor más adecuado y disponible, o None si no hay ninguno.
+
+    `respetar_horario` (2026-10-07, Fase 1 de la política de asignación): con el negocio CERRADO
+    ahora devuelve None aunque haya asesores con el interruptor `disponible` encendido. Pasaba que
+    un lead derivado el domingo de madrugada se asignaba a alguien que dormía, Gabi se pausaba al
+    instante y nadie lo veía hasta que su ventana de 24 h de WhatsApp ya había cerrado. El lead queda
+    derivado, SIN asesor y con Gabi activa, y `asignar_cola_pendiente_al_abrir` (Cron) lo reparte
+    cuando el negocio abre. Solo se desactiva (`False`) en el modo sin IA (`respaldo_sin_ia`), que
+    tiene su propia regla de asignación fuera de horario. Las asignaciones MANUALES (panel) no pasan
+    por esta función.
 
     `negocio_id` (Gate 5.4, T2): esta función llama a listar_asesores(), que
     ahora exige negocio_id. Se llama desde el flujo de mensajes del webhook
@@ -79,6 +97,9 @@ async def elegir_asesor_automatico(interes: str, negocio_id: str | None, excluir
     rotación por inactividad podría "rotar" un lead al mismo asesor que
     acaba de fallar en responder, si es el único (o el de menor carga)."""
     if negocio_id is None:
+        return None
+    if respetar_horario and not await negocio_abierto_ahora(negocio_id):
+        logger.info("Asignación automática omitida: el negocio está cerrado ahora — el lead queda en la cola hasta que abra")
         return None
     asesores = await listar_asesores(negocio_id)
     disponibles = [a for a in asesores if a.get("disponible") and a["username"] != excluir]
@@ -196,3 +217,102 @@ async def ejecutar_ciclo_de_rotacion(intervalo_minutos: int = 5, umbral_rotacion
         rotados.append(c["telefono"])
 
     return {"rotados": rotados, "escalados": escalados}
+
+
+# ── Cola de pendientes al abrir el negocio (2026-10-07, Fase 1) ──────────────────────────────────
+#
+# Un lead derivado con el negocio cerrado queda SIN asesor y con Gabi activa (ver
+# `elegir_asesor_automatico`). Este paso del Cron de cada 5 minutos lo reparte apenas el negocio
+# abre y haya asesores `disponible`: el reloj de rotación solo corre en horario, así que asignar
+# antes solo escondería el caso.
+
+VENTANA_META_24H = timedelta(hours=24)
+
+# Tope de asignaciones por corrida (una corrida = 5 min), configurable por negocio con la clave
+# `cola_apertura_max_por_corrida`. 10 cubre de una vez el atraso típico de un fin de semana (la semana
+# medida tenía 8 leads derivados fuera de horario) y, si el atraso fuera mayor, el resto sale en las
+# corridas siguientes sin que un solo asesor reciba decenas de casos de golpe: cada asignación aumenta
+# su carga activa, así que el reparto por carga también reparte el lote entre los asesores disponibles.
+COLA_APERTURA_MAX_POR_CORRIDA_DEFAULT = 10
+
+
+async def _limite_por_corrida(negocio_id: str) -> int:
+    valor = await obtener_configuracion(
+        "cola_apertura_max_por_corrida", str(COLA_APERTURA_MAX_POR_CORRIDA_DEFAULT), negocio_id=negocio_id,
+    )
+    try:
+        return max(1, int(valor))
+    except (TypeError, ValueError):
+        return COLA_APERTURA_MAX_POR_CORRIDA_DEFAULT
+
+
+def _clave_de_urgencia(ultimo_cliente: datetime | None, ahora: datetime) -> tuple:
+    """Orden de la cola: primero los que MÁS PRONTO cierran su ventana de 24 h de WhatsApp (último
+    mensaje del cliente + 24 h, de menor a mayor); luego los de ventana ya cerrada, del cliente que
+    escribió más recientemente al más antiguo (los más fáciles de retomar con una plantilla); al final
+    los que no tienen ningún mensaje del cliente registrado."""
+    if ultimo_cliente is None:
+        return (2, 0.0)
+    cierre = ultimo_cliente + VENTANA_META_24H
+    if cierre > ahora:
+        return (0, cierre.timestamp())
+    return (1, -ultimo_cliente.timestamp())
+
+
+async def listar_cola_pendiente_por_urgencia(negocio_id: str, ahora: datetime | None = None) -> list[dict]:
+    """Leads derivados sin asesor que se pueden repartir, ordenados por urgencia de ventana. Parte de
+    `listar_leads_esperando_asesor` (sin resultado cerrado, con conversación activa, no cerrados
+    definitivamente, no atendidos ya por una persona) y descarta además los escalados a supervisión y
+    los que Gabi tiene pausados a mano: esos los trata una persona, no el reparto automático."""
+    ahora = ahora or datetime.utcnow()
+    pendientes = [
+        l for l in await listar_leads_esperando_asesor(negocio_id)
+        if not l.get("escalado_supervision_en") and not l.get("pausado_manual")
+    ]
+    con_clave = []
+    for lead in pendientes:
+        ultimo = await obtener_timestamp_ultimo_mensaje_usuario(lead["telefono"])
+        con_clave.append((_clave_de_urgencia(ultimo, ahora), lead))
+    con_clave.sort(key=lambda par: par[0])
+    return [lead for _clave, lead in con_clave]
+
+
+async def asignar_cola_pendiente_al_abrir(max_por_corrida: int | None = None) -> dict:
+    """Paso del Cron `liberar_leads_inactivos`: por cada negocio ABIERTO ahora, asigna los leads
+    derivados que quedaron sin asesor (ver `listar_cola_pendiente_por_urgencia`) con la misma lógica
+    de `elegir_asesor_automatico` (solo asesores `disponible`, nivel y carga). Idempotente: un lead
+    asignado sale de la cola, y justo antes de asignar cada uno se vuelve a leer por si otra corrida
+    o una persona ya lo tomó. Si no hay ningún asesor disponible, no asigna nada (nadie pierde el lugar).
+
+    `max_por_corrida` fuerza el tope (tests); si no, se lee `cola_apertura_max_por_corrida` del negocio.
+    Devuelve {"asignados": [(telefono, asesor), ...], "pendientes": n} — `pendientes` son los que
+    siguen esperando tras esta corrida (por tope o por falta de asesores) en los negocios abiertos."""
+    asignados: list[tuple[str, str]] = []
+    pendientes_restantes = 0
+    for negocio in await listar_negocios(solo_activos=True):
+        negocio_id = negocio["id"]
+        if not await negocio_abierto_ahora(negocio_id):
+            continue
+        cola = await listar_cola_pendiente_por_urgencia(negocio_id)
+        if not cola:
+            continue
+        limite = max_por_corrida if max_por_corrida is not None else await _limite_por_corrida(negocio_id)
+        hechos = 0
+        for lead in cola:
+            if hechos >= limite:
+                break
+            fresco = await obtener_lead(lead["telefono"], negocio_id=negocio_id)
+            if (
+                fresco is None or fresco.get("asesor_asignado") or fresco.get("pausado_manual")
+                or fresco.get("escalado_supervision_en") or fresco.get("paso_flujo") != "derivado_asesor"
+            ):
+                continue
+            asesor = await elegir_asesor_automatico(fresco.get("interes") or "", negocio_id)
+            if asesor is None:
+                break  # sin asesores disponibles (o el negocio cerró entre medio): para los demás también
+            await asignar_asesor_a_lead(lead["telefono"], asesor, automatico=True)
+            logger.info(f"Cola al abrir: lead {lead['telefono']} asignado a {asesor}")
+            asignados.append((lead["telefono"], asesor))
+            hechos += 1
+        pendientes_restantes += max(0, len(cola) - hechos)
+    return {"asignados": asignados, "pendientes": pendientes_restantes}
