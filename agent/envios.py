@@ -72,6 +72,12 @@ ORIGENES: dict[str, dict] = {
     # tope mensual. Sin agrupar: la regla de "una vez por cierre" la aplica quien lo envía (idempotente por
     # el evento `agradecimiento_cierre_enviado`), no la ventana de agrupación.
     "agradecimiento_cierre": {"esencial": False, "modo": "siempre"},
+    # Triaje de temas NO comerciales (2026-10-08, agent/triaje_atc.py, apagado por defecto): UN texto fijo, sin
+    # IA, que redirige al cliente a la línea de atención de Cálidda cuando escribió por su recibo, su número de
+    # cliente o un pago. Es la respuesta que el cliente espera (reemplaza a la de Gabi en ese turno), así que es
+    # esencial: ningún interruptor ni tope de gasto lo frena. Sin agrupar: "un triaje por ciclo" lo garantiza
+    # quien lo envía (agent/triaje_atc.py), y si el envío no sale NO se cierra el caso y sigue Gabi.
+    "triaje_atc": {"esencial": True},
 }
 
 
@@ -79,7 +85,7 @@ ORIGENES: dict[str, dict] = {
 # WhatsApp (agent/formato_whatsapp.py). NUNCA se incluyen los del asesor ni las plantillas.
 ORIGENES_CON_LIMPIEZA_DE_FORMATO = frozenset({
     "gabi_respuesta", "gabi_aviso_derivacion", "gabi_aviso_no_legible", "gabi_respaldo_sin_ia",
-    "reenganche_inactividad", "agradecimiento_cierre",
+    "reenganche_inactividad", "agradecimiento_cierre", "triaje_atc",
 })
 
 

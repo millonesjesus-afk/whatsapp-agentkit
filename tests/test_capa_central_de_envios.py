@@ -209,3 +209,25 @@ def test_todo_origen_usado_en_el_codigo_esta_registrado():
             assert origen, f"envío sin origen en {ruta.name}: {texto[llamada.start():llamada.start() + 80]!r}"
             usados.add(origen.group(1))
     assert usados and usados <= set(envios.ORIGENES)
+
+
+async def test_el_origen_del_triaje_atc_es_esencial_y_nunca_se_agrupa_ni_lo_frena_un_interruptor():
+    """2026-10-08 — `triaje_atc` (agent/triaje_atc.py): el texto fijo que redirige a la línea de atención de Cálidda. Es la
+    respuesta que el cliente espera, así que ni el interruptor del origen ni el tope de gasto lo frenan, y no se agrupa
+    (el «un triaje por ciclo» lo garantiza quien lo envía)."""
+    assert envios.ORIGENES["triaje_atc"] == {"esencial": True}
+    assert "triaje_atc" in envios.ORIGENES_CON_LIMPIEZA_DE_FORMATO
+    nid, canal = await _negocio("env-triaje")
+    await mem.guardar_configuracion("envios_modo_triaje_atc", "nunca", negocio_id=nid)   # lo esencial ignora el interruptor
+    p = _Proveedor()
+    for _ in range(2):
+        r = await envios.enviar_texto(p, "51911111130", "texto del triaje", origen="triaje_atc", canal=canal)
+        assert r.enviado and not r.bloqueado
+    assert len(p.llamadas) == 2
+    assert [f.origen for f in await _filas(nid)] == ["triaje_atc", "triaje_atc"]
+
+
+def test_el_triaje_atc_envia_por_la_capa_central_con_su_origen():
+    fuente = (RAIZ / "agent" / "triaje_atc.py").read_text(encoding="utf-8")
+    assert 'envios.enviar_texto(proveedor, telefono, texto, origen="triaje_atc", canal=canal)' in fuente
+    assert not re.search(r"\bproveedor\.enviar_", fuente)

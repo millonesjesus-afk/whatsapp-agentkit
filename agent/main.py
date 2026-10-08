@@ -38,7 +38,7 @@ from agent.memory import (
 )
 from agent.providers import obtener_proveedor
 from agent import envios
-from agent import circuito_ia, respaldo_sin_ia, calidad_gabi, formato_whatsapp
+from agent import circuito_ia, respaldo_sin_ia, calidad_gabi, formato_whatsapp, triaje_atc
 from agent.dashboard import (
     router as dashboard_router, NoAutenticado,
     ARCHIVOS_DIR, EXTENSIONES_ARCHIVO_PERMITIDAS, TAMANO_MAXIMO_ARCHIVO_MB, _guardar_archivo_en_disco,
@@ -747,6 +747,14 @@ async def _generar_y_enviar_respuesta_ia(telefono: str, canal: dict | None) -> N
     lead = await obtener_lead(telefono, negocio_id=canal.get("negocio_id") if canal else None)
     if _gabi_debe_pausarse(lead):
         logger.info(f"Respuesta debounced de {telefono} cancelada — un humano tomó el caso mientras se esperaba")
+        return
+
+    # Triaje de temas NO comerciales → Consulta ATC (2026-10-08, diseño D2; APAGADO por defecto). Va aquí, antes del
+    # circuito de la IA, porque es determinista (cero tokens): sigue funcionando aunque la IA esté caída. Con el
+    # modo apagado (`triaje_atc_modo`) o en sombra no cambia nada: devuelve False y Gabi responde igual que siempre.
+    # Solo en modo activo, con una consulta de recibo / número de cliente / pago, envía un texto fijo hacia la línea
+    # de atención de Cálidda y cierra el caso: entonces Gabi no responde este turno. No lanza.
+    if await triaje_atc.procesar(telefono, canal, lead, proveedor):
         return
 
     # Modo sin IA (Fase 1): con el circuito abierto NO se llama a Claude. Se dispara (en segundo

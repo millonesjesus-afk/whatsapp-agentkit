@@ -607,6 +607,18 @@ class Lead(Base):
 
 TIPO_EVENTO_LARGO_MAX = 60  # ver migración d4b7a1c93e52 (antes 30: dos tipos automáticos no cabían en Postgres)
 
+# Triaje de temas no comerciales → Consulta ATC (2026-10-08, agent/triaje_atc.py).
+#   · `triaje_atc_cerrado`: el triaje cerró el caso (visible en el Timeline: es una decisión de negocio).
+#   · `triaje_atc_sombra`: la decisión que tomó el triaje cuando había un candidato (modo sombra o activo),
+#     para medir recall/precisión en SQL (scripts/analisis_triaje_atc.py).
+#   · `triaje_atc_fallido`: el triaje quiso cerrar pero el envío no salió (cuenta como el triaje del ciclo).
+# Los dos últimos son INTERNOS: `listar_eventos_lead` no los entrega, así no aparecen como ruido en el
+# Timeline del panel (ni cuentan como "último cambio" para el aviso de conflicto de edición).
+EVENTO_TRIAJE_ATC_CERRADO = "triaje_atc_cerrado"
+EVENTO_TRIAJE_ATC_SOMBRA = "triaje_atc_sombra"
+EVENTO_TRIAJE_ATC_FALLIDO = "triaje_atc_fallido"
+TIPOS_EVENTO_INTERNOS = (EVENTO_TRIAJE_ATC_SOMBRA, EVENTO_TRIAJE_ATC_FALLIDO)
+
 
 class EventoLead(Base):
     """Conversation Timeline (MAIEK_AI_PRODUCT_PATTERNS.md, Cap. 6) — eventos
@@ -687,7 +699,10 @@ async def listar_eventos_lead(telefono: str, limite: int | None = None) -> list[
             return []
         query = (
             select(EventoLead)
-            .where(EventoLead.conversation_id == conversation.id, EventoLead.negocio_id == conversation.negocio_id)
+            .where(
+                EventoLead.conversation_id == conversation.id, EventoLead.negocio_id == conversation.negocio_id,
+                EventoLead.tipo.notin_(TIPOS_EVENTO_INTERNOS),
+            )
             .order_by(EventoLead.creado.desc())
         )
         if limite:
@@ -1655,6 +1670,14 @@ async def _registrar_reapertura_por_cliente(
         lead.derivado_en = None
         lead.minutos_espera_asesor = 0
         lead.veces_rotado_espera = 0
+        # 2026-10-08 (triaje ATC): el cierre definitivo del Lead también se consume. Hasta hoy solo lo
+        # limpiaba `liberar_asignacion`, que el webhook llama únicamente cuando el Lead conserva asesor o
+        # pausa (`_cierre_definitivo_pendiente_de_liberar`). Un caso cerrado SIN asesor (el que deja el
+        # triaje automático) conservaba un cierre viejo en el Lead: `respaldo_sin_ia._lead_fuera_de_alcance`
+        # lo seguía tratando como cerrado y el modo sin IA ignoraba al cliente reabierto. Con asesor o
+        # pausa NO se toca: el webhook necesita ese cierre para decidir que debe liberar al asesor anterior.
+        if not (lead.asesor_asignado or lead.pausado_manual):
+            lead.cerrado_definitivamente_en = None
         _avanzar_version(lead)
         lead.actualizado = datetime.utcnow()
 
@@ -7348,6 +7371,74 @@ async def cerrar_lead_definitivamente_via_conversation(conversation_id: str, neg
     return telefono
 
 
+_ETIQUETAS_CATEGORIA_TRIAJE = {"recibo": "recibo", "numero_cliente": "número de cliente", "pago_deuda": "pago o deuda"}
+
+
+async def cerrar_por_triaje(
+    telefono: str, negocio_id: str, categoria: str, ahora: datetime | None = None,
+) -> dict | None:
+    """Cierre del TRIAJE de temas no comerciales (2026-10-08, agent/triaje_atc.py), en UNA transacción:
+    `Lead.resultado` y `Opportunity.resultado` = "consulta_atc", `cerrado_definitivamente_en` en el Lead y en
+    la Conversation activa, y dos eventos del Timeline (`resultado_cambiado` con autor None y
+    `triaje_atc_cerrado`). NO asigna asesor, NO notifica a nadie y NO toca `paso_flujo`.
+
+    El llamador ya envió (y guardó como mensaje de Gabi) el texto que redirige al cliente a la línea ATC;
+    ese mensaje queda ANTES del cierre en el tiempo, así que la condición C4 de
+    `evaluar_cierre_cortesia` (nadie escribió después del cierre) deja absorber el "gracias"/"ok" posterior.
+
+    Devuelve `{"conversation_id", "opportunity_id", "cierre_en"}`, o None SIN tocar nada si el caso ya no es
+    cerrable (otro negocio, ya cerrado, un humano lo tomó o ya tiene resultado): una persona siempre gana."""
+    ahora = ahora or datetime.utcnow()
+    async with async_session() as session:
+        async with session.begin():
+            contact = await _obtener_contact(session, negocio_id, telefono)
+            conversation = await _obtener_conversation_activa(session, contact.id) if contact is not None else None
+            lead = await session.get(Lead, telefono)
+            if conversation is None or conversation.negocio_id != negocio_id:
+                return None
+            if lead is None or lead.negocio_id != negocio_id:
+                return None
+            if lead.cerrado_definitivamente_en is not None or conversation.cerrado_definitivamente_en is not None:
+                return None
+            if lead.asesor_asignado or lead.pausado_manual or conversation.asesor_asignado_id or conversation.pausado_manual:
+                return None
+            opportunity = await _obtener_opportunity_vigente(session, conversation.id)
+            if opportunity is None or opportunity.resultado or lead.resultado:
+                return None
+
+            lead.resultado = "consulta_atc"
+            lead.cerrado_definitivamente_en = ahora
+            lead.derivado_en = None
+            _avanzar_version(lead)
+            lead.actualizado = ahora
+            opportunity.resultado = "consulta_atc"
+            opportunity.version = Opportunity.version + 1
+            opportunity.actualizado = ahora
+            conversation.cerrado_definitivamente_en = ahora
+            conversation.version = Conversation.version + 1
+            conversation.actualizado = ahora
+
+            etiqueta = _ETIQUETAS_CATEGORIA_TRIAJE.get(categoria, categoria)
+            session.add(EventoLead(
+                conversation_id=conversation.id, negocio_id=conversation.negocio_id, opportunity_id=opportunity.id,
+                tipo="resultado_cambiado", autor=None,
+                descripcion="Cambió el resultado a «Consulta ATC» (triaje automático)",
+                payload={
+                    "campo": "resultado", "anterior": None, "nuevo": "consulta_atc",
+                    "origen": "triaje_atc", "categoria": categoria,
+                },
+                creado=ahora,
+            ))
+            session.add(EventoLead(
+                conversation_id=conversation.id, negocio_id=conversation.negocio_id, opportunity_id=opportunity.id,
+                tipo=EVENTO_TRIAJE_ATC_CERRADO, autor=None,
+                descripcion=f"Triaje automático: consulta de {etiqueta} derivada a la línea de atención — caso cerrado"[:300],
+                payload={"categoria": categoria, "origen": "triaje_atc", "cierre_en": ahora.isoformat()},
+                creado=ahora,
+            ))
+            return {"conversation_id": conversation.id, "opportunity_id": opportunity.id, "cierre_en": ahora}
+
+
 async def reabrir_caso_cerrado(
     conversation_id: str, negocio_id: str, autor: str, rol: str | None = None, motivo: str | None = None,
     ahora: datetime | None = None,
@@ -8597,6 +8688,80 @@ async def _contar_ventas_periodo(
         return (await session.execute(query)).scalar_one()
 
 
+# ── Métrica del embudo: ¿cuentan las consultas no comerciales? (2026-10-08, decisión del dueño) ──
+#
+# Cada `consulta_atc` es una Opportunity más: sin tocar nada, baja la tasa de cierre aunque nunca fue una
+# oportunidad comercial. Es CONFIGURABLE por negocio (default apagado = comportamiento de siempre):
+#   `metricas_excluir_consulta_atc`        "1"/"0" (default "0").
+#   `metricas_excluir_consulta_atc_desde`  fecha de corte AAAA-MM-DD (Lima, opcional): solo se excluyen las
+#                                          consultas de oportunidades creadas desde ese día; vacío = todo el
+#                                          período consultado.
+# Con la exclusión activa las consultas NO se ocultan: salen en `consultas_no_comerciales` (cantidad y
+# porcentaje sobre los contactos del período) y la tasa bruta sigue disponible.
+
+CLAVE_METRICAS_EXCLUIR_ATC = "metricas_excluir_consulta_atc"
+CLAVE_METRICAS_EXCLUIR_ATC_DESDE = "metricas_excluir_consulta_atc_desde"
+RESULTADO_CONSULTA_NO_COMERCIAL = "consulta_atc"
+
+
+def normalizar_politica_metricas(excluir, desde) -> dict:
+    """`{"excluir_consulta_atc": bool, "desde": datetime|None}` (UTC naive) a partir de los dos valores
+    guardados. Cualquier valor inválido cae al comportamiento de siempre (no excluir / sin corte)."""
+    activo = str(excluir if excluir is not None else "0").strip().lower() in ("1", "true", "si", "sí", "on", "activo", "yes")
+    corte = None
+    texto = str(desde or "").strip()
+    if texto:
+        try:
+            if len(texto) <= 10:
+                corte = rango_periodo_utc(texto, texto)[0]  # medianoche de Lima de ese día, en UTC
+            else:
+                corte = datetime.fromisoformat(texto).replace(tzinfo=None)
+        except ValueError:
+            corte = None
+    return {"excluir_consulta_atc": activo, "desde": corte}
+
+
+async def obtener_politica_metricas(negocio_id: str) -> dict:
+    """Ver `normalizar_politica_metricas`. Nunca lanza: ante un fallo de lectura, no excluye."""
+    try:
+        excluir = await obtener_configuracion(CLAVE_METRICAS_EXCLUIR_ATC, "0", negocio_id=negocio_id)
+        desde = await obtener_configuracion(CLAVE_METRICAS_EXCLUIR_ATC_DESDE, "", negocio_id=negocio_id)
+    except Exception:
+        return {"excluir_consulta_atc": False, "desde": None}
+    return normalizar_politica_metricas(excluir, desde)
+
+
+async def _contar_consultas_no_comerciales(
+    session, negocio_id: str, desde: datetime, hasta: datetime, corte: datetime | None,
+    unidad_id: str | None = None, asesor: str | None = None, campana_id: int | None = None,
+) -> int:
+    """Oportunidades del período con resultado `consulta_atc` (mismos filtros que el resto del embudo). Con
+    `corte`, solo las creadas desde esa fecha."""
+    inicio = max(desde, corte) if corte is not None else desde
+    if inicio >= hasta:
+        return 0
+    query = (
+        select(func.count(Opportunity.id))
+        .select_from(Opportunity)
+        .where(
+            Opportunity.negocio_id == negocio_id, Opportunity.resultado == RESULTADO_CONSULTA_NO_COMERCIAL,
+            Opportunity.creado >= inicio, Opportunity.creado < hasta,
+        )
+    )
+    query = _filtrar_opportunity_por_conversation(query, asesor, campana_id)
+    if unidad_id is not None:
+        query = query.where(Opportunity.unidad_id == unidad_id)
+    return (await session.execute(query)).scalar_one()
+
+
+def _bloque_consultas_no_comerciales(cantidad: int, brutas: int, corte: datetime | None) -> dict:
+    return {
+        "cantidad": cantidad,
+        "porcentaje_de_contactos": round(100 * cantidad / brutas, 1) if brutas > 0 else None,
+        "excluidas_desde": corte.isoformat() if corte is not None else None,
+    }
+
+
 async def contar_flujo_periodo(
     negocio_id: str, desde: datetime, hasta: datetime,
     unidad_id: str | None = None, asesor: str | None = None, campana_id: int | None = None,
@@ -8654,8 +8819,21 @@ async def contar_flujo_periodo(
         leads = (await session.execute(query_leads)).scalar_one()
         conversaciones = (await session.execute(query_conversaciones)).scalar_one()
         oportunidades = (await session.execute(query_oportunidades)).scalar_one()
+        politica = await obtener_politica_metricas(negocio_id)
+        consultas = (
+            await _contar_consultas_no_comerciales(
+                session, negocio_id, desde, hasta, politica["desde"], unidad_id, asesor, campana_id,
+            ) if politica["excluir_consulta_atc"] else 0
+        )
     ventas = await _contar_ventas_periodo(negocio_id, desde, hasta, unidad_id, asesor, campana_id)
-    return {"leads": leads, "conversaciones": conversaciones, "oportunidades": oportunidades, "ventas": ventas}
+    flujo = {"leads": leads, "conversaciones": conversaciones, "oportunidades": oportunidades, "ventas": ventas}
+    if politica["excluir_consulta_atc"]:
+        # Aditivo: `oportunidades` pasa a ser la comercial (misma cifra que el embudo) y la bruta sigue visible.
+        flujo.update({
+            "oportunidades": oportunidades - consultas, "oportunidades_brutas": oportunidades,
+            "consultas_no_comerciales": _bloque_consultas_no_comerciales(consultas, oportunidades, politica["desde"]),
+        })
+    return flujo
 
 
 async def calcular_embudo_comercial(
@@ -8679,9 +8857,27 @@ async def calcular_embudo_comercial(
         if unidad_id is not None:
             query = query.where(Opportunity.unidad_id == unidad_id)
         oportunidades = (await session.execute(query)).scalar_one()
+        politica = await obtener_politica_metricas(negocio_id)
+        consultas = (
+            await _contar_consultas_no_comerciales(
+                session, negocio_id, desde, hasta, politica["desde"], unidad_id, asesor, campana_id,
+            ) if politica["excluir_consulta_atc"] else 0
+        )
     ventas = await _contar_ventas_periodo(negocio_id, desde, hasta, unidad_id, asesor, campana_id)
-    tasa_cierre = (ventas / oportunidades) if oportunidades > 0 else None
-    return {"oportunidades": oportunidades, "ventas": ventas, "tasa_cierre": tasa_cierre}
+    if not politica["excluir_consulta_atc"]:
+        tasa_cierre = (ventas / oportunidades) if oportunidades > 0 else None
+        return {"oportunidades": oportunidades, "ventas": ventas, "tasa_cierre": tasa_cierre}
+    # Exclusión activa (2026-10-08, configurable): el denominador es solo lo comercial. Contrato ADITIVO: las
+    # claves de siempre se mantienen (ahora con la cifra comercial) y se suman la bruta y las consultas.
+    comerciales = oportunidades - consultas
+    return {
+        "oportunidades": comerciales, "ventas": ventas,
+        "tasa_cierre": (ventas / comerciales) if comerciales > 0 else None,
+        "oportunidades_brutas": oportunidades,
+        "tasa_cierre_bruta": (ventas / oportunidades) if oportunidades > 0 else None,
+        "consultas_no_comerciales": _bloque_consultas_no_comerciales(consultas, oportunidades, politica["desde"]),
+        "excluye_consulta_atc": True,
+    }
 
 
 async def contar_oportunidades_por_asesor(
