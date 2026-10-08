@@ -1,0 +1,9 @@
+# Dependencias SOLO para desarrollo local / CI de pruebas — NO van a producción
+# (Railway instala requirements.txt, no este archivo).
+#   pip install -r requirements-dev.txt
+-r requirements.txt
+pytest>=9.0
+pytest-asyncio>=1.4
+# Permite correr la suite en paralelo: python -m pytest tests/ -n 4
+# (cada worker usa su propia base SQLite, ver tests/conftest.py)
+pytest-xdist>=3.5
