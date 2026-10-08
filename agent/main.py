@@ -8,6 +8,7 @@ Funciona con el proveedor Meta Cloud API a través de la capa de providers.
 
 import asyncio
 import contextlib
+import json
 import os
 import re
 import time
@@ -33,11 +34,11 @@ from agent.memory import (
     registrar_agradecimiento_cierre, obtener_estado_ventana,
 )
 from agent.memory import (
-    es_texto_de_error_tecnico, es_texto_de_reenganche_automatico, textos_de_error_tecnico_conocidos,
+    es_texto_de_error_tecnico, es_texto_de_reenganche_automatico, textos_de_error_tecnico_conocidos, es_cierre_cortesia,
 )
 from agent.providers import obtener_proveedor
 from agent import envios
-from agent import circuito_ia, respaldo_sin_ia
+from agent import circuito_ia, respaldo_sin_ia, calidad_gabi, formato_whatsapp
 from agent.dashboard import (
     router as dashboard_router, NoAutenticado,
     ARCHIVOS_DIR, EXTENSIONES_ARCHIVO_PERMITIDAS, TAMANO_MAXIMO_ARCHIVO_MB, _guardar_archivo_en_disco,
@@ -710,6 +711,18 @@ def _sin_avisos_automaticos_finales(historial: list[dict]) -> list[dict]:
     return historial[:fin] if hubo_error else historial
 
 
+def _registrar_calidad_gabi(texto_cliente: str, respuesta: str) -> None:
+    """MODO SOMBRA (Mejoras de Gabi, Fase 1): una línea INFO `gabi_calidad {json}` con las métricas de la
+    respuesta que Gabi acaba de enviar (largo, pregunta/CTA, exento, si traía `**`). Sin texto de mensajes ni
+    teléfonos. Solo observa: no cambia el comportamiento ni reintenta nada, y nunca rompe el envío."""
+    try:
+        original = formato_whatsapp.ORIGINAL_ANTES_DE_LIMPIAR.get() or respuesta
+        metricas = calidad_gabi.medir_calidad(original, respuesta, es_cierre_cortesia(texto_cliente))
+        logger.info("gabi_calidad " + json.dumps(metricas, ensure_ascii=False))
+    except Exception:
+        logger.exception("No se pudo registrar gabi_calidad (modo sombra)")
+
+
 async def _generar_y_enviar_respuesta_ia(telefono: str, canal: dict | None) -> None:
     """Gate 2026-09-23 (fix #3, debounce) — el trabajo REAL que antes corría
     inline dentro de `webhook_handler` para cada mensaje de texto: arma el
@@ -820,6 +833,8 @@ async def _generar_y_enviar_respuesta_ia(telefono: str, canal: dict | None) -> N
     )
     await gestor_conexiones.emitir_mensaje_nuevo(mensaje_guardado["conversation_id"])
     logger.info(f"Respuesta a {telefono}: {respuesta}")
+    if enviado and not hubo_error and not escalado_por_confianza:
+        _registrar_calidad_gabi(texto_actual, respuesta)
 
     if escalado_por_confianza:
         # La IA deja de tomar decisiones sobre esta conversación — mismo

@@ -31,7 +31,7 @@ from agent.tools import (
 )
 from agent.memory import obtener_campana_por_nombre, obtener_configuracion, obtener_identidad_agente, obtener_negocio
 from agent.campanas import resolver_promo, resolver_familia_promo, obtener_codigos_promocionales_activos
-from agent import circuito_ia
+from agent import circuito_ia, formato_whatsapp
 
 load_dotenv()
 logger = logging.getLogger("agentkit")
@@ -557,7 +557,7 @@ async def _generar_respuesta_protocolo_confianza(
             raise ValueError("El modelo no devolvió la herramienta forzada (respuesta sin tool_use)")
 
         datos = bloque_tool.input
-        respuesta = (datos.get("respuesta") or "").strip()
+        respuesta = await formato_whatsapp.limpiar_salida_gabi((datos.get("respuesta") or "").strip())
         confianza = datos.get("confianza")
         razon = (datos.get("razon") or "").strip()
 
@@ -640,6 +640,7 @@ async def generar_respuesta(
         razon son None en modo "produccion" (protocolo todavía no
         activo ahí) o si hubo_error — nunca se inventan ni se infieren.
     """
+    formato_whatsapp.ORIGINAL_ANTES_DE_LIMPIAR.set(None)   # modo sombra: main lo lee tras la llamada
     # Si el mensaje está vacío, usar fallback (mensajes cortos como "5" o "sí" son válidos)
     if not mensaje or not mensaje.strip():
         return obtener_mensaje_fallback(), False, None, None
@@ -651,6 +652,11 @@ async def generar_respuesta(
     # "assistant" — los mensajes que escribió un asesor humano (guardados con
     # role="asesor" para distinguirlos en el panel) se mapean a "assistant",
     # ya que para el cliente es la misma "voz" del negocio.
+    # Formato de WhatsApp (Mejoras de Gabi, Fase 1): Claude imita el `**` que ve en sus propios mensajes
+    # anteriores (contagio). Los turnos de Gabi (role "assistant") se limpian EN MEMORIA para este envío a
+    # Claude; la base y la lista `historial` original no se tocan. Los del asesor humano no se tocan.
+    if await formato_whatsapp.limpieza_activa():
+        historial = formato_whatsapp.limpiar_historial_assistant(historial)
     mensajes_historial = [
         {"role": "assistant" if m["role"] == "asesor" else m["role"], "content": m["content"]}
         for m in historial
@@ -722,7 +728,9 @@ async def generar_respuesta(
             messages=mensajes
         )
 
-        respuesta = response.content[0].text
+        # Se limpia el markdown AQUÍ (en el origen) para que lo que se envía, lo que se guarda en el chat y lo
+        # que lee extraer_datos_lead sea el mismo texto (agent/formato_whatsapp.py). Nunca lanza.
+        respuesta = await formato_whatsapp.limpiar_salida_gabi(response.content[0].text)
         # cache_read/cache_creation en el log (no solo in/out) — es la única
         # forma de confirmar que el caching de arriba realmente está
         # pegando en producción, no solo que el código no rompió nada.

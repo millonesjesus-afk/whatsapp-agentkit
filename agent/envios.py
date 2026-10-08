@@ -19,7 +19,7 @@ import asyncio
 import logging
 import weakref
 
-from agent import politica_envios
+from agent import formato_whatsapp, politica_envios
 from agent.http_utils import CODIGO_META_FUERA_DE_VENTANA, EnvioIncierto
 from agent.memory import (
     cerrar_envio_meta, marcar_envio_incierto, obtener_configuracion, registrar_envio_bloqueado, reservar_envio_meta,
@@ -73,6 +73,14 @@ ORIGENES: dict[str, dict] = {
     # el evento `agradecimiento_cierre_enviado`), no la ventana de agrupación.
     "agradecimiento_cierre": {"esencial": False, "modo": "siempre"},
 }
+
+
+# Orígenes cuyo texto lo escribe Gabi (o es un texto fijo del sistema): red de seguridad del formato de
+# WhatsApp (agent/formato_whatsapp.py). NUNCA se incluyen los del asesor ni las plantillas.
+ORIGENES_CON_LIMPIEZA_DE_FORMATO = frozenset({
+    "gabi_respuesta", "gabi_aviso_derivacion", "gabi_aviso_no_legible", "gabi_respaldo_sin_ia",
+    "reenganche_inactividad", "agradecimiento_cierre",
+})
 
 
 class ResultadoEnvio:
@@ -240,11 +248,33 @@ async def _cerrar(envio_id: int | None, enviado: bool, wamid: str | None) -> Non
         logger.exception(f"No se pudo cerrar el registro de envío {envio_id}")
 
 
+async def _limpiar_formato_si_corresponde(origen: str, texto: str) -> str:
+    """Red de seguridad: los textos de Gabi ya salen limpios de agent/brain.py; si acá la limpieza cambia algo,
+    es que algún camino no se limpió en origen (se avisa con un warning). Nunca para el asesor ni las plantillas.
+    Ante cualquier error devuelve el texto original."""
+    if origen not in ORIGENES_CON_LIMPIEZA_DE_FORMATO or not isinstance(texto, str):
+        return texto
+    try:
+        if not await formato_whatsapp.limpieza_activa():
+            return texto
+        limpio = formato_whatsapp.formatear_para_whatsapp(texto)
+        if limpio != texto:
+            logger.warning(
+                f"Formato de WhatsApp: el origen {origen} llegó a la capa de envíos con markdown sin limpiar "
+                f"({len(texto)} → {len(limpio)} caracteres); algún camino no se limpia en origen"
+            )
+            return limpio
+    except Exception:
+        logger.exception(f"No se pudo limpiar el formato del envío {origen} — se envía el texto original")
+    return texto
+
+
 async def enviar_texto(
     proveedor, telefono: str, texto: str, *, origen: str, canal: dict | None = None, asesor: str | None = None, **extra,
 ) -> ResultadoEnvio:
     """`extra` se reenvía tal cual al proveedor (ej. `mensaje_id_citado`). `asesor` (username de
     quien envía desde el panel) solo se guarda en el registro; no llega al proveedor."""
+    texto = await _limpiar_formato_si_corresponde(origen, texto)
     return await _enviar(origen, "texto", telefono, canal, lambda: proveedor.enviar_mensaje(telefono, texto, canal=canal, **extra), asesor)
 
 
