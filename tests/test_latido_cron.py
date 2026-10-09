@@ -24,7 +24,7 @@ RAIZ = Path(__file__).resolve().parent.parent
 SCRIPTS = [
     "liberar_leads_inactivos", "procesar_inactividad_clientes", "purgar_archivos_expirados",
     "cerrar_leads_definitivamente", "cerrar_ventas_sin_seguimiento", "backup_postgres",
-    "recuperar_mensajes_sin_respuesta", "plantilla_zona_muerta",
+    "recuperar_mensajes_sin_respuesta", "plantilla_zona_muerta", "crear_tareas_llamada",
 ]
 
 
@@ -254,7 +254,7 @@ def test_cada_script_usa_ejecutar_cron_con_su_nombre_y_el_intervalo_que_vigila_e
     assert _valor(llamada.args[2], arbol) == mem.CRONES_ESPERADOS[nombre][1]
 
 
-def test_los_ocho_scripts_estan_vigilados_y_cargan_por_ruta():
+def test_los_nueve_scripts_estan_vigilados_y_cargan_por_ruta():
     assert set(mem.CRONES_ESPERADOS) == set(SCRIPTS)
     for nombre in SCRIPTS:
         modulo = _cargar(nombre)
@@ -353,7 +353,9 @@ def test_hay_un_solo_head_y_la_migracion_cuelga_del_head_anterior():
     cfg = Config(str(RAIZ / "alembic.ini"))
     cfg.set_main_option("script_location", str(RAIZ / "migrations"))
     guion = ScriptDirectory.from_config(cfg)
-    assert guion.get_heads() == ["a7d3b9e2c4f1"]
+    # 2026-10-09: la migración de "Para llamar" (b8e2d4f6a1c3) cuelga de la del latido y es el head actual.
+    assert guion.get_heads() == ["b8e2d4f6a1c3"]
+    assert guion.get_revision("b8e2d4f6a1c3").down_revision == "a7d3b9e2c4f1"
     assert guion.get_revision("a7d3b9e2c4f1").down_revision == "e5a1c8f3b2d7"
 
 

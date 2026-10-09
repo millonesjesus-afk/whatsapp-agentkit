@@ -78,6 +78,16 @@ ORIGENES: dict[str, dict] = {
     # esencial: ningún interruptor ni tope de gasto lo frena. Sin agrupar: "un triaje por ciclo" lo garantiza
     # quien lo envía (agent/triaje_atc.py), y si el envío no sale NO se cierra el caso y sigue Gabi.
     "triaje_atc": {"esencial": True},
+    # Emergencia de gas (2026-10-09, agent/triaje_atc.py, apagada por defecto con `triaje_atc_emergencia_modo`): UN texto
+    # fijo y corto, sin IA, que manda al cliente que reportó olor o fuga de gas a Emergencias de Cálidda (1808, 24 h).
+    # Es seguridad: esencial Y exento del tope (ni el interruptor, ni el tope mensual, ni la Opción B lo frenan). Sin
+    # agrupar: "no repetir en 24 h" lo garantiza quien lo envía (agent/triaje_atc.py).
+    "triaje_emergencia_gas": {"esencial": True, "exento_tope": True},
+    # Oferta de llamada de Gabi (2026-10-09, agent/llamadas.py, apagada por defecto): UN texto que reemplaza al
+    # reenganche genérico para los leads de segmento A/B cuando `llamadas_oferta_activa` y la compuerta de
+    # responsabilidad están encendidas. Texto libre dentro de la ventana de 24 h, igual que el reenganche: mismo
+    # modo "solo_gratis" (no se paga por insistirle a quien no contestó) y nadie lo espera, así que no es esencial.
+    "gabi_oferta_llamada": {"esencial": False, "modo": "solo_gratis"},
 }
 
 
@@ -85,7 +95,8 @@ ORIGENES: dict[str, dict] = {
 # WhatsApp (agent/formato_whatsapp.py). NUNCA se incluyen los del asesor ni las plantillas.
 ORIGENES_CON_LIMPIEZA_DE_FORMATO = frozenset({
     "gabi_respuesta", "gabi_aviso_derivacion", "gabi_aviso_no_legible", "gabi_respaldo_sin_ia",
-    "reenganche_inactividad", "agradecimiento_cierre", "triaje_atc",
+    "reenganche_inactividad", "agradecimiento_cierre", "triaje_atc", "gabi_oferta_llamada",
+    "triaje_emergencia_gas",
 })
 
 

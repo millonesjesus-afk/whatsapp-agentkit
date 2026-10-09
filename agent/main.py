@@ -38,7 +38,7 @@ from agent.memory import (
 )
 from agent.providers import obtener_proveedor
 from agent import envios
-from agent import circuito_ia, respaldo_sin_ia, calidad_gabi, formato_whatsapp, triaje_atc
+from agent import circuito_ia, respaldo_sin_ia, calidad_gabi, formato_whatsapp, triaje_atc, llamadas
 from agent.dashboard import (
     router as dashboard_router, NoAutenticado,
     ARCHIVOS_DIR, EXTENSIONES_ARCHIVO_PERMITIDAS, TAMANO_MAXIMO_ARCHIVO_MB, _guardar_archivo_en_disco,
@@ -1123,6 +1123,19 @@ async def webhook_handler(request: Request):
 
             cron.marca("lead_y_conversacion")
 
+            # "Para llamar" (2026-10-09, agent/llamadas.py): si el cliente vuelve a escribir —o una persona le responde desde
+            # el celular— la tarea de llamada abierta de este lead ya no corresponde y se cancela. Va ANTES de cualquier otro
+            # flujo; una reacción (👍) no cuenta. Sin tareas (el caso de siempre, y con el módulo apagado) es una consulta
+            # indexada que no encuentra nada. Fail-open: jamás puede frenar la atención de un mensaje.
+            if msg.tipo != "reaction" and canal and canal.get("negocio_id"):
+                try:
+                    await llamadas.cancelar_por_respuesta_del_cliente(
+                        msg.telefono, canal["negocio_id"],
+                        motivo="paso_a_humano" if msg.tipo_evento == "echo" else "respondio_cliente",
+                    )
+                except Exception:  # noqa: BLE001
+                    logger.exception(f"Para llamar: no se pudo cancelar la tarea de llamada de {msg.telefono}")
+
             # Coexistencia: un asesor le respondió al cliente directo desde
             # la app de WhatsApp Business en el celular, no desde Gabi ni el
             # panel. Solo se registra en el historial (para que el panel
@@ -1279,6 +1292,10 @@ async def webhook_handler(request: Request):
                     cron.marca("guardar_y_marcar")
                     await gestor_conexiones.emitir_mensaje_nuevo(mensaje_guardado["conversation_id"])
                     cron.marca("emitir")
+                    # Emergencia de gas (2026-10-09, `triaje_atc_emergencia_modo`, apagada por defecto): una emergencia se
+                    # responde aunque el lead esté en gestión. Este lead nunca llega a Gabi, así que el aviso fijo (sin IA)
+                    # se evalúa acá, solo para la emergencia. Con el interruptor apagado no hace nada; no lanza.
+                    await triaje_atc.procesar(msg.telefono, canal, lead, proveedor, solo_emergencia=True)
                     logger.info(f"webhook_tiempos {cron.resumen()}")
                     return
 

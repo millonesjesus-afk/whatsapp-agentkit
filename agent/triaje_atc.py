@@ -20,9 +20,26 @@
 # campaña) impide cerrar. Ante la duda NO se cierra. Las guardas (ver `clasificar`) cubren asesor/pausa, caso ya cerrado,
 # flujo de financiamiento, DNI/suministro pedidos por Gabi, números largos, fotos, más de N mensajes, un triaje por ciclo.
 #
-# FASE 1 — categorías con regla: recibo, numero_cliente, pago_deuda. La emergencia de gas (olor, fuga) se clasifica como
-# `emergencia_gas` con acción `alerta_emergencia` pero SOLO queda en el log y en el evento: no se envía nada (queda
-# documentado para la fase siguiente; nunca debe terminar en un cierre silencioso).
+# FASE 1 — categorías con regla: recibo, numero_cliente, pago_deuda.
+#
+# EMERGENCIA DE GAS (2026-10-09, decisión del dueño). La línea es COMERCIAL (no atiende emergencias ni atención al
+# cliente) pero DEBE derivar: ante un cliente que reporta olor o fuga de gas se envía UN texto corto y fijo hacia
+# Emergencias de Cálidda (1808, 24 h), sin IA (cero tokens), y se tipifica `consulta_atc` y se cierra sin asesor.
+# Tiene su PROPIO interruptor `triaje_atc_emergencia_modo` (apagado | sombra | activo, default apagado), independiente
+# de `triaje_atc_modo`: puede estar `activo` con el triaje general en sombra (el aviso de seguridad no espera las
+# semanas de medición de recibo/pago). Reglas propias:
+#   · Detección más estricta que la de las demás categorías (precisión > recall, ver `detectar_emergencia`): negación,
+#     hipótesis ("si huelo gas"), pasado ("hace años"), pregunta explícita y contexto comercial NO disparan.
+#   · NO usa las guardas "ya hay asesor / pausa / resultado / paso_flujo / cierre": una emergencia se responde aunque
+#     el lead esté en gestión (por eso el webhook también llama `procesar(..., solo_emergencia=True)` para los leads con
+#     asesor o pausa, que nunca llegan a Gabi). Las guardas que SÍ aplican (`_guardas_emergencia`): canal de pruebas
+#     (salvo `triaje_atc_permitir_canal_pruebas`), teléfono excluido o mensaje de prueba, y que no se haya avisado ya a
+#     este cliente en las últimas 24 h (evita bucles y repetición).
+#   · Solo se mira lo que el cliente escribió desde el último mensaje saliente (lo que aún no se le respondió): una
+#     frase vieja, ya atendida, nunca vuelve a disparar el aviso.
+#   · Cierra solo si el lead no está en gestión: con asesor/pausa o con resultado (vendido, agendado…) se envía el aviso y
+#     se deja el evento `emergencia_gas_derivada`, SIN cerrar ni cambiar el resultado ni tocar al asesor.
+#   · Sin texto configurado y sin `triaje_atc_linea_emergencia_texto`, `activo` se degrada a `sombra`.
 #
 # DEUDA MULTI-NEGOCIO. Gabi pasará de Gaso+ a "Cálidda Hogar", una unidad grande con varios negocios asociados. Hoy el
 # léxico (`REGLAS_ATC`, `BLOQUEOS_COMERCIALES`) y las categorías son los de Cálidda/Gaso+ y viven en ESTE módulo, no en
@@ -42,14 +59,15 @@ import logging
 import re
 import unicodedata
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 
 from sqlalchemy import func, select
 
 from agent import envios
 from agent.memory import (
-    EVENTO_TRIAJE_ATC_CERRADO, EVENTO_TRIAJE_ATC_FALLIDO, EVENTO_TRIAJE_ATC_SOMBRA, PREFIJO_REACCION,
-    EventoLead, Mensaje, _obtener_contact, _obtener_conversation_activa, async_session, cerrar_por_triaje,
-    listar_campanas, obtener_configuracion, registrar_evento_lead,
+    EVENTO_EMERGENCIA_GAS_DERIVADA, EVENTO_TRIAJE_ATC_CERRADO, EVENTO_TRIAJE_ATC_FALLIDO, EVENTO_TRIAJE_ATC_SOMBRA,
+    PREFIJO_REACCION, EnvioMeta, EventoLead, Mensaje, _obtener_contact, _obtener_conversation_activa, async_session,
+    cerrar_por_triaje, listar_campanas, obtener_configuracion, registrar_evento_lead,
 )
 from agent.services.servicio_conversacion import servicio_conversacion
 from agent.tiempo_real import gestor_conexiones
@@ -68,6 +86,8 @@ CLAVE_MAX_MENSAJES = "triaje_atc_max_mensajes_cliente"      # default 4
 CLAVE_NOMBRE_NEGOCIO = "triaje_atc_nombre_negocio"          # nombre que sale en el texto (fallback abajo)
 CLAVE_TELEFONOS_EXCLUIDOS = "triaje_atc_telefonos_excluidos"  # números del equipo / de pruebas, separados por comas
 CLAVE_PERMITIR_CANAL_PRUEBAS = "triaje_atc_permitir_canal_pruebas"  # "1" deja cerrar también en un canal de pruebas
+CLAVE_EMERGENCIA_MODO = "triaje_atc_emergencia_modo"        # apagado (default) | sombra | activo — INDEPENDIENTE del modo general
+CLAVE_EMERGENCIA_TEXTO = "triaje_atc_emergencia_texto"      # plantilla del aviso de emergencia; vacío = TEXTO_EMERGENCIA_POR_DEFECTO
 
 MODO_APAGADO, MODO_SOMBRA, MODO_ACTIVO = "apagado", "sombra", "activo"
 MODOS = (MODO_APAGADO, MODO_SOMBRA, MODO_ACTIVO)
@@ -77,6 +97,9 @@ CATEGORIA_EMERGENCIA = "emergencia_gas"
 CATEGORIAS_FASE_1 = ("recibo", "numero_cliente", "pago_deuda")
 CATEGORIAS_ATC = CATEGORIAS_FASE_1  # las que cierran; cuando existan más (fase 2) se suman acá
 ACCION_NINGUNA, ACCION_CERRAR, ACCION_ALERTA_EMERGENCIA = "ninguna", "cerrar", "alerta_emergencia"
+ACCION_DERIVAR_EMERGENCIA = "derivar_emergencia"  # la emergencia pasó las guardas: con el modo `activo` se avisa al cliente
+ORIGEN_EMERGENCIA = "triaje_emergencia_gas"       # origen de envío (agent/envios.py::ORIGENES): esencial y exento del tope
+HORAS_SIN_REPETIR_EMERGENCIA = 24                 # no se vuelve a avisar al mismo cliente dentro de este lapso
 
 MAX_MENSAJES_CLIENTE_POR_DEFECTO = 4
 UMBRAL_CIERRE = 0.75  # confianza mínima para proponer el cierre
@@ -88,6 +111,17 @@ TEXTO_POR_DEFECTO = (
     "¡Hola{nombre}! 😊 Para consultas de tu recibo, número de cliente, pagos o el servicio de gas, la atención la da "
     "directamente Cálidda en su línea {linea_atc}. Aquí en {negocio} te ayudamos con la compra y el financiamiento de "
     "gasodomésticos. Si más adelante te interesa una cocina, terma, horno u otro, escríbenos por aquí y con gusto te asesoro."
+)
+
+# Aviso de emergencia (2026-10-09). Corto, sin pregunta y sin los verbos que el cierre de cortesía lee como compromiso
+# o petición pendiente (llam*, envi*, avis*, necesit*, cuent*, dni, días, horas…): por eso dice "Comunícate ya con…" y no
+# "Llama ya a…". Así un «ok» posterior del cliente se absorbe (condiciones C2/C3 de `evaluar_cierre_cortesia`) en vez de
+# reabrir el caso y despertar a Gabi. {linea_emergencia} es "1808 (Emergencias 24/7)" en producción; sin esa línea
+# configurada (ni un texto propio con el número) este texto NUNCA se envía.
+TEXTO_EMERGENCIA_POR_DEFECTO = (
+    "⚠️ Si hueles a gas, no enciendas fuego ni uses interruptores, abre puertas y ventanas y sal de la vivienda. "
+    "Comunícate ya con Emergencias de Cálidda, las 24 horas: {linea_emergencia}. "
+    "Esta línea es solo de ventas y no atiende emergencias."
 )
 
 
@@ -168,14 +202,119 @@ REGLAS_ATC: tuple[Regla, ...] = (
     ),
 )
 
-# Emergencia de gas: SOLO se registra (log + evento). Se mira en TODOS los mensajes del cliente.
+# Emergencia de gas (olor o fuga ACTUAL). Los patrones se escriben sobre texto ya normalizado (sin tildes, letras repetidas
+# colapsadas). Fuertes (0.95): frases inequívocas de olor/fuga. Débiles (0.80): "hay gas en la cocina", "gas por toda la
+# casa" —también las dice quien SÍ tiene gas natural—, que además exigen que la cláusula no hable de servicio o compra.
+_PAT_LUGARES = r"(?:cocina|casa|departamento|depa|cuarto|sala|vivienda|bano|patio|piso)"
 REGLAS_EMERGENCIA: tuple[Regla, ...] = (
-    _regla("emergencia_olor_fuga", CATEGORIA_EMERGENCIA, 0.95, (
-        "huele a gas", "huelo a gas", "huele gas", "huelo gas", "olor a gas", "olor de gas", "fuga de gas", "fugas de gas",
-        "escape de gas", "escapa el gas", "se escapa el gas", "explosion*", "explot*",
+    _regla("emergencia_olor_gas", CATEGORIA_EMERGENCIA, 0.95, regex=(
+        r"\bhuel[eo]\s+(?:(?:mucho|bastante|demasiado|fuerte|muy\s+fuerte)\s+)?(?:a\s+)?gas\b"
+        r"|\bolor(?:es)?\s+(?:(?:muy|bien)\s+)?(?:(?:fuerte|intenso)\s+)?(?:a|de)\s+gas\b"
     )),
-    _regla("emergencia_fuga_gas", CATEGORIA_EMERGENCIA, 0.90, regex=r"\bfuga\b.{0,20}\bgas\b|\bgas\b.{0,20}\b(?:fuga|escapa\w*|se sale)\b"),
+    _regla("emergencia_fuga_escape", CATEGORIA_EMERGENCIA, 0.95, regex=(
+        r"\bfugas?\s+(?:de|del)\s+gas\b|\bescapes?\s+de\s+gas\b|\bescap(?:a|ando)\s+(?:el\s+)?gas\b"
+        r"|\bgas\s+se\s+(?:esta\s+)?(?:escap(?:a|ando)|sale|saliendo)\b"
+    )),
+    _regla("emergencia_explosion", CATEGORIA_EMERGENCIA, 0.95, regex=r"\bemergencia\s+(?:de|por)\s+gas\b|\bexplosion\s+(?:de|del)\s+gas\b"),
+    _regla("emergencia_hay_gas_en_casa", CATEGORIA_EMERGENCIA, 0.80, regex=(
+        r"\bhay\s+gas\s+(?:en|por)\s+(?:(?:toda|todo)\s+)?(?:(?:la|el|mi|mis)\s+)?" + _PAT_LUGARES + r"\b"
+        r"|\bgas\s+por\s+(?:toda|todo)\s+(?:(?:la|el|mi)\s+)?" + _PAT_LUGARES + r"\b"
+    )),
 )
+_PESO_EMERGENCIA_DEBIL = 0.90  # las reglas con peso menor exigen además `_RE_EMERGENCIA_DEBIL_EXCLUYE`
+
+# Texto de una cláusula que vuelve ambigua o comercial una coincidencia (todo sobre texto normalizado).
+_RE_EMERGENCIA_EXCLUYE = re.compile(
+    r"\b(?:detector\w*|sensor\w*|alarma\w*|valvula\w*|proteccion|prevenir|prevencion|evitar|evita\w*|riesgo\w*|garantia"
+    r"|incluy\w*|precio\w*|costo\w*|cuesta\w*|cotiz\w*|cuanto|comprar\w*|cuota\w*|financ\w*|promo\w*|oferta\w*|descuento\w*"
+    r"|catalogo|modelo\w*)\b"
+)
+_RE_EMERGENCIA_DEBIL_EXCLUYE = re.compile(
+    r"\b(?:natural|instal\w*|tengo|tenemos|servicio|suministro|medidor|red|conexion|habilit\w*|quiero|quisiera|necesito|cuando"
+    r"|disponible|cobertura|zona|gasodomestic\w*|terma\w*|horno\w*|calentador\w*|secadora\w*|estufa\w*|producto\w*|asesor\w*)\b"
+)
+# Pasado: hace años, ayer, "hubo", "tuve", "olía"…
+_RE_EMERGENCIA_PASADO = re.compile(
+    r"\b(?:hace\s+(?:\w+\s+){0,2}(?:ano|anos|mes|meses|semana|semanas|dia|dias|tiempo|mucho)|ayer|antes|anteriormente"
+    r"|ano\s+pasado|mes\s+pasado|semana\s+pasada|hubo|tuve|tuvimos|tuvo|habia|tenia|olia|olio|ocurrio|sucedio|ya\s+no"
+    r"|ya\s+se\s+(?:soluciono|arreglo|reparo))\b"
+)
+# Hipótesis o condición, ANTES de la coincidencia (últimas palabras de la cláusula): "si huelo gas", "en caso de fuga…".
+_RE_EMERGENCIA_HIPOTESIS = re.compile(
+    r"\b(?:si|cuando|en\s+caso\s+de|por\s+si|cada\s+vez\s+que|siempre\s+que|como\s+(?:saber|detectar|identificar|reconocer|se)"
+    r"|es\s+normal|podria|seria|quizas|tal\s+vez|alguna\s+vez|supongamos|imagina\w*)\b"
+)
+# Habitual o condicional, DESPUÉS de la coincidencia: "huele a gas cuando prendo la cocina".
+_RE_EMERGENCIA_HABITUAL = re.compile(r"\b(?:cuando|cada\s+vez|a\s+veces|de\s+vez\s+en\s+cuando|siempre\s+que|solo\s+cuando|solo\s+si)\b")
+_RE_EMERGENCIA_NEGACION = re.compile(r"\b(?:no|nunca|jamas|sin|tampoco|ni|ningun|ninguna|descarto|descartamos|falsa)\b")
+_CORTES_DE_CLAUSULA_EMERGENCIA = frozenset({"pero", "y", "aunque", "sino", "entonces", "porque", "que"})
+# Una cláusula que EMPIEZA como pregunta ("qué hago…", "cómo sé si…", "es normal que…") no es un reporte.
+_RE_EMERGENCIA_INTERROGATIVO = re.compile(
+    r"^(?:y\s+)?(?:que|como|cuando|cual|cuales|donde|por\s+que|cuanto|es\s+normal|se\s+puede|puede|pueden|sera|seria|existe"
+    r"|hay\s+(?:que|algun|alguna|riesgo))\b"
+)
+_VENTANA_PREFIJO_EMERGENCIA = 6   # palabras antes de la coincidencia que se miran por hipótesis
+_VENTANA_NEGACION_EMERGENCIA = 4  # palabras antes de la coincidencia (tras el último "pero"/"y"/"que") que se miran por negación
+
+
+def _clausulas(texto: str) -> list[tuple[str, bool]]:
+    """Cláusulas del mensaje CRUDO (con sus signos): se parte en `. ! ; ,` y saltos de línea. Lo que va entre «¿» y «?» es una
+    pregunta explícita (segundo elemento True); la parte declarativa que sigue al «?» se conserva ("huele a gas ¿qué hago?"
+    deja «huele a gas» como reporte)."""
+    resultado: list[tuple[str, bool]] = []
+    for bloque in re.split(r"[.!\n;]+", texto or ""):
+        for i, parte in enumerate(bloque.split("¿")):
+            if not parte.strip():
+                continue
+            resto = parte
+            if i > 0:
+                pregunta, _, resto = parte.partition("?")
+                resultado.append((pregunta, True))
+            for clausula in re.split(r"[,?:]+", resto):
+                if clausula.strip():
+                    resultado.append((clausula, False))
+    return resultado
+
+
+def _emergencia_descartada(texto: str, coincidencia: "re.Match[str]", debil: bool, mensaje: str = "") -> bool:
+    """¿Esta coincidencia es negada, hipotética, pasada, habitual o comercial? `texto` es UNA cláusula normalizada y
+    `mensaje` el mensaje completo normalizado: una frase débil ("hay gas en mi casa, quiero una terma") se descarta por
+    el contexto de TODO el mensaje."""
+    if _RE_EMERGENCIA_EXCLUYE.search(texto) or _RE_EMERGENCIA_PASADO.search(texto):
+        return True
+    if debil and _RE_EMERGENCIA_DEBIL_EXCLUYE.search(mensaje or texto):
+        return True
+    if _RE_EMERGENCIA_HABITUAL.search(texto[coincidencia.end():]):
+        return True
+    previas = texto[:coincidencia.start()].split()
+    if _RE_EMERGENCIA_HIPOTESIS.search(" ".join(previas[-_VENTANA_PREFIJO_EMERGENCIA:])):
+        return True
+    corte = max((i for i, palabra in enumerate(previas) if palabra in _CORTES_DE_CLAUSULA_EMERGENCIA), default=-1)
+    return bool(_RE_EMERGENCIA_NEGACION.search(" ".join(previas[corte + 1:][-_VENTANA_NEGACION_EMERGENCIA:])))
+
+
+def detectar_emergencia(mensajes_cliente: list[str]) -> dict[str, Regla]:
+    """PURA. Reglas de emergencia de gas (olor o fuga ACTUAL) que coinciden en los mensajes crudos del cliente. Precisión >
+    recall: ante la duda NO hay coincidencia. No dispara con negación ("no huele a gas"), hipótesis ("¿qué hago si huelo
+    gas?"), pasado ("hace años olía a gas"), pregunta explícita, ni contexto comercial (detector, precio, instalación…)."""
+    hallazgos: dict[str, Regla] = {}
+    for crudo in mensajes_cliente or []:
+        mensaje = normalizar(crudo)
+        for clausula, es_pregunta in _clausulas(crudo):
+            if es_pregunta:
+                continue
+            texto = normalizar(clausula)
+            if not texto or _RE_EMERGENCIA_INTERROGATIVO.match(texto):
+                continue
+            for regla in REGLAS_EMERGENCIA:
+                if regla.id in hallazgos:
+                    continue
+                for coincidencia in regla.patron.finditer(texto):
+                    if not _emergencia_descartada(texto, coincidencia, regla.peso < _PESO_EMERGENCIA_DEBIL, mensaje):
+                        hallazgos[regla.id] = regla
+                        break
+    return hallazgos
+
 
 # Bloqueo comercial: UNA sola coincidencia en cualquier mensaje del cliente impide cerrar. Deliberadamente amplio: perder un
 # cierre cuesta un mensaje de Gabi; cerrar mal le cuesta una venta al negocio.
@@ -216,7 +355,7 @@ _TIPOS_MEDIA = ("image", "document", "audio", "sticker", "video")
 @dataclass(frozen=True)
 class Decision:
     categoria: str = CATEGORIA_NINGUNA
-    accion: str = ACCION_NINGUNA          # ninguna | cerrar | alerta_emergencia
+    accion: str = ACCION_NINGUNA          # ninguna | cerrar | alerta_emergencia | derivar_emergencia
     confianza: float = 0.0
     senales: tuple[str, ...] = ()         # ids de las reglas que coincidieron
     bloqueos: tuple[str, ...] = ()        # guardas y bloqueos comerciales que impidieron cerrar
@@ -248,6 +387,11 @@ class Contexto:
     tiene_campana: bool = False
     patrones_saludo: tuple[str, ...] = ()  # saludos preestablecidos de las campañas del negocio (ya normalizados)
     conversation_id: str | None = None
+    # — emergencia de gas (2026-10-09) —
+    evaluar_atc: bool = True               # False: solo se evalúa la emergencia (triaje general apagado o lead en gestión)
+    emergencia_propone: bool = False       # el interruptor de emergencia no está apagado: aplican `_guardas_emergencia`
+    emergencia_reciente: bool = False      # ya se avisó de una emergencia a este cliente en las últimas 24 h
+    mensajes_pendientes: tuple[str, ...] | None = None  # lo que el cliente escribió desde el último saliente (None → todos)
 
 
 def _hay_numero_largo(mensajes: list[str]) -> bool:
@@ -295,6 +439,19 @@ def _guardas(mensajes: list[str], ctx: Contexto) -> list[str]:
     return g
 
 
+def _guardas_emergencia(mensajes: list[str], ctx: Contexto) -> list[str]:
+    """Las ÚNICAS guardas de una emergencia de gas. NO aplican asesor/pausa, humano, cierre, resultado, paso_flujo, número
+    largo, media ni "demasiados mensajes": una emergencia se responde aunque el lead esté en gestión."""
+    g: list[str] = []
+    if ctx.canal_pruebas:
+        g.append("canal_de_pruebas")
+    if ctx.telefono_excluido or any(_RE_MENSAJE_DE_PRUEBA.search(normalizar(m)) for m in mensajes):
+        g.append("equipo_o_prueba")
+    if ctx.emergencia_reciente:
+        g.append("emergencia_reciente_24h")
+    return g
+
+
 def _coincidencias(reglas: tuple[Regla, ...], mensajes_normalizados: list[str]) -> dict[str, Regla]:
     hallazgos: dict[str, Regla] = {}
     for texto in mensajes_normalizados:
@@ -311,12 +468,22 @@ def clasificar(mensajes_cliente: list[str], ctx: Contexto | None = None) -> Deci
     mensajes = [m for m in (mensajes_cliente or []) if (m or "").strip()]
     todos = [normalizar(m) for m in mensajes]
 
-    # 1) Emergencia de gas: en cualquier mensaje; nunca cierra y se evalúa antes que todo lo demás.
-    emergencia = _coincidencias(REGLAS_EMERGENCIA, todos)
+    # 1) Emergencia de gas: se evalúa antes que todo lo demás (detección estricta, ver `detectar_emergencia`). Con el
+    # interruptor de emergencia apagado solo queda como alerta (log + evento, como siempre); si no, pasa por sus propias
+    # guardas y, sin bloqueos, propone `derivar_emergencia` (el modo decide si se envía). Mira todos los mensajes, o solo
+    # los que aún no se respondieron cuando `Contexto.mensajes_pendientes` lo indica.
+    emergencia = detectar_emergencia(list(ctx.mensajes_pendientes) if ctx.mensajes_pendientes is not None else mensajes)
     if emergencia:
+        confianza_emergencia = max(r.peso for r in emergencia.values())
+        if not ctx.emergencia_propone:
+            return Decision(CATEGORIA_EMERGENCIA, ACCION_ALERTA_EMERGENCIA, confianza_emergencia, tuple(emergencia))
+        bloqueos_emergencia = tuple(_guardas_emergencia(mensajes, ctx))
         return Decision(
-            CATEGORIA_EMERGENCIA, ACCION_ALERTA_EMERGENCIA, max(r.peso for r in emergencia.values()), tuple(emergencia),
+            CATEGORIA_EMERGENCIA, ACCION_DERIVAR_EMERGENCIA if not bloqueos_emergencia else ACCION_ALERTA_EMERGENCIA,
+            confianza_emergencia, tuple(emergencia), bloqueos_emergencia,
         )
+    if not ctx.evaluar_atc:
+        return Decision()
 
     # 2) Señales del tema en los ÚLTIMOS 2 mensajes del cliente.
     hallazgos = _coincidencias(REGLAS_ATC, todos[-2:])
@@ -419,7 +586,31 @@ async def _cfg(clave: str, negocio_id: str | None, por_defecto: str = "") -> str
     return (await obtener_configuracion(clave, por_defecto, negocio_id=negocio_id) or "").strip()
 
 
-async def _armar_contexto(telefono: str, canal: dict | None, lead: dict, negocio_id: str) -> tuple[Contexto, list[str]] | None:
+async def _emergencia_avisada_hace_poco(session, negocio_id: str, telefono: str, conversation_id: str) -> bool:
+    """¿Ya se le avisó de una emergencia a este cliente en las últimas `HORAS_SIN_REPETIR_EMERGENCIA` h (o hay un evento
+    de aviso reciente en este ciclo)? Dos fuentes: el registro de envíos (se escribe ANTES de enviar, aguanta un fallo posterior) y el evento
+    `emergencia_gas_derivada`. Un envío fallido no cuenta: ese sí puede reintentarse."""
+    desde = datetime.utcnow() - timedelta(hours=HORAS_SIN_REPETIR_EMERGENCIA)
+    envio = (await session.execute(
+        select(EnvioMeta.id).where(
+            EnvioMeta.negocio_id == negocio_id, EnvioMeta.telefono == telefono, EnvioMeta.origen == ORIGEN_EMERGENCIA,
+            EnvioMeta.decision.in_(("enviado", "incierto")), EnvioMeta.creado >= desde,
+        ).limit(1)
+    )).first()
+    if envio is not None:
+        return True
+    evento = (await session.execute(
+        select(EventoLead.id).where(
+            EventoLead.conversation_id == conversation_id, EventoLead.tipo == EVENTO_EMERGENCIA_GAS_DERIVADA,
+            EventoLead.creado >= desde,
+        ).limit(1)
+    )).first()
+    return evento is not None
+
+
+async def _armar_contexto(
+    telefono: str, canal: dict | None, lead: dict, negocio_id: str, *, evaluar_atc: bool = True, emergencia_propone: bool = False,
+) -> tuple[Contexto, list[str]] | None:
     """Lee el ciclo ACTUAL (la Conversation activa) y la configuración. None si no hay conversación."""
     categorias = tuple(c for c in _parsear_lista(await _cfg(CLAVE_CATEGORIAS, negocio_id)) if c) or CATEGORIAS_FASE_1
     maximo = _parsear_entero(await _cfg(CLAVE_MAX_MENSAJES, negocio_id), MAX_MENSAJES_CLIENTE_POR_DEFECTO)
@@ -449,8 +640,12 @@ async def _armar_contexto(telefono: str, canal: dict | None, lead: dict, negocio
                 EventoLead.tipo.in_((EVENTO_TRIAJE_ATC_CERRADO, EVENTO_TRIAJE_ATC_FALLIDO)),
             )
         )).scalar_one()
+        emergencia_reciente = False
+        if emergencia_propone:
+            emergencia_reciente = await _emergencia_avisada_hace_poco(session, negocio_id, telefono, conversation.id)
 
     mensajes_cliente: list[str] = []
+    pendientes: list[str] = []   # lo que el cliente escribió desde el último mensaje saliente (aún sin respuesta)
     n_cliente = n_gabi = 0
     ultimo_gabi = ""
     hay_media = hay_humano = gabi_dio_precio = False
@@ -465,11 +660,14 @@ async def _armar_contexto(telefono: str, canal: dict | None, lead: dict, negocio
                 hay_media = True
             if not placeholder:
                 mensajes_cliente.append(contenido)
+                pendientes.append(contenido)
         elif role == "asesor" or (role == "assistant" and via_app):
             hay_humano = True
+            pendientes.clear()
         elif role == "assistant" and (estado_envio or "") != "fallido":
             n_gabi += 1
             ultimo_gabi = contenido
+            pendientes.clear()
             if _RE_GABI_DIO_PRECIO.search(normalizar(contenido)):
                 gabi_dio_precio = True
 
@@ -482,30 +680,58 @@ async def _armar_contexto(telefono: str, canal: dict | None, lead: dict, negocio
         canal_pruebas=((canal or {}).get("modo") == "pruebas") and not permitir_pruebas,
         telefono_excluido=_solo_digitos(telefono) in excluidos if excluidos else False,
         tiene_campana=tiene_campana, patrones_saludo=patrones, conversation_id=conversation.id,
+        evaluar_atc=evaluar_atc, emergencia_propone=emergencia_propone, emergencia_reciente=emergencia_reciente,
+        # Con el interruptor de emergencia apagado se conserva el criterio de siempre (todos los mensajes del ciclo).
+        mensajes_pendientes=tuple(pendientes) if emergencia_propone else None,
     )
     return ctx, mensajes_cliente
 
 
-async def evaluar(telefono: str, canal: dict | None, lead: dict | None) -> Evaluacion:
+async def _emergencia_lista(negocio_id: str) -> bool:
+    """¿Se puede ENVIAR el aviso de emergencia? Nunca sale un número equivocado ni un hueco: si la plantilla (la propia o la
+    del módulo) usa {linea_emergencia} y esa línea no está configurada, `activo` se degrada a `sombra`."""
+    plantilla = await _cfg(CLAVE_EMERGENCIA_TEXTO, negocio_id) or TEXTO_EMERGENCIA_POR_DEFECTO
+    return not ("{linea_emergencia}" in plantilla and not await _cfg(CLAVE_LINEA_EMERGENCIA, negocio_id))
+
+
+async def evaluar(telefono: str, canal: dict | None, lead: dict | None, *, solo_emergencia: bool = False) -> Evaluacion:
     """Lee la configuración, el ciclo actual y los eventos previos, y clasifica. NUNCA lanza: ante cualquier error
-    devuelve una decisión "ninguna" con el modo "apagado" (el llamador no hace nada). Con el triaje apagado lo único
-    que toca la base es la lectura de `triaje_atc_modo`."""
+    devuelve una decisión "ninguna" con el modo "apagado" (el llamador no hace nada). Con ambos interruptores apagados
+    lo único que toca la base es la lectura de `triaje_atc_modo` y `triaje_atc_emergencia_modo`.
+
+    Dos interruptores INDEPENDIENTES: el general (`triaje_atc_modo`: recibo, número de cliente, pago) y el de emergencia
+    (`triaje_atc_emergencia_modo`). `Evaluacion.modo` es el que rige la DECISIÓN tomada: el de emergencia si la decisión es
+    una emergencia (con ese interruptor encendido), el general en cualquier otro caso. `solo_emergencia=True` (leads con
+    asesor o pausa, que nunca llegan a Gabi) ignora el general."""
     try:
         negocio_id = (canal or {}).get("negocio_id")
         if not negocio_id or not lead:
             return Evaluacion(Decision(), MODO_APAGADO)
-        configurado = _parsear_modo(await _cfg(CLAVE_MODO, negocio_id, MODO_APAGADO))
-        if configurado == MODO_APAGADO:
+        general = _parsear_modo(await _cfg(CLAVE_MODO, negocio_id, MODO_APAGADO))
+        emergencia = _parsear_modo(await _cfg(CLAVE_EMERGENCIA_MODO, negocio_id, MODO_APAGADO))
+        evaluar_atc = general != MODO_APAGADO and not solo_emergencia
+        if not evaluar_atc and emergencia == MODO_APAGADO:
             return Evaluacion(Decision(), MODO_APAGADO)
-        armado = await _armar_contexto(telefono, canal, lead, negocio_id)
+        armado = await _armar_contexto(
+            telefono, canal, lead, negocio_id, evaluar_atc=evaluar_atc, emergencia_propone=emergencia != MODO_APAGADO,
+        )
         if armado is None:
-            return Evaluacion(Decision(), MODO_APAGADO, configurado)
+            return Evaluacion(Decision(), MODO_APAGADO, general)
         ctx, mensajes_cliente = armado
         # `activo` exige la línea de atención: sin ella no se redirige a nadie (se degrada a sombra).
-        modo = configurado
-        if configurado == MODO_ACTIVO and not await _cfg(CLAVE_LINEA, negocio_id):
-            modo = MODO_SOMBRA
-        return Evaluacion(clasificar(mensajes_cliente, ctx), modo, configurado, ctx, ctx.n_msgs_cliente or 0)
+        modo_general = MODO_APAGADO if not evaluar_atc else general
+        if modo_general == MODO_ACTIVO and not await _cfg(CLAVE_LINEA, negocio_id):
+            modo_general = MODO_SOMBRA
+        # `activo` en emergencia exige un texto enviable (línea de emergencia): si no, se degrada a sombra.
+        modo_emergencia = emergencia
+        if emergencia == MODO_ACTIVO and not await _emergencia_lista(negocio_id):
+            modo_emergencia = MODO_SOMBRA
+        decision = clasificar(mensajes_cliente, ctx)
+        if decision.categoria == CATEGORIA_EMERGENCIA:
+            # Interruptor de emergencia apagado: se conserva lo de siempre (alerta con el modo del triaje general).
+            modo = modo_emergencia if emergencia != MODO_APAGADO else modo_general
+            return Evaluacion(decision, modo, emergencia if emergencia != MODO_APAGADO else general, ctx, ctx.n_msgs_cliente or 0)
+        return Evaluacion(decision, modo_general, general, ctx, ctx.n_msgs_cliente or 0)
     except Exception:
         logger.exception("triaje_atc: no se pudo evaluar el caso — se sigue con Gabi")
         return Evaluacion(Decision(bloqueos=("error_interno",)), MODO_APAGADO)
@@ -530,7 +756,11 @@ def _registrar_log(ev: Evaluacion) -> None:
         datos = {"conv": ev.contexto.conversation_id if ev.contexto else None, **_resumen(ev)}
         logger.info("triaje_atc " + json.dumps(datos, ensure_ascii=False))
         if ev.decision.categoria == CATEGORIA_EMERGENCIA:
-            logger.warning(f"triaje_atc_emergencia_gas conv={datos['conv']} (solo registro en fase 1: Gabi sigue normal)")
+            avisa = ev.decision.accion == ACCION_DERIVAR_EMERGENCIA and ev.modo == MODO_ACTIVO
+            logger.warning(
+                f"triaje_atc_emergencia_gas conv={datos['conv']} accion={ev.decision.accion} modo={ev.modo} "
+                + ("(se avisa a Emergencias de Cálidda)" if avisa else "(solo registro: Gabi sigue normal)")
+            )
     except Exception:
         logger.exception("triaje_atc: no se pudo escribir el log")
 
@@ -636,16 +866,112 @@ async def ejecutar(ev: Evaluacion, telefono: str, canal: dict | None, lead: dict
     return True
 
 
-async def procesar(telefono: str, canal: dict | None, lead: dict | None, proveedor) -> bool:
-    """Punto de entrada único desde `main._generar_y_enviar_respuesta_ia`. Devuelve True si el triaje atendió el
-    turno (Gabi NO debe responder) y False en cualquier otro caso —apagado, sombra, sin candidato, con bloqueos, error
-    o envío fallido—, es decir, que el camino de Gabi sigue exactamente como siempre."""
+def _motivo_sin_cierre_emergencia(ctx: Contexto | None, lead: dict | None) -> str | None:
+    """Por qué el aviso de emergencia NO cierra el caso (None = se puede cerrar). Un lead con asesor/pausa/supervisión no
+    se cierra: cerrar liberaría al asesor en cuanto el cliente vuelva a escribir. Uno con resultado (vendido, agendado…) o ya
+    cerrado tampoco: no se le cambia el resultado."""
+    lead = lead or {}
+    if (ctx and ctx.con_asesor_o_pausa) or lead.get("asesor_asignado") or lead.get("pausado_manual") or lead.get("escalado_supervision_en"):
+        return "con_asesor_o_pausa"
+    if (ctx and ctx.resultado) or lead.get("resultado"):
+        return "ya_tiene_resultado"
+    if (ctx and ctx.cerrado) or lead.get("cerrado_definitivamente_en") is not None:
+        return "caso_cerrado"
+    return None
+
+
+async def _texto_emergencia(negocio_id: str, lead: dict | None) -> str:
+    plantilla = await _cfg(CLAVE_EMERGENCIA_TEXTO, negocio_id) or TEXTO_EMERGENCIA_POR_DEFECTO
+    return texto_para(
+        plantilla, (lead or {}).get("nombre"), await _cfg(CLAVE_LINEA, negocio_id),
+        await _cfg(CLAVE_NOMBRE_NEGOCIO, negocio_id) or NOMBRE_NEGOCIO_POR_DEFECTO,
+        await _cfg(CLAVE_LINEA_EMERGENCIA, negocio_id), await _cfg(CLAVE_LINEA_VENTAS, negocio_id),
+    )
+
+
+async def _registrar_emergencia_derivada(telefono: str, ev: Evaluacion, cerrado: bool, motivo_sin_cierre: str | None) -> None:
+    """Evento VISIBLE en el Timeline del lead (sin PII): deja al equipo enterado sin consumir asesor. Nunca lanza."""
     try:
-        ev = await evaluar(telefono, canal, lead)
+        await registrar_evento_lead(
+            telefono, tipo=EVENTO_EMERGENCIA_GAS_DERIVADA,
+            descripcion=(
+                "Reportó olor o fuga de gas — se le derivó a Emergencias de Cálidda (24 h)"
+                + ("; caso cerrado como Consulta ATC" if cerrado else f"; el caso sigue abierto ({motivo_sin_cierre})")
+            )[:300],
+            autor=None,
+            payload={
+                "categoria": CATEGORIA_EMERGENCIA, "origen": "triaje_atc", "cerrado": cerrado,
+                "motivo_sin_cierre": motivo_sin_cierre, "señales": list(ev.decision.senales),
+            },
+        )
+    except Exception:
+        logger.exception("triaje_atc: no se pudo registrar el evento de la emergencia derivada")
+
+
+async def ejecutar_emergencia(ev: Evaluacion, telefono: str, canal: dict | None, lead: dict | None, proveedor) -> bool:
+    """Aviso de emergencia de gas: SIN IA (determinista, cero tokens). Envía el texto fijo (origen `triaje_emergencia_gas`,
+    esencial y exento del tope), lo guarda como mensaje de Gabi ANTES de cerrar (condición C4 del cierre de cortesía), y si
+    el lead no está en gestión lo tipifica `consulta_atc` y lo cierra (`cerrar_por_triaje`, sin asesor ni correo). Siempre
+    deja el evento `emergencia_gas_derivada`. Devuelve True si el texto SALIÓ (o pudo salir); si no sale, False y nada se
+    cierra (Gabi responde y el cliente puede reintentar el aviso con su siguiente mensaje). Nunca lanza."""
+    negocio_id = (canal or {}).get("negocio_id")
+    categoria = ev.decision.categoria
+    try:
+        texto = await _texto_emergencia(negocio_id, lead)
+        resultado = await envios.enviar_texto(proveedor, telefono, texto, origen="triaje_emergencia_gas", canal=canal)
+    except Exception:
+        logger.exception("triaje_atc: falló el envío del aviso de emergencia — el caso sigue su camino")
+        await _registrar_fallido(telefono, categoria, "excepcion_al_enviar", False)
+        return False
+    if not (resultado.enviado or resultado.incierto):
+        logger.warning(f"triaje_atc: el aviso de emergencia no salió ({resultado.motivo or 'envío fallido'})")
+        await _registrar_fallido(telefono, categoria, resultado.motivo, bool(resultado.bloqueado))
+        return False
+
+    conversation_id = ev.contexto.conversation_id if ev.contexto else None
+    guardado_ok = True
+    try:
+        guardado = await servicio_conversacion.guardar_mensaje(
+            telefono, "assistant", texto, negocio_id=negocio_id,
+            mensaje_id_meta=resultado.wamid, estado_envio=resultado.estado_envio,
+        )
+        conversation_id = guardado.get("conversation_id") or conversation_id
+    except Exception:
+        guardado_ok = False
+        logger.exception("triaje_atc: el aviso de emergencia salió pero no se pudo guardar el mensaje — no se cierra el caso")
+
+    motivo = _motivo_sin_cierre_emergencia(ev.contexto, lead) if guardado_ok else "mensaje_no_guardado"
+    cierre = None
+    if motivo is None:
+        try:
+            cierre = await cerrar_por_triaje(telefono, negocio_id, categoria)
+        except Exception:
+            logger.exception("triaje_atc: el aviso de emergencia salió pero falló el cierre del caso")
+        if cierre is None:
+            motivo = "no_se_pudo_cerrar"
+    if cierre is not None:
+        logger.info("triaje_atc_cerrado " + json.dumps({"conv": cierre["conversation_id"], "categoria": categoria}, ensure_ascii=False))
+    await _registrar_emergencia_derivada(telefono, ev, cierre is not None, motivo)
+    try:
+        await gestor_conexiones.emitir_mensaje_nuevo(conversation_id)
+    except Exception:
+        logger.exception("triaje_atc: no se pudo avisar al panel")
+    return True
+
+
+async def procesar(telefono: str, canal: dict | None, lead: dict | None, proveedor, *, solo_emergencia: bool = False) -> bool:
+    """Punto de entrada desde `main._generar_y_enviar_respuesta_ia` (y, con `solo_emergencia=True`, desde la rama del webhook
+    de los leads con asesor o pausa, que no llegan a Gabi). Devuelve True si el triaje atendió el turno (Gabi NO debe
+    responder) y False en cualquier otro caso —apagado, sombra, sin candidato, con bloqueos, error o envío fallido—, es decir,
+    que el camino de Gabi sigue exactamente como siempre."""
+    try:
+        ev = await evaluar(telefono, canal, lead, solo_emergencia=solo_emergencia)
         if ev.modo == MODO_APAGADO:
             return False
         _registrar_log(ev)
         await _registrar_decision(telefono, ev)
+        if ev.decision.accion == ACCION_DERIVAR_EMERGENCIA:
+            return ev.modo == MODO_ACTIVO and await ejecutar_emergencia(ev, telefono, canal, lead, proveedor)
         if ev.modo != MODO_ACTIVO or ev.decision.accion != ACCION_CERRAR:
             return False
         return await ejecutar(ev, telefono, canal, lead, proveedor)

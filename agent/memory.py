@@ -617,7 +617,27 @@ TIPO_EVENTO_LARGO_MAX = 60  # ver migración d4b7a1c93e52 (antes 30: dos tipos a
 EVENTO_TRIAJE_ATC_CERRADO = "triaje_atc_cerrado"
 EVENTO_TRIAJE_ATC_SOMBRA = "triaje_atc_sombra"
 EVENTO_TRIAJE_ATC_FALLIDO = "triaje_atc_fallido"
-TIPOS_EVENTO_INTERNOS = (EVENTO_TRIAJE_ATC_SOMBRA, EVENTO_TRIAJE_ATC_FALLIDO)
+# Emergencia de gas (2026-10-09): el cliente reportó olor o fuga de gas y se le derivó a Emergencias de Cálidda.
+# VISIBLE en el Timeline (deja al equipo enterado sin consumir asesor); también es la marca de "ya se avisó".
+EVENTO_EMERGENCIA_GAS_DERIVADA = "emergencia_gas_derivada"
+# "Para llamar" (2026-10-09, agent/llamadas.py): tarea de llamada para leads callados que mostraron interés.
+# Los eventos de GESTIÓN REAL quedan visibles en el Timeline (la llamada registrada, la tarea agotada, la oferta
+# de Gabi y la reprogramación que decidió una persona). Los de mecánica interna —crearla, asignarla, cancelarla
+# porque el cliente escribió, expirarla, escalarla— son INTERNOS: existen para medir y auditar, no para el asesor.
+EVENTO_LLAMADA_PENDIENTE_CREADA = "llamada_pendiente_creada"
+EVENTO_LLAMADA_ASIGNADA = "llamada_asignada"
+EVENTO_LLAMADA_REGISTRADA = "llamada_registrada"
+EVENTO_LLAMADA_REPROGRAMADA = "llamada_reprogramada"
+EVENTO_LLAMADA_CANCELADA_POR_RESPUESTA = "llamada_cancelada_por_respuesta"
+EVENTO_LLAMADA_AGOTADA = "llamada_agotada_sin_contacto"
+EVENTO_LLAMADA_EXPIRADA = "llamada_expirada"
+EVENTO_LLAMADA_ESCALADA = "llamada_escalada_supervision"
+EVENTO_LLAMADA_OFERTA_ENVIADA = "llamada_oferta_enviada"
+TIPOS_EVENTO_LLAMADA_INTERNOS = (
+    EVENTO_LLAMADA_PENDIENTE_CREADA, EVENTO_LLAMADA_ASIGNADA, EVENTO_LLAMADA_CANCELADA_POR_RESPUESTA,
+    EVENTO_LLAMADA_EXPIRADA, EVENTO_LLAMADA_ESCALADA,
+)
+TIPOS_EVENTO_INTERNOS = (EVENTO_TRIAJE_ATC_SOMBRA, EVENTO_TRIAJE_ATC_FALLIDO) + TIPOS_EVENTO_LLAMADA_INTERNOS
 
 
 class EventoLead(Base):
@@ -1242,6 +1262,9 @@ class Contact(Base):
     nombre: Mapped[str | None] = mapped_column(String(100), nullable=True)
     eliminado_en: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     eliminado_por: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    # "Para llamar" (2026-10-09): desde este instante (UTC) la persona pidió que NO se la llame. Se revisa antes de
+    # crear cualquier tarea de llamada y antes de cada intento; nunca se borra solo.
+    no_llamar_en: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     creado: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     actualizado: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, index=True)
 
@@ -1407,6 +1430,61 @@ class LineaVenta(Base):
 
     __table_args__ = (
         Index("ix_lineaventa_opportunity_negocio", "opportunity_id", "negocio_id"),
+    )
+
+
+class TareaLlamada(Base):
+    """"Para llamar" (2026-10-09, diseño D3; lógica en agent/llamadas.py): tarea de llamada para un lead CALLADO que
+    mostró interés. Es una tarea SUPERPUESTA a la conversación: no es una etapa del Pipeline, ni un resultado, ni un
+    `paso_flujo`, y NO reutiliza `derivado_asesor` (eso pausaría a Gabi, mandaría correo, armaría el reloj de
+    rotación 30+30 e inflaría el embudo). Gabi sigue activa mientras la tarea está abierta.
+
+    `estado`: programada (aún no accionable: fuera de horario o con hora futura) | pendiente (accionable, con asesor
+    o esperando uno) | cumplida | agotada | cancelada | expirada. `modo`: sombra (solo se registra para medir; nadie
+    la ve ni se llama) | activo. `grupo`: llamar | control (holdout: se registra pero NUNCA se muestra ni se llama,
+    para medir el efecto real de llamar). `segmento`: A | B | exploracion. `senales`: foto de por qué puntuó lo
+    que puntuó (banderas y números, nunca texto de mensajes ni nombres). El asesor vive en la TAREA, no en
+    `Lead.asesor_asignado`: asignar la tarea no pausa a Gabi.
+
+    Un índice único parcial garantiza a lo sumo UNA tarea abierta por conversación (idempotencia ante dos corridas
+    simultáneas del Cron)."""
+    __tablename__ = "tareas_llamada"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_generar_uuid)
+    negocio_id: Mapped[str] = mapped_column(String(36), ForeignKey("negocios.id"), nullable=False, index=True)
+    conversation_id: Mapped[str] = mapped_column(String(36), ForeignKey("conversations.id"), nullable=False, index=True)
+    contact_id: Mapped[str] = mapped_column(String(36), ForeignKey("contacts.id"), nullable=False, index=True)
+    # Copia para mostrar (150, como Mensaje.telefono: un BSUID es más largo que un teléfono).
+    telefono: Mapped[str] = mapped_column(String(150), nullable=False)
+    estado: Mapped[str] = mapped_column(String(20), nullable=False, default="pendiente", index=True)
+    motivo_cierre: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    segmento: Mapped[str] = mapped_column(String(20), nullable=False)
+    puntaje: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    senales: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    grupo: Mapped[str] = mapped_column(String(10), nullable=False, default="llamar")
+    modo: Mapped[str] = mapped_column(String(10), nullable=False, default="sombra")
+    asesor_username: Mapped[str | None] = mapped_column(String(50), nullable=True, index=True)
+    asignada_en: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    programada_para: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    intentos: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    ultimo_intento_en: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    proximo_intento_en: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    resultado_llamada: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    nota: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    # Cuántas veces el SLA la reasignó a otro asesor (máx. 1) y cuándo pasó a "sin hacer" visible al supervisor.
+    reasignaciones: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    escalada_en: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    creada_en: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow, index=True)
+    cerrada_en: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    vence_en: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+    __table_args__ = (
+        Index("ix_tareas_llamada_negocio_estado", "negocio_id", "estado"),
+        Index(
+            "ix_tarea_llamada_una_abierta_por_conversation", "conversation_id", unique=True,
+            sqlite_where=text("estado IN ('programada', 'pendiente')"),
+            postgresql_where=text("estado IN ('programada', 'pendiente')"),
+        ),
     )
 
 
@@ -2879,7 +2957,9 @@ class Configuracion(Base):
     # 50 → 100 (2026-10-05): `meta_uso_previo_servicio_AAAA-MM:<phone_number_id>` llegaba a 49.
     clave: Mapped[str] = mapped_column(String(100))
     negocio_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("negocios.id"), nullable=True)
-    valor: Mapped[str] = mapped_column(String(200))
+    # 200 → 1000 (2026-10-09): el texto de la oferta de llamada y las plantillas configurables pasan de 200 (ver la
+    # migración b8e2d4f6a1c3; SQLite no valida el largo, Postgres sí).
+    valor: Mapped[str] = mapped_column(String(1000))
 
     __table_args__ = (
         # Único activo cuando negocio_id es NULL (config global de plataforma)
@@ -3028,6 +3108,7 @@ CRONES_ESPERADOS: dict[str, tuple[str, int]] = {
     "backup_postgres": ("Respaldo de la base de datos", 1440),
     "recuperar_mensajes_sin_respuesta": ("Recuperación de mensajes sin respuesta", 10),
     "plantilla_zona_muerta": ("Plantilla automática de fin de semana", 30),
+    "crear_tareas_llamada": ("Tareas de llamada (Para llamar)", 15),
 }
 DIAS_RETENCION_CRON_EJECUCIONES = 30
 
@@ -7372,6 +7453,7 @@ async def cerrar_lead_definitivamente_via_conversation(conversation_id: str, neg
 
 
 _ETIQUETAS_CATEGORIA_TRIAJE = {"recibo": "recibo", "numero_cliente": "número de cliente", "pago_deuda": "pago o deuda"}
+_DESCRIPCION_CIERRE_EMERGENCIA = "Triaje automático: emergencia de gas derivada a Emergencias de Cálidda — caso cerrado"
 
 
 async def cerrar_por_triaje(
@@ -7387,7 +7469,9 @@ async def cerrar_por_triaje(
     `evaluar_cierre_cortesia` (nadie escribió después del cierre) deja absorber el "gracias"/"ok" posterior.
 
     Devuelve `{"conversation_id", "opportunity_id", "cierre_en"}`, o None SIN tocar nada si el caso ya no es
-    cerrable (otro negocio, ya cerrado, un humano lo tomó o ya tiene resultado): una persona siempre gana."""
+    cerrable (otro negocio, ya cerrado, un humano lo tomó o ya tiene resultado): una persona siempre gana.
+    También vale para `categoria="emergencia_gas"` (2026-10-09): un lead con asesor o pausa NO se cierra (cerrar
+    liberaría al asesor cuando el cliente vuelva a escribir) y uno vendido/agendado tampoco (ya tiene resultado)."""
     ahora = ahora or datetime.utcnow()
     async with async_session() as session:
         async with session.begin():
@@ -7432,7 +7516,10 @@ async def cerrar_por_triaje(
             session.add(EventoLead(
                 conversation_id=conversation.id, negocio_id=conversation.negocio_id, opportunity_id=opportunity.id,
                 tipo=EVENTO_TRIAJE_ATC_CERRADO, autor=None,
-                descripcion=f"Triaje automático: consulta de {etiqueta} derivada a la línea de atención — caso cerrado"[:300],
+                descripcion=(
+                    _DESCRIPCION_CIERRE_EMERGENCIA if categoria == "emergencia_gas"
+                    else f"Triaje automático: consulta de {etiqueta} derivada a la línea de atención — caso cerrado"
+                )[:300],
                 payload={"categoria": categoria, "origen": "triaje_atc", "cierre_en": ahora.isoformat()},
                 creado=ahora,
             ))
@@ -7797,6 +7884,20 @@ async def listar_leads_inactividad_cliente(
             sa_or(Lead.resultado.is_(None), Lead.resultado.notin_(RESULTADOS_CERRADOS)),
         )
         candidatos = (await session.execute(query)).scalars().all()
+        # "Para llamar" (2026-10-09): un lead con una tarea de llamada ABIERTA, visible y en juego (modo activo,
+        # grupo `llamar`) NO se cierra como `sin_respuesta` a las 15 h: lo cierra la propia tarea al agotarse
+        # (agent/llamadas.py). Las tareas de sombra y del grupo de control NUNCA frenan este cierre (el grupo de
+        # control tiene que comportarse como siempre). Sin tareas, el conjunto es vacío y nada cambia.
+        con_tarea_de_llamada_abierta: set[tuple[str, str]] = set()
+        if candidatos:
+            con_tarea_de_llamada_abierta = {
+                (negocio, telefono) for negocio, telefono in (await session.execute(
+                    select(TareaLlamada.negocio_id, TareaLlamada.telefono).where(
+                        TareaLlamada.estado.in_(("programada", "pendiente")),
+                        TareaLlamada.modo == "activo", TareaLlamada.grupo == "llamar",
+                    )
+                )).all()
+            }
 
         for lead in candidatos:
             recientes = (await session.execute(
@@ -7852,7 +7953,8 @@ async def listar_leads_inactividad_cliente(
                 continue
 
             if ultimo_cliente.timestamp < corte_cierre:
-                candidatos_cierre.append(fila)
+                if (lead.negocio_id, lead.telefono) not in con_tarea_de_llamada_abierta:
+                    candidatos_cierre.append(fila)
             elif not ya_reenganchado and ultimo_cliente.timestamp < corte_reenganche:
                 candidatos_reenganche.append(fila)
 
@@ -8729,6 +8831,102 @@ async def obtener_politica_metricas(negocio_id: str) -> dict:
     except Exception:
         return {"excluir_consulta_atc": False, "desde": None}
     return normalizar_politica_metricas(excluir, desde)
+
+
+# Configuración de la métrica desde el panel (2026-10-09): lo que antes solo fijaba `scripts/configurar_triaje_atc.py`.
+SIN_CAMBIO_METRICAS = object()   # "no tocar la fecha de corte" (distinto de None = "borrarla")
+
+
+def validar_fecha_corte_metricas(valor) -> str:
+    """'' si no hay corte; si no, la fecha AAAA-MM-DD (día de Lima) ya validada. Lanza ValueError con el motivo."""
+    if valor is None:
+        return ""
+    if not isinstance(valor, str):
+        raise ValueError("La fecha de corte debe ser un texto AAAA-MM-DD (o vacío).")
+    texto = valor.strip()
+    if not texto:
+        return ""
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", texto):
+        raise ValueError("La fecha de corte debe tener el formato AAAA-MM-DD (o ir vacía).")
+    try:
+        dia = datetime.strptime(texto, "%Y-%m-%d")
+    except ValueError:
+        raise ValueError("La fecha de corte no es un día válido del calendario.")
+    if not 2020 <= dia.year <= 2100:
+        raise ValueError("La fecha de corte debe estar entre los años 2020 y 2100.")
+    return texto
+
+
+async def obtener_configuracion_metricas(negocio_id: str) -> dict:
+    """Lo guardado, listo para la pantalla: `{"excluir_consulta_atc": bool, "excluir_desde": "AAAA-MM-DD"|None}`.
+    Un corte guardado que no sea una fecha válida se informa como ausente (así lo trata el cálculo)."""
+    excluir = await obtener_configuracion(CLAVE_METRICAS_EXCLUIR_ATC, "0", negocio_id=negocio_id)
+    desde = await obtener_configuracion(CLAVE_METRICAS_EXCLUIR_ATC_DESDE, "", negocio_id=negocio_id)
+    try:
+        corte = validar_fecha_corte_metricas(desde) or None
+    except ValueError:
+        corte = None
+    return {"excluir_consulta_atc": normalizar_politica_metricas(excluir, None)["excluir_consulta_atc"], "excluir_desde": corte}
+
+
+async def guardar_configuracion_metricas(
+    negocio_id: str, excluir, desde=SIN_CAMBIO_METRICAS, autor: str | None = None,
+) -> dict:
+    """Valida y guarda la política de la métrica del embudo desde el panel (ver `normalizar_politica_metricas`).
+    `excluir` debe ser un booleano; `desde`: AAAA-MM-DD, ''/None para borrar el corte, o `SIN_CAMBIO_METRICAS`
+    para dejarlo como está. Los dos valores y la fila de auditoría (quién, cuándo, antes y después) van en UNA
+    transacción. Lanza ValueError con el motivo si algo no es válido (no guarda nada). Devuelve
+    `{"modificadas": [claves]}`."""
+    if not isinstance(excluir, bool):
+        raise ValueError("`excluir_consulta_atc` debe ser true o false.")
+    cambios = {CLAVE_METRICAS_EXCLUIR_ATC: "1" if excluir else "0"}
+    if desde is not SIN_CAMBIO_METRICAS:
+        cambios[CLAVE_METRICAS_EXCLUIR_ATC_DESDE] = validar_fecha_corte_metricas(desde)
+    por_defecto = {CLAVE_METRICAS_EXCLUIR_ATC: "0", CLAVE_METRICAS_EXCLUIR_ATC_DESDE: ""}
+
+    async with async_session() as session:
+        actuales = {
+            c.clave: c for c in (await session.execute(
+                select(Configuracion).where(Configuracion.negocio_id == negocio_id, Configuracion.clave.in_(list(cambios)))
+            )).scalars().all()
+        }
+        registro: dict[str, dict] = {}
+        for clave, valor in cambios.items():
+            existente = actuales.get(clave)
+            antes = existente.valor if existente else None
+            if (antes if antes is not None else por_defecto[clave]) == valor:
+                continue   # ya estaba así (o es el valor por defecto): ni se escribe ni se audita
+            if existente is None:
+                session.add(Configuracion(clave=clave, negocio_id=negocio_id, valor=valor))
+            else:
+                existente.valor = valor
+            registro[clave] = {"antes": antes, "despues": valor}
+        if registro:
+            session.add(RegistroAuditoria(
+                accion="metricas_configuracion", actor=autor, negocio_id=negocio_id, entidad_tipo="configuracion",
+                payload={"cambios": registro, "riesgo_confirmado": False},
+            ))
+        await session.commit()
+    return {"modificadas": sorted(registro)}
+
+
+async def contar_consultas_atc_recientes(negocio_id: str, dias: int = 30) -> dict:
+    """Contexto para la pantalla: cuántas oportunidades de los últimos `dias` días son consultas no comerciales
+    (`consulta_atc`) sobre el total, SIN importar si la exclusión está activa. `{"dias", "consultas",
+    "oportunidades", "porcentaje"}` (porcentaje None si no hubo oportunidades)."""
+    hasta = datetime.utcnow() + timedelta(minutes=1)
+    desde = hasta - timedelta(days=dias)
+    async with async_session() as session:
+        consultas = await _contar_consultas_no_comerciales(session, negocio_id, desde, hasta, None)
+        total = (await session.execute(
+            select(func.count(Opportunity.id)).where(
+                Opportunity.negocio_id == negocio_id, Opportunity.creado >= desde, Opportunity.creado < hasta,
+            )
+        )).scalar_one()
+    return {
+        "dias": dias, "consultas": consultas, "oportunidades": total,
+        "porcentaje": round(100 * consultas / total, 1) if total > 0 else None,
+    }
 
 
 async def _contar_consultas_no_comerciales(

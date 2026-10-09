@@ -227,7 +227,35 @@ async def test_el_origen_del_triaje_atc_es_esencial_y_nunca_se_agrupa_ni_lo_fren
     assert [f.origen for f in await _filas(nid)] == ["triaje_atc", "triaje_atc"]
 
 
+async def test_el_origen_de_la_emergencia_de_gas_es_esencial_exento_del_tope_y_nunca_lo_frena_un_interruptor():
+    """2026-10-09 — `triaje_emergencia_gas` (agent/triaje_atc.py): el aviso fijo hacia Emergencias de Cálidda cuando el cliente
+    reporta olor o fuga de gas. Es seguridad: esencial y exento del tope; ni el interruptor del origen, ni el tope mensual, ni
+    la Opción B (`envios_tope_bloquea_esenciales`) lo frenan, y no se agrupa (el «no repetir en 24 h» lo garantiza quien lo
+    envía)."""
+    assert envios.ORIGENES["triaje_emergencia_gas"] == {"esencial": True, "exento_tope": True}
+    assert "triaje_emergencia_gas" in envios.ORIGENES_CON_LIMPIEZA_DE_FORMATO and len("triaje_emergencia_gas") <= 40
+    nid, canal = await _negocio("env-emergencia")
+    await mem.guardar_configuracion("envios_modo_triaje_emergencia_gas", "nunca", negocio_id=nid)
+    await mem.guardar_configuracion("envios_tope_bloquea_esenciales", "true", negocio_id=nid)
+    await mem.guardar_configuracion("envios_tope_mensual_usd", "0", negocio_id=nid)
+    p = _Proveedor()
+    for _ in range(2):
+        r = await envios.enviar_texto(p, "51911111131", "aviso de emergencia", origen="triaje_emergencia_gas", canal=canal)
+        assert r.enviado and not r.bloqueado
+    assert len(p.llamadas) == 2
+    assert [f.origen for f in await _filas(nid)] == ["triaje_emergencia_gas", "triaje_emergencia_gas"]
+
+
+def test_el_origen_de_la_oferta_de_llamada_esta_registrado_no_es_esencial_y_solo_va_gratis():
+    """2026-10-09 — `gabi_oferta_llamada` (agent/llamadas.py): la oferta de llamada que reemplaza al reenganche genérico. Nadie la
+    espera (no es esencial), igual que el reenganche solo sale si es gratis, y pasa por la limpieza de formato de WhatsApp."""
+    assert envios.ORIGENES["gabi_oferta_llamada"] == {"esencial": False, "modo": "solo_gratis"}
+    assert "gabi_oferta_llamada" in envios.ORIGENES_CON_LIMPIEZA_DE_FORMATO
+
+
 def test_el_triaje_atc_envia_por_la_capa_central_con_su_origen():
     fuente = (RAIZ / "agent" / "triaje_atc.py").read_text(encoding="utf-8")
     assert 'envios.enviar_texto(proveedor, telefono, texto, origen="triaje_atc", canal=canal)' in fuente
+    assert 'envios.enviar_texto(proveedor, telefono, texto, origen="triaje_emergencia_gas", canal=canal)' in fuente
+    assert 'ORIGEN_EMERGENCIA = "triaje_emergencia_gas"' in fuente
     assert not re.search(r"\bproveedor\.enviar_", fuente)

@@ -13,12 +13,18 @@ Uso (la base sale de DATABASE_URL, como en los demás scripts; sin ninguna opci�
     # 3) Más adelante, ya medido (scripts/analisis_triaje_atc.py): activar o volver a apagar:
     python scripts/configurar_triaje_atc.py --negocio-id <id> --modo activo
     python scripts/configurar_triaje_atc.py --negocio-id <id> --modo apagado
+    # EMERGENCIA DE GAS (interruptor PROPIO, independiente de --modo; default apagado). Aviso fijo y sin IA hacia
+    # Emergencias de Cálidda + cierre como consulta_atc. Necesita --linea-emergencia (o un texto propio con el número):
+    python scripts/configurar_triaje_atc.py --negocio-id <id> --emergencia-modo sombra   # solo log + evento interno
+    python scripts/configurar_triaje_atc.py --negocio-id <id> --emergencia-modo activo   # envía el aviso y cierra
+    python scripts/configurar_triaje_atc.py --negocio-id <id> --emergencia-modo apagado
     # Métrica del embudo: excluir las consultas ATC del denominador comercial (desde una fecha opcional):
     python scripts/configurar_triaje_atc.py --negocio-id <id> --excluir-consulta-atc 1 --excluir-desde 2026-10-09
 
 Otras opciones: --categorias recibo,numero_cliente,pago_deuda · --texto "…{nombre}…{linea_atc}…{negocio}" ·
 --texto-categoria recibo="…" (repetible) · --max-mensajes 4 · --nombre-negocio "Gaso+" ·
 --telefonos-excluidos 51999…,51988… (equipo/pruebas) · --permitir-canal-pruebas 1 · "" en un valor texto lo borra.
+--emergencia-texto "…{linea_emergencia}…" (debe llevar {linea_emergencia}, sin «?» ni «¿»; vacío = texto por defecto del módulo).
 """
 import argparse
 import asyncio
@@ -44,8 +50,10 @@ def _argumentos(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--negocio-id", default=None, help="Id del negocio. Si se omite y existe un solo negocio activo, se usa ese.")
     p.add_argument("--modo", choices=t.MODOS, default=None, help="apagado (default del sistema) | sombra | activo.")
     p.add_argument("--linea", default=None, help='Línea de atención de Cálidda tal como se dice al cliente, p. ej. "614900, opción 5".')
-    p.add_argument("--linea-emergencia", default=None, help='p. ej. "1808 (Emergencias 24/7)" (fase siguiente; informativa).')
+    p.add_argument("--linea-emergencia", default=None, help='p. ej. "1808 (Emergencias 24/7)": la línea del aviso de emergencia de gas.')
     p.add_argument("--linea-ventas", default=None, help='p. ej. "614-9002" (ventas Cálidda Hogar; informativa).')
+    p.add_argument("--emergencia-modo", choices=t.MODOS, default=None, help="Emergencia de gas (interruptor propio): apagado (default) | sombra | activo.")
+    p.add_argument("--emergencia-texto", default=None, help="Plantilla del aviso de emergencia: debe llevar {linea_emergencia}; sin «?». Vacío = texto por defecto.")
     p.add_argument("--categorias", default=None, help=f"Categorías activas, separadas por comas (válidas: {', '.join(t.CATEGORIAS_ATC)}).")
     p.add_argument("--texto", default=None, help="Plantilla general con {nombre}, {linea_atc}, {negocio}, {linea_emergencia}, {linea_ventas}.")
     p.add_argument("--texto-categoria", action="append", default=[], metavar="CATEGORIA=TEXTO", help="Plantilla propia de una categoría (repetible).")
@@ -87,6 +95,34 @@ def validar_texto(texto: str, etiqueta: str) -> str:
     return texto
 
 
+def validar_texto_emergencia(texto: str, etiqueta: str = "--emergencia-texto", linea: str | None = None) -> tuple[str, list[str]]:
+    """Valida el texto del aviso de emergencia. ERRORES: más de TEXTO_MAXIMO caracteres, «?»/«¿», o que no lleve la línea de
+    emergencia (el marcador {linea_emergencia} o, si se indica `linea`, ese mismo texto). ADVERTENCIA (no bloquea): si el texto
+    deja algo pendiente para el cierre de cortesía (p. ej. «llama…»), un «ok» posterior del cliente reabriría el caso y Gabi
+    respondería. NO se aplica la regla de palabras prohibidas de los demás textos: esta se escribe para que un «gracias»
+    siempre se absorba, pero quien lo personalice puede usar «llama»."""
+    texto = texto.strip()
+    if not texto:
+        return "", []
+    if len(texto) > TEXTO_MAXIMO:
+        raise ValueError(f"{etiqueta}: máximo {TEXTO_MAXIMO} caracteres.")
+    if "?" in texto or "¿" in texto:
+        raise ValueError(f"{etiqueta}: no puede llevar «?» ni «¿» (es una instrucción de seguridad, no una pregunta).")
+    if "{linea_emergencia}" not in texto and not ((linea or "").strip() and linea.strip() in texto):
+        raise ValueError(
+            f"{etiqueta}: debe llevar la línea de emergencia: usa el marcador {{linea_emergencia}} (se rellena con "
+            "--linea-emergencia, p. ej. \"1808 (Emergencias 24/7)\")."
+        )
+    avisos = []
+    if mem.saliente_deja_algo_pendiente(texto.replace("{nombre}", "").replace("{linea_emergencia}", "1808 (Emergencias 24/7)")):
+        avisos.append(
+            f"AVISO {etiqueta}: el texto tiene una palabra que el cierre de cortesía lee como compromiso o petición pendiente "
+            "(llamar, enviar, avisar, necesitar, días, horas…): un «ok» del cliente reabriría el caso y Gabi respondería. "
+            "Un «gracias» sí se absorbe. El texto por defecto usa «Comunícate ya con…» para evitarlo."
+        )
+    return texto, avisos
+
+
 def validar_fecha(valor: str) -> str:
     valor = valor.strip()
     if valor:
@@ -97,11 +133,19 @@ def validar_fecha(valor: str) -> str:
     return valor
 
 
-def _cambios_desde(args) -> dict[str, str]:
-    """Valida los argumentos y devuelve {clave de configuración: valor} (vacío = ningún cambio)."""
+def _cambios_desde(args, avisos: list[str] | None = None) -> dict[str, str]:
+    """Valida los argumentos y devuelve {clave de configuración: valor} (vacío = ningún cambio). Las advertencias no
+    bloqueantes se agregan a `avisos` si se la pasa."""
     cambios: dict[str, str] = {}
     if args.modo is not None:
         cambios[t.CLAVE_MODO] = args.modo
+    if args.emergencia_modo is not None:
+        cambios[t.CLAVE_EMERGENCIA_MODO] = args.emergencia_modo
+    if args.emergencia_texto is not None:
+        texto_emergencia, avisos_texto = validar_texto_emergencia(args.emergencia_texto, linea=args.linea_emergencia)
+        cambios[t.CLAVE_EMERGENCIA_TEXTO] = texto_emergencia
+        if avisos is not None:
+            avisos.extend(avisos_texto)
     for valor, clave, etiqueta in (
         (args.linea, t.CLAVE_LINEA, "--linea"), (args.linea_emergencia, t.CLAVE_LINEA_EMERGENCIA, "--linea-emergencia"),
         (args.linea_ventas, t.CLAVE_LINEA_VENTAS, "--linea-ventas"), (args.nombre_negocio, t.CLAVE_NOMBRE_NEGOCIO, "--nombre-negocio"),
@@ -149,6 +193,10 @@ async def estado(negocio_id: str) -> dict:
         return (await mem.obtener_configuracion(clave, defecto, negocio_id=negocio_id) or "").strip()
 
     modo = t._parsear_modo(await v(t.CLAVE_MODO, "apagado"))
+    emergencia = t._parsear_modo(await v(t.CLAVE_EMERGENCIA_MODO, "apagado"))
+    plantilla_emergencia = await v(t.CLAVE_EMERGENCIA_TEXTO) or t.TEXTO_EMERGENCIA_POR_DEFECTO
+    linea_emergencia = await v(t.CLAVE_LINEA_EMERGENCIA)
+    emergencia_lista = not ("{linea_emergencia}" in plantilla_emergencia and not linea_emergencia)
     linea = await v(t.CLAVE_LINEA)
     plantilla = await v(t.CLAVE_TEXTO) or t.TEXTO_POR_DEFECTO
     negocio = await v(t.CLAVE_NOMBRE_NEGOCIO) or t.NOMBRE_NEGOCIO_POR_DEFECTO
@@ -157,6 +205,9 @@ async def estado(negocio_id: str) -> dict:
         "negocio_id": negocio_id,
         "modo_configurado": modo,
         "modo_efectivo": t.MODO_SOMBRA if (modo == t.MODO_ACTIVO and not linea) else modo,
+        "emergencia_modo_configurado": emergencia,
+        "emergencia_modo_efectivo": t.MODO_SOMBRA if (emergencia == t.MODO_ACTIVO and not emergencia_lista) else emergencia,
+        t.CLAVE_EMERGENCIA_TEXTO: await v(t.CLAVE_EMERGENCIA_TEXTO) or "(texto por defecto del módulo)",
         t.CLAVE_LINEA: linea or None,
         t.CLAVE_LINEA_EMERGENCIA: await v(t.CLAVE_LINEA_EMERGENCIA) or None,
         t.CLAVE_LINEA_VENTAS: await v(t.CLAVE_LINEA_VENTAS) or None,
@@ -168,6 +219,9 @@ async def estado(negocio_id: str) -> dict:
         "metricas_excluir_consulta_atc": politica["excluir_consulta_atc"],
         "metricas_excluir_consulta_atc_desde": await v(mem.CLAVE_METRICAS_EXCLUIR_ATC_DESDE) or None,
         "vista_previa_texto": t.texto_para(plantilla, "Yasmin", linea or "<FALTA --linea>", negocio),
+        "vista_previa_emergencia": t.texto_para(
+            plantilla_emergencia, "Yasmin", linea or "", negocio, linea_emergencia or "<FALTA --linea-emergencia>",
+        ),
     }
 
 
@@ -179,6 +233,16 @@ async def aplicar(negocio_id: str, cambios: dict[str, str]) -> dict:
             linea = await mem.obtener_configuracion(t.CLAVE_LINEA, "", negocio_id=negocio_id)
         if not (linea or "").strip():
             raise ValueError("No se puede activar sin la línea de atención: configura --linea primero (p. ej. \"614900, opción 5\").")
+    if cambios.get(t.CLAVE_EMERGENCIA_MODO) == t.MODO_ACTIVO:
+        plantilla = cambios[t.CLAVE_EMERGENCIA_TEXTO] if t.CLAVE_EMERGENCIA_TEXTO in cambios else await mem.obtener_configuracion(
+            t.CLAVE_EMERGENCIA_TEXTO, "", negocio_id=negocio_id)
+        linea_emergencia = cambios[t.CLAVE_LINEA_EMERGENCIA] if t.CLAVE_LINEA_EMERGENCIA in cambios else await mem.obtener_configuracion(
+            t.CLAVE_LINEA_EMERGENCIA, "", negocio_id=negocio_id)
+        if "{linea_emergencia}" in ((plantilla or "").strip() or t.TEXTO_EMERGENCIA_POR_DEFECTO) and not (linea_emergencia or "").strip():
+            raise ValueError(
+                "No se puede activar la emergencia sin la línea de emergencia: configura --linea-emergencia primero "
+                "(p. ej. \"1808 (Emergencias 24/7)\")."
+            )
     for clave, valor in cambios.items():
         await mem.guardar_configuracion(clave, valor, negocio_id=negocio_id)
     return await estado(negocio_id)
@@ -186,13 +250,18 @@ async def aplicar(negocio_id: str, cambios: dict[str, str]) -> dict:
 
 async def main(argv: list[str] | None = None) -> dict:
     args = _argumentos(argv)
-    cambios = _cambios_desde(args)
+    avisos: list[str] = []
+    cambios = _cambios_desde(args, avisos)
+    for aviso in avisos:
+        print(aviso, file=sys.stderr)
     await mem.esperar_base_de_datos()
     negocio_id = resolver_negocio_id(args.negocio_id, await mem.listar_negocios())
     resultado = await aplicar(negocio_id, cambios) if cambios else await estado(negocio_id)
     print(json.dumps(resultado, ensure_ascii=False, indent=2))
     if resultado["modo_configurado"] == t.MODO_ACTIVO and resultado["modo_efectivo"] != t.MODO_ACTIVO:
         print("\nOjo: el modo activo sin línea de atención funciona como sombra.")
+    if resultado["emergencia_modo_configurado"] == t.MODO_ACTIVO and resultado["emergencia_modo_efectivo"] != t.MODO_ACTIVO:
+        print("\nOjo: la emergencia en modo activo sin línea de emergencia funciona como sombra.")
     return resultado
 
 

@@ -13,6 +13,11 @@ Fuente: los eventos internos `triaje_atc_sombra` (una decisión por candidato, e
 triaje detectó un tema (recibo, número de cliente, pago…) aunque lo bloqueara una guarda. Las conversaciones SIN ningún
 tema detectado no dejan evento (la línea INFO `triaje_atc` del log sí cubre todas las evaluaciones).
 
+EMERGENCIA DE GAS (2026-10-09, `triaje_atc_emergencia_modo`): las decisiones y los cierres de la categoría `emergencia_gas`
+NO entran en las métricas de recibo/pago de arriba (no son consultas de atención al cliente ni cuentan para el recall);
+tienen su sección 5: emergencias detectadas, avisadas (evento `emergencia_gas_derivada`), cerradas como consulta_atc y
+las avisadas SIN cerrar (lead con asesor/pausa o con resultado), por modo y por guarda. Solo conteos.
+
 Solo agregados: nunca teléfonos, nombres, texto de mensajes ni ids de conversación. Un grupo con n<10 muestra "n<10" en
 vez de porcentajes. Lectura pura: solo SELECT; en Postgres la transacción se abre como READ ONLY. NO es un Cron.
 
@@ -41,11 +46,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from sqlalchemy import func, select, text
 
 from agent.memory import (
-    EVENTO_TRIAJE_ATC_CERRADO, EVENTO_TRIAJE_ATC_SOMBRA, Conversation, EventoLead, Lead, Contact, Opportunity,
+    EVENTO_EMERGENCIA_GAS_DERIVADA, EVENTO_TRIAJE_ATC_CERRADO, EVENTO_TRIAJE_ATC_SOMBRA, Conversation, EventoLead, Lead, Contact, Opportunity,
     async_session, engine, esperar_base_de_datos,
 )
 
 LIMITE_N = 10
+CATEGORIA_EMERGENCIA = "emergencia_gas"
 RESULTADOS_COMERCIALES = ("agendado", "vendido")
 EVENTOS_DERIVACION = ("asignado", "asignado_automatico", "derivado_sin_ia", "rotado_automatico_sin_respuesta")
 DESDE_POR_DEFECTO = "2026-10-08"
@@ -74,6 +80,11 @@ def tabla(encabezados: list[str], filas: list[list]) -> list[str]:
         return "  " + "  ".join(c.ljust(a) if i == 0 else c.rjust(a) for i, (c, a) in enumerate(zip(fila, anchos))).rstrip()
 
     return [linea(encabezados), "  " + "  ".join("-" * a for a in anchos)] + [linea(f) for f in filas]
+
+
+def es_emergencia(payload) -> bool:
+    """¿El payload de un evento del triaje es de la categoría emergencia_gas? (no entra en las métricas ATC)."""
+    return isinstance(payload, dict) and payload.get("categoria") == CATEGORIA_EMERGENCIA
 
 
 def limite_superior_error(fallos: int, n: int) -> float | None:
@@ -138,6 +149,7 @@ class Datos:
     inicio_medicion: datetime | None
     desde: datetime
     hasta: datetime
+    emergencias: dict = field(default_factory=dict)   # conversation_id → {"decision": payload|None, "avisada": bool, "cerrada": bool, "motivo": str|None}
 
 
 # ── Carga (solo SELECT) ───────────────────────────────────────────────────────────────────────────────────
@@ -167,13 +179,14 @@ async def _rellenar(session, convs: dict[str, Conv], desde: datetime) -> None:
             c.resultado = o.resultado
             c.producto = bool(o.producto_tipo)
         for e in (await session.execute(
-            select(EventoLead.conversation_id, EventoLead.tipo).where(
+            select(EventoLead.conversation_id, EventoLead.tipo, EventoLead.payload).where(
                 EventoLead.conversation_id.in_(lote), EventoLead.tipo.in_(EVENTOS_DERIVACION + (EVENTO_TRIAJE_ATC_CERRADO,)),
             )
         )).all():
             c = convs[e.conversation_id]
             if e.tipo == EVENTO_TRIAJE_ATC_CERRADO:
-                c.cerrada_por_triaje = True
+                if not es_emergencia(e.payload):
+                    c.cerrada_por_triaje = True
             else:
                 c.derivada = True
     # Producto cargado en el Lead de la conversación MÁS RECIENTE del contacto (el Lead refleja el último ciclo).
@@ -225,14 +238,25 @@ async def cargar_datos(session, desde: datetime, hasta: datetime) -> Datos:
     )).scalar_one_or_none()
 
     convs: dict[str, Conv] = {}
+    emergencias: dict[str, dict] = {}
     for e in (await session.execute(
         select(EventoLead.conversation_id, EventoLead.tipo, EventoLead.payload)
         .where(
-            EventoLead.tipo.in_((EVENTO_TRIAJE_ATC_SOMBRA, EVENTO_TRIAJE_ATC_CERRADO)),
+            EventoLead.tipo.in_((EVENTO_TRIAJE_ATC_SOMBRA, EVENTO_TRIAJE_ATC_CERRADO, EVENTO_EMERGENCIA_GAS_DERIVADA)),
             EventoLead.creado >= desde, EventoLead.creado < hasta,
         )
         .order_by(EventoLead.creado, EventoLead.id)
     )).all():
+        if e.tipo == EVENTO_EMERGENCIA_GAS_DERIVADA or es_emergencia(e.payload):
+            em = emergencias.setdefault(e.conversation_id, {"decision": None, "avisada": False, "cerrada": False, "motivo": None})
+            if e.tipo == EVENTO_TRIAJE_ATC_SOMBRA:
+                em["decision"] = e.payload
+            elif e.tipo == EVENTO_TRIAJE_ATC_CERRADO:
+                em["cerrada"] = True
+            else:
+                em["avisada"] = True
+                em["motivo"] = (e.payload or {}).get("motivo_sin_cierre") if isinstance(e.payload, dict) else None
+            continue
         c = convs.setdefault(e.conversation_id, Conv(e.conversation_id))
         if e.tipo == EVENTO_TRIAJE_ATC_SOMBRA and isinstance(e.payload, dict):
             c.decisiones.append(e.payload)
@@ -248,11 +272,18 @@ async def cargar_datos(session, desde: datetime, hasta: datetime) -> Datos:
             .join(Conversation, Conversation.id == Opportunity.conversation_id)
             .where(Opportunity.resultado == "consulta_atc", Conversation.creado >= ini, Conversation.creado < hasta)
         )).scalars().all()
+        # Las consultas_atc que cerró el aviso de emergencia no son consultas de atención al cliente: fuera del recall.
+        por_emergencia = {
+            e.conversation_id for e in (await session.execute(
+                select(EventoLead.conversation_id, EventoLead.payload).where(EventoLead.tipo == EVENTO_TRIAJE_ATC_CERRADO)
+            )).all() if es_emergencia(e.payload)
+        }
+        ids = [i for i in ids if i not in por_emergencia]
         propias = {i: convs.get(i) or Conv(i) for i in set(ids)}
         faltan = {i: c for i, c in propias.items() if i not in convs}
         await _rellenar(session, faltan, desde)
         universo = list(propias.values())
-    return Datos(convs, universo, inicio_medicion, desde, hasta)
+    return Datos(convs, universo, inicio_medicion, desde, hasta, emergencias)
 
 
 # ── Resumen (PURO) ────────────────────────────────────────────────────────────────────────────────────────
@@ -271,7 +302,16 @@ def resumir(datos: Datos) -> dict:
             por_guarda[g] += 1
     por_modo = Counter(c.ultima.get("modo") or "?" for c in convs if c.decisiones)
     cerradas = [c for c in convs if c.cerrada_por_triaje]
+    em = list(datos.emergencias.values())
+    emergencia = {
+        "detectadas": len(em), "avisadas": sum(e["avisada"] for e in em), "cerradas": sum(e["cerrada"] for e in em),
+        "avisadas_sin_cierre": sum(e["avisada"] and not e["cerrada"] for e in em),
+        "por_motivo_sin_cierre": dict(Counter(e["motivo"] or "?" for e in em if e["avisada"] and not e["cerrada"])),
+        "por_modo": dict(Counter((e["decision"] or {}).get("modo") or "?" for e in em if e["decision"])),
+        "por_guarda": dict(Counter(g for e in em for g in dict.fromkeys((e["decision"] or {}).get("guardas_que_bloquearon") or []))),
+    }
     return {
+        "emergencia": emergencia,
         "candidatas": len(convs), "decision_cerrar": len(cerrar), "bloqueadas": len(convs) - len(cerrar),
         "desenlaces": dict(desenlaces), "resueltas": resueltas, "falsos_positivos": desenlaces["comercial"],
         "precision": (desenlaces["confirmada"] / resueltas) if resueltas else None,
@@ -285,6 +325,31 @@ def resumir(datos: Datos) -> dict:
     }
 
 
+def _lineas_emergencia(e: dict) -> list[str]:
+    L = ["", "=" * 100, "5. EMERGENCIA DE GAS (triaje_atc_emergencia_modo; fuera de las métricas de recibo/pago)", "=" * 100]
+    L += tabla(["Concepto", "n"], [
+        ["Conversaciones con una emergencia detectada", e["detectadas"]],
+        ["  con aviso enviado a Emergencias de Cálidda (evento emergencia_gas_derivada)", e["avisadas"]],
+        ["    cerradas como consulta_atc", e["cerradas"]],
+        ["    avisadas SIN cerrar (asesor/pausa, resultado o cierre no posible)", e["avisadas_sin_cierre"]],
+        ["  sin aviso (modo sombra o apagado, guardas, envío fallido)", e["detectadas"] - e["avisadas"]],
+    ])
+    if e["por_motivo_sin_cierre"]:
+        L.append("")
+        L.append("Avisadas sin cerrar, por motivo:")
+        L += tabla(["Motivo", "n"], [[k, v] for k, v in sorted(e["por_motivo_sin_cierre"].items(), key=lambda kv: -kv[1])])
+    if e["por_modo"]:
+        L.append("")
+        L.append("Modo de la última decisión de cada emergencia:")
+        L += tabla(["Modo", "n"], [[k, v] for k, v in sorted(e["por_modo"].items())])
+    if e["por_guarda"]:
+        L.append("")
+        L.append("Guardas que impidieron avisar (una conversación cuenta una vez por cada una):")
+        L += tabla(["Guarda", "n"], [[k, v] for k, v in sorted(e["por_guarda"].items(), key=lambda kv: -kv[1])])
+    L.append("  Tasa de reapertura y revisión de falsos positivos: lee el chat de esas conversaciones en el panel (el informe no muestra texto).")
+    return L
+
+
 def formatear(datos: Datos, r: dict, desde_txt: str, hasta_txt: str) -> list[str]:
     L = [
         "ANÁLISIS DEL TRIAJE ATC — solo lectura",
@@ -294,6 +359,8 @@ def formatear(datos: Datos, r: dict, desde_txt: str, hasta_txt: str) -> list[str
     ]
     if not r["candidatas"] and not r["universo_recall"]:
         L.append("  Sin eventos del triaje en el período: ¿está encendido el modo sombra (triaje_atc_modo)?")
+        if r["emergencia"]["detectadas"]:
+            L += _lineas_emergencia(r["emergencia"])
         return L
 
     L += ["=" * 100, "1. CANDIDATAS Y DECISIONES", "=" * 100]
@@ -341,6 +408,7 @@ def formatear(datos: Datos, r: dict, desde_txt: str, hasta_txt: str) -> list[str
     L.append("")
     L.append("Modo en el que se tomó la última decisión:")
     L += tabla(["Modo", "n"], [[k, v] for k, v in sorted(r["por_modo"].items())] or [["(ninguno)", 0]])
+    L += _lineas_emergencia(r["emergencia"])
     return L
 
 

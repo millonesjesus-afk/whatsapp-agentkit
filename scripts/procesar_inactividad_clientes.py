@@ -50,7 +50,7 @@ from scripts._cron import ejecutar_cron  # latido: ver scripts/_cron.py
 
 from agent.memory import esperar_base_de_datos, listar_leads_inactividad_cliente, actualizar_lead, guardar_mensaje
 from agent.providers import obtener_proveedor
-from agent import circuito_ia, envios
+from agent import circuito_ia, envios, llamadas
 from agent.tiempo_real import gestor_conexiones
 
 MOTIVO_DERIVACION_FALLA_IA = "sin_respuesta_por_falla_ia"
@@ -95,6 +95,61 @@ async def main() -> None:
     fallidos: list[str] = []
     invalidos: list[str] = []
     errores: list[str] = []
+
+    # "Para llamar" (2026-10-09, APAGADO por defecto): a los leads de segmento A/B (interés alto, callados) se les ofrece la
+    # llamada de un asesor EN LUGAR del reenganche genérico, solo con la ventana de 24 h abierta y como máximo UNA vez por
+    # ciclo. Con `llamadas_oferta_activa` apagado, o sin la aceptación de responsabilidad vigente, `preparar_ofertas`
+    # devuelve {} y todo sigue exactamente igual que antes. Cualquier falla acá cae al reenganche de siempre.
+    ofertados: list[str] = []
+    ofertas_sin_ventana = 0
+    try:
+        ofertas = await llamadas.preparar_ofertas(candidatos_reenganche)
+    except Exception as e:  # noqa: BLE001
+        ofertas = {}
+        print(f"ERROR preparando las ofertas de llamada (se sigue con el reenganche de siempre): {type(e).__name__}: {e}", file=sys.stderr)
+    if ofertas:
+        manejados: set[str] = set()
+        for fila in candidatos_reenganche:
+            oferta = ofertas.get(fila["telefono"])
+            if oferta is None:
+                continue
+            manejados.add(fila["telefono"])   # con oferta, o sin ventana: NO recibe además el reenganche genérico
+            if oferta["accion"] != "ofrecer":
+                ofertas_sin_ventana += 1
+                continue
+            try:
+                if not fila["telefono"].isdigit():
+                    invalidos.append(repr(fila["telefono"]))
+                    continue
+                canal = await proveedor.resolver_canal(fila["numero_whatsapp_id"], negocio_id=fila["negocio_id"])
+                resultado = await envios.enviar_texto(
+                    proveedor, fila["telefono"], oferta["texto"], origen="gabi_oferta_llamada", canal=canal,
+                )
+                if resultado.bloqueado:
+                    bloqueados.append(fila["telefono"])
+                    continue
+                enviado, wamid = resultado
+                if resultado.incierto:
+                    await guardar_mensaje(
+                        fila["telefono"], "assistant", oferta["texto"],
+                        negocio_id=fila["negocio_id"], mensaje_id_meta=None, estado_envio="incierto",
+                    )
+                    inciertos.append(fila["telefono"])
+                    continue
+                if not enviado:
+                    fallidos.append(fila["telefono"])
+                    continue
+                mensaje_guardado = await guardar_mensaje(
+                    fila["telefono"], "assistant", oferta["texto"], negocio_id=fila["negocio_id"], mensaje_id_meta=wamid,
+                )
+                await gestor_conexiones.emitir_mensaje_nuevo(mensaje_guardado["conversation_id"])
+                await llamadas.registrar_oferta_enviada(fila["telefono"], fila["negocio_id"], oferta)
+                ofertados.append(fila["telefono"])
+            except Exception as e:  # noqa: BLE001 — igual que el reenganche: un lead con problemas no frena a los demás
+                errores.append(fila.get("telefono", "?"))
+                print(f"ERROR ofreciendo la llamada a {fila.get('telefono', '?')}: {type(e).__name__}: {e}", file=sys.stderr)
+        candidatos_reenganche = [f for f in candidatos_reenganche if f["telefono"] not in manejados]
+
     for fila in candidatos_reenganche:
         # Un fallo inesperado con UN lead (red, Meta, base) no aborta la corrida: ni a los demás
         # leads ni al cierre por sin_respuesta de más abajo. Se cuenta como "error" y ese lead
@@ -167,6 +222,7 @@ async def main() -> None:
         f"({len(fallidos)} fallo(s) de envío, {len(inciertos)} sin confirmar, {len(bloqueados)} frenado(s) por la política de costo), "
         f"{cerrados} cerrado(s) por sin respuesta tras {HORAS_CIERRE}h, {len(errores)} error(es)."
         + (f" {len(derivados)} derivado(s) a una persona por falla de la IA." if con_falla_ia else "")
+        + (f" {len(ofertados)} oferta(s) de llamada ({ofertas_sin_ventana} sin ventana de 24 h)." if (ofertados or ofertas_sin_ventana) else "")
     )
     if fallidos:
         print(f"  Envíos fallidos a: {', '.join(fallidos)}")

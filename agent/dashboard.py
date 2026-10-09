@@ -89,6 +89,8 @@ from agent import envios
 from agent import circuito_ia
 from agent import plantilla_retomar
 from agent import atencion_atrasada
+from agent import llamadas
+from agent import memory as mem
 from agent.memory import obtener_estado_ventana
 
 # Paleta de colores para distinguir canales de WhatsApp en el panel — se
@@ -3442,6 +3444,7 @@ def _zona_accion_vacia(mensaje: str) -> str:
 TOPES_ZONA_ACCION = {
     "escalados": 5, "sin_asesor": 5, "cliente_esperando": 8, "cliente_esperando_ventana_cerrada": 5,
     "citas_proximas": 3, "citas_vencidas": 3,
+    "llamar": 5,   # "Para llamar" (2026-10-09, agent/llamadas.py): tareas de llamada accionables
 }
 # fecha_agendada se guarda como hora local de Lima, SIN zona (la tipea un
 # humano en un datetime-local) — para compararla con "ahora" hay que llevar
@@ -3576,6 +3579,17 @@ async def _zona_accion_datos(negocio_id: str, asesor: str | None, vista_admin: b
         pares.append((l, _item_zona(l, _texto_cita(l, "Cita agendada"), "cita")))
     for l in vencidas[:TOPES_ZONA_ACCION["citas_vencidas"]]:
         pares.append((l, _item_zona(l, _texto_cita(l, "Cita vencida sin cerrar"), "cita_vencida")))
+    # Aditivo (2026-10-09, "Para llamar"): las tareas de llamada accionables de este usuario (o de todo el negocio en la
+    # vista admin/supervisor), las vencidas primero. Con el módulo apagado, en sombra o sin aceptación vigente no hay
+    # ningún ítem y los dos totales valen 0: el contrato de siempre no cambia.
+    llamar = await llamadas.datos_para_inicio(negocio_id, asesor, ahora, tope=TOPES_ZONA_ACCION["llamar"])
+    for t in llamar["items"]:
+        item = _item_zona(t, "Para llamar — sin hacer a tiempo" if t["vencida"] else "Para llamar", "llamar")
+        item.update({
+            "tarea_id": t["tarea_id"], "segmento": t["segmento"], "vencida": t["vencida"], "asesor": t["asesor"],
+            "programada_para": t["programada_para"],
+        })
+        pares.append((t, item))
 
     abiertas = [c for c in esperando if c["ventana_abierta"]]
     # Aditivo — alimenta SOLO el badge de la campana: ventana abierta o cerrada
@@ -3608,6 +3622,8 @@ async def _zona_accion_datos(negocio_id: str, asesor: str | None, vista_admin: b
         "citas_proximas": len(proximas), "citas_vencidas": len(vencidas),
         # Aditivo: vencidas de hace MÁS de 7 días (no se listan en Inicio).
         "citas_vencidas_antiguas": vencidas_antiguas,
+        # Aditivos (2026-10-09, "Para llamar"): tareas de llamada pendientes y cuántas están vencidas por SLA.
+        "llamadas_pendientes": llamar["pendientes"], "llamadas_vencidas": llamar["vencidas"],
         # Extra (no estaba en el contrato original): alimenta el indicador
         # "Citas próximas (7 días)" de la vista Asesor.
         "citas_7_dias": citas_7_dias,
@@ -3755,10 +3771,31 @@ async def _avisos_inicio(usuario: dict) -> list[dict]:
     """Avisos para Inicio — SOLO para el rol 'admin' (decisión del usuario: supervisor y
     asesor no los ven): el del modo sin IA (si está activo) y los de uso/costos de WhatsApp.
     Nunca rompe Inicio: ante cualquier falla se registra y devuelve lo que sí se pudo calcular."""
+    avisos_llamadas = await _avisos_llamadas(usuario)
     if usuario.get("rol") != "admin":
-        return []
+        return avisos_llamadas
     avisos = await _avisos_circuito_ia(usuario["negocio_id"])
-    return avisos + await _avisos_procesos_programados() + await _avisos_uso_inicio(usuario)
+    return avisos + await _avisos_procesos_programados() + await _avisos_uso_inicio(usuario) + avisos_llamadas
+
+
+async def _avisos_llamadas(usuario: dict) -> list[dict]:
+    """Aviso de "Para llamar" (2026-10-09), para supervisor y admin y SOLO si hay llamadas vencidas por SLA (llevan más
+    de `llamadas_sla_horas_habiles` sin hacerse) o "sin hacer". Nunca rompe Inicio."""
+    if usuario.get("rol") not in ("admin", "supervisor"):
+        return []
+    try:
+        vencidas = (await llamadas.datos_para_inicio(usuario["negocio_id"], None, tope=1))["vencidas"]
+        if not vencidas:
+            return []
+        return [{
+            "id": "llamadas-vencidas", "nivel": "warning",
+            "titulo": f"{vencidas} llamada{'s' if vencidas != 1 else ''} sin hacer a tiempo",
+            "detalle": "Pasaron más de las horas de atención permitidas sin que nadie las haga. Revísalas y reasígnalas si hace falta.",
+            "enlace": None,
+        }]
+    except Exception:
+        logger.exception("Inicio: no se pudo calcular el aviso de llamadas vencidas")
+        return []
 
 
 async def _avisos_uso_inicio(usuario: dict) -> list[dict]:
@@ -3952,6 +3989,109 @@ async def inicio_json(usuario: dict = Depends(_usuario_actual)):
         "zona_indicadores": zona_indicadores,
         "avisos": await _avisos_inicio(usuario),
     })
+
+
+# ── "Para llamar" (2026-10-09, agent/llamadas.py) ───────────────────────────────────────────────────────
+#
+# Tarea de llamada para leads callados que mostraron interés. Contratos completos en docs/contrato_para_llamar.md.
+# Todo el módulo viene APAGADO: mientras `llamadas_gabi_activo` no sea "1" (y, para ver tareas, el modo no sea `activo` con
+# la aceptación de responsabilidad vigente) el listado devuelve la lista vacía y las acciones responden 409.
+
+_HTTP_DE_LLAMADA = {"no_encontrada": 404, "sin_permiso": 403, "no_abierta": 409, "no_disponible": 409, "invalido": 400}
+
+
+def _error_http_de_llamada(error: "llamadas.ErrorLlamada") -> HTTPException:
+    return HTTPException(status_code=_HTTP_DE_LLAMADA.get(error.codigo, 400), detail=error.mensaje)
+
+
+async def _cuerpo_objeto_json(request: Request) -> dict:
+    try:
+        cuerpo = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="El cuerpo debe ser JSON.")
+    if not isinstance(cuerpo, dict):
+        raise HTTPException(status_code=400, detail="El cuerpo debe ser un objeto JSON.")
+    return cuerpo
+
+
+@router.get("/llamadas.json")
+async def llamadas_json(estado: str = "abiertas", usuario: dict = Depends(_usuario_actual)):
+    """Tareas de llamada. Un asesor ve las suyas; admin y supervisor ven todas, con los KPI del equipo y la medición.
+    `estado`: abiertas (default) | cerradas (últimos 7 días) | todas. Fuera del modo `activo` devuelve `tareas: []`."""
+    if estado not in ("abiertas", "cerradas", "todas"):
+        raise HTTPException(status_code=400, detail="estado debe ser abiertas, cerradas o todas.")
+    return JSONResponse(await llamadas.listar_tareas(usuario["negocio_id"], usuario, estado))
+
+
+@router.post("/llamadas/{tarea_id}/resultado")
+async def llamada_resultado(
+    tarea_id: str, request: Request, usuario: dict = Depends(_usuario_actual), _csrf: None = Depends(verificar_csrf),
+):
+    """Registra el resultado de una llamada. Cuerpo: `{resultado, nota?, hora?}`; `hora` (AAAA-MM-DDTHH:MM, hora de Lima)
+    es obligatoria solo con `contesto_llamar_luego`. El asesor solo puede registrar sobre SUS tareas."""
+    cuerpo = await _cuerpo_objeto_json(request)
+    try:
+        resultado = await llamadas.registrar_resultado(
+            tarea_id, usuario["negocio_id"], usuario, cuerpo.get("resultado"), nota=cuerpo.get("nota"), hora=cuerpo.get("hora"),
+        )
+    except llamadas.ErrorLlamada as e:
+        raise _error_http_de_llamada(e)
+    return JSONResponse({"ok": True, **resultado})
+
+
+@router.post("/llamadas/{tarea_id}/reasignar")
+async def llamada_reasignar(
+    tarea_id: str, request: Request,
+    usuario: dict = Depends(servicio_identidad.requiere_rol(*ROLES_CON_VISION_TOTAL)), _csrf: None = Depends(verificar_csrf),
+):
+    """Supervisor/admin: cambia el asesor de la tarea. Cuerpo: `{asesor: "<username>"|null}` (null = vuelve al reparto)."""
+    cuerpo = await _cuerpo_objeto_json(request)
+    asesor = cuerpo.get("asesor")
+    if asesor is not None and not isinstance(asesor, str):
+        raise HTTPException(status_code=400, detail="asesor debe ser un username o null.")
+    try:
+        resultado = await llamadas.reasignar(tarea_id, usuario["negocio_id"], usuario, asesor)
+    except llamadas.ErrorLlamada as e:
+        raise _error_http_de_llamada(e)
+    return JSONResponse({"ok": True, **resultado})
+
+
+@router.post("/llamadas/{tarea_id}/descartar")
+async def llamada_descartar(
+    tarea_id: str, request: Request,
+    usuario: dict = Depends(servicio_identidad.requiere_rol(*ROLES_CON_VISION_TOTAL)), _csrf: None = Depends(verificar_csrf),
+):
+    """Supervisor/admin: descarta la tarea (no hace falta llamar). Cuerpo opcional: `{nota?}`. No toca el lead."""
+    cuerpo = await _cuerpo_objeto_json(request)
+    try:
+        resultado = await llamadas.descartar(tarea_id, usuario["negocio_id"], usuario, nota=cuerpo.get("nota"))
+    except llamadas.ErrorLlamada as e:
+        raise _error_http_de_llamada(e)
+    return JSONResponse({"ok": True, **resultado})
+
+
+@router.get("/configuracion/llamadas.json")
+async def configuracion_llamadas_json(usuario: dict = Depends(servicio_identidad.requiere_rol("admin"))):
+    """Configuración de "Para llamar" del negocio de la sesión, con el modo EFECTIVO, el texto de responsabilidad vigente y
+    el estado de su aceptación. Solo Admin."""
+    return JSONResponse(await llamadas.estado_configuracion(usuario["negocio_id"]))
+
+
+@router.post("/configuracion/llamadas.json")
+async def actualizar_configuracion_llamadas_json(
+    request: Request, usuario: dict = Depends(servicio_identidad.requiere_rol("admin")), _csrf: None = Depends(verificar_csrf),
+):
+    """Guarda la configuración (cualquier subconjunto de campos; todo o nada). Aceptar la responsabilidad legal:
+    `{aceptar_responsabilidad: true, version_texto: "v1"}`; revocarla: `{revocar_responsabilidad: true}` (apaga el modo
+    activo y cancela las tareas abiertas). Del negocio de la sesión, nunca del cuerpo. Solo Admin."""
+    cuerpo = await _cuerpo_objeto_json(request)
+    try:
+        estado = await llamadas.guardar_cambios(usuario["negocio_id"], usuario["username"], cuerpo)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except llamadas.ErrorLlamada as e:
+        raise _error_http_de_llamada(e)
+    return JSONResponse({"ok": True, **estado})
 
 
 @router.get("", response_class=HTMLResponse)
@@ -8100,10 +8240,23 @@ def _senales_analitica_p0(flujo_periodo: dict, valor_vendido: dict) -> list[dict
     `senales`."""
     senales = []
     if flujo_periodo["oportunidades"] == 0:
-        senales.append({
-            "tipo": "sin_oportunidades",
-            "texto": "No se registraron oportunidades en este período.",
-        })
+        # Con la exclusión de consultas ATC activa, `oportunidades` es la cifra comercial: puede ser 0 habiendo
+        # contactos (todos fueron consultas de atención al cliente). Se dice tal cual, sin sugerir que no hubo nadie.
+        consultas = ((flujo_periodo.get("consultas_no_comerciales") or {}).get("cantidad")) or 0
+        if consultas > 0:
+            senales.append({
+                "tipo": "sin_oportunidades",
+                "texto": (
+                    "No se registraron oportunidades comerciales en este período: "
+                    + ("el único contacto fue una consulta de atención al cliente." if consultas == 1
+                       else f"los {consultas} contactos fueron consultas de atención al cliente.")
+                ),
+            })
+        else:
+            senales.append({
+                "tipo": "sin_oportunidades",
+                "texto": "No se registraron oportunidades en este período.",
+            })
     if valor_vendido["ventas_excluidas"] > 0:
         senales.append({
             "tipo": "ventas_excluidas",
@@ -8507,6 +8660,56 @@ async def actualizar_financiamiento_ruta(
         "ok": True,
         "financiamiento": {"tea": tea, "igv": igv, "cuotas_min": CUOTAS_MIN, "cuotas_max": CUOTAS_MAX},
     })
+
+
+async def _estado_configuracion_metricas(negocio_id: str) -> dict:
+    """Política vigente de la métrica del embudo + cuántas consultas no comerciales hubo en los últimos 30 días
+    (contexto para decidir; se calcula aunque la exclusión esté apagada). El contexto es opcional: si falla, la
+    configuración se sigue pudiendo ver y cambiar."""
+    estado = await mem.obtener_configuracion_metricas(negocio_id)
+    try:
+        estado["consultas_atc_ultimos_30_dias"] = await mem.contar_consultas_atc_recientes(negocio_id, 30)
+    except Exception:
+        logger.warning("No se pudo contar las consultas ATC recientes para la configuración de métricas", exc_info=True)
+        estado["consultas_atc_ultimos_30_dias"] = None
+    return estado
+
+
+@router.get("/configuracion/metricas.json")
+async def configuracion_metricas_json(usuario: dict = Depends(servicio_identidad.requiere_rol("admin"))):
+    """Política de la métrica del embudo comercial (decisión del dueño, 2026-10-08): si las consultas de atención
+    al cliente (`consulta_atc`) cuentan en el denominador de la tasa de cierre. Contrato:
+    `{excluir_consulta_atc: bool, excluir_desde: "AAAA-MM-DD"|null, consultas_atc_ultimos_30_dias:
+    {dias, consultas, oportunidades, porcentaje}|null}`. Del negocio de la sesión; solo lectura; solo Admin."""
+    return JSONResponse(await _estado_configuracion_metricas(usuario["negocio_id"]))
+
+
+@router.post("/configuracion/metricas.json")
+async def actualizar_configuracion_metricas_json(
+    request: Request,
+    usuario: dict = Depends(servicio_identidad.requiere_rol("admin")),
+    _csrf: None = Depends(verificar_csrf),
+):
+    """Guarda la política de la métrica. Cuerpo: `{excluir_consulta_atc: bool, excluir_desde?: "AAAA-MM-DD"|null}`
+    (la fecha es día de Lima; `null`/vacía = todo el período; si no viene, se deja la que había). No borra ni
+    reclasifica datos: solo cambia cómo se calcula la tasa. Queda en el historial de cambios (quién, cuándo,
+    antes y después). Del negocio de la sesión, nunca del cuerpo; solo Admin; todo o nada."""
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="El cuerpo debe ser JSON.")
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="El cuerpo debe ser un objeto JSON.")
+    try:
+        guardado = await mem.guardar_configuracion_metricas(
+            usuario["negocio_id"], body.get("excluir_consulta_atc"),
+            body["excluir_desde"] if "excluir_desde" in body else mem.SIN_CAMBIO_METRICAS,
+            autor=usuario.get("username"),
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    logger.info("Métrica del embudo actualizada por %s: %s", usuario.get("username"), guardado["modificadas"])
+    return JSONResponse({"ok": True, "modificadas": guardado["modificadas"], **await _estado_configuracion_metricas(usuario["negocio_id"])})
 
 
 def _validar_hora(valor: str, etiqueta: str) -> None:

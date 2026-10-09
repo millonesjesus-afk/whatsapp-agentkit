@@ -229,7 +229,7 @@ def test_prueba_en_medio_de_una_frase_no_cuenta_como_mensaje_de_prueba():
 
 @pytest.mark.parametrize("texto", [
     "huele a gas en mi casa", "Hay olor a gas!!", "creo que hay una fuga de gas", "se escapa el gas de la cocina",
-    "huelo gas en la cocina", "hubo una explosión",
+    "huelo gas en la cocina", "explosión de gas en el edificio",
 ])
 def test_la_emergencia_se_clasifica_con_accion_de_alerta_y_nunca_cierra(texto):
     d = _c(texto)

@@ -142,3 +142,58 @@ def test_resolver_negocio_id():
     assert ct.resolver_negocio_id(None, uno) == "a" and ct.resolver_negocio_id("z", dos) == "z"
     with pytest.raises(ValueError, match="--negocio-id"):
         ct.resolver_negocio_id(None, dos)
+
+
+# ── Emergencia de gas (2026-10-09): interruptor propio, texto y validaciones ─────────────────────
+
+async def test_el_interruptor_de_emergencia_es_independiente_y_el_activo_exige_la_linea_de_emergencia():
+    nid = await _negocio("cfg-em-a")
+    r = await ct.main(["--negocio-id", nid])
+    assert r["emergencia_modo_configurado"] == "apagado" and r["emergencia_modo_efectivo"] == "apagado"
+    assert r[t.CLAVE_EMERGENCIA_TEXTO] == "(texto por defecto del módulo)"
+    assert "<FALTA --linea-emergencia>" in r["vista_previa_emergencia"]
+    with pytest.raises(ValueError, match="línea de emergencia"):
+        await ct.main(["--negocio-id", nid, "--emergencia-modo", "activo"])
+    assert await mem.obtener_configuracion(t.CLAVE_EMERGENCIA_MODO, "sin-fijar", negocio_id=nid) == "sin-fijar"
+    # sombra no exige nada; activo + línea en el mismo comando sí se acepta; el modo general NO cambia
+    r = await ct.main(["--negocio-id", nid, "--emergencia-modo", "sombra"])
+    assert (r["emergencia_modo_configurado"], r["emergencia_modo_efectivo"], r["modo_configurado"]) == ("sombra", "sombra", "apagado")
+    r = await ct.main(["--negocio-id", nid, "--emergencia-modo", "activo", "--linea-emergencia", "1808 (Emergencias 24/7)"])
+    assert (r["emergencia_modo_configurado"], r["emergencia_modo_efectivo"], r["modo_configurado"]) == ("activo", "activo", "apagado")
+    assert "1808 (Emergencias 24/7)" in r["vista_previa_emergencia"] and "{" not in r["vista_previa_emergencia"]
+    assert (await ct.main(["--negocio-id", nid, "--emergencia-modo", "apagado"]))["emergencia_modo_efectivo"] == "apagado"
+
+
+async def test_el_activo_con_un_texto_propio_que_ya_trae_el_numero_no_exige_la_clave_de_la_linea():
+    nid = await _negocio("cfg-em-b")
+    r = await ct.main([
+        "--negocio-id", nid, "--emergencia-modo", "activo", "--emergencia-texto", "Sal ya y comunícate con Cálidda al 1808.",
+        "--linea-emergencia", "1808",
+    ])
+    assert r["emergencia_modo_efectivo"] == "activo" and r[t.CLAVE_EMERGENCIA_TEXTO].startswith("Sal ya")
+
+
+@pytest.mark.parametrize("texto", [
+    "Sal de la casa. ¿Necesitas ayuda?",                   # «?»
+    "Sal de la casa y llama a Emergencias.",               # sin la línea de emergencia
+    "x" * 700 + " {linea_emergencia}",                      # largo
+])
+def test_un_texto_de_emergencia_invalido_se_rechaza(texto):
+    with pytest.raises(ValueError, match="--emergencia-texto"):
+        _cambios("--emergencia-texto", texto)
+
+
+def test_el_texto_de_emergencia_por_defecto_y_los_propios_se_aceptan_y_llama_solo_advierte():
+    avisos: list[str] = []
+    c = ct._cambios_desde(ct._argumentos(["--emergencia-texto", t.TEXTO_EMERGENCIA_POR_DEFECTO]), avisos)
+    assert c == {t.CLAVE_EMERGENCIA_TEXTO: t.TEXTO_EMERGENCIA_POR_DEFECTO} and avisos == []
+    # «llama» no se rechaza (la regla de palabras prohibidas no aplica a este texto) pero avisa: un «ok» reabriría el caso
+    c = ct._cambios_desde(ct._argumentos(["--emergencia-texto", "Llama ya a Emergencias: {linea_emergencia}."]), avisos)
+    assert c[t.CLAVE_EMERGENCIA_TEXTO].startswith("Llama") and len(avisos) == 1 and "ok" in avisos[0]
+    assert _cambios("--emergencia-texto", "") == {t.CLAVE_EMERGENCIA_TEXTO: ""}            # vacío = texto por defecto
+    assert _cambios("--emergencia-modo", "sombra") == {t.CLAVE_EMERGENCIA_MODO: "sombra"}
+
+
+def test_el_modo_de_emergencia_invalido_se_rechaza():
+    with pytest.raises(SystemExit):
+        _cambios("--emergencia-modo", "encendido")

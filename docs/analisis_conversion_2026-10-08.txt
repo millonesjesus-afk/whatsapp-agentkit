@@ -1,0 +1,38 @@
+ANÁLISIS DE CONVERSIÓN (resumen de la corrida de solo lectura, Railway 2026-10-08 12:07 Lima)
+Periodo: 2026-09-15 a 2026-10-08 | 476 ciclos, 468 leads únicos | agregado, sin PII
+Fuente: logs del servicio temporal; el visor de Railway reordena líneas, por eso se transcribe por etiqueta.
+
+1. EMBUDO
+- 468 leads: respondió 74,1% | derivado 57,1% (267) | mensaje humano 47,9% | agendado+vendido 7,7% (36; 23 agendados, 13 vendidos) | sobre derivados 13,5%.
+- Por semana: 14-sep 68 leads (agend+vend 13,2%); 21-sep 154 (5,8%); 28-sep 175 (5,1%); 05-oct 71 (12,7%).
+- Resultado final: sin_respuesta 321 (68,6%); no_interesado 34 (7,3%); consulta_atc 26 (5,6%); no_califica 17 (3,6%); sin resultado 13; cartera_fnb 9; otro 4; servicio_postventa 4; no_es_cliente_calidda 3; producto_sin_stock 1.
+
+2. ORIGEN / INTERÉS / DÍA / FRANJA (% agend+vend sobre leads; entre paréntesis sobre derivados)
+- Anuncio CTWA 399 leads: 8,0% (14,7%) | Orgánico/otro 64: 6,2% (8,5%) | wa.link 5.
+- Terma 162: 14,8% (22,6%) | Secadora 185: 2,2% (3,8%) | Cocina 11 | Otros 87: 4,6% (12,5%; solo 43,7% responde).
+- Día: martes 18,2% | lunes 10,4% | miércoles 10,4% | jueves 9,0% | viernes 3,6% | domingo 4,0% | sábado 1,9% (en sábado/domingo solo 28-33% tiene mensaje humano).
+- Franja: mañana 13,0% (21,5% s/deriv.) | tarde 4,3% | noche 7,5% | madrugada 4,8%.
+
+3. VELOCIDAD
+- Primer mensaje del cliente -> 1.ª respuesta de Gabi: p50 7 s.
+- Derivación: p50 5 min, p75 11 min, p90 2,2 h. Derivación -> 1.ª respuesta humana: p50 29 min, p75 5,9 h, p90 16,4 h.
+- % agend+vend según 1.ª respuesta humana (desde último mensaje del cliente): <15 min 18,4% | 15-60 min 17,4% | 1-4 h 12,8% | 4-12 h 26,1% (n=23) | >12 h 5,3% | nunca 2,4%.
+- 41 de 263 derivados (15,6%) sin ningún mensaje humano; 36 (13,7%) perdieron la ventana de 24 h sin respuesta humana.
+
+4. REENGANCHE Y SILENCIO
+- Respuesta en 24 h tras el reenganche de 2 h: 20,5% (n=195) vs 5,1% en silencio >=2 h sin reenganche (n=39); comparación NO aleatoria. Agend+vend final tras reenganche 0,5%.
+- sin_respuesta (n=323): 35,3% nunca respondió tras el primer mensaje de Gabi; 64,7% respondió al menos una vez y luego se enfrió. Etapa donde queda: después del primer saludo 104 (32,2%); tras otra respuesta 98 (30,3%); tras pedir DNI/financiamiento 70 (21,7%); tras dar precio 34 (10,5%); tras pedir nombre 12.
+- 129 de los 323 (39,9%) ya estaban derivados a un asesor (es decir, se enfriaron DESPUÉS de la derivación).
+
+5. GABI Y RESPUESTA DEL CLIENTE (1303 turnos, descriptivo)
+- Respondió según largo del turno: <=200 car. 80,4% | 201-350 85,8% | 351-500 89,3% | >500 86,6%. Con pregunta final 85,3% vs sin pregunta 68,4% (n=57).
+- Con ** 88,3% (n=486) vs sin ** 82,4% (n=817): NO hay evidencia de que el ** perjudique la respuesta (el análisis previo sugería lo contrario; está confundido por turno/etapa).
+- 1.er mensaje de Gabi: 72,5% responde (anuncio 71,3%, n=349; otro lead 81,8%, n=44). 2.º turno 92,2%; 3.º o más 88,8%.
+
+7. CIERRES Y REAPERTURAS: 8 ciclos reabiertos por el cliente (muestras n<10 en todos los resultados).
+
+8. RESUMEN (del script)
+- Palanca 1 Silencio: 68,4% termina en sin_respuesta.
+- Palanca 2 Reenganche: 20,5% vs 5,1% (observacional).
+- Palanca 3 Atención humana: atendidos <1 h 18,0% agend+vend vs 8,8% los de >4 h o nunca (n=122 vs 102); descriptivo.
+(La sección 6, de asesores, es de uso interno del dueño y no se transcribe aquí.)
