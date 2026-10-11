@@ -88,6 +88,9 @@ CLAVE_TELEFONOS_EXCLUIDOS = "triaje_atc_telefonos_excluidos"  # números del equ
 CLAVE_PERMITIR_CANAL_PRUEBAS = "triaje_atc_permitir_canal_pruebas"  # "1" deja cerrar también en un canal de pruebas
 CLAVE_EMERGENCIA_MODO = "triaje_atc_emergencia_modo"        # apagado (default) | sombra | activo — INDEPENDIENTE del modo general
 CLAVE_EMERGENCIA_TEXTO = "triaje_atc_emergencia_texto"      # plantilla del aviso de emergencia; vacío = TEXTO_EMERGENCIA_POR_DEFECTO
+# Resultado con que se tipifica y cierra (2026-10-11): `triaje_atc_resultado`, default `consulta_atc`, validado contra
+# `memory.RESULTADOS_TRIAJE_PERMITIDOS` (nunca comerciales). Lo lee `memory.cerrar_por_triaje`; se edita desde el panel
+# «Derivación automática» (agent/derivacion_automatica.py) o con scripts/configurar_triaje_atc.py --resultado.
 
 MODO_APAGADO, MODO_SOMBRA, MODO_ACTIVO = "apagado", "sombra", "activo"
 MODOS = (MODO_APAGADO, MODO_SOMBRA, MODO_ACTIVO)

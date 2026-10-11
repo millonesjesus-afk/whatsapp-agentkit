@@ -1123,6 +1123,20 @@ async def webhook_handler(request: Request):
 
             cron.marca("lead_y_conversacion")
 
+            # Respuesta a la oferta de llamada (2026-10-11): ANTES de cancelar, se interpreta la PRIMERA respuesta de texto del
+            # cliente a la oferta de Gabi («sí», «a las 3», «no me llamen»). Si la acepta o da una hora, la tarea queda lista y
+            # protegida (el cancelar de abajo ya no la toca); si la rechaza, se marca al contacto. La confirmación fija sale más
+            # abajo, DESPUÉS de guardar el mensaje del cliente. Sin oferta ni tarea es una consulta que no encuentra nada.
+            # Fail-open: jamás puede frenar la atención de un mensaje.
+            respuesta_llamada = None
+            if msg.tipo == "text" and msg.tipo_evento != "echo" and msg.texto and canal and canal.get("negocio_id"):
+                try:
+                    respuesta_llamada = await llamadas.procesar_respuesta_del_cliente(
+                        msg.telefono, canal["negocio_id"], msg.texto, msg.mensaje_id or None,
+                    )
+                except Exception:  # noqa: BLE001
+                    logger.exception(f"Para llamar: no se pudo interpretar la respuesta a la oferta de {msg.telefono}")
+
             # "Para llamar" (2026-10-09, agent/llamadas.py): si el cliente vuelve a escribir —o una persona le responde desde
             # el celular— la tarea de llamada abierta de este lead ya no corresponde y se cancela. Va ANTES de cualquier otro
             # flujo; una reacción (👍) no cuenta. Sin tareas (el caso de siempre, y con el módulo apagado) es una consulta
@@ -1325,6 +1339,14 @@ async def webhook_handler(request: Request):
                 await gestor_conexiones.emitir_mensaje_nuevo(mensaje_guardado["conversation_id"])
             except Exception:
                 logger.exception(f"No se pudo avisar al panel del mensaje nuevo de {msg.telefono}")
+
+            # Confirmación fija de la respuesta a la oferta de llamada (ver arriba): Gabi NO conversa en este turno. Si el texto
+            # no sale, el turno sigue con Gabi como siempre.
+            if respuesta_llamada and respuesta_llamada.get("texto"):
+                if await llamadas.enviar_confirmacion(proveedor, msg.telefono, canal, respuesta_llamada["texto"]):
+                    cron.marca("confirma_llamada")
+                    logger.info(f"webhook_tiempos {cron.resumen()}")
+                    return
 
             # Le muestra "escribiendo..." en WhatsApp de una vez — aunque la
             # respuesta real todavía no arranca (está en la ventana de

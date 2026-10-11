@@ -39,10 +39,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from agent import memory as mem
 from agent import triaje_atc as t
+# Las validaciones de texto viven en un módulo común: las usan este script y el panel «Derivación automática»
+# (GET/POST /dashboard/configuracion/derivacion-automatica.json). Se reexportan aquí con los mismos nombres.
+from agent.derivacion_automatica import (  # noqa: F401
+    LINEA_MAXIMA, TEXTO_MAXIMO, validar_texto, validar_texto_emergencia,
+)
 
-TEXTO_MAXIMO = 600
 MAX_MENSAJES_RANGO = (1, 20)
-LINEA_MAXIMA = 120
 
 
 def _argumentos(argv: list[str] | None = None) -> argparse.Namespace:
@@ -57,6 +60,7 @@ def _argumentos(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--categorias", default=None, help=f"Categorías activas, separadas por comas (válidas: {', '.join(t.CATEGORIAS_ATC)}).")
     p.add_argument("--texto", default=None, help="Plantilla general con {nombre}, {linea_atc}, {negocio}, {linea_emergencia}, {linea_ventas}.")
     p.add_argument("--texto-categoria", action="append", default=[], metavar="CATEGORIA=TEXTO", help="Plantilla propia de una categoría (repetible).")
+    p.add_argument("--resultado", default=None, help=f"Resultado con que se tipifica y cierra (default {mem.RESULTADO_TRIAJE_POR_DEFECTO}; válidos: {', '.join(mem.RESULTADOS_TRIAJE_PERMITIDOS)}).")
     p.add_argument("--max-mensajes", type=int, default=None, help="Máximo de mensajes del cliente para triar (default 4).")
     p.add_argument("--nombre-negocio", default=None, help="Nombre del negocio que sale en el texto (fallback: Gaso+).")
     p.add_argument("--telefonos-excluidos", default=None, help="Números del equipo/pruebas a los que nunca se triará, separados por comas.")
@@ -75,52 +79,6 @@ def resolver_negocio_id(negocio_id: str | None, negocios: list[dict]) -> str:
         return activos[0]["id"]
     disponibles = ", ".join(f"{n.get('id')} ({n.get('nombre') or n.get('codigo') or '?'})" for n in activos) or "ninguno"
     raise ValueError(f"Hay {len(activos)} negocios activos: indica --negocio-id. Disponibles: {disponibles}.")
-
-
-def validar_texto(texto: str, etiqueta: str) -> str:
-    """El texto no puede dejar nada pendiente para el cierre de cortesía: sin «?» ni compromisos/peticiones; si no,
-    un «ok» o «gracias» posterior del cliente reabriría el caso en vez de absorberse."""
-    texto = texto.strip()
-    if not texto:
-        return ""
-    if len(texto) > TEXTO_MAXIMO:
-        raise ValueError(f"{etiqueta}: máximo {TEXTO_MAXIMO} caracteres.")
-    if "?" in texto or "¿" in texto:
-        raise ValueError(f"{etiqueta}: no puede llevar «?» ni «¿» (un «ok» del cliente reabriría el caso).")
-    if mem.saliente_deja_algo_pendiente(texto.replace("{nombre}", "").replace("{linea_atc}", "614900")):
-        raise ValueError(
-            f"{etiqueta}: contiene una palabra que el cierre de cortesía lee como compromiso o petición pendiente "
-            "(llamar, necesitar, enviar, avisar, contar, DNI, días de la semana, horas…). Reescríbelo con otras palabras.",
-        )
-    return texto
-
-
-def validar_texto_emergencia(texto: str, etiqueta: str = "--emergencia-texto", linea: str | None = None) -> tuple[str, list[str]]:
-    """Valida el texto del aviso de emergencia. ERRORES: más de TEXTO_MAXIMO caracteres, «?»/«¿», o que no lleve la línea de
-    emergencia (el marcador {linea_emergencia} o, si se indica `linea`, ese mismo texto). ADVERTENCIA (no bloquea): si el texto
-    deja algo pendiente para el cierre de cortesía (p. ej. «llama…»), un «ok» posterior del cliente reabriría el caso y Gabi
-    respondería. NO se aplica la regla de palabras prohibidas de los demás textos: esta se escribe para que un «gracias»
-    siempre se absorba, pero quien lo personalice puede usar «llama»."""
-    texto = texto.strip()
-    if not texto:
-        return "", []
-    if len(texto) > TEXTO_MAXIMO:
-        raise ValueError(f"{etiqueta}: máximo {TEXTO_MAXIMO} caracteres.")
-    if "?" in texto or "¿" in texto:
-        raise ValueError(f"{etiqueta}: no puede llevar «?» ni «¿» (es una instrucción de seguridad, no una pregunta).")
-    if "{linea_emergencia}" not in texto and not ((linea or "").strip() and linea.strip() in texto):
-        raise ValueError(
-            f"{etiqueta}: debe llevar la línea de emergencia: usa el marcador {{linea_emergencia}} (se rellena con "
-            "--linea-emergencia, p. ej. \"1808 (Emergencias 24/7)\")."
-        )
-    avisos = []
-    if mem.saliente_deja_algo_pendiente(texto.replace("{nombre}", "").replace("{linea_emergencia}", "1808 (Emergencias 24/7)")):
-        avisos.append(
-            f"AVISO {etiqueta}: el texto tiene una palabra que el cierre de cortesía lee como compromiso o petición pendiente "
-            "(llamar, enviar, avisar, necesitar, días, horas…): un «ok» del cliente reabriría el caso y Gabi respondería. "
-            "Un «gracias» sí se absorbe. El texto por defecto usa «Comunícate ya con…» para evitarlo."
-        )
-    return texto, avisos
 
 
 def validar_fecha(valor: str) -> str:
@@ -168,6 +126,10 @@ def _cambios_desde(args, avisos: list[str] | None = None) -> dict[str, str]:
         if not separador or categoria not in t.CATEGORIAS_ATC:
             raise ValueError(f"--texto-categoria espera CATEGORIA=TEXTO con una categoría de {', '.join(t.CATEGORIAS_ATC)}.")
         cambios[t.CLAVE_TEXTO_CATEGORIA + categoria] = validar_texto(texto, f"--texto-categoria {categoria}")
+    if args.resultado is not None:
+        if not mem.resultado_triaje_valido(args.resultado):
+            raise ValueError(f"--resultado: válidos {', '.join(mem.RESULTADOS_TRIAJE_PERMITIDOS)}; recibido {args.resultado!r}.")
+        cambios[mem.CLAVE_TRIAJE_RESULTADO] = args.resultado.strip()
     if args.max_mensajes is not None:
         bajo, alto = MAX_MENSAJES_RANGO
         if not bajo <= args.max_mensajes <= alto:
@@ -212,6 +174,7 @@ async def estado(negocio_id: str) -> dict:
         t.CLAVE_LINEA_EMERGENCIA: await v(t.CLAVE_LINEA_EMERGENCIA) or None,
         t.CLAVE_LINEA_VENTAS: await v(t.CLAVE_LINEA_VENTAS) or None,
         t.CLAVE_CATEGORIAS: await v(t.CLAVE_CATEGORIAS) or ",".join(t.CATEGORIAS_FASE_1),
+        mem.CLAVE_TRIAJE_RESULTADO: await mem.obtener_resultado_triaje(negocio_id),
         t.CLAVE_MAX_MENSAJES: await v(t.CLAVE_MAX_MENSAJES) or str(t.MAX_MENSAJES_CLIENTE_POR_DEFECTO),
         t.CLAVE_NOMBRE_NEGOCIO: await v(t.CLAVE_NOMBRE_NEGOCIO) or f"(fallback: {t.NOMBRE_NEGOCIO_POR_DEFECTO})",
         t.CLAVE_TELEFONOS_EXCLUIDOS: await v(t.CLAVE_TELEFONOS_EXCLUIDOS) or None,

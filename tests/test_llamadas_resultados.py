@@ -67,11 +67,33 @@ async def test_la_llamada_registrada_deja_el_resultado_y_la_nota_en_el_payload()
     assert e.payload["resultado"] == "contesto_sigo_yo" and e.payload["nota"] == "nota X" and e.autor == dueno.capitalize()
 
 
-async def test_contesto_agendado_pide_abrir_el_formulario_de_agendar_y_cierra_la_tarea():
+async def test_contesto_agendado_pide_abrir_el_formulario_de_agendar_cierra_la_tarea_y_asigna_el_lead():
+    """2026-10-11: «contestó, agendado» ya no solo abre el formulario: asigna el lead al asesor que llamó (pausa a Gabi, igual
+    que «sigo yo»), para que si cierra el formulario sin guardar Gabi no siga conversando con quien ya acordó una cita."""
     negocio, canal, tarea, dueno = await _escenario("lr-agenda")
     r = await _registrar(negocio, tarea, _usuario(negocio, dueno), "contesto_agendado")
     assert r["accion"] == "abrir_agendar" and r["conversation_id"] == tarea.conversation_id
     assert (await _tarea(tarea.id)).estado == "cumplida"
+    lead = await mem.obtener_lead(TEL, negocio_id=negocio["id"])
+    assert lead["asesor_asignado"] == dueno
+    asignados = [e for e in await mem.listar_eventos_lead(TEL) if e["tipo"] == "asignado"]
+    assert len(asignados) == 1 and asignados[0]["payload"]["nuevo"] == dueno and asignados[0]["payload"]["origen"] == "llamada"
+    assert mem.EVENTO_LLAMADA_REGISTRADA in [e["tipo"] for e in await mem.listar_eventos_lead(TEL)]
+
+
+async def test_contesto_agendado_de_una_tarea_sin_asesor_asigna_a_quien_registra():
+    negocio, canal, tarea, dueno = await _escenario("lr-agenda2")
+    await _tocar(tarea.id, asesor_username=None)
+    r = await _registrar(negocio, tarea, _usuario(negocio, "sup", "supervisor"), "contesto_agendado")
+    assert r["accion"] == "abrir_agendar"
+    assert (await mem.obtener_lead(TEL, negocio_id=negocio["id"]))["asesor_asignado"] == "sup"
+
+
+@pytest.mark.parametrize("resultado", ["contesto_no_interesado", "numero_errado", "no_contesto", "no_llamar"])
+async def test_los_demas_resultados_no_asignan_el_lead(resultado):
+    negocio, canal, tarea, dueno = await _escenario(f"lr-noasigna-{resultado[:6]}")
+    await _registrar(negocio, tarea, _usuario(negocio, dueno), resultado)
+    assert (await mem.obtener_lead(TEL, negocio_id=negocio["id"]))["asesor_asignado"] is None
 
 
 async def test_contesto_no_interesado_pone_el_resultado_del_caso():

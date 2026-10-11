@@ -259,3 +259,25 @@ def test_el_triaje_atc_envia_por_la_capa_central_con_su_origen():
     assert 'envios.enviar_texto(proveedor, telefono, texto, origen="triaje_emergencia_gas", canal=canal)' in fuente
     assert 'ORIGEN_EMERGENCIA = "triaje_emergencia_gas"' in fuente
     assert not re.search(r"\bproveedor\.enviar_", fuente)
+
+
+async def test_el_origen_de_la_confirmacion_de_llamada_es_esencial_y_nunca_lo_frena_un_interruptor():
+    """2026-10-11 — `gabi_confirma_llamada` (agent/llamadas.py): el texto fijo con que Gabi responde a «sí / a las 3 / no me llamen»
+    tras la oferta de llamada. Reemplaza a la respuesta de Gabi en ese turno (el cliente la espera, dentro de la ventana que él
+    mismo abrió), así que es esencial como `triaje_atc`: ni el interruptor del origen ni el tope de gasto lo frenan. No se agrupa
+    («una vez por oferta» lo garantiza quien lo envía) y pasa por la limpieza de formato."""
+    assert envios.ORIGENES["gabi_confirma_llamada"] == {"esencial": True}
+    assert "gabi_confirma_llamada" in envios.ORIGENES_CON_LIMPIEZA_DE_FORMATO
+    nid, canal = await _negocio("env-confirma-llamada")
+    await mem.guardar_configuracion("envios_modo_gabi_confirma_llamada", "nunca", negocio_id=nid)
+    p = _Proveedor()
+    for _ in range(2):
+        r = await envios.enviar_texto(p, "51911111132", "Perfecto. Un asesor te llamará en breve.", origen="gabi_confirma_llamada", canal=canal)
+        assert r.enviado and not r.bloqueado
+    assert [f.origen for f in await _filas(nid)] == ["gabi_confirma_llamada", "gabi_confirma_llamada"]
+
+
+def test_la_confirmacion_de_llamada_envia_por_la_capa_central_con_su_origen():
+    fuente = (RAIZ / "agent" / "llamadas.py").read_text(encoding="utf-8")
+    assert 'envios.enviar_texto(proveedor, telefono, texto, origen="gabi_confirma_llamada", canal=canal)' in fuente
+    assert not re.search(r"\bproveedor\.enviar_", fuente)

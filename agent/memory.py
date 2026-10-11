@@ -633,6 +633,10 @@ EVENTO_LLAMADA_AGOTADA = "llamada_agotada_sin_contacto"
 EVENTO_LLAMADA_EXPIRADA = "llamada_expirada"
 EVENTO_LLAMADA_ESCALADA = "llamada_escalada_supervision"
 EVENTO_LLAMADA_OFERTA_ENVIADA = "llamada_oferta_enviada"
+# La respuesta del cliente a la oferta de llamada (2026-10-11): VISIBLES (son la evidencia del consentimiento o del
+# rechazo, con el texto literal del cliente en el payload).
+EVENTO_LLAMADA_ACEPTADA = "llamada_aceptada_por_cliente"
+EVENTO_LLAMADA_RECHAZADA = "llamada_rechazada_por_cliente"
 TIPOS_EVENTO_LLAMADA_INTERNOS = (
     EVENTO_LLAMADA_PENDIENTE_CREADA, EVENTO_LLAMADA_ASIGNADA, EVENTO_LLAMADA_CANCELADA_POR_RESPUESTA,
     EVENTO_LLAMADA_EXPIRADA, EVENTO_LLAMADA_ESCALADA,
@@ -7455,9 +7459,40 @@ async def cerrar_lead_definitivamente_via_conversation(conversation_id: str, neg
 _ETIQUETAS_CATEGORIA_TRIAJE = {"recibo": "recibo", "numero_cliente": "número de cliente", "pago_deuda": "pago o deuda"}
 _DESCRIPCION_CIERRE_EMERGENCIA = "Triaje automático: emergencia de gas derivada a Emergencias de Cálidda — caso cerrado"
 
+# Resultado con que el triaje tipifica y cierra (2026-10-11, configurable por negocio desde el panel «Derivación
+# automática»). Default `consulta_atc` = comportamiento de siempre. Solo valen resultados que (a) cierran (están en
+# RESULTADOS_CERRADOS: `cerrar_por_triaje` fija `cerrado_definitivamente_en`) y (b) NO son comerciales: un caso sin
+# posibilidad de venta jamás debe quedar como vendido (ni agendado/postventa, que no cierran), ni como
+# no_interesado/no_califica (pérdidas comerciales que ensuciarían la tasa de cierre) ni sin_respuesta (lo pone el barrido).
+CLAVE_TRIAJE_RESULTADO = "triaje_atc_resultado"
+RESULTADO_TRIAJE_POR_DEFECTO = "consulta_atc"
+RESULTADOS_TRIAJE_NO_PERMITIDOS = ("vendido", "no_interesado", "no_califica", "sin_respuesta")
+# El default va primero (así lo muestra el panel).
+RESULTADOS_TRIAJE_PERMITIDOS = (RESULTADO_TRIAJE_POR_DEFECTO,) + tuple(
+    r for r in RESULTADOS_CERRADOS if r not in RESULTADOS_TRIAJE_NO_PERMITIDOS and r != RESULTADO_TRIAJE_POR_DEFECTO
+)
+
+
+def resultado_triaje_valido(valor: str | None) -> bool:
+    return (valor or "").strip() in RESULTADOS_TRIAJE_PERMITIDOS
+
+
+def etiqueta_resultado(resultado: str | None) -> str:
+    return _ETIQUETAS_RESULTADO_REAPERTURA.get(resultado or "", resultado or "")
+
+
+async def obtener_resultado_triaje(negocio_id: str) -> str:
+    """El resultado configurado para el cierre del triaje; ante cualquier valor inválido o un fallo de lectura,
+    el de siempre (`consulta_atc`). Nunca lanza."""
+    try:
+        valor = (await obtener_configuracion(CLAVE_TRIAJE_RESULTADO, "", negocio_id=negocio_id) or "").strip()
+    except Exception:
+        return RESULTADO_TRIAJE_POR_DEFECTO
+    return valor if resultado_triaje_valido(valor) else RESULTADO_TRIAJE_POR_DEFECTO
+
 
 async def cerrar_por_triaje(
-    telefono: str, negocio_id: str, categoria: str, ahora: datetime | None = None,
+    telefono: str, negocio_id: str, categoria: str, ahora: datetime | None = None, resultado: str | None = None,
 ) -> dict | None:
     """Cierre del TRIAJE de temas no comerciales (2026-10-08, agent/triaje_atc.py), en UNA transacción:
     `Lead.resultado` y `Opportunity.resultado` = "consulta_atc", `cerrado_definitivamente_en` en el Lead y en
@@ -7471,8 +7506,15 @@ async def cerrar_por_triaje(
     Devuelve `{"conversation_id", "opportunity_id", "cierre_en"}`, o None SIN tocar nada si el caso ya no es
     cerrable (otro negocio, ya cerrado, un humano lo tomó o ya tiene resultado): una persona siempre gana.
     También vale para `categoria="emergencia_gas"` (2026-10-09): un lead con asesor o pausa NO se cierra (cerrar
-    liberaría al asesor cuando el cliente vuelva a escribir) y uno vendido/agendado tampoco (ya tiene resultado)."""
+    liberaría al asesor cuando el cliente vuelva a escribir) y uno vendido/agendado tampoco (ya tiene resultado).
+
+    El resultado con que se tipifica sale de la configuración del negocio (`triaje_atc_resultado`, default
+    `consulta_atc`; ver `obtener_resultado_triaje`) salvo que el llamador pase `resultado` (debe ser válido)."""
     ahora = ahora or datetime.utcnow()
+    if resultado is None:
+        resultado = await obtener_resultado_triaje(negocio_id)
+    elif not resultado_triaje_valido(resultado):
+        raise ValueError(f"cerrar_por_triaje: resultado no permitido para el triaje: {resultado!r}")
     async with async_session() as session:
         async with session.begin():
             contact = await _obtener_contact(session, negocio_id, telefono)
@@ -7490,12 +7532,12 @@ async def cerrar_por_triaje(
             if opportunity is None or opportunity.resultado or lead.resultado:
                 return None
 
-            lead.resultado = "consulta_atc"
+            lead.resultado = resultado
             lead.cerrado_definitivamente_en = ahora
             lead.derivado_en = None
             _avanzar_version(lead)
             lead.actualizado = ahora
-            opportunity.resultado = "consulta_atc"
+            opportunity.resultado = resultado
             opportunity.version = Opportunity.version + 1
             opportunity.actualizado = ahora
             conversation.cerrado_definitivamente_en = ahora
@@ -7506,9 +7548,9 @@ async def cerrar_por_triaje(
             session.add(EventoLead(
                 conversation_id=conversation.id, negocio_id=conversation.negocio_id, opportunity_id=opportunity.id,
                 tipo="resultado_cambiado", autor=None,
-                descripcion="Cambió el resultado a «Consulta ATC» (triaje automático)",
+                descripcion=f"Cambió el resultado a «{etiqueta_resultado(resultado)}» (triaje automático)",
                 payload={
-                    "campo": "resultado", "anterior": None, "nuevo": "consulta_atc",
+                    "campo": "resultado", "anterior": None, "nuevo": resultado,
                     "origen": "triaje_atc", "categoria": categoria,
                 },
                 creado=ahora,
@@ -7520,7 +7562,7 @@ async def cerrar_por_triaje(
                     _DESCRIPCION_CIERRE_EMERGENCIA if categoria == "emergencia_gas"
                     else f"Triaje automático: consulta de {etiqueta} derivada a la línea de atención — caso cerrado"
                 )[:300],
-                payload={"categoria": categoria, "origen": "triaje_atc", "cierre_en": ahora.isoformat()},
+                payload={"categoria": categoria, "origen": "triaje_atc", "cierre_en": ahora.isoformat(), "resultado": resultado},
                 creado=ahora,
             ))
             return {"conversation_id": conversation.id, "opportunity_id": opportunity.id, "cierre_en": ahora}

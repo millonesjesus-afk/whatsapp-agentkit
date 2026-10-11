@@ -15,7 +15,7 @@ Uso (la base sale de DATABASE_URL; sin ninguna opción solo MUESTRA lo configura
     python scripts/configurar_llamadas.py --negocio-id <id> --revocar-responsabilidad --como admin
 
 Otras opciones: --horas-silencio 4 · --puntaje-minimo 4 · --exploracion-pct 0 · --holdout-pct 30 · --max-intentos 3 ·
---sla-horas 2 · --vida-max-dias 3 · --oferta-activa 0|1 · --oferta-texto "…{nombre}…{producto}…" ("" vuelve al texto por defecto).
+--sla-horas 2 · --vida-max-dias 3 · --oferta-activa 0|1 · --respuesta-haiku 0|1 · --oferta-texto "…{nombre}…{producto}…" ("" vuelve al texto por defecto).
 """
 import argparse
 import asyncio
@@ -44,6 +44,7 @@ def _argumentos(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--vida-max-dias", type=float, default=None)
     p.add_argument("--oferta-activa", choices=("0", "1"), default=None)
     p.add_argument("--oferta-texto", default=None)
+    p.add_argument("--respuesta-haiku", choices=("0", "1"), default=None, help="1 deja que Haiku interprete las respuestas AMBIGUAS a la oferta (llamadas_respuesta_haiku).")
     p.add_argument("--aceptar-responsabilidad", metavar="VERSION_TEXTO", default=None, help=f"Acepta el texto de responsabilidad (versión actual: {llamadas.VERSION_TEXTO_RESPONSABILIDAD}).")
     p.add_argument("--revocar-responsabilidad", action="store_true", help="Revoca la aceptación: apaga el modo activo y cancela las tareas abiertas.")
     p.add_argument("--como", default=None, help="Usuario que figura en la aceptación/revocación (obligatorio con ellas).")
@@ -57,6 +58,8 @@ def cuerpo_desde(args) -> dict:
         cuerpo["gabi_activo"] = args.activo == "1"
     if args.oferta_activa is not None:
         cuerpo["oferta_activa"] = args.oferta_activa == "1"
+    if args.respuesta_haiku is not None:
+        cuerpo["respuesta_haiku"] = args.respuesta_haiku == "1"
     if args.modo is not None:
         cuerpo["modo"] = args.modo
     for campo, valor in (

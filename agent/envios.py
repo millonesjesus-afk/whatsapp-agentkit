@@ -88,6 +88,12 @@ ORIGENES: dict[str, dict] = {
     # responsabilidad están encendidas. Texto libre dentro de la ventana de 24 h, igual que el reenganche: mismo
     # modo "solo_gratis" (no se paga por insistirle a quien no contestó) y nadie lo espera, así que no es esencial.
     "gabi_oferta_llamada": {"esencial": False, "modo": "solo_gratis"},
+    # Confirmación determinista de Gabi a la RESPUESTA del cliente a esa oferta (2026-10-11, agent/llamadas.py): «Perfecto,
+    # un asesor te llamará…» cuando acepta o pide una hora, o «Listo, no te llamaremos…» cuando rechaza. Es la respuesta que
+    # el cliente espera a un mensaje que acaba de mandar (dentro de la ventana de 24 h que él mismo abrió) y reemplaza a la
+    # de Gabi en ese turno, igual que `triaje_atc`: esencial, ningún interruptor ni tope de gasto la frena. Sin agrupar:
+    # «una vez por oferta» lo garantiza quien la envía (agent/llamadas.py). Si no sale, el turno sigue con Gabi.
+    "gabi_confirma_llamada": {"esencial": True},
 }
 
 
@@ -96,7 +102,7 @@ ORIGENES: dict[str, dict] = {
 ORIGENES_CON_LIMPIEZA_DE_FORMATO = frozenset({
     "gabi_respuesta", "gabi_aviso_derivacion", "gabi_aviso_no_legible", "gabi_respaldo_sin_ia",
     "reenganche_inactividad", "agradecimiento_cierre", "triaje_atc", "gabi_oferta_llamada",
-    "triaje_emergencia_gas",
+    "triaje_emergencia_gas", "gabi_confirma_llamada",
 })
 
 

@@ -90,6 +90,7 @@ from agent import circuito_ia
 from agent import plantilla_retomar
 from agent import atencion_atrasada
 from agent import llamadas
+from agent import derivacion_automatica
 from agent import memory as mem
 from agent.memory import obtener_estado_ventana
 
@@ -8710,6 +8711,38 @@ async def actualizar_configuracion_metricas_json(
         raise HTTPException(status_code=400, detail=str(e))
     logger.info("Métrica del embudo actualizada por %s: %s", usuario.get("username"), guardado["modificadas"])
     return JSONResponse({"ok": True, "modificadas": guardado["modificadas"], **await _estado_configuracion_metricas(usuario["negocio_id"])})
+
+
+@router.get("/configuracion/derivacion-automatica.json")
+async def configuracion_derivacion_automatica_json(usuario: dict = Depends(servicio_identidad.requiere_rol("admin"))):
+    """Derivación automática (decisión del dueño, 2026-10-11): los casos SIN posibilidad de venta (recibo, número de
+    cliente, pago o deuda y emergencia de gas) se derivan al canal correcto y se tipifican y cierran solos, sin asesor y
+    sin tokens. Devuelve la configuración del negocio de la sesión con el estado EFECTIVO de cada categoría (p. ej. «activo»
+    sin línea degrada a sombra), los textos y las líneas, el resultado de cierre y sus opciones, las variables permitidas,
+    lo que nunca se cierra y la actividad de los últimos 30 días (solo conteos; `null` si no pudo calcularse).
+    Solo lectura; solo Admin."""
+    return JSONResponse(await derivacion_automatica.estado_configuracion(usuario["negocio_id"]))
+
+
+@router.post("/configuracion/derivacion-automatica.json")
+async def actualizar_configuracion_derivacion_automatica_json(
+    request: Request,
+    usuario: dict = Depends(servicio_identidad.requiere_rol("admin")),
+    _csrf: None = Depends(verificar_csrf),
+):
+    """Guarda cualquier subconjunto de: `modo` y `emergencia_modo` (apagado|sombra|activo; interruptores distintos),
+    `categorias` (lista de las incluidas en el modo general), `lineas` ({atencion?, emergencia?, ventas?}),
+    `nombre_negocio`, `texto_general`, `textos_categoria` ({categoría: texto}), `texto_emergencia` (un texto vacío vuelve
+    al original) y `resultado` (con que se tipifica y cierra; default consulta_atc). Todo o nada, con las mismas validaciones
+    que scripts/configurar_triaje_atc.py. Solo se escribe lo que cambia: guardar sin cambiar nada no activa nada. Queda en
+    el Historial de configuración (quién, cuándo, antes y después). Del negocio de la sesión, nunca del cuerpo; solo Admin."""
+    cuerpo = await _cuerpo_objeto_json(request)
+    try:
+        resultado = await derivacion_automatica.guardar_cambios(usuario["negocio_id"], usuario.get("username"), cuerpo)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    logger.info("Derivación automática actualizada por %s: %s", usuario.get("username"), resultado["modificadas"])
+    return JSONResponse({"ok": True, **resultado})
 
 
 def _validar_hora(valor: str, etiqueta: str) -> None:

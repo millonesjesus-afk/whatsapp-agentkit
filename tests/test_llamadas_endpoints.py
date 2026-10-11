@@ -91,6 +91,7 @@ async def test_listado_activo_trae_el_contrato_de_cada_tarea():
         "id", "conversation_id", "telefono", "nombre", "producto", "estado", "motivo_cierre", "segmento", "puntaje", "senales",
         "asesor", "asesor_nombre", "asignada_en", "programada_para", "intentos", "max_intentos", "ultimo_intento_en",
         "proximo_intento_en", "resultado_llamada", "nota", "vencida", "sin_hacer", "reasignaciones", "creada_en", "cerrada_en", "vence_en",
+        "aceptada_por_cliente",     # 2026-10-11 (aditivo): el cliente aceptó la llamada respondiendo a la oferta de Gabi
     }
     assert t["estado"] == "pendiente" and t["segmento"] == "A" and t["puntaje"] == 12 and t["nombre"] == "Ana" and t["asesor"] == dueno
     assert t["max_intentos"] == 3 and t["vencida"] is False and t["creada_en"].endswith("Z") and t["asesor_nombre"] == dueno.capitalize()
@@ -199,6 +200,7 @@ async def test_get_configuracion_por_defecto_esta_todo_apagado_con_los_defaults_
     assert (c["horas_silencio"], c["puntaje_minimo"], c["exploracion_pct"], c["holdout_pct"]) == (4.0, 4, 0.0, 30.0)
     assert (c["max_intentos"], c["sla_horas_habiles"], c["vida_max_dias"], c["oferta_activa"], c["oferta_texto"]) == (3, 2.0, 3.0, False, None)
     assert c["oferta_texto_por_defecto"] == ll.OFERTA_TEXTO_POR_DEFECTO
+    assert c["respuesta_haiku"] is False        # 2026-10-11: el clasificador Haiku de las respuestas ambiguas viene apagado
     r = c["responsabilidad"]
     assert r["texto"] == ll.TEXTO_RESPONSABILIDAD and r["version_texto"] == "v1" and r["aceptada_vigente"] is False
     assert r["aceptada_por"] is None and r["aceptada_en"] is None
