@@ -11,7 +11,7 @@
 | Fecha de creación | 2026-07-30 |
 | Autor | Claude, a pedido de Jesús Millones |
 | Fecha de aprobación | 2026-07-30 |
-| Última actualización | 2026-10-12 (Capítulos 1 y 3 — Shell de sidebar de alto completo y Tira de acción en Inicio, enmendado por ADR-0005; ver Control de versiones) |
+| Última actualización | 2026-10-13 (Capítulos 3 y 8 — «Mi día» retirado, citas como llamada programada y recordatorio de cita en la campana, enmendado por decisión del dueño sobre ADR-0005; ver Control de versiones) |
 
 ## Dependencias
 
@@ -54,6 +54,7 @@ introduce módulos funcionales (MPA), no prescribe framework, librería ni códi
 | 1.0 | 2026-08-08 | Claude | **Capítulo 6 (CRM/Pipeline) — herencia de la atribución de campaña, 3 ediciones mínimas.** Resuelve la Brecha A identificada durante el Gap Analysis del recorrido #5 de Product Design (Campaña → Lead atribuido → Pipeline): MPA §4 y §6 ya declaraban la relación Campañas → CRM/Pipeline con atribución persistente, pero este capítulo no la reflejaba. (1) §2 Trazabilidad — se agrega la relación con Campañas (MPA §4) a la lista ya existente de relaciones declaradas (Conversaciones, Catálogo, Equipo). (2) §8 Relación con otros patrones — se declara a Campañas como fuente entrante de atribución, corrigiendo la asimetría con el Capítulo 7.B §8 (que ya declaraba alimentar a este patrón, sin que este lo recibiera de vuelta). (3) §3 Composición, Vista de detalle — se agrega la atribución de origen como dato presente, no opcional: MPA §3 exige que permanezca "visible en todo el ciclo de vida posterior del lead", por lo que este capítulo declara únicamente que el dato debe estar presente y visible — dónde se ubica, cómo se presenta y su comportamiento sin atribución quedan explícitamente diferidos a Product Design (Screen Contract en adelante). No se modificó ningún otro capítulo, ni MPX, ni MPA, ni AI Architecture, ni SCR-03 ni ningún artefacto de Product Design. Con esto, la Brecha A queda **RESUELTA** — junto con la Brecha B (resuelta el mismo día en MPA y AI Architecture), el bloqueo de corpus del recorrido #5 queda levantado. |
 | 1.0 | 2026-08-10 | Claude | **Capítulo 8 (Notificaciones) agregado — patrón nuevo.** Redactado tras un ciclo de Gate 1 (recuperación de evidencia: MPA §3/4/6/9, MPX Capítulo 7, Capítulo 1 de este documento, código real de `agent/dashboard.py` y `agent/notificaciones.py`) y Gate 2 (reconciliación de contradicciones/vacíos entre esas fuentes) previos a la redacción, seguidos de cuatro decisiones de producto aprobadas explícitamente por el usuario (DEC-01 canal, DEC-02 eventos del Badge, DEC-03 estados, DEC-04 clasificación de `agent/notificaciones.py`) — detalle completo del proceso en `MAIEK_AI_EXPERIENCE_FLOWS.md`. Cambio de numeración documental asociado, no de producto: el antiguo Capítulo 8 ("Principios Transversales de Producto") pasa a ser Capítulo 9 sin alteración de su contenido conceptual — solo se actualizaron sus referencias internas a "Capítulos 1 a 7" → "Capítulos 1 a 8" y dos referencias cruzadas residuales en Capítulo 6 y Capítulo 7 que apuntaban al antiguo número, más el bloque de cierre del documento. Sin observaciones de fondo. |
 | 1.0 | 2026-10-12 | Claude, a pedido de Jesús Millones | **Enmendado por ADR-0005** (`adr/0005-shell-sidebar-alto-completo-y-tira-de-accion-en-inicio.md`, decisión del dueño del 2026-10-12). (1) **Capítulo 1 (Shell), §3, §5, §6, §7 y §9:** la Top Navigation «por encima de todo» permanece únicamente en móvil (por debajo de `sm`, 768 px, barra de 56 px); en escritorio y tablet la marca, el buscador, la campana con contador, la navegación y la cuenta viven en un Sidebar de alto completo, sin barra superior; «Ayuda» pasa al menú de cuenta; modo colapsado de 64 px con iconos apilados; sin selector de negocio hasta que exista un segundo negocio. (2) **Capítulo 3 (Inicio), §2–§5, §7 y §9:** la Zona de indicadores se reemplaza por una **Tira de acción** (celdas con verbo y destino que filtran «Mi cola»; máximo 5; sin cifras sin verbo), que también sustituye a los chips de la cola; se registra el **Pulso de hoy** (banda plegable de supervisión) como patrón aceptado por fases, siempre después de la cola de acción. (3) **Capítulo 9, «Acción antes que observación»:** se agrega el corolario del Pulso. Texto anterior conservado como nota de trazabilidad en cada sección. No se modificó ningún otro capítulo, ni MDL, MPX ni MPA. |
+| 1.0 | 2026-10-13 | Claude, a pedido de Jesús Millones | **Enmendado por decisión del dueño, 2026-10-13** (ver «Enmienda 2026-10-13» en `adr/0005-shell-sidebar-alto-completo-y-tira-de-accion-en-inicio.md`). (1) **Capítulo 3 (Inicio):** «Mi día» se retira del rail; las citas de hoy se «pinean» en «Mi cola» (no cuentan para el tope de filas); la celda de citas pasa a «hoy + vencidas sin cerrar» con desglose; una cita se define como **llamada programada** (acción primaria «Llamar»); se registra el disparador para evaluar una tarjeta de agenda. (2) **Capítulo 8 (Notificaciones), §3, §6 y errores a evitar:** «cita próxima» **deja de estar excluida** (DEC-02): entra como evento-fuente con un recordatorio agrupado cuando faltan menos de 60 minutos. Texto anterior conservado como nota de trazabilidad. No se modificó ningún otro capítulo, ni MDL, MPX ni MPA. |
 
 ---
 
@@ -561,6 +562,27 @@ feriados ni horas fuera de horario hábil (las esperas se miden en horas hábile
 pausa»). Fases: C0 con las cifras existentes, C1 con cifras nuevas de backend, C2 con comparaciones y
 tendencias. El detalle de indicadores y su contrato queda en la «Propuesta A+C», a incorporar por
 enmienda al ADR-0005 y a este capítulo; este documento no lo fija.
+
+**Citas en Inicio** (enmendado por decisión del dueño, 2026-10-13; ADR-0005) — una **cita es una
+llamada programada con el cliente** (no una visita): sin dirección, zona ni tipo de visita.
+- **«Mi día» se retira** del rail derecho. Sin otro contenido el rail no se renderiza y la cola ocupa
+  todo el ancho; el Pulso lo volverá a usar.
+- **Las citas de hoy están «pineadas»:** no cuentan para el tope de 6 filas de «Mi cola» y siempre se
+  ven; las demás filas respetan el tope. Las citas de otros días van a un pliegue **«Citas de otros
+  días»** (plegado).
+- **Fila de cita:** acción primaria «Llamar» (con «Copiar número» y «Abrir chat» en el menú), texto
+  «Llamada programada a las 4:30 p. m.», producto del cliente y, para supervisión, el asesor. Una cita
+  vencida suma «Cerrar o reprogramar» (lleva al estado comercial del lead).
+- **Celda de la Tira:** cifra = citas de hoy + vencidas sin cerrar (7 días) = filas del filtro;
+  subtexto con el desglose («2 hoy · 1 vencida sin cerrar») y, para el asesor, la próxima. Las vencidas
+  de más de 7 días salen en una línea discreta bajo la cola.
+- **Recordatorio:** una entrada agrupada en la campana cuando faltan menos de 60 minutos (Capítulo 8).
+- **Disparador de revisión:** tras medir **dos semanas de citas reales**, si una persona tiene **más de
+  3 citas por día de forma sostenida durante una semana**, se vuelve a evaluar una tarjeta o vista de
+  agenda. Hasta entonces no se construye.
+
+*Redacción anterior (ADR-0005, 2026-10-12), conservada por trazabilidad:* el rail derecho conservaba
+«Mi día» (las citas del día con su hora).
 
 ## 4. Roles y variaciones
 
@@ -1243,9 +1265,12 @@ de una persona específica.
   evidenciada; Push/externo, con dos realizaciones actuales (Browser Notification API y correo
   vía Resend) y una posibilidad futura ya nombrada documentalmente (WhatsApp), sin evidencia de
   implementación (DEC-01).
-- Eventos-fuente reconocidos por el patrón: nueva asignación, mensaje sin responder (MPA §4).
-  "Cita próxima" existe en la implementación de escritorio actual, pero no tiene respaldo
-  documental como evento-fuente del patrón — no se incorpora a esta lista (DEC-02).
+- Eventos-fuente reconocidos por el patrón: nueva asignación, mensaje sin responder (MPA §4) y
+  **cita por empezar** (una llamada programada que empieza en menos de 60 minutos; una sola entrada
+  agrupada en la campana, «Cita en N min · Nombre» o «N citas en los próximos 60 min»).
+  *Enmendado por decisión del dueño 2026-10-13.* Redacción anterior, conservada por trazabilidad:
+  «"Cita próxima" existe en la implementación de escritorio actual, pero no tiene respaldo
+  documental como evento-fuente del patrón — no se incorpora a esta lista (DEC-02).»
 - Relación evento → canal → estado → contador: un mismo evento puede tener más de una realización
   simultánea sin que eso sea una duplicación de diseño — ver §8, caso "nueva asignación".
 - No se define acá layout del panel, drawer, página, posición, animaciones ni ningún componente
@@ -1283,7 +1308,8 @@ Ciclo: **evento relevante → evaluación del destinatario → elección de cana
 posible atención/acción.**
 
 - El Badge se alimenta de los eventos aprobados en DEC-02 (nueva asignación, mensaje sin
-  responder).
+  responder y, desde la enmienda del 2026-10-13, cita por empezar: una entrada agrupada, calculada
+  en el navegador con la hora de la cita, sin sonido ni correo).
 - Push/externo, con las realizaciones ya reconocidas en §3.
 - **[EO]** La implementación actual permite que, al hacer clic sobre una notificación relacionada
   con un Lead, se llegue directamente al contexto de ese Lead — comportamiento observado en
@@ -1332,7 +1358,9 @@ que deba diferir del comportamiento ya declarado del Shell.
   el futuro ambas conviven — mismo riesgo ya señalado en Cap. 1 §6.
 - Alimentar el Badge del Shell con cualquier evento que hoy dispare una notificación de
   escritorio, sin verificar que tenga respaldo documental como evento-fuente — es exactamente el
-  error que DEC-02 evita al excluir "cita próxima" por ahora.
+  error que DEC-02 evita. *(Enmendado 2026-10-13: "cita próxima" ya no está excluida; el recordatorio
+  agrupado de menos de 60 minutos sí es un evento-fuente aprobado. Lo que sigue prohibido es alimentar el
+  Badge con eventos sin respaldo.)*
 - Tratar `agent/notificaciones.py` como parte de la experiencia principal del patrón solo por su
   ubicación en el código — DEC-04 ya estableció que la clasificación depende del destinatario y la
   relación con el usuario individual, no del archivo en el que vive.

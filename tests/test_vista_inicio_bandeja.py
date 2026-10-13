@@ -330,3 +330,21 @@ def test_componer_vista_no_repite_telefonos_y_respeta_supervision():
     assert [e["telefono"] for e in mem.componer_vista_inicio("responde_ahora", esperando, asignar, [], [], False)] == ["1"]
     assert mem.componer_vista_inicio("escalados", esperando, asignar, [], [], False) == []
     assert mem.componer_vista_inicio("desconocida", esperando, asignar, [], [], True) == []
+
+
+async def test_vista_citas_vencidas_antiguas_lista_solo_las_de_mas_de_7_dias_y_coincide_con_el_total_de_inicio():
+    negocio, canal = await _negocio_con_canal("vib-ant", "40200000077")
+    admin = await _usuario(negocio, "admin1", "admin")
+    ahora_lima = datetime.utcnow() - timedelta(hours=5)
+    await _lead(negocio, canal, "51920000701", asesor="a1", resultado="agendado", fecha_agendada=ahora_lima - timedelta(days=10))
+    await _lead(negocio, canal, "51920000702", asesor="a1", resultado="agendado", fecha_agendada=ahora_lima - timedelta(days=30))
+    await _lead(negocio, canal, "51920000703", asesor="a1", resultado="agendado", fecha_agendada=ahora_lima - timedelta(days=2))   # reciente
+    await _lead(negocio, canal, "51920000704", asesor="a1", resultado="agendado", fecha_agendada=ahora_lima + timedelta(days=2))   # futura
+    totales = (await _inicio(admin))["zona_accion"]["totales"]
+    assert totales["citas_vencidas_antiguas"] == 2
+    cuerpo = await _bandeja(admin, vista="citas_vencidas_antiguas")
+    assert cuerpo["total"] == totales["citas_vencidas_antiguas"] == 2
+    assert cuerpo["vista"] == "citas_vencidas_antiguas"
+    assert set(_telefonos(cuerpo)) == {"51920000701", "51920000702"}
+    # La vista de siempre sigue mostrando solo la de los últimos 7 días.
+    assert _telefonos(await _bandeja(admin, vista="citas_vencidas")) == ["51920000703"]

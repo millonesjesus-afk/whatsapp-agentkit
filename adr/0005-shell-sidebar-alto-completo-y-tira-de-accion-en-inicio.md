@@ -17,7 +17,7 @@
 - **Sidebar** (`components/shell/sidebar.tsx`): `<aside>` Navy (`bg-navy-900`) de 280 px expandido / 64 px colapsado, **sin marca** (el wordmark solo aparece en el overlay móvil). Entre 768 px y 1023,98 px el colapso es forzado (`enZonaEstrecha` en `proveedor-shell.tsx`); por debajo de 768 px es un `Sheet` a pantalla completa.
 - **Wordmark** (`components/shell/wordmark.tsx`): isotipo real (`public/logo-mark.png`) dentro de un tile blanco de 28 px, más el texto «Maiek AI» en Poppins. El comentario del componente registra el pedido explícito del dueño del 2026-09-15: «el logo de maiek siempre debe ir en fondo blanco».
 - **Breakpoints** (`tailwind.config.ts`, MDL Cap. 3): `xs` 480, **`sm` 768**, **`md` 1024**, `lg` 1280, `xl` 1536 (la escala por defecto de Tailwind está reemplazada).
-- **Inicio** (`components/inicio/inicio-nuevo.tsx`, `mi-cola.tsx`, `zona-indicadores.tsx`): «Tu siguiente mejor acción» y «Mi cola» en la columna principal; en el rail derecho (desde `lg`) «Mi día» y el cuadro **«Indicadores»** (3 cifras sin acción asociada, tomadas de `zona_indicadores`); sobre la cola, **chips** Todo / Responder / Llamar / Citas con sus conteos. Las mismas cantidades se muestran, por lo tanto, en dos lugares con presentación distinta y ninguna de las cifras de «Indicadores» es clicable.
+- **Inicio** (`components/inicio/inicio-nuevo.tsx`, `mi-cola.tsx`, `zona-indicadores.tsx`): «Tu siguiente mejor acción» y «Mi cola» en la columna principal; en el rail derecho (desde `lg`) «Mi día» y el cuadro **«Indicadores»** (3 cifras sin acción asociada, tomadas de `zona_indicadores`); sobre la cola, **chips** Todo / Responder / Llamar / Citas con sus conteos. Las mismas cantidades se muestran, por lo tanto, en dos lugares con presentación distinta y ninguna de las cifras de «Indicadores» es clicable. *(Nota 2026-10-13: «Mi día» se retiró del rail; ver «Enmienda 2026-10-13».)*
 
 ### Qué no cuadra
 
@@ -89,12 +89,29 @@ El dueño aprobó, el 2026-10-12, tres decisiones de producto relacionadas. Las 
 - El mantenimiento de la regla «el logo siempre sobre fondo blanco» queda trasladado a un shell Navy: el tile blanco es obligatorio también en el Sidebar.
 - No cambia ningún permiso ni capacidad (MPA §9), ni el conjunto de módulos de navegación (MPA §10); este ADR no toca la arquitectura funcional.
 - El Pulso agrega, en F4, cifras nuevas de backend; requerirá un contrato aditivo y, de afectar `MAIEK_AI_API_ARCHITECTURE.md`, su propio registro.
+- **(Enmienda 2026-10-13)** «Mi día» queda **retirado** del rail derecho: Inicio ya no tiene tarjeta de agenda, y sin otro contenido el rail no se pinta (la cola ocupa todo el ancho). El rail queda reservado para el Pulso.
+
+## Enmienda 2026-10-13 — «Mi día» retirado y citas como llamada programada
+
+*Enmendado por decisión del dueño, 2026-10-13* (sobre la maqueta «Mi día» de las opciones A/B/C; se aprobó la B). Dato de negocio que fija el alcance: **una cita es una LLAMADA PROGRAMADA con el cliente** (no una visita técnica ni presencial), así que no lleva dirección, zona ni tipo de visita.
+
+1. **Se retira la tarjeta «Mi día»** del rail derecho de Inicio. Sin otro contenido, el rail no se renderiza (nunca vacío) y «Mi cola» ocupa todo el ancho desde `lg`. El Pulso (F3 en adelante) volverá a usar ese rail.
+2. **Las citas de HOY no cuentan para el tope de 6 filas de «Mi cola»:** están «pineadas» (siempre visibles, aunque pasen de 6); las demás filas respetan el tope y el «y N más». Las citas de otros días van al pliegue **«Citas de otros días»** (plegado por defecto).
+3. **Tira de acción — celda de citas.** Asesor: **«Citas de hoy»**; supervisor y administrador: **«Citas»**. La cifra = filas del filtro = **citas de hoy + citas vencidas sin cerrar de días anteriores** (ventana de 7 días); una cita de hoy que ya pasó cuenta una sola vez, en «hoy». El subtexto desglosa («2 hoy · 1 vencida sin cerrar», en ámbar solo la parte vencida) y al asesor le suma la próxima («Próxima 4:30 p. m. · Marcos»). Las vencidas de **más de 7 días** quedan fuera de la cifra y salen en una línea discreta bajo la cola («N citas vencidas hace más de 7 días sin cerrar · Ver») que lleva a Conversaciones con la vista `citas_vencidas_antiguas`. Esto cumple el criterio 3 (cifra = conteo de «Mi cola» filtrada) también para citas.
+4. **Celda «Llamar»:** se muestra siempre cuando el módulo está encendido y en modo efectivo `activo` (`totales.llamadas_activo`, aditivo), con «Nada pendiente» si hay 0; con el módulo en sombra, apagado o ausente el campo, se oculta.
+5. **Fila de cita (llamada programada):** acción primaria **«Llamar»** (`tel:`), «Copiar número» y «Abrir chat» en el menú; el texto dice «Llamada programada a las 4:30 p. m.». El supervisor ve el asesor de la cita y todos ven el producto (`producto`, `asesor`: campos aditivos de `_item_cita`). Una cita **vencida** suma la acción visible **«Cerrar o reprogramar»** (lleva al panel «Estado comercial» del lead; no hay reprogramador nuevo) y la explicación «La llamada programada pasó sin cerrarse: regístrala o reprográmala».
+6. **Recordatorio en la campana (fase 2, aprobada):** cuando faltan menos de 60 minutos (el mismo umbral de `cita_inminente`) para una o más citas, **una entrada agrupada**: «Cita en N min · Nombre» o «N citas en los próximos 60 min». Se calcula en el navegador con `cita_en`, sin endpoint nuevo; categoría `operativo`. Esto **enmienda la exclusión de «cita próxima»** como evento-fuente de la campana (Patterns Cap. 8 §3, DEC-02).
+7. **Disparador para volver a evaluar una tarjeta de agenda:** si, tras **medir dos semanas de citas reales**, una persona tiene **más de 3 citas por día de forma sostenida durante una semana**, se reabre la evaluación de una tarjeta o vista de agenda. Mientras tanto, la agenda de mes/semana sigue siendo el pendiente «calendario de agendados» y no se construye aquí.
+
+*Alternativas descartadas en esta enmienda:* conservar «Mi día» como tarjeta (duplicaba la cola y la tira: las citas ya se veían en tres lugares) y añadir un reprogramador propio (la ficha del lead ya cambia resultado y fecha).
+
+**Observación de producto (no se unifica ahora):** una *cita* (Lead `agendado` con `fecha_agendada`) y una tarea de «Para llamar» programada (`tareas_llamada.programada_para`) son dos modelos de «llamada a una hora». Propuesta para una decisión futura: tratar la cita como una tarea de llamada de origen «agenda» para tener un solo reloj, un solo registro de resultado y un solo recordatorio.
 
 ## Documentos enmendados (2026-10-12)
 
 | Documento | Versión | Qué cambia |
 |---|---|---|
-| `MAIEK_AI_PRODUCT_PATTERNS.md` | 1.0 (nueva fila fechada 2026-10-12) | Cap. 1 §3, §5, §6, §7 y §9 (Shell: barra superior solo en móvil; Sidebar de alto completo); Cap. 3 §2–§5, §7 y §9 (Zona de indicadores → Tira de acción; Pulso de hoy aceptado por fases); Cap. 9, «Acción antes que observación» (corolario del Pulso) |
+| `MAIEK_AI_PRODUCT_PATTERNS.md` | 1.0 (nueva fila fechada 2026-10-12; otra fila 2026-10-13: Cap. 3 «Citas en Inicio» y Cap. 8 §3, §6 y errores a evitar, DEC-02) | Cap. 1 §3, §5, §6, §7 y §9 (Shell: barra superior solo en móvil; Sidebar de alto completo); Cap. 3 §2–§5, §7 y §9 (Zona de indicadores → Tira de acción; Pulso de hoy aceptado por fases); Cap. 9, «Acción antes que observación» (corolario del Pulso) |
 | `MAIEK_AI_COMPONENT_SYSTEM.md` | 1.0.2 | Sidebar (variante de alto completo), Top Navigation (solo móvil, 56 px, sin Ayuda suelta), KPI Card (variante «Celda de acción») |
 | `MAIEK_AI_ADR_INDEX.md` | 1.0 (sin fila nueva de versión: solo la tabla de registro, según su propia regla de cierre) | Fila 0005 |
 | `DOCUMENTATION_INDEX.md` | 1.0 | «Última actualización» y párrafo de narrativa |

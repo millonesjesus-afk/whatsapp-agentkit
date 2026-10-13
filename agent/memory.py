@@ -2401,6 +2401,7 @@ async def listar_conversaciones_activas(
 
 VISTAS_INICIO = (
     "responde_ahora", "ventana_cerrada", "sin_asesor", "escalados", "esperando", "citas", "citas_vencidas",
+    "citas_vencidas_antiguas",
 )
 
 
@@ -2448,7 +2449,9 @@ def componer_vista_inicio(
         entradas = [_entrada(c, "cliente_esperando") for c in esperando]
     elif vista == "citas":
         entradas = [_entrada(l, "cita") for l in proximas]
-    elif vista == "citas_vencidas":
+    elif vista in ("citas_vencidas", "citas_vencidas_antiguas"):
+        # `vencidas` ya llega acotada por quien llama: las de los últimos 7 días o, para `citas_vencidas_antiguas`
+        # (2026-10-13), las de hace más de 7 días que Inicio solo cuenta en `totales.citas_vencidas_antiguas`.
         entradas = [_entrada(l, "cita_vencida") for l in vencidas]
     elif vista == "ventana_cerrada":
         entradas = [_entrada(c, "cliente_esperando") for c in esperando if not c["ventana_abierta"]]

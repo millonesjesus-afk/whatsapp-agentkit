@@ -371,7 +371,7 @@ async def test_citas_muestra_las_proximas_no_las_viejas_y_las_vencidas_aparte():
     await _lead(negocio, canal, "51910000071", asesor="asesor1", nombre="Vieja2", resultado="agendado",
                 fecha_agendada=ahora_lima - timedelta(days=2))
     # "Hoy más tarde" en hora de Lima: ya pasó respecto a UTC-naive pero NO respecto a Lima.
-    futuras = {"51910000072": 1, "51910000073": 3, "51910000074": 5, "51910000075": 20}
+    futuras = {"51910000072": 1, "51910000073": 3, "51910000074": 5, "51910000075": 30}
     for tel, horas in futuras.items():
         await _lead(negocio, canal, tel, asesor="asesor1", resultado="agendado",
                     fecha_agendada=ahora_lima + timedelta(hours=horas))
@@ -645,3 +645,167 @@ async def test_items_de_cita_y_escalado_traen_el_instante_para_ordenar():
     assert timedelta(minutes=35) <= cita - datetime.utcnow() <= timedelta(minutes=45)
     assert por_tel["51910000432"]["cita_en"].endswith("Z")
     assert por_tel["51910000433"]["escalado_en"].endswith("Z")
+
+
+# ---------------------------------------------------------------------------
+# Tira de acción (2026-10-13): totales.citas_hoy
+# ---------------------------------------------------------------------------
+
+def test_contar_citas_hoy_corta_el_dia_en_lima_y_no_en_utc():
+    # 2026-10-14 03:00 UTC = 2026-10-13 22:00 en Lima: para Lima todavía es el 13.
+    ahora_lima = datetime(2026, 10, 14, 3, 0) - timedelta(hours=5)
+
+    def c(y, m, d, h, mi):
+        return {"fecha_agendada": datetime(y, m, d, h, mi)}
+
+    leads = [
+        c(2026, 10, 13, 0, 5),    # hoy temprano (ya pasó, sigue sin cerrar): cuenta
+        c(2026, 10, 13, 23, 30),  # hoy tarde (aún no): cuenta
+        c(2026, 10, 12, 23, 59),  # ayer: no
+        c(2026, 10, 14, 0, 30),   # mañana en Lima (aunque en UTC sea hoy): no
+    ]
+    assert dashboard._contar_citas_hoy(leads, ahora_lima) == 2
+    assert dashboard._contar_citas_hoy([], ahora_lima) == 0
+
+
+async def test_citas_hoy_cuenta_las_de_hoy_futuras_y_pasadas_pero_no_ayer_ni_manana():
+    negocio, canal = await _negocio_con_canal("iv2-hoy", "40100000081")
+    asesor = await _usuario(negocio, "asesor1", "asesor")
+    hoy = (datetime.utcnow() - timedelta(hours=5)).replace(hour=0, minute=0, second=0, microsecond=0)
+    casos = {
+        "51910000501": hoy + timedelta(minutes=5),            # hoy, pasada o futura según la hora: cuenta
+        "51910000502": hoy + timedelta(hours=23, minutes=55),  # hoy, tarde: cuenta
+        "51910000503": hoy - timedelta(minutes=5),            # ayer: no
+        "51910000504": hoy + timedelta(days=1, minutes=5),    # mañana: no
+    }
+    for tel, fecha in casos.items():
+        await _lead(negocio, canal, tel, asesor="asesor1", resultado="agendado", fecha_agendada=fecha)
+    await _lead(negocio, canal, "51910000505", asesor="otro", resultado="agendado",
+                fecha_agendada=hoy + timedelta(hours=10))      # de otro asesor: no es de este asesor
+    t = (await _inicio(asesor))["zona_accion"]["totales"]
+    assert t["citas_hoy"] == 2
+    # Es aditivo: no altera los totales de siempre.
+    assert t["citas_proximas"] + t["citas_vencidas"] + t["citas_vencidas_antiguas"] >= 2
+
+
+async def test_citas_hoy_el_supervisor_ve_las_de_todos_y_un_dia_cerrado_no_cuenta():
+    negocio, canal = await _negocio_con_canal("iv2-hoy2", "40100000082")
+    admin = await _usuario(negocio, "admin1", "admin")
+    hoy = (datetime.utcnow() - timedelta(hours=5)).replace(hour=0, minute=0, second=0, microsecond=0)
+    await _lead(negocio, canal, "51910000511", asesor="a1", resultado="agendado", fecha_agendada=hoy + timedelta(hours=9))
+    await _lead(negocio, canal, "51910000512", asesor="a2", resultado="agendado", fecha_agendada=hoy + timedelta(hours=11))
+    # Una cita de hoy que ya se cerró definitivamente: no es trabajo del día.
+    await _lead(negocio, canal, "51910000513", asesor="a2", resultado="agendado", fecha_agendada=hoy + timedelta(hours=12))
+    async with mem.async_session() as session:
+        lead = await session.get(mem.Lead, "51910000513")
+        lead.cerrado_definitivamente_en = datetime.utcnow()
+        await session.commit()
+    # Y una que dejó de estar 'agendada' (vendió): tampoco.
+    await _lead(negocio, canal, "51910000514", asesor="a1", resultado="vendido", fecha_agendada=hoy + timedelta(hours=13))
+    assert (await _inicio(admin))["zona_accion"]["totales"]["citas_hoy"] == 2
+
+
+async def test_citas_hoy_es_cero_en_una_zona_vacia():
+    negocio, canal = await _negocio_con_canal("iv2-hoy3", "40100000083")
+    asesor = await _usuario(negocio, "asesor1", "asesor")
+    z = (await _inicio(asesor))["zona_accion"]
+    assert z["vacio"] is True and z["totales"]["citas_hoy"] == 0
+
+
+# ---------------------------------------------------------------------------
+# «Mi día» retirado, citas = llamada programada (2026-10-13): `asesor`/`producto` en la cita, citas de hoy sin tope,
+# `totales.llamadas_activo`
+# ---------------------------------------------------------------------------
+
+async def _poner_producto(telefono: str, tipo, marca):
+    async with mem.async_session() as session:
+        lead = await session.get(mem.Lead, telefono)
+        lead.producto_tipo = tipo
+        lead.producto_marca = marca
+        await session.commit()
+
+
+def test_producto_legible_une_tipo_y_marca_e_ignora_los_nulos_del_modelo():
+    f = dashboard._producto_legible
+    assert f({"producto_tipo": "terma", "producto_marca": "Rheem"}) == "Terma Rheem"
+    assert f({"producto_tipo": "cocina", "producto_marca": None}) == "Cocina"
+    assert f({"producto_tipo": None, "producto_marca": "Indurama"}) == "Indurama"
+    assert f({"producto_tipo": "null", "producto_marca": "desconocido"}) is None
+    assert f({}) is None
+
+
+def test_item_cita_trae_producto_y_solo_la_vista_admin_trae_el_asesor():
+    lead = {"telefono": "51910000601", "conversation_id": None, "nombre": "Marcos", "asesor_asignado": "lelespuru",
+            "producto_tipo": "terma", "producto_marca": "Rheem", "fecha_agendada": datetime(2026, 10, 13, 16, 30)}
+    asesor = dashboard._item_cita(lead, "Cita agendada — 13/10 16:30", "cita")
+    admin = dashboard._item_cita(lead, "Cita agendada — 13/10 16:30", "cita", vista_admin=True)
+    assert asesor["producto"] == "Terma Rheem" and "asesor" not in asesor
+    assert admin["producto"] == "Terma Rheem" and admin["asesor"] == "lelespuru"
+    assert admin["cita_en"] == "2026-10-13T21:30:00Z"
+    # Una cita no es una visita: ningún dato de dirección, zona ni tipo.
+    assert not {"direccion", "zona", "tipo"} & set(admin)
+
+
+async def test_inicio_manda_asesor_y_producto_en_las_citas_al_supervisor_y_producto_al_asesor():
+    negocio, canal = await _negocio_con_canal("iv2-prod", "40100000084")
+    admin = await _usuario(negocio, "admin1", "admin")
+    asesor = await _usuario(negocio, "asesor1", "asesor")
+    ahora_lima = datetime.utcnow() - timedelta(hours=5)
+    await _lead(negocio, canal, "51910000602", asesor="asesor1", resultado="agendado", fecha_agendada=ahora_lima + timedelta(days=2))
+    await _poner_producto("51910000602", "terma", "Rheem")
+    await _lead(negocio, canal, "51910000603", asesor="asesor1", resultado="agendado", fecha_agendada=ahora_lima - timedelta(days=1))
+    de_admin = {i["telefono"]: i for i in (await _inicio(admin))["zona_accion"]["items"]}
+    assert de_admin["51910000602"]["asesor"] == "asesor1" and de_admin["51910000602"]["producto"] == "Terma Rheem"
+    assert de_admin["51910000603"]["asesor"] == "asesor1" and de_admin["51910000603"]["producto"] is None
+    de_asesor = {i["telefono"]: i for i in (await _inicio(asesor))["zona_accion"]["items"]}
+    assert de_asesor["51910000602"]["producto"] == "Terma Rheem"
+    assert "asesor" not in de_asesor["51910000602"]
+
+
+async def test_las_citas_de_hoy_se_envian_todas_aunque_pasen_del_tope_de_3():
+    negocio, canal = await _negocio_con_canal("iv2-hoy5", "40100000085")
+    admin = await _usuario(negocio, "admin1", "admin")
+    hoy = (datetime.utcnow() - timedelta(hours=5)).replace(hour=0, minute=0, second=0, microsecond=0)
+    for n in range(6):   # 6 citas hoy (a medianoche + n h; algunas ya pasadas según la hora): ninguna se pierde
+        await _lead(negocio, canal, f"519100007{n:02d}", asesor="a1", resultado="agendado", fecha_agendada=hoy + timedelta(hours=n * 4, minutes=5))
+    for n in range(4):   # 4 en días siguientes: siguen topadas a 3 en total de «próximas» no-hoy
+        await _lead(negocio, canal, f"519100008{n:02d}", asesor="a1", resultado="agendado", fecha_agendada=hoy + timedelta(days=2 + n))
+    z = (await _inicio(admin))["zona_accion"]
+    de_hoy = [i for i in z["items"] if i["categoria"] in ("cita", "cita_vencida") and i["telefono"].startswith("519100007")]
+    assert len(de_hoy) == 6
+    otros = [i for i in z["items"] if i["categoria"] == "cita" and i["telefono"].startswith("519100008")]
+    assert len(otros) <= 3
+    assert z["totales"]["citas_hoy"] == 6
+
+
+def test_con_citas_de_hoy_respeta_el_orden_y_el_tope_extra():
+    from datetime import date
+    hoy = date(2026, 10, 13)
+
+    def c(dia, hora):
+        return {"fecha_agendada": datetime(2026, 10, dia, hora, 0)}
+
+    lista = [c(13, 8), c(13, 9), c(13, 10), c(13, 11), c(14, 9), c(13, 12)]
+    r = dashboard._con_citas_de_hoy(lista, 3, hoy)
+    assert [x["fecha_agendada"].hour for x in r] == [8, 9, 10, 11, 12]        # el tope de 3 + las demás de hoy
+    muchas = [c(13, 8)] * 3 + [c(13, 9)] * 30
+    assert len(dashboard._con_citas_de_hoy(muchas, 3, hoy)) == 3 + dashboard.TOPE_CITAS_HOY_EXTRA
+
+
+async def test_llamadas_activo_solo_con_el_modulo_encendido_y_en_modo_activo():
+    from agent import llamadas as ll
+    negocio, canal = await _negocio_con_canal("iv2-lla", "40100000086")
+    asesor = await _usuario(negocio, "asesor1", "asesor")
+    # Ausente (módulo apagado): False, y el campo existe.
+    assert (await _inicio(asesor))["zona_accion"]["totales"]["llamadas_activo"] is False
+    # En sombra: sigue sin mostrarse.
+    await mem.guardar_configuracion(ll.CLAVE_GABI_ACTIVO, "1", negocio_id=negocio["id"])
+    await mem.guardar_configuracion(ll.CLAVE_MODO, "sombra", negocio_id=negocio["id"])
+    assert (await _inicio(asesor))["zona_accion"]["totales"]["llamadas_activo"] is False
+    # Activo pero sin aceptar la responsabilidad: el modo EFECTIVO se degrada a sombra.
+    await mem.guardar_configuracion(ll.CLAVE_MODO, "activo", negocio_id=negocio["id"])
+    assert (await _inicio(asesor))["zona_accion"]["totales"]["llamadas_activo"] is False
+    # Activo y aceptado: True, aunque no haya ninguna tarea pendiente.
+    await ll.aceptar_responsabilidad(negocio["id"], "admin1", ll.VERSION_TEXTO_RESPONSABILIDAD)
+    z = (await _inicio(asesor))["zona_accion"]
+    assert z["totales"]["llamadas_activo"] is True and z["totales"]["llamadas_pendientes"] == 0

@@ -2748,13 +2748,15 @@ async def bandeja_conversaciones(
         vision_total = usuario["rol"] in ROLES_CON_VISION_TOTAL
         negocio_id = usuario["negocio_id"]
         ahora = datetime.utcnow()
-        es_vista_de_citas = vista in ("citas", "citas_vencidas")
+        es_vista_de_citas = vista in ("citas", "citas_vencidas", "citas_vencidas_antiguas")
         esperando = [] if es_vista_de_citas else await listar_clientes_esperando(
             negocio_id, asesor=asesor_filtro, ahora=ahora, con_desde=False,
         )
         proximas, vencidas = [], []
         if es_vista_de_citas:
             proximas, vencidas, _ = await _citas_inicio(negocio_id, asesor_filtro, ahora)
+            if vista == "citas_vencidas_antiguas":
+                vencidas = await _citas_vencidas_antiguas(negocio_id, asesor_filtro, ahora)
         # Escalados / sin asesor: solo visión total y sin acotar a un asesor
         # (un lead sin asesor no pertenece a la cartera de nadie).
         incluir_supervision = vision_total and not asesor_filtro
@@ -3492,12 +3494,32 @@ def _item_zona(lead: dict, motivo: str, categoria: str) -> dict:
     }
 
 
-def _item_cita(lead: dict, motivo: str, categoria: str) -> dict:
+def _producto_legible(lead: dict) -> str | None:
+    """«Terma Rheem», «Cocina»… a partir de `producto_tipo` / `producto_marca` (los datos que ya extrae Gabi). None si
+    ninguno es un dato real (se ignoran los «null» / «desconocido» que a veces devuelve el modelo)."""
+    tipo = lead.get("producto_tipo")
+    marca = lead.get("producto_marca")
+    partes = []
+    if llamadas.dato_conocido(tipo):
+        partes.append(tipo.strip().capitalize())
+    if llamadas.dato_conocido(marca):
+        partes.append(marca.strip())
+    return " ".join(partes) or None
+
+
+def _item_cita(lead: dict, motivo: str, categoria: str, vista_admin: bool = False) -> dict:
     """Ítem de cita. Aditivo (Inicio nuevo, 2026-10-12): `cita_en`, el instante de la cita en UTC con `Z`
-    (`fecha_agendada` es hora de Lima sin zona: se lleva a UTC sumando el offset). None si la cita no tiene hora."""
+    (`fecha_agendada` es hora de Lima sin zona: se lleva a UTC sumando el offset). None si la cita no tiene hora.
+
+    Aditivos (2026-10-13, «Mi día»): `producto` legible (tipo + marca; None si no se sabe) y, solo en la vista
+    admin/supervisor, `asesor` (a quién le toca la llamada; igual que `_item_cliente_esperando`). Una cita es una LLAMADA
+    PROGRAMADA con el cliente: no lleva dirección, zona ni tipo de visita."""
     item = _item_zona(lead, motivo, categoria)
     fecha = lead.get("fecha_agendada")
     item["cita_en"] = iso_utc(fecha + _OFFSET_LIMA) if fecha else None
+    item["producto"] = _producto_legible(lead)
+    if vista_admin:
+        item["asesor"] = lead.get("asesor_asignado")
     return item
 
 
@@ -3532,11 +3554,35 @@ def _item_cliente_esperando(cliente: dict, vista_admin: bool) -> dict:
 DIAS_CITA_VENCIDA_VIGENTE = 7
 
 
+# Tope de citas de HOY que se envían además de las 3 de siempre (no se pierden filas del día, pero tampoco se manda
+# una lista sin fin si alguien agenda decenas en un día).
+TOPE_CITAS_HOY_EXTRA = 12
+
+
+def _con_citas_de_hoy(citas: list[dict], tope: int, hoy_lima) -> list[dict]:
+    """Las primeras `tope` citas (el orden ya viene dado) más las demás cuyo DÍA en Lima es hoy, hasta
+    `TOPE_CITAS_HOY_EXTRA` extra. Conserva el orden de `citas`."""
+    resto_de_hoy = [l for l in citas[tope:] if l["fecha_agendada"].date() == hoy_lima][:TOPE_CITAS_HOY_EXTRA]
+    return citas[:tope] + resto_de_hoy
+
+
+def _contar_citas_hoy(con_fecha: list[dict], ahora_lima: datetime) -> int:
+    """Citas cuyo DÍA en Lima es hoy (Tira de acción de Inicio, 2026-10-13, `totales.citas_hoy`).
+
+    Definición: leads con cita viva (`listar_leads_agendados` ya descarta los cerrados definitivamente y los que dejaron
+    de estar 'agendado') cuya `fecha_agendada` (hora local de Lima, sin zona) cae en el mismo día calendario que
+    `ahora_lima`. Cuenta las de hoy que todavía no empiezan Y las de hoy que ya pasaron y siguen sin cerrar (siguen
+    siendo trabajo del día: hay que cerrarlas o reprogramarlas). NO cuenta las vencidas de días anteriores (esas siguen
+    en `citas_vencidas`) ni las de mañana en adelante. El día se corta a medianoche de Lima (UTC-5), no de UTC."""
+    hoy = ahora_lima.date()
+    return sum(1 for l in con_fecha if l["fecha_agendada"].date() == hoy)
+
+
 async def _citas_inicio_detalle(
     negocio_id: str, asesor: str | None, ahora_utc: datetime,
-) -> tuple[list, list, int, int]:
+) -> tuple[list, list, int, int, int]:
     """(próximas, vencidas de los últimos 7 días, cuántas próximas en 7 días,
-    cuántas vencidas MÁS antiguas). Próximas: la más cercana primero (antes
+    cuántas vencidas MÁS antiguas, cuántas citas son de HOY en Lima). Próximas: la más cercana primero (antes
     mostraba las 3 más VIEJAS). Vencidas: la fecha ya pasó y el lead sigue
     'agendado' (nadie la cerró) — la más reciente primero. Un lead cerrado
     definitivamente ya no entra (lo filtra `listar_leads_agendados`)."""
@@ -3551,15 +3597,35 @@ async def _citas_inicio_detalle(
         key=lambda l: l["fecha_agendada"], reverse=True,
     )
     en_7_dias = sum(1 for l in proximas if l["fecha_agendada"] <= ahora_lima + timedelta(days=7))
-    return proximas, vencidas, en_7_dias, len(vencidas_todas) - len(vencidas)
+    return proximas, vencidas, en_7_dias, len(vencidas_todas) - len(vencidas), _contar_citas_hoy(con_fecha, ahora_lima)
+
+
+async def _citas_vencidas_antiguas(negocio_id: str, asesor: str | None, ahora_utc: datetime) -> list[dict]:
+    """Citas vencidas sin cerrar de hace MÁS de `DIAS_CITA_VENCIDA_VIGENTE` días (las que Inicio solo cuenta en
+    `totales.citas_vencidas_antiguas`), la más reciente primero. Es la lista de la vista `citas_vencidas_antiguas`."""
+    limite = ahora_utc - _OFFSET_LIMA - timedelta(days=DIAS_CITA_VENCIDA_VIGENTE)
+    agendados = await listar_leads_agendados(negocio_id, asesor_asignado=asesor)
+    return sorted(
+        (l for l in agendados if l.get("fecha_agendada") and l["fecha_agendada"] < limite),
+        key=lambda l: l["fecha_agendada"], reverse=True,
+    )
 
 
 async def _citas_inicio(negocio_id: str, asesor: str | None, ahora_utc: datetime) -> tuple[list, list, int]:
     """(próximas, vencidas de los últimos 7 días, cuántas en los próximos 7
     días). Misma firma de siempre; ver `_citas_inicio_detalle` para el conteo
     de las vencidas más antiguas."""
-    proximas, vencidas, en_7_dias, _antiguas = await _citas_inicio_detalle(negocio_id, asesor, ahora_utc)
+    proximas, vencidas, en_7_dias, _antiguas, _hoy = await _citas_inicio_detalle(negocio_id, asesor, ahora_utc)
     return proximas, vencidas, en_7_dias
+
+
+async def _llamadas_activo(negocio_id: str) -> bool:
+    """¿«Para llamar» está encendido y en modo efectivo `activo`? Nunca lanza: Inicio no puede romperse por esto."""
+    try:
+        return (await llamadas.modo_efectivo(negocio_id)) == llamadas.MODO_ACTIVO
+    except Exception:  # noqa: BLE001
+        logger.exception("Para llamar: no se pudo leer el modo efectivo para Inicio")
+        return False
 
 
 async def _zona_accion_datos(negocio_id: str, asesor: str | None, vista_admin: bool) -> dict:
@@ -3579,7 +3645,7 @@ async def _zona_accion_datos(negocio_id: str, asesor: str | None, vista_admin: b
     umbral_ventana = timedelta(hours=umbral_ventana_horas)
     esperando.sort(key=lambda c: -atencion_atrasada.gravedad(c))
     atencion_por_telefono = {c["telefono"]: c["atencion"] for c in esperando}
-    proximas, vencidas, citas_7_dias, vencidas_antiguas = await _citas_inicio_detalle(negocio_id, asesor, ahora)
+    proximas, vencidas, citas_7_dias, vencidas_antiguas, citas_hoy = await _citas_inicio_detalle(negocio_id, asesor, ahora)
 
     escalados: list[dict] = []
     sin_asesor: list[dict] = []
@@ -3611,10 +3677,13 @@ async def _zona_accion_datos(negocio_id: str, asesor: str | None, vista_admin: b
         pares.append((c, _item_cliente_esperando(c, vista_admin)))
     for c in [c for c in por_mostrar if not c["ventana_abierta"]][:TOPES_ZONA_ACCION["cliente_esperando_ventana_cerrada"]]:
         pares.append((c, _item_cliente_esperando(c, vista_admin)))
-    for l in proximas[:TOPES_ZONA_ACCION["citas_proximas"]]:
-        pares.append((l, _item_cita(l, _texto_cita(l, "Cita agendada"), "cita")))
-    for l in vencidas[:TOPES_ZONA_ACCION["citas_vencidas"]]:
-        pares.append((l, _item_cita(l, _texto_cita(l, "Cita vencida sin cerrar"), "cita_vencida")))
+    # Las citas de HOY no se topan (se «pinean» en Inicio, 2026-10-13): además de las 3 de siempre se envían las demás de hoy
+    # (hasta `TOPE_CITAS_HOY_EXTRA`). Las de otros días conservan el tope.
+    hoy_lima = (ahora - _OFFSET_LIMA).date()
+    for l in _con_citas_de_hoy(proximas, TOPES_ZONA_ACCION["citas_proximas"], hoy_lima):
+        pares.append((l, _item_cita(l, _texto_cita(l, "Cita agendada"), "cita", vista_admin)))
+    for l in _con_citas_de_hoy(vencidas, TOPES_ZONA_ACCION["citas_vencidas"], hoy_lima):
+        pares.append((l, _item_cita(l, _texto_cita(l, "Cita vencida sin cerrar"), "cita_vencida", vista_admin)))
     # Aditivo (2026-10-09, "Para llamar"): las tareas de llamada accionables de este usuario (o de todo el negocio en la
     # vista admin/supervisor), las vencidas primero. Con el módulo apagado, en sombra o sin aceptación vigente no hay
     # ningún ítem y los dos totales valen 0: el contrato de siempre no cambia.
@@ -3663,9 +3732,14 @@ async def _zona_accion_datos(negocio_id: str, asesor: str | None, vista_admin: b
         "citas_vencidas_antiguas": vencidas_antiguas,
         # Aditivos (2026-10-09, "Para llamar"): tareas de llamada pendientes y cuántas están vencidas por SLA.
         "llamadas_pendientes": llamar["pendientes"], "llamadas_vencidas": llamar["vencidas"],
+        # Aditivo (2026-10-13): el módulo está encendido Y en modo efectivo `activo`. Con 0 pendientes la celda «Llamar» de
+        # Inicio se muestra igual («Nada pendiente») solo si esto es True; en sombra o apagado se oculta.
+        "llamadas_activo": await _llamadas_activo(negocio_id),
         # Extra (no estaba en el contrato original): alimenta el indicador
         # "Citas próximas (7 días)" de la vista Asesor.
         "citas_7_dias": citas_7_dias,
+        # Aditivo (2026-10-13, Tira de acción): citas cuyo día en Lima es hoy (futuras y ya pasadas sin cerrar).
+        "citas_hoy": citas_hoy,
         # Aditivo (2026-10-07): atencion_atrasada | atencion_urgente | atencion_ultima_llamada (excluyentes),
         # atencion_total y los dos de la campana (ver `atencion_atrasada.totales_de_atencion`).
         **atencion_atrasada.totales_de_atencion(esperando, para_campana, pausa),
