@@ -33,7 +33,7 @@ import subprocess
 import tempfile
 import uuid
 import bcrypt
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date as _date
 from urllib.parse import urlencode
 from fastapi import APIRouter, Depends, HTTPException, Form, Request, UploadFile, File, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse, Response, FileResponse
@@ -89,6 +89,7 @@ from agent import envios
 from agent import circuito_ia
 from agent import plantilla_retomar
 from agent import atencion_atrasada
+from agent import calendario_negocio as cal_negocio
 from agent import llamadas
 from agent import derivacion_automatica
 from agent import memory as mem
@@ -3324,12 +3325,26 @@ def _filas_exportacion(leads: list[dict]) -> list[list[str]]:
     ]
 
 
+async def _auditar_exportacion_leads(usuario: dict, formato: str, filas: int) -> None:
+    """Deja constancia en `RegistroAuditoria` de cada exportación de leads (CSV o Excel): quién (`actor`), con qué rol,
+    en qué formato, cuántas filas y con qué filtros. Sin PII en el payload (ni teléfonos ni nombres). Si no se puede
+    dejar constancia, la exportación NO se entrega (misma regla que los cambios de configuración)."""
+    await mem.registrar_auditoria(
+        "leads_exportados", actor=usuario.get("username"), negocio_id=usuario["negocio_id"], entidad_tipo="exportacion",
+        payload={
+            "actor_rol": usuario.get("rol"), "formato": formato, "filas": filas,
+            "filtros": {"alcance": "todos_los_leads_del_negocio"},   # la exportación no admite filtros: siempre son todos
+        },
+    )
+
+
 @router.get("/metricas/exportar.csv")
 async def exportar_metricas_csv(usuario: dict = Depends(servicio_identidad.requiere_rol(*ROLES_CON_VISION_TOTAL))):
     import csv
     import io
 
     leads = await _adjuntar_resumen_ventas(await listar_leads(usuario["negocio_id"]), usuario["negocio_id"])
+    await _auditar_exportacion_leads(usuario, "csv", len(leads))
     buffer = io.StringIO()
     escritor = csv.writer(buffer)
     escritor.writerow(COLUMNAS_EXPORTACION)
@@ -3351,6 +3366,7 @@ async def exportar_metricas_xlsx(usuario: dict = Depends(servicio_identidad.requ
 
     leads = await _adjuntar_resumen_ventas(await listar_leads(usuario["negocio_id"]), usuario["negocio_id"])
     filas = _filas_exportacion(leads)
+    await _auditar_exportacion_leads(usuario, "xlsx", len(filas))
     libro = Workbook()
     hoja = libro.active
     hoja.title = "Leads"
@@ -3452,7 +3468,9 @@ TOPES_ZONA_ACCION = {
 # "ahora" a Lima (UTC-5, sin horario de verano). Un instante UTC (Mensaje.
 # timestamp) NO se mueve: va con iso_utc.
 _OFFSET_LIMA = timedelta(hours=5)
-_VENTANA_POR_VENCER = timedelta(hours=4)
+# Un solo umbral para «ventana por vencer» y «Última llamada» (decisión del dueño, 2026-10-12): la clave configurable
+# `atencion_ultima_llamada_horas` (ver `atencion_atrasada.obtener_umbrales`). Esta constante es solo el valor por defecto (6 h).
+_VENTANA_POR_VENCER = timedelta(hours=atencion_atrasada.UMBRALES_POR_DEFECTO["ultima_llamada"])
 # La campana avisa de clientes con la ventana de WhatsApp abierta o cerrada hace
 # menos de estas horas; un cliente que dejó de escribir hace días sigue en
 # Inicio pero ya no suma al badge.
@@ -3472,6 +3490,15 @@ def _item_zona(lead: dict, motivo: str, categoria: str) -> dict:
         "telefono": lead["telefono"], "conversation_id": lead.get("conversation_id"),
         "nombre": lead.get("nombre"), "motivo": motivo, "categoria": categoria,
     }
+
+
+def _item_cita(lead: dict, motivo: str, categoria: str) -> dict:
+    """Ítem de cita. Aditivo (Inicio nuevo, 2026-10-12): `cita_en`, el instante de la cita en UTC con `Z`
+    (`fecha_agendada` es hora de Lima sin zona: se lleva a UTC sumando el offset). None si la cita no tiene hora."""
+    item = _item_zona(lead, motivo, categoria)
+    fecha = lead.get("fecha_agendada")
+    item["cita_en"] = iso_utc(fecha + _OFFSET_LIMA) if fecha else None
+    return item
 
 
 def _item_cliente_esperando(cliente: dict, vista_admin: bool) -> dict:
@@ -3545,6 +3572,11 @@ async def _zona_accion_datos(negocio_id: str, asesor: str | None, vista_admin: b
     # ventana_restante_horas}. Los más graves van primero (orden estable: dentro de un mismo nivel se
     # conserva el de siempre) para que entren en el tope de ítems de Inicio.
     await atencion_atrasada.anotar_atencion(negocio_id, esperando, ahora)
+    # Calendario de negocio (2026-10-12): hoy cerrado por feriado/día especial = pausa de los relojes de atención.
+    pausa = await atencion_atrasada.pausa_de_atencion(negocio_id, ahora)
+    # Umbral único de «ventana por vencer» = «Última llamada» (configurable, 6 h por defecto).
+    umbral_ventana_horas = (await atencion_atrasada.obtener_umbrales(negocio_id))["ultima_llamada"]
+    umbral_ventana = timedelta(hours=umbral_ventana_horas)
     esperando.sort(key=lambda c: -atencion_atrasada.gravedad(c))
     atencion_por_telefono = {c["telefono"]: c["atencion"] for c in esperando}
     proximas, vencidas, citas_7_dias, vencidas_antiguas = await _citas_inicio_detalle(negocio_id, asesor, ahora)
@@ -3562,7 +3594,10 @@ async def _zona_accion_datos(negocio_id: str, asesor: str | None, vista_admin: b
     pares: list[tuple[dict, dict]] = []   # (lead_o_cliente, item sin conversation_id resuelto)
     mostrados: set[str] = set()
     for l in escalados[:TOPES_ZONA_ACCION["escalados"]]:
-        pares.append((l, _item_zona(l, "Escalado a supervisión — ningún asesor respondió", "escalado")))
+        item_escalado = _item_zona(l, "Escalado a supervisión — ningún asesor respondió", "escalado")
+        # Aditivo (Inicio nuevo, 2026-10-12): desde cuándo está en la cola de supervisión (ordena los escalados).
+        item_escalado["escalado_en"] = iso_utc(l["escalado_supervision_en"])
+        pares.append((l, item_escalado))
         mostrados.add(l["telefono"])
     for l in sin_asesor[:TOPES_ZONA_ACCION["sin_asesor"]]:
         pares.append((l, _item_zona(l, "Sin asesor asignado", "sin_asesor")))
@@ -3577,9 +3612,9 @@ async def _zona_accion_datos(negocio_id: str, asesor: str | None, vista_admin: b
     for c in [c for c in por_mostrar if not c["ventana_abierta"]][:TOPES_ZONA_ACCION["cliente_esperando_ventana_cerrada"]]:
         pares.append((c, _item_cliente_esperando(c, vista_admin)))
     for l in proximas[:TOPES_ZONA_ACCION["citas_proximas"]]:
-        pares.append((l, _item_zona(l, _texto_cita(l, "Cita agendada"), "cita")))
+        pares.append((l, _item_cita(l, _texto_cita(l, "Cita agendada"), "cita")))
     for l in vencidas[:TOPES_ZONA_ACCION["citas_vencidas"]]:
-        pares.append((l, _item_zona(l, _texto_cita(l, "Cita vencida sin cerrar"), "cita_vencida")))
+        pares.append((l, _item_cita(l, _texto_cita(l, "Cita vencida sin cerrar"), "cita_vencida")))
     # Aditivo (2026-10-09, "Para llamar"): las tareas de llamada accionables de este usuario (o de todo el negocio en la
     # vista admin/supervisor), las vencidas primero. Con el módulo apagado, en sombra o sin aceptación vigente no hay
     # ningún ítem y los dos totales valen 0: el contrato de siempre no cambia.
@@ -3611,8 +3646,11 @@ async def _zona_accion_datos(negocio_id: str, asesor: str | None, vista_admin: b
         "responde_ahora_total": len(
             {l["telefono"] for l in escalados} | {l["telefono"] for l in sin_asesor} | {c["telefono"] for c in abiertas}
         ),
-        "esperando_campana": len(para_campana),
-        "ventana_por_vencer": sum(1 for c in abiertas if c["ventana_vence_en"] - ahora < _VENTANA_POR_VENCER),
+        # Con la pausa vigente la campana no suma «clientes esperando»: la entrada informativa de `avisos` lo explica.
+        "esperando_campana": 0 if pausa is not None else len(para_campana),
+        "ventana_por_vencer": sum(1 for c in abiertas if c["ventana_vence_en"] - ahora < umbral_ventana),
+        # Aditivo: el umbral (en horas) con el que se cuenta lo anterior; el mismo de la insignia «Última llamada».
+        "ventana_umbral_horas": umbral_ventana_horas,
         "escalados": len(escalados), "sin_asesor": len(sin_asesor),
         # Casos DISTINTOS de la sección "Responde ahora" (escalados + sin asesor +
         # clientes esperando): un escalado suele ser también cliente esperando,
@@ -3630,12 +3668,12 @@ async def _zona_accion_datos(negocio_id: str, asesor: str | None, vista_admin: b
         "citas_7_dias": citas_7_dias,
         # Aditivo (2026-10-07): atencion_atrasada | atencion_urgente | atencion_ultima_llamada (excluyentes),
         # atencion_total y los dos de la campana (ver `atencion_atrasada.totales_de_atencion`).
-        **atencion_atrasada.totales_de_atencion(esperando, para_campana),
+        **atencion_atrasada.totales_de_atencion(esperando, para_campana, pausa),
     }
 
     if not pares:
         mensaje = _MENSAJE_VACIO_ADMIN if vista_admin else _MENSAJE_VACIO_ASESOR
-        return {"vacio": True, "mensaje_vacio": mensaje, "items": [], "totales": totales}
+        return {"vacio": True, "mensaje_vacio": mensaje, "items": [], "totales": totales, "pausa": pausa}
 
     # Los clientes esperando ya traen su conversation_id; el resto (leads sin
     # asignar, citas) se resuelve en bloque, no uno por uno.
@@ -3649,7 +3687,7 @@ async def _zona_accion_datos(negocio_id: str, asesor: str | None, vista_admin: b
         if "atencion" not in item and item["categoria"] in ("escalado", "sin_asesor") and fuente["telefono"] in atencion_por_telefono:
             item["atencion"] = atencion_por_telefono[fuente["telefono"]]
         items.append(item)
-    return {"vacio": False, "mensaje_vacio": None, "items": items, "totales": totales}
+    return {"vacio": False, "mensaje_vacio": None, "items": items, "totales": totales, "pausa": pausa}
 
 
 async def _zona_accion_asesor_datos(usuario: dict, datos: dict) -> dict:
@@ -3665,12 +3703,24 @@ async def _zona_accion_admin_datos(datos: dict, negocio_id: str) -> dict:
     return await _zona_accion_datos(negocio_id, None, vista_admin=True)
 
 
+def _indicador_esperando(totales: dict) -> dict:
+    """«Esperando respuesta» = los que se pueden responder AHORA (ventana abierta): el mismo número que el
+    badge de «Responde ahora». Si hay clientes con la ventana cerrada, se suman como nota secundaria (`nota`, aditivo);
+    el valor total (`cliente_esperando`) sigue en `totales`. Sin `esperando_ventana_abierta` (totales viejos) cae al total."""
+    abiertos = totales.get("esperando_ventana_abierta", totales["cliente_esperando"])
+    indicador = {"valor": abiertos, "etiqueta": "Esperando respuesta"}
+    cerrados = totales.get("esperando_ventana_cerrada", 0) or 0
+    if cerrados > 0:
+        indicador["nota"] = f"+{cerrados} con ventana cerrada"
+    return indicador
+
+
 def _zona_indicadores_asesor_datos(casos_activos: int, totales: dict) -> list[dict]:
     # Antes "Conversaciones activas" y "Leads asignados" eran el MISMO número
     # (y contaban cerrados). Ahora: casos vivos, los que esperan, y agenda.
     return [
         {"valor": casos_activos, "etiqueta": "Mis casos activos"},
-        {"valor": totales["cliente_esperando"], "etiqueta": "Esperando respuesta"},
+        _indicador_esperando(totales),
         {"valor": totales["citas_7_dias"], "etiqueta": "Citas próximas (7 días)"},
     ]
 
@@ -3679,7 +3729,7 @@ def _zona_indicadores_admin_datos(casos_activos: int, totales: dict, asesores: l
     disponibles = sum(1 for a in asesores if a.get("disponible"))
     return [
         {"valor": casos_activos, "etiqueta": "Casos activos"},
-        {"valor": totales["cliente_esperando"], "etiqueta": "Esperando respuesta"},
+        _indicador_esperando(totales),
         {"valor": f"{disponibles}/{len(asesores)}", "etiqueta": "Asesores disponibles"},
     ]
 
@@ -3768,6 +3818,23 @@ async def _avisos_procesos_programados() -> list[dict]:
         return []
 
 
+def _aviso_pausa_calendario(pausa: dict | None, esperando: int) -> dict | None:
+    """Calendario de negocio (2026-10-12): la ÚNICA entrada de la campana mientras hoy es feriado o día especial
+    cerrado («Hoy es feriado: Combate de Angamos» / «3 clientes esperan; se atienden mañana a las 8:00 a. m.»).
+    Informativa (`nivel: "info"`), sin enlace. None si no hay pausa."""
+    if pausa is None:
+        return None
+    titulo = cal_negocio.describir_motivo(pausa.get("motivo"), pausa.get("nombre")) or "Hoy no hay atención"
+    titulo = f"{titulo[0].upper()}{titulo[1:]}"
+    cuando = f"se atienden {pausa['reanuda_texto']}" if pausa.get("reanuda_texto") else "se atienden cuando el equipo vuelva"
+    punto = "" if cuando.endswith(".") else "."     # «8:00 a. m.» ya termina en punto
+    if esperando > 0:
+        detalle = f"{esperando} cliente{'s' if esperando != 1 else ''} {'esperan' if esperando != 1 else 'espera'}; {cuando}{punto}"
+    else:
+        detalle = f"No hay clientes esperando; la atención se retoma así: {cuando}{punto}"
+    return {"id": "calendario_pausa", "nivel": "info", "titulo": titulo, "detalle": detalle, "enlace": None}
+
+
 async def _avisos_inicio(usuario: dict) -> list[dict]:
     """Avisos para Inicio — SOLO para el rol 'admin' (decisión del usuario: supervisor y
     asesor no los ven): el del modo sin IA (si está activo) y los de uso/costos de WhatsApp.
@@ -3776,7 +3843,39 @@ async def _avisos_inicio(usuario: dict) -> list[dict]:
     if usuario.get("rol") != "admin":
         return avisos_llamadas
     avisos = await _avisos_circuito_ia(usuario["negocio_id"])
-    return avisos + await _avisos_procesos_programados() + await _avisos_uso_inicio(usuario) + avisos_llamadas
+    return (
+        avisos + await _avisos_procesos_programados() + await _avisos_uso_inicio(usuario) + avisos_llamadas
+        + await _avisos_cambios_calendario_supervisor(usuario["negocio_id"])
+    )
+
+
+_ENLACE_HISTORIAL_CALENDARIO = "/calendario#historial"
+
+
+async def _avisos_cambios_calendario_supervisor(negocio_id: str) -> list[dict]:
+    """Aviso SOLO para el admin (lo llama `_avisos_inicio`): cuántos cambios al calendario hicieron usuarios con rol
+    supervisor en las últimas 24 h («El supervisor ana cambió el calendario: 3 cambios en 24 h»), con enlace al historial
+    del calendario. Informativo (`nivel: "info"`); sin cambios de supervisores no hay aviso. Nunca rompe Inicio."""
+    try:
+        r = await mem.resumen_cambios_calendario_de_supervisores(negocio_id, datetime.utcnow() - timedelta(hours=24))
+        if not r["total"]:
+            return []
+        nombres = r["supervisores"]
+        quien = (
+            f"El supervisor {nombres[0]}" if len(nombres) == 1
+            else f"Los supervisores {', '.join(nombres[:-1])} y {nombres[-1]}"
+        )
+        verbo = "cambió" if len(nombres) == 1 else "cambiaron"
+        cambios = f"{r['total']} cambio{'s' if r['total'] != 1 else ''}"
+        return [{
+            "id": "calendario_cambios_supervisor", "nivel": "info",
+            "titulo": f"{quien} {verbo} el calendario: {cambios} en 24 h",
+            "detalle": "Revisa en el historial del calendario qué días se agregaron, cambiaron o quitaron.",
+            "enlace": _ENLACE_HISTORIAL_CALENDARIO,
+        }]
+    except Exception:
+        logger.exception("Inicio: no se pudo calcular el aviso de cambios del calendario por supervisores")
+        return []
 
 
 async def _avisos_llamadas(usuario: dict) -> list[dict]:
@@ -3984,11 +4083,15 @@ async def inicio_json(usuario: dict = Depends(_usuario_actual)):
         casos_activos = await contar_casos_activos(usuario["negocio_id"], asesor=usuario["username"])
         zona_indicadores = _zona_indicadores_asesor_datos(casos_activos, zona_accion["totales"])
 
+    avisos = await _avisos_inicio(usuario)
+    aviso_calendario = _aviso_pausa_calendario(zona_accion.get("pausa"), zona_accion["totales"].get("atencion_en_pausa", 0))
+    if aviso_calendario is not None:
+        avisos = [aviso_calendario] + avisos   # para TODOS los roles: es la única entrada de la campana durante la pausa
     return JSONResponse({
         "vision_total": datos["vision_total"],
         "zona_accion": zona_accion,
         "zona_indicadores": zona_indicadores,
-        "avisos": await _avisos_inicio(usuario),
+        "avisos": avisos,
     })
 
 
@@ -4087,7 +4190,7 @@ async def actualizar_configuracion_llamadas_json(
     activo y cancela las tareas abiertas). Del negocio de la sesión, nunca del cuerpo. Solo Admin."""
     cuerpo = await _cuerpo_objeto_json(request)
     try:
-        estado = await llamadas.guardar_cambios(usuario["negocio_id"], usuario["username"], cuerpo)
+        estado = await llamadas.guardar_cambios(usuario["negocio_id"], usuario["username"], cuerpo, actor_rol=usuario.get("rol"))
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except llamadas.ErrorLlamada as e:
@@ -7553,13 +7656,14 @@ def _anuncio_a_json(a: dict) -> dict:
 
 @router.get("/uso-mensajes.json")
 async def uso_mensajes_json(
-    mes: str = "", usuario: dict = Depends(servicio_identidad.requiere_rol("admin", "supervisor")),
+    mes: str = "", usuario: dict = Depends(servicio_identidad.requiere_rol("admin")),
 ):
     """Uso y costo de mensajes de WhatsApp del mes, por número del negocio,
     según los estados que Meta informó (ver `resumen_uso_mensual`): gratis de
     la cuota usados/restantes, cobrables, ventana gratuita de anuncios y
     alertas 80/95/100 %. `mes` = YYYY-MM (por defecto, el mes en curso). Solo
-    lectura; Admin y Supervisor del propio negocio."""
+    lectura; SOLO Admin (2026-10-12: entrega costos de Meta; supervisor y
+    asesor reciben 403)."""
     if mes and not re.fullmatch(r"\d{4}-(0[1-9]|1[0-2])", mes):
         raise HTTPException(status_code=400, detail="El mes debe tener el formato AAAA-MM")
     return JSONResponse(await resumen_uso_mensual(usuario["negocio_id"], mes or None))
@@ -7567,11 +7671,12 @@ async def uso_mensajes_json(
 
 @router.get("/uso-mensajes/envios.json")
 async def uso_mensajes_envios_json(
-    mes: str = "", usuario: dict = Depends(servicio_identidad.requiere_rol("admin", "supervisor")),
+    mes: str = "", usuario: dict = Depends(servicio_identidad.requiere_rol("admin")),
 ):
     """Envíos del mes por origen (Gabi, reenganche, asesores, plantillas...):
     cuántos salieron, cuántos frenó la política de costo y por qué, y qué terminó
-    cobrando Meta por cada origen (ver `resumen_envios_por_origen`). Solo lectura."""
+    cobrando Meta por cada origen (ver `resumen_envios_por_origen`). Solo lectura;
+    SOLO Admin (2026-10-12: trae costos de Meta y `por_asesor`)."""
     if mes and not re.fullmatch(r"\d{4}-(0[1-9]|1[0-2])", mes):
         raise HTTPException(status_code=400, detail="El mes debe tener el formato AAAA-MM")
     return JSONResponse(await resumen_envios_por_origen(usuario["negocio_id"], mes or None))
@@ -8782,6 +8887,320 @@ async def guardar_horario_ruta(
     return JSONResponse({"ok": True, "horario": horario})
 
 
+# ── Calendario de negocio: días especiales (2026-10-12, Fase 1) ──────────────────────────────────────────
+#
+# Feriados, días no laborables, puentes, atención especial y cierres propios del negocio de la sesión. Contrato JSON
+# completo (request/response/errores/auditoría) en docs/contrato_calendario_negocio.md. Lectura y escritura: admin y
+# supervisor. Todo del negocio de la sesión, nunca del cuerpo. El GET de horario existente no cambia.
+
+_ETIQUETAS_TIPO_DIA_ESPECIAL = {
+    cal_negocio.TIPO_FERIADO: "Feriado",
+    cal_negocio.TIPO_NO_LABORABLE: "Día no laborable",
+    cal_negocio.TIPO_PUENTE: "Puente",
+    cal_negocio.TIPO_ATENCION_ESPECIAL: "Atención especial",
+    cal_negocio.TIPO_CIERRE_PROPIO: "Cierre propio",
+}
+_OPERACIONES_DIAS_ESPECIALES = ("guardar", "marcar_manana_no_laborable", "cargar_feriados_peru")
+_MAX_DIAS_CONSULTA_CALENDARIO = 800
+
+
+def _dia_especial_a_json(d: dict, hoy) -> dict:
+    from agent import calendario_peru
+    fecha = d["fecha"]
+    verificado = None
+    if d.get("origen") == mem.ORIGEN_DIA_PRECARGADO_PE:
+        precargado = calendario_peru.buscar_feriado(fecha)
+        verificado = precargado["verificado"] if precargado else None
+    dias_atras = (hoy - fecha).days
+    return {
+        "id": d["id"], "fecha": fecha.isoformat(), "dia_semana": cal_negocio.DIAS_ES[fecha.weekday()],
+        "tipo": d["tipo"], "nombre": d["nombre"], "atiende": d["atiende"],
+        "hora_apertura": d["hora_apertura"], "hora_cierre": d["hora_cierre"],
+        "origen": d["origen"], "fuente_url": d["fuente_url"], "verificado": verificado,
+        "pasado": dias_atras > 0,
+        "requiere_motivo": 0 < dias_atras <= mem.DIAS_EDICION_RETROACTIVA,
+        "editable": dias_atras <= mem.DIAS_EDICION_RETROACTIVA,
+        "creado": iso_utc(d["creado"]), "creado_por": d["creado_por"], "actualizado": iso_utc(d["actualizado"]),
+    }
+
+
+def _fecha_param_calendario(valor: str | None, nombre: str):
+    if not valor:
+        return None
+    try:
+        return _date.fromisoformat(valor.strip())
+    except ValueError:
+        raise HTTPException(status_code=400, detail=f"`{nombre}` debe tener el formato AAAA-MM-DD.")
+
+
+def _exigir_guardas_calendario(usuario: dict, operacion: str, cuerpo: dict, hoy) -> None:
+    """Guardas de negocio del calendario para quien NO es admin (hoy, el supervisor; decisiones D4 y D5 del dueño,
+    2026-10-12): 403 si intenta (1) cambiar o quitar un día PASADO (la regla de hasta 7 días con motivo queda solo para
+    el admin) o (2) cargar los feriados de un año con lista NO verificada (hoy 2027). El admin conserva todo. Un valor
+    mal escrito no se decide acá: sigue su camino y recibe el 400 de siempre."""
+    if usuario.get("rol") == "admin":
+        return
+    if operacion == "cargar_feriados_peru":
+        from agent import calendario_peru
+        anio = cuerpo.get("anio")
+        if (
+            isinstance(anio, int) and not isinstance(anio, bool) and anio in calendario_peru.ANIOS_DISPONIBLES
+            and not calendario_peru.VERIFICADO_POR_ANIO.get(anio, False)
+        ):
+            raise HTTPException(
+                status_code=403,
+                detail=f"Los feriados de {anio} todavía no están verificados con la fuente oficial. Solo un administrador puede cargarlos.",
+            )
+    elif operacion in ("guardar", "quitar"):
+        try:
+            fecha = mem._fecha_dia_especial(cuerpo.get("fecha"))
+        except ValueError:
+            return
+        if fecha < hoy:
+            raise HTTPException(status_code=403, detail="Solo un administrador puede cambiar o quitar un día que ya pasó.")
+
+
+def _entero_positivo_config(valor: str | None, por_defecto: int) -> int:
+    try:
+        n = int(str(valor).strip())
+    except (TypeError, ValueError):
+        return por_defecto
+    return n if n >= 1 else por_defecto
+
+
+async def _exigir_limite_escrituras_calendario(usuario: dict) -> None:
+    """Límite de frecuencia de las escrituras al calendario (decisión D7): máximo `calendario_max_escrituras_hora`
+    (por defecto 20) por usuario por hora, con ventana deslizante. Se cuenta contra la auditoría en la base (no en
+    memoria del proceso), así vale igual con varias réplicas. El admin también cuenta, con un tope propio más alto
+    (`calendario_max_escrituras_hora_admin`, por defecto 100: cargar un año de puentes y cierres a mano no debe
+    toparse). Excedido → 429 con `Retry-After`."""
+    negocio_id = usuario["negocio_id"]
+    if usuario.get("rol") == "admin":
+        clave, por_defecto = mem.CLAVE_CALENDARIO_MAX_ESCRITURAS_HORA_ADMIN, mem.CALENDARIO_MAX_ESCRITURAS_HORA_ADMIN_POR_DEFECTO
+    else:
+        clave, por_defecto = mem.CLAVE_CALENDARIO_MAX_ESCRITURAS_HORA, mem.CALENDARIO_MAX_ESCRITURAS_HORA_POR_DEFECTO
+    maximo = _entero_positivo_config(await obtener_configuracion(clave, str(por_defecto), negocio_id=negocio_id), por_defecto)
+    uso = await mem.contar_escrituras_calendario(negocio_id, usuario.get("username"))
+    if uso["cantidad"] < maximo:
+        return
+    segundos = max(1, int((uso["libera_en"] - datetime.utcnow()).total_seconds())) if uso["libera_en"] else 60
+    minutos = max(1, -(-segundos // 60))
+    raise HTTPException(
+        status_code=429,
+        detail=(
+            f"Hiciste {maximo} cambios al calendario en la última hora, que es el máximo permitido. "
+            f"Podrás hacer otro en {minutos} min."
+        ),
+        headers={"Retry-After": str(segundos)},
+    )
+
+
+async def _estado_calendario(usuario: dict, desde, hasta) -> dict:
+    from agent import calendario_peru
+    negocio_id = usuario["negocio_id"]
+    hoy = mem.hoy_en_lima()
+    ahora = datetime.utcnow()
+    dias = await mem.listar_dias_especiales(negocio_id, desde, hasta)
+    cal = await mem.obtener_calendario_negocio(negocio_id)
+    est = cal_negocio.estado(ahora, cal)
+    cobertura = await mem.resumen_cobertura_calendario(negocio_id, hoy)
+    todos_feriados = {
+        d["fecha"] for d in await mem.listar_dias_especiales(negocio_id, _date(hoy.year - 1, 1, 1), _date(hoy.year + 3, 12, 31))
+        if d["tipo"] == cal_negocio.TIPO_FERIADO
+    }
+    return {
+        "hoy": hoy.isoformat(), "desde": desde.isoformat(), "hasta": hasta.isoformat(),
+        "dias": [_dia_especial_a_json(d, hoy) for d in dias],
+        "estado_actual": {
+            "abierto": est["abierto"], "motivo": est["motivo"], "nombre": est["nombre"],
+            "proxima_apertura": iso_utc(est["proxima_apertura"]) if est["proxima_apertura"] else None,
+            "proxima_apertura_texto": cal_negocio.describir_proxima_apertura(est["proxima_apertura"], ahora),
+        },
+        "cobertura": {
+            "ultima_fecha_cargada": cobertura["ultima_fecha_cargada"].isoformat() if cobertura["ultima_fecha_cargada"] else None,
+            "dias_restantes": cobertura["dias_restantes"], "aviso": cobertura["aviso"], "mensaje": cobertura["mensaje"],
+        },
+        "anios_precargables": [
+            {
+                "anio": anio, "verificado": calendario_peru.VERIFICADO_POR_ANIO.get(anio, False),
+                "nota": calendario_peru.nota_del_anio(anio), "total": len(calendario_peru.feriados_de(anio)),
+                "cargados": sum(1 for f in calendario_peru.feriados_de(anio) if f["fecha"] in todos_feriados),
+            }
+            for anio in calendario_peru.ANIOS_DISPONIBLES
+        ],
+        "tipos": [
+            {"valor": t, "etiqueta": _ETIQUETAS_TIPO_DIA_ESPECIAL[t], "atiende_por_defecto": mem.ATIENDE_POR_DEFECTO[t]}
+            for t in cal_negocio.TIPOS_DIA_ESPECIAL
+        ],
+        "dias_edicion_retroactiva": mem.DIAS_EDICION_RETROACTIVA,
+    }
+
+
+@router.get("/configuracion/dias-especiales.json")
+async def dias_especiales_json(
+    desde: str | None = None, hasta: str | None = None,
+    usuario: dict = Depends(servicio_identidad.requiere_rol(*ROLES_CON_VISION_TOTAL)),
+):
+    """Días especiales del negocio de la sesión entre `desde` y `hasta` (AAAA-MM-DD; por defecto desde hace 7 días hasta
+    dentro de un año), más el estado actual del negocio (abierto/cerrado y por qué), la cobertura del calendario
+    (`aviso` si faltan menos de 60 días de feriados cargados) y los años que se pueden precargar. Admin y supervisor."""
+    hoy = mem.hoy_en_lima()
+    f_desde = _fecha_param_calendario(desde, "desde") or (hoy - timedelta(days=mem.DIAS_EDICION_RETROACTIVA))
+    f_hasta = _fecha_param_calendario(hasta, "hasta") or (hoy + timedelta(days=365))
+    if f_hasta < f_desde:
+        raise HTTPException(status_code=400, detail="`hasta` no puede ser anterior a `desde`.")
+    if (f_hasta - f_desde).days > _MAX_DIAS_CONSULTA_CALENDARIO:
+        raise HTTPException(status_code=400, detail=f"El rango no puede pasar de {_MAX_DIAS_CONSULTA_CALENDARIO} días.")
+    return JSONResponse(await _estado_calendario(usuario, f_desde, f_hasta))
+
+
+@router.post("/configuracion/dias-especiales.json")
+async def dias_especiales_guardar_json(
+    request: Request,
+    usuario: dict = Depends(servicio_identidad.requiere_rol(*ROLES_CON_VISION_TOTAL)),
+    _csrf: None = Depends(verificar_csrf),
+):
+    """Tres operaciones según `operacion` (por defecto `guardar`):
+      · `guardar`: `{fecha, tipo, nombre, atiende?, hora_apertura?, hora_cierre?, motivo?}` — crea el día especial de esa
+        fecha o cambia el que ya existe (una sola fila viva por fecha). Respuesta `resultado`: creado | modificado |
+        sin_cambios.
+      · `marcar_manana_no_laborable`: `{nombre?}` — mañana (día de Lima) queda cerrado; rige en ≤ 60 s.
+      · `cargar_feriados_peru`: `{anio}` — siembra los feriados nacionales (idempotente; restaura los que se quitaron).
+    Un día pasado solo se puede tocar hasta 7 días atrás y con `motivo`. Todo queda en el historial de cambios (quién,
+    cuándo, antes y después, motivo, rol del autor). Del negocio de la sesión, nunca del cuerpo. Admin y supervisor.
+    Solo el admin puede tocar un día pasado o cargar los feriados de un año no verificado (el supervisor recibe 403).
+    Máximo `calendario_max_escrituras_hora` escrituras por usuario por hora (429)."""
+    cuerpo = await _cuerpo_objeto_json(request)
+    operacion = cuerpo.get("operacion", "guardar")
+    if operacion not in _OPERACIONES_DIAS_ESPECIALES:
+        raise HTTPException(status_code=400, detail=f"`operacion` debe ser una de: {', '.join(_OPERACIONES_DIAS_ESPECIALES)}.")
+    negocio_id, autor, autor_rol = usuario["negocio_id"], usuario.get("username"), usuario.get("rol")
+    hoy = mem.hoy_en_lima()
+    _exigir_guardas_calendario(usuario, operacion, cuerpo, hoy)
+    await _exigir_limite_escrituras_calendario(usuario)
+    try:
+        if operacion == "cargar_feriados_peru":
+            anio = cuerpo.get("anio")
+            if not isinstance(anio, int) or isinstance(anio, bool):
+                raise ValueError("`anio` debe ser un número entero (por ejemplo 2026).")
+            r = await mem.sembrar_calendario(negocio_id, anio, autor=autor, restaurar_eliminados=True, autor_rol=autor_rol)
+            logger.info("Calendario: %s cargó los feriados de Perú %s (%d nuevos)", autor, anio, len(r["insertados"]))
+            return JSONResponse({
+                "ok": True, "operacion": operacion, "anio": anio, "verificado": r["verificado"], "nota": r["nota"],
+                "insertados": [d.isoformat() for d in r["insertados"]],
+                "ya_existian": [d.isoformat() for d in r["ya_existian"]],
+            })
+        if operacion == "marcar_manana_no_laborable":
+            nombre = cuerpo.get("nombre")
+            if nombre is not None and not isinstance(nombre, str):
+                raise ValueError("`nombre` debe ser texto.")
+            r = await mem.marcar_manana_no_laborable(negocio_id, autor=autor, nombre=nombre, hoy=hoy, autor_rol=autor_rol)
+        else:
+            r = await mem.guardar_dia_especial(
+                negocio_id, cuerpo.get("fecha"), cuerpo.get("tipo"), cuerpo.get("nombre"), cuerpo.get("atiende"),
+                cuerpo.get("hora_apertura"), cuerpo.get("hora_cierre"), autor=autor, motivo=cuerpo.get("motivo"), hoy=hoy,
+                autor_rol=autor_rol,
+            )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    logger.info("Calendario: %s %s el día especial %s", autor, r["resultado"] if "resultado" in r else r["accion"], r["dia"]["fecha"])
+    return JSONResponse({
+        "ok": True, "operacion": operacion, "resultado": r["accion"], "dia": _dia_especial_a_json(r["dia"], hoy),
+    })
+
+
+@router.delete("/configuracion/dias-especiales.json")
+async def dias_especiales_quitar_json(
+    fecha: str | None = None, motivo: str | None = None,
+    usuario: dict = Depends(servicio_identidad.requiere_rol(*ROLES_CON_VISION_TOTAL)),
+    _csrf: None = Depends(verificar_csrf),
+):
+    """Quita (borrado lógico) el día especial de `fecha` (query, AAAA-MM-DD). Un día pasado solo hasta 7 días atrás y
+    con `motivo` (query). 404 si esa fecha no tiene día especial. Queda en el historial de cambios. Admin y supervisor;
+    el supervisor no puede quitar un día pasado (403) y comparte el límite de escrituras por hora (429)."""
+    f = _fecha_param_calendario(fecha, "fecha")
+    if f is None:
+        raise HTTPException(status_code=400, detail="Indica la `fecha` (AAAA-MM-DD) del día que quieres quitar.")
+    _exigir_guardas_calendario(usuario, "quitar", {"fecha": f}, mem.hoy_en_lima())
+    await _exigir_limite_escrituras_calendario(usuario)
+    try:
+        quitado = await mem.eliminar_dia_especial(
+            usuario["negocio_id"], f, autor=usuario.get("username"), motivo=motivo, hoy=mem.hoy_en_lima(),
+            autor_rol=usuario.get("rol"),
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    if quitado is None:
+        raise HTTPException(status_code=404, detail="Esa fecha no tiene un día especial cargado.")
+    logger.info("Calendario: %s quitó el día especial %s", usuario.get("username"), f.isoformat())
+    return JSONResponse({"ok": True, "eliminado": _dia_especial_a_json(quitado, mem.hoy_en_lima())})
+
+
+@router.get("/calendario/horario.json")
+async def calendario_horario_json(usuario: dict = Depends(servicio_identidad.requiere_rol(*ROLES_CON_VISION_TOTAL))):
+    """Horario SEMANAL del negocio de la sesión en SOLO LECTURA (admin y supervisor): una entrada por día de la
+    semana (lunes a domingo) más el estado actual (abierto/cerrado, motivo, próxima apertura). El supervisor lo ve para
+    entender el calendario, pero no puede cambiarlo: la escritura sigue siendo `POST /dashboard/configuracion/horario`
+    (solo admin). Contrato en docs/contrato_calendario_supervisor.md."""
+    from agent import calendario_negocio
+    negocio_id = usuario["negocio_id"]
+    ahora = datetime.utcnow()
+    filas = {f["dia_semana"]: f for f in await listar_horarios_atencion(negocio_id)}
+    cal = await mem.obtener_calendario_negocio(negocio_id)
+    rangos = calendario_negocio.rangos_de_semana(cal)
+    est = calendario_negocio.estado(ahora, cal)
+    return JSONResponse({
+        "hoy": mem.hoy_en_lima().isoformat(),
+        "solo_lectura": True,
+        "dias": [
+            {
+                "dia_semana": dia, "nombre": calendario_negocio.DIAS_ES[dia], "habilitado": rangos[dia] is not None,
+                "hora_apertura": rangos[dia][0] if rangos[dia] else None, "hora_cierre": rangos[dia][1] if rangos[dia] else None,
+                "es_por_defecto": dia not in filas,   # el negocio nunca configuró ese día: rige el horario de siempre
+            }
+            for dia in range(7)
+        ],
+        "estado_actual": {
+            "abierto": est["abierto"], "motivo": est["motivo"], "nombre": est["nombre"],
+            "proxima_apertura": iso_utc(est["proxima_apertura"]) if est["proxima_apertura"] else None,
+            "proxima_apertura_texto": calendario_negocio.describir_proxima_apertura(est["proxima_apertura"], ahora),
+        },
+    })
+
+
+@router.get("/configuracion/dias-especiales/historial.json")
+async def dias_especiales_historial_json(
+    limite: int = mem.LIMITE_HISTORIAL_CALENDARIO, antes_de: str | None = None,
+    usuario: dict = Depends(servicio_identidad.requiere_rol(*ROLES_CON_VISION_TOTAL)),
+):
+    """Historial legible de cambios del calendario del negocio de la sesión (admin y supervisor), más reciente
+    primero: quién, con qué rol, cuándo, qué acción, qué día, antes y después, y el motivo. `limite` 1-200 (por defecto
+    100); `antes_de` (el `fecha_hora` del último ítem recibido) pagina hacia atrás. Del negocio de la sesión, nunca
+    del cuerpo ni de la query. Contrato en docs/contrato_calendario_supervisor.md."""
+    if not 1 <= limite <= mem.MAX_HISTORIAL_CALENDARIO:
+        raise HTTPException(status_code=400, detail=f"`limite` debe estar entre 1 y {mem.MAX_HISTORIAL_CALENDARIO}.")
+    from datetime import timezone as _timezone
+    corte = None
+    if antes_de:
+        try:
+            corte = datetime.fromisoformat(antes_de.strip().replace("Z", "+00:00"))
+            if corte.tzinfo is not None:
+                corte = corte.astimezone(_timezone.utc).replace(tzinfo=None)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="`antes_de` debe ser una fecha y hora ISO 8601 (la `fecha_hora` de un ítem).")
+    r = await mem.listar_historial_calendario(usuario["negocio_id"], limite, corte)
+    return JSONResponse({
+        "items": [
+            {
+                "fecha_hora": iso_utc(i["creado"]), "actor": i["actor"], "actor_rol": i["actor_rol"], "accion": i["accion"],
+                "fecha_dia": i["fecha_dia"], "antes": i["antes"], "despues": i["despues"], "motivo": i["motivo"],
+            }
+            for i in r["items"]
+        ],
+        "hay_mas": r["hay_mas"],
+    })
+
+
 @router.get("/canales-whatsapp", response_class=HTMLResponse)
 async def gestionar_canales_whatsapp(request: Request, usuario: dict = Depends(servicio_identidad.requiere_rol("admin"))):
     sidebar = await _renderizar_sidebar(usuario, telefono_activo=None)
@@ -9618,6 +10037,10 @@ def _capacidades_de(rol: str) -> list[str]:
         capacidades += [
             "leads.ver_todos", "leads.asignar", "asesores.gestionar", "metricas.exportar", "campanas.ver",
             "leads:reasignar",
+            # Calendario de negocio (2026-10-12, decisión D1/D2 del dueño): el supervisor LEE siempre y ESCRIBE solo
+            # hacia adelante (las guardas de día pasado y año no verificado viven en las rutas, no acá). Es una
+            # capacidad operativa propia: NO implica "configuracion:ver", que sigue siendo solo del admin.
+            "calendario:ver", "calendario:editar",
         ]
     if es_admin:
         capacidades += [

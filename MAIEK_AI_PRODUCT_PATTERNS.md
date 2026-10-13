@@ -11,7 +11,7 @@
 | Fecha de creación | 2026-07-30 |
 | Autor | Claude, a pedido de Jesús Millones |
 | Fecha de aprobación | 2026-07-30 |
-| Última actualización | 2026-08-08 (Capítulo 6 — herencia de atribución de campaña, ver Control de versiones) |
+| Última actualización | 2026-10-12 (Capítulos 1 y 3 — Shell de sidebar de alto completo y Tira de acción en Inicio, enmendado por ADR-0005; ver Control de versiones) |
 
 ## Dependencias
 
@@ -53,6 +53,7 @@ introduce módulos funcionales (MPA), no prescribe framework, librería ni códi
 | 1.0 (Approved) | 2026-07-30 | Claude | Precisión final incorporada a Plataforma primero (especializar un patrón vía configuración/permisos/parametrización es válido; modificar el patrón canónico no lo es). Auditoría documental completa de calidad y consistencia: referencias cruzadas, numeración, trazabilidad, terminología y citas a MPA/MDL/MPX verificadas contra el contenido real de esos documentos. 5 inconsistencias editoriales menores corregidas (3 referencias residuales a "zona de foco" tras el renombre a "Zona de acción" en Capítulo 3; 1 referencia obsoleta a "futuro patrón de Catálogo"; 1 cita mal atribuida — "la IA se ve, no se anuncia" corresponde al MDL Capítulo 1, no al Capítulo 6). Sin observaciones de fondo. Aprobado por el usuario — congelado como v1.0. |
 | 1.0 | 2026-08-08 | Claude | **Capítulo 6 (CRM/Pipeline) — herencia de la atribución de campaña, 3 ediciones mínimas.** Resuelve la Brecha A identificada durante el Gap Analysis del recorrido #5 de Product Design (Campaña → Lead atribuido → Pipeline): MPA §4 y §6 ya declaraban la relación Campañas → CRM/Pipeline con atribución persistente, pero este capítulo no la reflejaba. (1) §2 Trazabilidad — se agrega la relación con Campañas (MPA §4) a la lista ya existente de relaciones declaradas (Conversaciones, Catálogo, Equipo). (2) §8 Relación con otros patrones — se declara a Campañas como fuente entrante de atribución, corrigiendo la asimetría con el Capítulo 7.B §8 (que ya declaraba alimentar a este patrón, sin que este lo recibiera de vuelta). (3) §3 Composición, Vista de detalle — se agrega la atribución de origen como dato presente, no opcional: MPA §3 exige que permanezca "visible en todo el ciclo de vida posterior del lead", por lo que este capítulo declara únicamente que el dato debe estar presente y visible — dónde se ubica, cómo se presenta y su comportamiento sin atribución quedan explícitamente diferidos a Product Design (Screen Contract en adelante). No se modificó ningún otro capítulo, ni MPX, ni MPA, ni AI Architecture, ni SCR-03 ni ningún artefacto de Product Design. Con esto, la Brecha A queda **RESUELTA** — junto con la Brecha B (resuelta el mismo día en MPA y AI Architecture), el bloqueo de corpus del recorrido #5 queda levantado. |
 | 1.0 | 2026-08-10 | Claude | **Capítulo 8 (Notificaciones) agregado — patrón nuevo.** Redactado tras un ciclo de Gate 1 (recuperación de evidencia: MPA §3/4/6/9, MPX Capítulo 7, Capítulo 1 de este documento, código real de `agent/dashboard.py` y `agent/notificaciones.py`) y Gate 2 (reconciliación de contradicciones/vacíos entre esas fuentes) previos a la redacción, seguidos de cuatro decisiones de producto aprobadas explícitamente por el usuario (DEC-01 canal, DEC-02 eventos del Badge, DEC-03 estados, DEC-04 clasificación de `agent/notificaciones.py`) — detalle completo del proceso en `MAIEK_AI_EXPERIENCE_FLOWS.md`. Cambio de numeración documental asociado, no de producto: el antiguo Capítulo 8 ("Principios Transversales de Producto") pasa a ser Capítulo 9 sin alteración de su contenido conceptual — solo se actualizaron sus referencias internas a "Capítulos 1 a 7" → "Capítulos 1 a 8" y dos referencias cruzadas residuales en Capítulo 6 y Capítulo 7 que apuntaban al antiguo número, más el bloque de cierre del documento. Sin observaciones de fondo. |
+| 1.0 | 2026-10-12 | Claude, a pedido de Jesús Millones | **Enmendado por ADR-0005** (`adr/0005-shell-sidebar-alto-completo-y-tira-de-accion-en-inicio.md`, decisión del dueño del 2026-10-12). (1) **Capítulo 1 (Shell), §3, §5, §6, §7 y §9:** la Top Navigation «por encima de todo» permanece únicamente en móvil (por debajo de `sm`, 768 px, barra de 56 px); en escritorio y tablet la marca, el buscador, la campana con contador, la navegación y la cuenta viven en un Sidebar de alto completo, sin barra superior; «Ayuda» pasa al menú de cuenta; modo colapsado de 64 px con iconos apilados; sin selector de negocio hasta que exista un segundo negocio. (2) **Capítulo 3 (Inicio), §2–§5, §7 y §9:** la Zona de indicadores se reemplaza por una **Tira de acción** (celdas con verbo y destino que filtran «Mi cola»; máximo 5; sin cifras sin verbo), que también sustituye a los chips de la cola; se registra el **Pulso de hoy** (banda plegable de supervisión) como patrón aceptado por fases, siempre después de la cola de acción. (3) **Capítulo 9, «Acción antes que observación»:** se agrega el corolario del Pulso. Texto anterior conservado como nota de trazabilidad en cada sección. No se modificó ningún otro capítulo, ni MDL, MPX ni MPA. |
 
 ---
 
@@ -200,23 +201,42 @@ viven *dentro* de él — ningún otro patrón se diseña sin asumir que este ya
 
 ## 3. Composición
 
-Tres regiones fijas, en este orden de jerarquía visual (Top Navigation por encima de todo,
-Sidebar y contenido comparten el nivel siguiente):
+> **Enmendado por ADR-0005 (2026-10-12).** Redacción anterior, conservada por trazabilidad: «Tres
+> regiones fijas, en este orden de jerarquía visual (Top Navigation por encima de todo, Sidebar y
+> contenido comparten el nivel siguiente)», con la Top Navigation como franja superior de altura
+> fija, siempre visible, en todos los tamaños, con wordmark, buscador, notificaciones, ayuda y
+> `Avatar` (máximo 4 elementos interactivos), y el Sidebar como rail de `280px` / `64px` debajo de
+> ella. Esa composición rige hoy solo para móvil; en escritorio y tablet la reemplaza la de abajo.
 
-**Top Navigation** (`Top Navigation` del CDS) — franja superior, altura fija, siempre visible.
-Contiene, de izquierda a derecha: wordmark de marca (`space-4` de margen izquierdo), y a la
-derecha (máximo 4 elementos interactivos, por regla del propio componente): buscador global
-(`Cmd/Ctrl+K`), notificaciones (`Icon Button` con `Badge` de contador), ayuda, y `Avatar` del
-usuario actual (dispara `Menús` de perfil al hacer clic — incluye nombre, rol, y la acción de
-cerrar sesión).
+La composición depende del ancho (breakpoints del MDL Capítulo 3: `sm` = 768 px, `md` = 1024 px):
 
-**Sidebar** (`Sidebar` del CDS) — rail izquierdo, `280px` expandido / `64px` colapsado
-(breakpoints `md` e inferiores). Cada ítem de la Navegación principal de MPA §10 se renderiza
-como un ítem de `Sidebar`, con `Badge` de conteo donde corresponda (ej. conversaciones sin
-leer). El ítem correspondiente a la sección activa usa el estado `activo` ya definido en el CDS
-(fondo `primary-50`/`primary-900`, texto `primary-600`/`400`).
+**Escritorio y tablet (desde `sm`, 768 px): dos regiones, sin barra superior.**
 
-**Punto de montaje de contenido** — el área restante, donde cada patrón de los capítulos
+**Sidebar de alto completo** (`Sidebar` del CDS, variante «de alto completo») — ocupa todo el alto
+de la ventana, `280px` expandido / `64px` colapsado. Contiene, de arriba hacia abajo:
+1. **Marca** — wordmark «Maiek AI» sobre tile blanco (el logo va siempre sobre fondo blanco, también
+   sobre el fondo Navy del Sidebar); enlaza a Inicio.
+2. **Buscador global** (`Cmd/Ctrl+K`) y **notificaciones** (`Icon Button` con `Badge` de contador).
+3. **Navegación principal** — cada ítem de MPA §10 como ítem de `Sidebar`, con `Badge` de conteo
+   donde corresponda (ej. conversaciones sin leer). El ítem de la sección activa usa el estado
+   `activo` del CDS (fondo `primary-50`/`primary-900`, texto `primary-600`/`400`; sobre fondo Navy,
+   su equivalente de alto contraste ya definido por el componente).
+4. **Tarjeta de cuenta** (abajo) — `Avatar`, nombre y rol; abre el menú de cuenta (`Menús`), que
+   incluye **Ayuda**, la apariencia y la acción de cerrar sesión.
+
+Modo colapsado (`64px`): isotipo, búsqueda, campana, navegación y avatar apilados verticalmente, con
+tooltip y etiqueta accesible por ítem. Entre 768 px y 1023,98 px el Sidebar se fuerza colapsado
+(la preferencia manual del usuario se conserva y se retoma desde `md`, 1024 px). No hay selector de
+negocio mientras exista un solo negocio.
+
+**Móvil (por debajo de `sm`, 768 px): tres regiones, como antes.**
+
+**Top Navigation** (`Top Navigation` del CDS) — franja superior de `56px`, sticky. De izquierda a
+derecha: hamburguesa (abre el Sidebar como overlay), wordmark, y a la derecha buscador (ícono),
+notificaciones (`Icon Button` con `Badge`) y `Avatar` (menú de cuenta, que incluye Ayuda). El Sidebar
+es un overlay a pantalla completa con la misma navegación y sin cambios de modelo de navegación.
+
+**Punto de montaje de contenido** (todos los tamaños) — el área restante, donde cada patrón de los capítulos
 siguientes de este documento se renderiza. Esta región es la única que cambia entre módulos; el
 Shell nunca se reconstruye al navegar entre ellos — principio ya `Activo` de
 `MAIEK_AI_FRONTEND_ARCHITECTURE.md` §1 (envoltura única, punto de montaje central), que este
@@ -263,7 +283,8 @@ el capítulo dedicado a Analítica.
   su sesión anterior, persistido entre sesiones.
 - **Colapsando/expandiendo** — transición `motion-fast` (150ms) del ancho del Sidebar; el
   contenido del punto de montaje se reacomoda sin recargarse.
-- **Con notificación nueva** — el `Badge` de la campana en Top Navigation actualiza su conteo en
+- **Con notificación nueva** — el `Badge` de la campana (en el Sidebar en escritorio y tablet, en la
+  Top Navigation en móvil; enmendado por ADR-0005) actualiza su conteo en
   tiempo real (mismo mecanismo ya activo de indicadores en vivo del panel); no dispara ningún
   sonido ni animación más allá del cambio de número, consistente con "tranquilidad, nunca
   ansiedad" (MDL Capítulo 0).
@@ -278,6 +299,11 @@ el capítulo dedicado a Analítica.
   al moverse entre módulos.
 - El buscador global (`Cmd/Ctrl+K`) es una **divulgación progresiva** (MPX Capítulo 1): no ocupa
   espacio permanente en pantallas angostas, aparece bajo demanda.
+- **Navegación por teclado y landmarks (ADR-0005).** «Saltar al contenido» es siempre el primer
+  elemento enfocable. En escritorio el orden de tabulación es marca → búsqueda → campana →
+  navegación → cuenta → contenido. Sin barra superior, el landmark `banner` no existe en
+  escritorio (ausencia deliberada, documentada); los landmarks son `navigation` («Navegación
+  principal») y `main`. En móvil, la Top Navigation es el `banner`.
 - Si en el futuro conviven, en la campana de notificaciones, una alerta operativa (ej. un
   incidente) y una sugerencia generada por IA, deben distinguirse visualmente entre sí — regla
   directa de MPX Capítulo 7, "Jerarquía visual: notificación de sistema vs. sugerencia de IA".
@@ -287,12 +313,14 @@ el capítulo dedicado a Analítica.
 
 ## 7. Responsive
 
-Por debajo del breakpoint `sm`, el Sidebar deja de convivir con el contenido — se convierte en
-overlay a pantalla completa, activado por un ícono en la Top Navigation (nunca se comprime a un
-ancho intermedio ilegible, regla ya fijada por el propio componente `Sidebar` del CDS). La Top
-Navigation en mobile colapsa a: wordmark + acceso a perfil + ícono de menú; el buscador se mueve
-detrás de un ícono (mismo patrón ya definido en el CDS para `Top Navigation` y `Search Box` en
-mobile).
+Por debajo del breakpoint `sm` (768 px), el Sidebar deja de convivir con el contenido — se convierte
+en overlay a pantalla completa, activado por la hamburguesa de la Top Navigation (nunca se comprime a
+un ancho intermedio ilegible, regla ya fijada por el propio componente `Sidebar` del CDS). La Top
+Navigation en mobile mide `56px` y colapsa a: hamburguesa + wordmark + búsqueda (ícono) + campana +
+avatar; «Ayuda» vive en el menú de cuenta (mismo patrón ya definido en el CDS para `Top Navigation` y
+`Search Box` en mobile). Desde `sm` no hay Top Navigation: el Sidebar de alto completo (colapsado
+a `64px` entre 768 px y 1023,98 px) reúne marca, búsqueda, campana, navegación y cuenta.
+*(Enmendado por ADR-0005, 2026-10-12.)*
 
 ## 8. Relación con otros patrones
 
@@ -305,10 +333,12 @@ montaje de este Shell, nunca una estructura de página independiente.
 - Reconstruir el Shell completo (o parpadear la Top Navigation/Sidebar) al navegar entre
   módulos — rompe directamente "Consistencia entre pantallas" del MPX y el principio ya
   `Activo` de envoltura única de Frontend Architecture.
-- Agregar accesos de producto sueltos a la Top Navigation (ej. un botón de una función
-  específica de un módulo) — la Top Navigation es identidad + accesos transversales de cuenta,
-  nunca navegación de producto (regla ya fijada por el propio componente `Top Navigation` del
-  CDS).
+- Agregar accesos de producto sueltos a la Top Navigation (móvil) o a la zona de marca/cuenta del
+  Sidebar (ej. un botón de una función específica de un módulo) — la Top Navigation y las zonas
+  transversales del Sidebar son identidad + accesos de cuenta, nunca navegación de producto (regla
+  ya fijada por el propio componente `Top Navigation` del CDS).
+- Reintroducir una barra superior en escritorio o duplicar búsqueda, campana o cuenta fuera del
+  Sidebar (ADR-0005): en cada ancho, cada función transversal tiene un solo lugar.
 - Mostrar un ítem del Sidebar deshabilitado en gris para un rol sin permiso, en vez de
   ocultarlo directamente — contradice el principio "ocultar, no vaciar" ya `Activo`.
 
@@ -469,16 +499,18 @@ empieza a acumular detalle exploratorio, deja de cumplir su objetivo.
   el pulso del equipo en números grandes y claros, y la IA le señala la única cosa que necesita
   su atención hoy"* (modo ejecutivo, Supervisor/Administrador). Este patrón es la materialización
   compositiva de ese texto, no una idea nueva.
-- **CDS**: `KPI Card`, `AI Suggestion Card`, `AI Insight`, `Card`, `Avatar`, `Badge`, `Skeleton`.
+- **CDS**: `KPI Card` (variante «Celda de acción», ver CDS v1.0.2), `AI Suggestion Card`, `AI Insight`, `Card`, `Avatar`, `Badge`, `Skeleton`.
+- **ADR**: `adr/0005-shell-sidebar-alto-completo-y-tira-de-accion-en-inicio.md` — enmienda de este capítulo (Zona de indicadores → Tira de acción; Pulso de hoy), 2026-10-12.
 - **MPX**: **Decision Experience** completo (Capítulo 3) — priorización, reducción de carga
   cognitiva, presentación orientada a decisión, Explainability First, Confianza; **divulgación
   progresiva** (Capítulo 1) para cualquier detalle que no sea parte del resumen inicial.
 
 ## 3. Composición
 
-Dos zonas fijas, presentes para los tres roles, en un **orden de prioridad deliberado — acción
-antes que observación** — lo que cambia entre roles es qué compone cada una, nunca su existencia
-ni su jerarquía relativa:
+Una **Zona de acción** fija, presente para los tres roles, y —solo para Supervisor y Administrador,
+por fases— una banda de observación posterior (Pulso de hoy), en un **orden de prioridad
+deliberado — acción antes que observación**. Lo que cambia entre roles es qué compone cada una, nunca
+su jerarquía relativa. *(Enmendado por ADR-0005: antes, «Dos zonas fijas», acción e indicadores.)*
 
 **Zona de acción** (primera, la más prominente de la pantalla) — combina la sugerencia de mayor
 valor del momento (`AI Suggestion Card`, cuando exista una que supere el umbral de confianza de
@@ -498,20 +530,45 @@ Ausente por completo, sin dejar un espacio vacío, cuando no hay ninguna señal 
 umbral de confianza — silencio de la sección, no una sección vacía (mismo criterio del Capítulo
 0 de este documento).
 
-**Zona de indicadores** (segunda, de apoyo — nunca la protagonista) — franja compacta de `KPI
-Card` (nunca más de 8, regla ya fijada por el propio componente), exclusivamente como contexto
-que respalda las decisiones ya priorizadas en la Zona de acción. Para Administrador/Supervisor:
-indicadores ejecutivos (ej. conversaciones activas, leads en curso, tendencia). Para Asesor:
-indicadores personales (ej. sus conversaciones activas hoy, sus leads asignados). Esta zona
-responde "¿cómo estoy?" en apoyo de lo que la Zona de acción ya respondió sobre "¿qué hago
-ahora?" — nunca al revés.
+**Tira de acción** (reemplaza a la antigua Zona de indicadores; enmendado por ADR-0005, 2026-10-12)
+— franja compacta de celdas (`KPI Card`, variante «Celda de acción») que forma parte de la Zona de
+acción: cada celda es una **entrada y un filtro de «Mi cola»**, no un indicador de observación.
+- **Asesor — 4 celdas:** Responder, Llamar, Citas de hoy y «Mis casos activos» (esta última es un
+  enlace tranquilo a Conversaciones: borde punteado, sin relleno, no es un KPI ni un filtro).
+- **Supervisor y Administrador — 5 celdas:** Responder, Llamar, Citas, Reasignar (escalados y sin
+  asesor) y «Asesores disponibles» (enlace tranquilo a Equipo).
+- Cada celda lleva **verbo y destino** (la etiqueta es el verbo; el destino es la cola filtrada o la
+  pantalla enlazada) y un **subtexto accionable** (ej. «2 cierran en menos de 6 h»). **Nunca más de
+  5 celdas** y **nunca una cifra sin verbo** (MPX Capítulo 3).
+- Sustituye también a los chips de filtro de «Mi cola» y al cuadro «Indicadores» del rail derecho:
+  los conteos de la cola tienen **una sola fuente de verdad** (Capítulo 9, Única fuente de verdad).
+- Pausa por feriado: el reloj de atención se pausa (los subtextos no hablan de atraso) pero la
+  ventana de 24 h de WhatsApp sigue corriendo y la celda Responder lo dice. «Todo al día»: las celdas
+  en 0 se atenúan con subtexto «Nada pendiente»; sin ítems, Inicio muestra su estado vacío.
+
+*Redacción anterior de esta zona (v1.0, 2026-07-30), conservada por trazabilidad:* «Zona de
+indicadores (segunda, de apoyo — nunca la protagonista) — franja compacta de `KPI Card` (nunca más
+de 8), exclusivamente como contexto que respalda las decisiones ya priorizadas en la Zona de acción
+[…] responde "¿cómo estoy?" en apoyo de lo que la Zona de acción ya respondió». Su necesidad de
+observación pasa al Pulso de hoy (abajo) y al patrón de Analítica (Capítulo 4).
+
+**Pulso de hoy** (observación; aceptado por ADR-0005, se construye por fases) — banda plegable para
+**Supervisor y Administrador**, con indicadores de desempeño del equipo y su comparación frente a
+ayer. Reglas invariantes: **siempre después de «Mi cola»** (nunca por encima de la cola de acción,
+en ningún breakpoint — Capítulo 9, Acción antes que observación); sin cifras sin verbo; sin
+vigilancia individual (describe al equipo, no rankea asesores por nombre); los semáforos no castigan
+feriados ni horas fuera de horario hábil (las esperas se miden en horas hábiles y se muestran «En
+pausa»). Fases: C0 con las cifras existentes, C1 con cifras nuevas de backend, C2 con comparaciones y
+tendencias. El detalle de indicadores y su contrato queda en la «Propuesta A+C», a incorporar por
+enmienda al ADR-0005 y a este capítulo; este documento no lo fija.
 
 ## 4. Roles y variaciones
 
 | Zona | Administrador | Supervisor | Vendedor/Asesor |
 |---|---|---|---|
 | Zona de acción (primera, prominente) | Qué necesita su intervención hoy, alcance global — remite a Analítica o al punto exacto de resolución | Qué necesita su intervención hoy, alcance de equipo — remite a Analítica o al punto exacto de resolución | Conversaciones/oportunidades propias que requieren atención — remite a Bandeja |
-| Zona de indicadores (segunda, de apoyo) | KPIs ejecutivos, alcance global | KPIs ejecutivos, alcance de equipo | KPIs personales |
+| Tira de acción (parte de la Zona de acción) | 5 celdas: Responder, Llamar, Citas, Reasignar, Asesores disponibles — alcance global | 5 celdas: las mismas — alcance de equipo | 4 celdas: Responder, Llamar, Citas de hoy, Mis casos activos — alcance personal |
+| Pulso de hoy (observación; después de «Mi cola»; por fases) | Desempeño del equipo, alcance global | Desempeño del equipo, alcance de equipo | No existe para este rol |
 
 Mismo criterio ya establecido en los capítulos anteriores: la pantalla existe, con su misma
 estructura y el mismo orden de prioridad, para los tres roles — el contenido de cada zona es lo
@@ -524,9 +581,13 @@ estructura y el mismo orden de prioridad, para los tres roles — el contenido d
   ahí aparecerán sus conversaciones en cuanto se le asigne la primera), nunca una pantalla vacía
   genérica.
 - **Cargando** — `Skeleton` con la geometría exacta de cada zona.
-- **Con datos, sin ninguna señal que supere el umbral de confianza** — la Zona de acción no se
-  renderiza (ver sección 3); la Zona de indicadores se muestra igual, ya que no depende de esa
-  señal.
+- **Con datos, sin ninguna señal que supere el umbral de confianza** — la sugerencia de IA de la
+  Zona de acción no se renderiza (ver sección 3); la Tira de acción se muestra igual, ya que sus
+  conteos no dependen de esa señal.
+- **Todo al día / feriado** *(ADR-0005)* — sin ítems en la cola, las celdas de la Tira de acción se
+  atenúan («Nada pendiente») y Inicio muestra su estado vacío «Estás al día» / «El equipo está al
+  día». En feriado, el reloj de atención se pausa y los subtextos no hablan de atraso; la ventana de
+  24 h de WhatsApp sigue corriendo y se dice.
 
 ## 6. Comportamiento aplicado del MPX
 
@@ -540,11 +601,15 @@ estructura y el mismo orden de prioridad, para los tres roles — el contenido d
 
 ## 7. Responsive
 
-Las dos zonas se apilan verticalmente en mobile, **manteniendo el mismo orden de prioridad que en
-desktop — Zona de acción primero, Zona de indicadores después** (comprimida a 2 columnas, regla
-ya fijada por `KPI Card`). El orden nunca se invierte entre breakpoints; invertirlo pondría la
-observación por encima de la acción exactamente en el contexto — mobile, uso interrumpido, de pie
-— donde priorizar la acción importa más, no menos.
+Las zonas se apilan verticalmente en mobile, **manteniendo el mismo orden de prioridad que en
+desktop — Zona de acción (con su Tira de acción) primero, Pulso de hoy después, siempre debajo de
+«Mi cola»**. En mobile la Tira de acción se desplaza horizontalmente **dentro de su propio
+contenedor** (con indicio visible de que hay más celdas y sin scroll horizontal de la página a
+375 px), en lugar de la grilla de 2 columnas de `KPI Card`; cada celda mide al menos 44 px de alto.
+El orden nunca se invierte entre breakpoints; invertirlo pondría la observación por encima de la
+acción exactamente en el contexto — mobile, uso interrumpido, de pie — donde priorizar la acción
+importa más, no menos. *(Enmendado por ADR-0005: antes, «Zona de indicadores comprimida a 2
+columnas».)*
 
 ## 8. Relación con otros patrones
 
@@ -564,14 +629,18 @@ el destino de profundidad para explorarlo.
   adelanto priorizado — duplicaría el patrón de Bandeja de Conversaciones dentro de Inicio, en
   vez de remitir a él.
 - Que la Zona de acción de Administrador/Supervisor se convierta en un resumen pasivo de
-  indicadores de equipo en vez de señalar qué requiere intervención — repetiría el propósito de
-  la Zona de indicadores y perdería la orientación a la acción que define este patrón.
-- **Anteponer la Zona de indicadores a la Zona de acción, en cualquier breakpoint** — invierte el
-  principio central de este patrón (acción antes que observación) y contradice directamente la
-  narrativa del MDL Capítulo 0 que lo fundamenta.
-- Dejar crecer la Zona de indicadores más allá de una franja compacta de apoyo — cualquier
-  necesidad de explorar tendencias o comparativos pertenece al patrón de Analítica (Capítulo 4),
-  nunca a Inicio.
+  indicadores de equipo en vez de señalar qué requiere intervención — repetiría el propósito del
+  Pulso de hoy y perdería la orientación a la acción que define este patrón.
+- **Anteponer el Pulso de hoy (o cualquier banda de observación) a la cola de acción, en cualquier
+  breakpoint** — invierte el principio central de este patrón (acción antes que observación) y
+  contradice directamente la narrativa del MDL Capítulo 0 que lo fundamenta. *(Enmendado por
+  ADR-0005; antes se refería a la Zona de indicadores.)*
+- Dejar crecer la Tira de acción por encima de 5 celdas, mostrar una cifra sin verbo o mantener los
+  mismos conteos en dos lugares (celdas y chips, o celdas y un cuadro «Indicadores») — rompe
+  «Única fuente de verdad» y «un número sin verbo de acción es información» (MPX Capítulo 3).
+- Convertir el Pulso de hoy en un ranking nominal de asesores, o hacer que un feriado o una hora
+  fuera de horario hábil lo pinten como alerta. Cualquier necesidad de explorar tendencias o
+  comparativos de profundidad pertenece al patrón de Analítica (Capítulo 4), nunca a Inicio.
 
 ---
 
@@ -1167,7 +1236,9 @@ de una persona específica.
 
 ## 3. Composición
 
-- Entrada declarada: `Icon Button`+`Badge` de la Top Navigation (Cap. 1 §3).
+- Entrada declarada: `Icon Button`+`Badge` de la Top Navigation (Cap. 1 §3) — en móvil; en escritorio y
+  tablet vive en el Sidebar de alto completo (enmendado por ADR-0005, 2026-10-12; mismo componente,
+  otra ubicación).
 - Canales: in-app silenciosa (contador) y banner in-app — declarados, sin implementación
   evidenciada; Push/externo, con dos realizaciones actuales (Browser Notification API y correo
   vía Resend) y una posibilidad futura ya nombrada documentalmente (WhatsApp), sin evidencia de
@@ -1320,7 +1391,9 @@ solo en la medida en que facilitan una decisión ya priorizada; la analítica de
 un patrón dedicado (Analítica, Capítulo 4), nunca mezclada con un patrón de acción. Establecido en
 Inicio (Capítulo 3), fundamentado directamente en la narrativa "Un día completo con Maiek" del MDL
 Capítulo 0; aplicado también en la composición de Copiloto IA (Capítulo 5, sugerencias antes que
-contexto).
+contexto). Corolario (ADR-0005, 2026-10-12): una banda de observación en un patrón de acción —el
+Pulso de hoy de Inicio— va siempre después de la cola de acción, nunca antes, y los conteos que
+sirven para actuar (Tira de acción) se presentan como filtros de esa cola, con verbo y destino.
 
 ## Human Decision Gate
 

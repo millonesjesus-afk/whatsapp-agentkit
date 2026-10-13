@@ -11,7 +11,7 @@
 | Fecha de creación | 2026-07-26 |
 | Autor | Claude, a pedido de Jesús Millones |
 | Fecha de aprobación | 2026-07-28 |
-| Última actualización | 2026-09-12 (ADR-0003 — identidad de marca única de plataforma MAIEK; ver narrativa al final de esta sección y `MAIEK_AI_ADR_INDEX.md`) |
+| Última actualización | 2026-10-12 (ADR-0005 — shell de sidebar de alto completo, Tira de acción en Inicio y Pulso de hoy por fases; enmiendas a Product Patterns y Component System; ver narrativa al final de esta sección y `MAIEK_AI_ADR_INDEX.md`) |
 
 ## Dependencias
 
@@ -274,6 +274,19 @@ en el mismo cambio, retirando ese ítem de su alcance. Lo que sigue siendo tenan
 cambio: nombre del negocio, Gabi/agente configurable, productos, campañas, canales, permisos.
 Ver `MAIEK_AI_ADR_INDEX.md` y `adr/0003-identidad-marca-unica-plataforma.md` para el detalle
 completo.
+
+**ADR-0005 — Shell de sidebar de alto completo, Tira de acción en Inicio y Pulso de hoy (2026-10-12).**
+Decisión del dueño (Origen: decisión del dueño; Estado: Aceptada). En escritorio y tablet (desde
+`sm`, 768 px) la barra superior desaparece: marca, buscador, campana con contador, navegación y
+tarjeta de cuenta pasan a un Sidebar de alto completo (colapsado a 64 px entre 768 y 1023,98 px);
+«Ayuda» pasa al menú de cuenta; la barra superior permanece solo en móvil, ahora de 56 px. En Inicio,
+una Tira de acción (4 celdas para Asesor, 5 para supervisión; filtros de «Mi cola», con verbo y
+destino) reemplaza al cuadro «Indicadores» y a los chips de la cola. El Pulso de hoy (banda plegable
+de supervisión) queda aceptado y se construye por fases (F3-F5) siempre después de la cola de acción.
+Enmiendas con nueva fila de Control de versiones: `MAIEK_AI_PRODUCT_PATTERNS.md` (Cap. 1, Cap. 3 y
+Cap. 9; versión 1.0, fila del 2026-10-12) y `MAIEK_AI_COMPONENT_SYSTEM.md` (v1.0.2: Sidebar, Top
+Navigation, KPI Card). Sin cambios de estado ni de versión mayor en ningún documento catalogado. Ver
+`MAIEK_AI_ADR_INDEX.md` y `adr/0005-shell-sidebar-alto-completo-y-tira-de-accion-en-inicio.md`.
 
 ---
 

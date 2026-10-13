@@ -10,7 +10,7 @@
 | Estado | **Approved** |
 | Fecha de creación | 2026-07-26 |
 | Autor | Claude, a pedido de Jesús Millones |
-| Última actualización | 2026-08-08 (sección 4 y 12 — relación Campañas → Agentes IA, ver Control de versiones) |
+| Última actualización | 2026-10-12 (secciones 8 y 9 — capacidad operativa «Calendario» del Supervisor, ver Control de versiones) |
 
 ## Dependencias
 
@@ -47,6 +47,7 @@
 |---|---|---|---|
 | 1.0 | 2026-07-26 | Claude | Primera versión — visión, mapa de 9 módulos funcionales, responsabilidades, relaciones, flujo de información, capacidades (incluida IA exclusiva), roles y permisos de alto nivel, navegación principal, arquitectura funcional, dependencias, escalabilidad futura, reglas para nuevos módulos, roadmap y diagrama conceptual. Congelado como referencia oficial. |
 | 1.0 | 2026-08-08 | Claude | **Nueva relación (sección 4 y 12): Campañas → Agentes IA.** El contexto de una campaña puede aportar información al contexto conversacional que los Agentes IA usan para responder — capacidad disponible y configurable, sujeta a las reglas de negocio aplicables, nunca una obligación universal. Formaliza una decisión de producto tomada durante el Gap Analysis del recorrido #5 de Product Design (Campaña → Lead atribuido → Pipeline), que identificó esta relación ya implementada en código (`agent/brain.py`, `agent/campanas.py`) sin respaldo canónico previo en ningún documento del corpus. No define reglas detalladas de cuándo o cómo se usa ese contexto — eso queda para Product Patterns, MPX y AI Architecture cuando corresponda. |
+| 1.0 | 2026-10-12 | Claude | **Enmienda (secciones 8 y 9): capacidad operativa «Calendario» del Supervisor** (decisión D2 del dueño, 2026-10-12). El Supervisor puede leer siempre el calendario del negocio (feriados, días no laborables, puentes, atención especial) y escribir solo hacia adelante: sin cambios retroactivos ni carga de años cuya lista de feriados no esté verificada. «Canales & Configuración» sigue sin acceso para el Supervisor. No se agrega ningún rol ni módulo nuevo. |
 
 Cualquier módulo nuevo o cambio de fondo en las relaciones descritas acá suma una fila nueva a
 esta tabla — mismo criterio de gobierno que el MDL y el CDS.
@@ -232,6 +233,13 @@ Platform, no introduce roles nuevos que Gaso+ no tenga hoy.
 | Analítica | Completa | Completa | Sin acceso (o acotada a sus propios números, según producto) |
 | Canales & Configuración | Completo | Sin acceso | Sin acceso |
 | Notificaciones | Todas las del sistema | Las de su equipo | Solo las propias |
+
+> **Enmienda 2026-10-12 (D2).** El calendario operativo del negocio (feriados, días no laborables,
+> puentes y atención especial) es una **capacidad operativa propia del Supervisor**, separada de
+> «Canales & Configuración»: el Supervisor lo **lee siempre** y **escribe hacia adelante** (sin
+> retroactivo y sin cargar años cuya lista de feriados no esté verificada); el Administrador conserva
+> el alcance completo. «Canales & Configuración» **sigue sin acceso** para el Supervisor, incluido el
+> horario semanal, que ve en solo lectura dentro del calendario.
 
 Esta tabla es de **alto nivel** — el detalle de permisos (RBAC técnico) vive en la
 implementación de cada producto, no en este documento.

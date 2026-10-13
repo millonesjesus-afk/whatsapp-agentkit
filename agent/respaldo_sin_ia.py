@@ -47,6 +47,7 @@ from agent.services.servicio_conversacion import servicio_conversacion
 from agent.services.servicio_inteligencia import servicio_inteligencia
 from agent.tiempo_real import gestor_conexiones
 from agent.tools import describir_horario_atencion, obtener_estado_horario_atencion, obtener_proxima_apertura
+from agent import calendario_negocio as cal_negocio
 
 logger = logging.getLogger("agentkit")
 
@@ -90,8 +91,14 @@ async def _texto_para_el_cliente(negocio_id: str | None, nombre: str | None) -> 
         return servicio_inteligencia.obtener_mensaje_sin_ia("dentro_horario", nombre)
     proxima = await obtener_proxima_apertura(negocio_id)
     if proxima is not None and (not proxima["hoy_es_dia_de_atencion"] or proxima["dias_de_diferencia"] >= 2):
+        # Calendario de negocio (2026-10-12): hoy cerrado por feriado/día especial cuenta como «día de descanso» y se
+        # cita el próximo día hábil real; si faltan 7 días o más se agrega la fecha para que no sea ambiguo.
+        dia = proxima["dia"]
+        fecha = proxima.get("fecha")
+        if fecha is not None and proxima["dias_de_diferencia"] >= 7:
+            dia = f"{dia} {fecha.day} de {cal_negocio.MESES_ES[fecha.month - 1]}"
         return servicio_inteligencia.obtener_mensaje_sin_ia(
-            "fin_de_semana", nombre, dia=proxima["dia"], hora=proxima["hora"],
+            "fin_de_semana", nombre, dia=dia, hora=proxima["hora"],
         )
     return servicio_inteligencia.obtener_mensaje_sin_ia(
         "fuera_horario", nombre, horario=await describir_horario_atencion(negocio_id),

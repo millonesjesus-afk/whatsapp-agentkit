@@ -24,3 +24,19 @@ def test_capacidades_previas_de_admin_no_cambian_de_cantidad_inesperada():
     assert len(capacidades) == len(set(capacidades))  # sin duplicados
     for esperada in ("productos:crear", "canales.gestionar", "usuarios.crear", "pipeline:ver"):
         assert esperada in capacidades
+
+
+# ── Calendario del supervisor (2026-10-12, D1/D2): capacidades propias, sin abrir Configuración ──
+
+def test_calendario_ver_y_editar_son_de_admin_y_supervisor_pero_no_del_asesor():
+    for rol in ("admin", "supervisor"):
+        capacidades = _capacidades_de(rol)
+        assert "calendario:ver" in capacidades and "calendario:editar" in capacidades
+    assert "calendario:ver" not in _capacidades_de("asesor") and "calendario:editar" not in _capacidades_de("asesor")
+
+
+def test_configuracion_ver_sigue_siendo_solo_del_admin_aunque_el_supervisor_tenga_calendario():
+    assert "configuracion:ver" in _capacidades_de("admin")
+    assert "configuracion:ver" not in _capacidades_de("supervisor")
+    assert "configuracion:ver" not in _capacidades_de("asesor")
+    assert len(_capacidades_de("supervisor")) == len(set(_capacidades_de("supervisor")))   # sin duplicados

@@ -9,6 +9,7 @@ actual (supervisor de ventas deriva manualmente al asesor por WhatsApp).
 """
 
 import os
+import html
 import logging
 
 from agent.http_utils import post_con_reintentos
@@ -35,6 +36,30 @@ async def _negocio_cerrado_ahora(negocio_id: str | None) -> bool:
     except Exception:
         logger.exception("No se pudo consultar el horario de atención para el correo de derivación")
         return False
+
+
+async def _detalle_del_cierre(negocio_id: str | None) -> str:
+    """Calendario de negocio (2026-10-12): el motivo del cierre y cuándo vuelve a atender el equipo, en una frase
+    para el correo («Hoy es feriado: Combate de Angamos. El equipo vuelve a atender el viernes 9 a las 8:00 a. m.»).
+    Vacío si no hay nada que agregar o ante cualquier falla — el correo sale igual con el texto de siempre."""
+    if not negocio_id:
+        return ""
+    try:
+        from agent.tools import obtener_estado_horario_atencion  # import tardío: tools importa de memory
+        from agent import calendario_negocio as cal_negocio
+        estado = await obtener_estado_horario_atencion(negocio_id)
+        if estado.get("dentro_de_horario"):
+            return ""
+        motivo = cal_negocio.describir_motivo(estado.get("motivo"), estado.get("nombre"))
+        partes = []
+        if motivo:
+            partes.append(f"{motivo[0].upper()}{motivo[1:]}.")
+        if estado.get("proxima_apertura_texto"):
+            partes.append(f"El equipo vuelve a atender {estado['proxima_apertura_texto']}.")
+        return " ".join(partes)
+    except Exception:
+        logger.exception("No se pudo calcular el detalle del cierre para el correo de derivación")
+        return ""
 
 
 async def notificar_lead_derivado(telefono: str, lead: dict, ultimo_mensaje: str, fuera_de_horario: bool | None = None) -> bool:
@@ -70,6 +95,9 @@ async def notificar_lead_derivado(telefono: str, lead: dict, ultimo_mensaje: str
                 "fuera del horario de atención y este lead quedó SIN asignar. Se asignará al primer "
                 "asesor que abra turno, o puedes asignarlo tú manualmente desde el panel ahora mismo.</p>"
             )
+            detalle_cierre = await _detalle_del_cierre(lead.get("negocio_id"))
+            if detalle_cierre:
+                aviso_asignacion += f"<p style='color:#b91c1c'>{html.escape(detalle_cierre)}</p>"
         else:
             asunto = f"⚠️ Lead Gaso+ SIN ASESOR DISPONIBLE — {nombre}"
             aviso_asignacion = (

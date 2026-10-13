@@ -47,6 +47,7 @@ from agent.tiempo_real import gestor_conexiones
 from agent.debounce import gestor_debounce_respuestas
 from agent.notificaciones import notificar_lead_derivado
 from agent.tools import obtener_estado_horario_atencion
+from agent import calendario_negocio as cal_negocio
 from agent.services.servicio_comercial import servicio_comercial
 from agent.services.servicio_canales import servicio_canales
 from agent.services.servicio_conversacion import servicio_conversacion
@@ -914,7 +915,11 @@ async def _avisar_derivacion_si_falto(telefono: str, respuesta: str, canal: dict
         return
     negocio_id = canal.get("negocio_id") if canal else None
     estado = await obtener_estado_horario_atencion(negocio_id)
-    aviso = servicio_inteligencia.obtener_mensaje_derivacion(estado["dentro_de_horario"])
+    # Calendario de negocio (2026-10-12): fuera de horario el aviso dice la hora exacta de la próxima atención.
+    aviso = servicio_inteligencia.obtener_mensaje_derivacion(
+        estado["dentro_de_horario"], estado.get("proxima_apertura_texto") or None,
+        cal_negocio.describir_motivo(estado.get("motivo"), estado.get("nombre")) or None,
+    )
     resultado = await envios.enviar_texto(proveedor, telefono, aviso, origen="gabi_aviso_derivacion", canal=canal)
     enviado, wamid = resultado
     mensaje_guardado = await servicio_conversacion.guardar_mensaje(

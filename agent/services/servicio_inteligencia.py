@@ -68,8 +68,10 @@ class ServicioInteligencia:
     def obtener_mensaje_escalado_por_confianza(self) -> str:
         return brain.obtener_mensaje_escalado_por_confianza()
 
-    def obtener_mensaje_derivacion(self, dentro_de_horario: bool) -> str:
-        return brain.obtener_mensaje_derivacion(dentro_de_horario)
+    def obtener_mensaje_derivacion(
+        self, dentro_de_horario: bool, proxima_apertura: str | None = None, motivo: str | None = None,
+    ) -> str:
+        return brain.obtener_mensaje_derivacion(dentro_de_horario, proxima_apertura, motivo)
 
     def obtener_mensaje_sin_ia(
         self, tipo: str, nombre: str | None = None, *, horario: str | None = None, dia: str | None = None,

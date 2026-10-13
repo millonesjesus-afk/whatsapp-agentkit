@@ -10,7 +10,7 @@
 | Estado | **Approved** |
 | Fecha de creación | 2026-07-26 |
 | Autor | Claude, a pedido de Jesús Millones |
-| Última actualización | 2026-07-30 |
+| Última actualización | 2026-10-12 (Sidebar, Top Navigation y KPI Card — ADR-0005; ver Control de versiones) |
 
 > Depende de [`MAIEK_AI_DESIGN_SYSTEM.md`](MAIEK_AI_DESIGN_SYSTEM.md) (Design Language v1.1,
 > Approved) — todo componente de este catálogo se construye exclusivamente con los tokens
@@ -28,6 +28,7 @@
 |---|---|---|---|
 | 1.0 | 2026-07-26 | Claude | Primera versión — catálogo completo de ~48 componentes en 8 categorías (Navegación, Botones, Formularios, Información, Datos, Feedback, IA, Conversación), matriz de principios y orden recomendado de implementación. Congelado como referencia oficial. |
 | 1.0.1 | 2026-07-30 | Claude, a pedido de Jesús Millones | Aclaración de una relación ambigua detectada al redactar MAIEK_AI_PRODUCT_PATTERNS.md (Cap. 5, patrón de Copiloto IA): Quick Actions vive únicamente dentro de Chat (una sola instancia real, junto al Text Area de respuesta); AI Action Panel no la contiene como componente hijo, sino que dispara/referencia las mismas acciones. Corregidas las secciones "Relación con otros componentes" de ambas entradas para que sean consistentes entre sí. No es una decisión de fondo nueva, solo una aclaración. |
+| 1.0.2 | 2026-10-12 | Claude, a pedido de Jesús Millones | **Enmendado por ADR-0005** (`adr/0005-shell-sidebar-alto-completo-y-tira-de-accion-en-inicio.md`, decisión del dueño). (1) **Sidebar:** nueva variante «de alto completo» (marca, buscador, campana con contador, navegación y tarjeta de cuenta dentro del propio Sidebar) para escritorio y tablet (desde `sm`, 768 px); forzado a 64 px colapsado entre 768 px y 1023,98 px. (2) **Top Navigation:** deja de ser el shell fijo de todos los tamaños; existe solo en móvil (por debajo de `sm`), de 56 px, con hamburguesa, marca, búsqueda, campana y avatar; «Ayuda» pasa al menú de cuenta en todos los tamaños. (3) **KPI Card:** nueva variante «Celda de acción» (filtro o enlace con verbo, destino y subtexto accionable) para la Tira de acción de Inicio. No se modificó ningún otro componente. |
 
 A partir de esta versión, cualquier componente nuevo o modificación de uno existente debe
 respetar este catálogo y mantener consistencia con el MDL — este documento no se edita en
@@ -80,7 +81,13 @@ contextual, no el Sidebar).
 
 **Variantes.** Expandido (default, `280px` de ancho — ver `space-*` del MDL para el ancho
 exacto según densidad de contenido) y colapsado (solo íconos, `64px`) para pantallas `md` e
-inferiores.
+inferiores. **De alto completo** *(agregada por ADR-0005, 2026-10-12)*: el Sidebar ocupa todo el alto
+de la ventana y aloja, además de la navegación, las funciones transversales que antes vivían en la
+Top Navigation — de arriba hacia abajo: marca (wordmark «Maiek AI» sobre tile blanco, enlace a
+Inicio), buscador (`Cmd/Ctrl+K`) y campana con `Badge` de contador, navegación, y tarjeta de cuenta
+(`Avatar`, nombre y rol) que abre el menú de cuenta (con Ayuda). Es la variante de escritorio y
+tablet (desde `sm`, 768 px). Colapsado: isotipo, búsqueda, campana, navegación y avatar apilados.
+Sin selector de negocio mientras exista un solo negocio.
 
 **Estados.** Ítem: reposo, hover, activo (fondo `primary-50` claro / `primary-900` oscuro +
 texto `primary-600`/`400`), deshabilitado (rol sin permiso, oculto — no deshabilitado
@@ -88,10 +95,15 @@ visible, ver Buenas prácticas). Sección: expandida/colapsada (ver `_subtitulo_
 Gaso+ como precedente de interacción).
 
 **Accesibilidad.** Navegable con teclado en orden lógico de arriba a abajo; el ítem activo se
-anuncia con `aria-current="page"`, no solo con color.
+anuncia con `aria-current="page"`, no solo con color. En la variante de alto completo el orden de
+tabulación es marca → búsqueda → campana → navegación → cuenta, precedido por «Saltar al
+contenido»; el Sidebar es un `aside` con un `nav` «Navegación principal» y, al no haber cabecera de
+página en escritorio, no existe landmark `banner` (ausencia deliberada). Cada control del Sidebar
+colapsado lleva etiqueta accesible y tooltip.
 
 **Responsive.** Por debajo de `sm` se convierte en overlay a pantalla completa activado por un
-botón — nunca se comprime a un ancho intermedio ilegible.
+botón — nunca se comprime a un ancho intermedio ilegible. Entre 768 px y 1023,98 px se fuerza
+colapsado (`64px`), sin importar la preferencia manual, que se retoma desde `md` (1024 px).
 
 **Buenas prácticas.** Un rol sin permiso sobre una sección nunca ve esa sección deshabilitada
 en gris — directamente no aparece (evita comunicar "esto existe pero no es para ti", más
@@ -101,15 +113,19 @@ cercano al principio de calma del Capítulo 0).
 un tercer nivel, esa sección necesita su propia pantalla, no más anidamiento.
 
 **Relación con otros componentes.** Contiene ítems de navegación (no un componente aparte, ver
-Menús) y Badge (contador, ej. conversaciones sin leer).
+Menús) y Badge (contador, ej. conversaciones sin leer). En su variante de alto completo contiene
+además Search Box (modo compacto), Icon Button con Badge (campana) y Avatar (tarjeta de cuenta).
 
 ## Top Navigation
 
 **Objetivo.** Identidad de marca + accesos globales (perfil, búsqueda, notificaciones) —
 siempre visible, nunca compite con el Sidebar por la misma información.
 
-**Cuándo utilizarlo.** Una sola vez por sesión, como shell fijo de toda la aplicación
-autenticada.
+**Cuándo utilizarlo.** *(Enmendado por ADR-0005, 2026-10-12.)* Una sola vez por sesión, como barra
+fija de la aplicación autenticada **en móvil (por debajo de `sm`, 768 px)**. En escritorio y tablet no
+se usa: sus funciones (marca, búsqueda, notificaciones, cuenta) viven en el Sidebar de alto
+completo. Redacción anterior: «como shell fijo de toda la aplicación autenticada», en todos los
+tamaños.
 
 **Cuándo NO utilizarlo.** Nunca duplicar navegación de secciones acá si ya vive en el
 Sidebar — la Top Navigation es para lo transversal (cuenta, notificaciones), no para
@@ -124,11 +140,13 @@ barra en sí no tiene estado propio.
 **Accesibilidad.** El buscador global es alcanzable por atajo de teclado (`Cmd/Ctrl+K`) desde
 cualquier pantalla.
 
-**Responsive.** En mobile, colapsa a: logo + acceso a perfil + menú — el buscador se mueve
-detrás de un ícono.
+**Responsive.** En mobile, mide `56px` y se compone de: hamburguesa (abre el Sidebar como overlay) +
+marca + búsqueda (ícono) + campana con `Badge` + avatar. Desde `sm` no existe *(ADR-0005)*.
 
-**Buenas prácticas.** Máximo 4 elementos interactivos en la barra (buscador, notificaciones,
-ayuda, perfil) — cualquier acceso adicional va dentro del menú de perfil, no suelto en la barra.
+**Buenas prácticas.** Máximo 3 accesos transversales en la barra (buscador, notificaciones, perfil),
+además del control de menú y la marca — cualquier acceso adicional, incluida **Ayuda**, va dentro del
+menú de perfil, no suelto en la barra. *(Redacción anterior: «máximo 4 elementos interactivos:
+buscador, notificaciones, ayuda, perfil».)*
 
 **Errores comunes.** Agregar accesos de producto sueltos (ej. un botón "Nueva campaña") acá en
 vez de en la pantalla correspondiente — la Top Navigation es cuenta, no producto.
@@ -675,7 +693,14 @@ ganados) en la parte superior de un dashboard.
 Tabla o un gráfico, no una serie de KPI Cards.
 
 **Variantes.** Con delta (`+12% vs ayer`, en color de éxito/error según dirección) / sin delta
-(métrica sin comparación temporal, ej. un total acumulado) / con acción ("Ver campañas →").
+(métrica sin comparación temporal, ej. un total acumulado) / con acción ("Ver campañas →") /
+**Celda de acción** *(agregada por ADR-0005, 2026-10-12)*: la KPI Card como control — número, verbo
+como etiqueta (Responder, Llamar, Reasignar…) y subtexto accionable (ej. «2 cierran en menos de
+6 h»); es un **filtro** (`aria-pressed`, el filtro activo se resalta con borde y fondo
+`primary-50`) o, en su forma «enlace tranquilo», un enlace sin relleno y de borde punteado hacia otra
+pantalla. Se usa en la Tira de acción de Inicio (Product Patterns Cap. 3): nunca más de 5 celdas,
+nunca una cifra sin verbo, alto táctil mínimo de 44 px en móvil, celda en 0 atenuada. Una celda de
+acción no lleva delta ni sparkline.
 
 **Estados.** Reposo, hover (solo si tiene acción asociada), loading (Skeleton con la misma
 geometría del número final).
@@ -684,7 +709,9 @@ geometría del número final).
 color — nunca solo verde/rojo para indicar mejora/caída.
 
 **Responsive.** En mobile, grid de 2 columnas en vez de 4-6 en desktop — nunca una sola
-columna que obligue a scroll largo para ver el resumen completo.
+columna que obligue a scroll largo para ver el resumen completo. Excepción *(ADR-0005)*: la Tira de
+acción (Celdas de acción) se desplaza horizontalmente dentro de su propio contenedor, con indicio
+visible de que hay más celdas y sin generar scroll horizontal de la página.
 
 **Buenas prácticas.** El número es siempre `text-display` o `text-title-lg` con
 `tabular-nums` — el número es el protagonista de la Card, todo lo demás es contexto.

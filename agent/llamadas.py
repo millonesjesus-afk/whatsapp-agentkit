@@ -398,7 +398,9 @@ async def leer_config(negocio_id: str) -> Config:
     )
 
 
-async def aceptar_responsabilidad(negocio_id: str, username: str, version_texto: str, ahora: datetime | None = None) -> dict:
+async def aceptar_responsabilidad(
+    negocio_id: str, username: str, version_texto: str, ahora: datetime | None = None, actor_rol: str | None = None,
+) -> dict:
     """Registra la aceptación del texto de responsabilidad (admin). `version_texto` debe ser la versión ACTUAL: así lo que
     se acepta es exactamente lo que se mostró. Queda en la configuración y en el registro de auditoría (quién, cuándo y
     el texto completo)."""
@@ -409,12 +411,14 @@ async def aceptar_responsabilidad(negocio_id: str, username: str, version_texto:
     await guardar_configuracion(CLAVE_RESPONSABILIDAD, json.dumps(registro, ensure_ascii=False, separators=(",", ":")), negocio_id=negocio_id)
     await registrar_auditoria(
         "llamadas_responsabilidad_aceptada", actor=username, negocio_id=negocio_id, entidad_tipo="configuracion",
-        entidad_id=CLAVE_RESPONSABILIDAD, payload={**registro, "texto": TEXTO_RESPONSABILIDAD},
+        entidad_id=CLAVE_RESPONSABILIDAD, payload={**registro, "texto": TEXTO_RESPONSABILIDAD, "actor_rol": actor_rol},
     )
     return await obtener_aceptacion(negocio_id)
 
 
-async def revocar_responsabilidad(negocio_id: str, username: str, ahora: datetime | None = None) -> dict:
+async def revocar_responsabilidad(
+    negocio_id: str, username: str, ahora: datetime | None = None, actor_rol: str | None = None,
+) -> dict:
     """Revoca la aceptación: el modo vuelve a `sombra` y las tareas abiertas de modo activo se cancelan al instante."""
     ahora = ahora or datetime.utcnow()
     anterior = _parsear_aceptacion(await obtener_configuracion(CLAVE_RESPONSABILIDAD, "", negocio_id=negocio_id))
@@ -426,7 +430,7 @@ async def revocar_responsabilidad(negocio_id: str, username: str, ahora: datetim
     await guardar_configuracion(CLAVE_MODO, MODO_SOMBRA, negocio_id=negocio_id)
     await registrar_auditoria(
         "llamadas_responsabilidad_revocada", actor=username, negocio_id=negocio_id, entidad_tipo="configuracion",
-        entidad_id=CLAVE_RESPONSABILIDAD, payload={**registro, "aceptada_antes_por": anterior["usuario"]},
+        entidad_id=CLAVE_RESPONSABILIDAD, payload={**registro, "aceptada_antes_por": anterior["usuario"], "actor_rol": actor_rol},
     )
     await reconciliar_compuerta(negocio_id, ahora)
     return await obtener_aceptacion(negocio_id)
@@ -2157,16 +2161,16 @@ def validar_cambios(cuerpo: dict) -> dict[str, str]:
     return cambios
 
 
-async def guardar_cambios(negocio_id: str, username: str, cuerpo: dict) -> dict:
+async def guardar_cambios(negocio_id: str, username: str, cuerpo: dict, actor_rol: str | None = None) -> dict:
     """Aplica un POST de configuración ya recibido. Las claves se guardan juntas; la aceptación/revocación va por su
     propio camino (con auditoría). Tras cambiar el modo se reconcilian las tareas abiertas."""
     cambios = validar_cambios(cuerpo)
     for clave, valor in cambios.items():
         await guardar_configuracion(clave, valor, negocio_id=negocio_id)
     if cuerpo.get("aceptar_responsabilidad") is True:
-        await aceptar_responsabilidad(negocio_id, username, cuerpo["version_texto"])
+        await aceptar_responsabilidad(negocio_id, username, cuerpo["version_texto"], actor_rol=actor_rol)
     if cuerpo.get("revocar_responsabilidad") is True:
-        await revocar_responsabilidad(negocio_id, username)
+        await revocar_responsabilidad(negocio_id, username, actor_rol=actor_rol)
     await reconciliar_compuerta(negocio_id)
     if cambios:
         logger.info("Para llamar: configuración actualizada por %s: %s", username, sorted(cambios))

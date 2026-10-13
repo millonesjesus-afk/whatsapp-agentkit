@@ -12,11 +12,12 @@ import re
 import glob
 import itertools
 import logging
-from datetime import datetime, time, timedelta
+from datetime import datetime, time, timedelta, timezone
 from zoneinfo import ZoneInfo
 
+from agent import calendario_negocio as cal_negocio
 from agent.memory import (
-    listar_productos_activos, obtener_producto_por_codigo_hana, listar_horarios_atencion,
+    listar_productos_activos, obtener_producto_por_codigo_hana, obtener_calendario_negocio,
     obtener_configuracion,
 )
 
@@ -494,80 +495,70 @@ def buscar_en_knowledge(mensaje: str, negocio_codigo: str | None, limite: int = 
     return "\n---\n".join(secciones)
 
 
-# Gate 4.2 (Decisión 5, Gate 4.1) — rango que corría hardcodeado acá mismo
-# antes de este Gate, sin relación con negocio_id. Se conserva SOLO como
-# fallback para un negocio_id que todavía no tiene HorarioAtencion
-# backfilleado (nunca debería pasar para un Negocio real, ver migración de
-# backfill) — nunca como la fuente de verdad.
-_FALLBACK_DIAS_HABILITADOS = range(0, 6)  # lunes a sábado
-_FALLBACK_HORA_APERTURA = time(8, 0)
-_FALLBACK_HORA_CIERRE = time(19, 0)
+# ── Horario de atención y calendario de negocio ──────────────────────────────────────────────────────────
+#
+# Gate 4.2 (Decisión 5, Gate 4.1) movió el horario de un rango hardcodeado a `HorarioAtencion` por negocio. Desde
+# 2026-10-12 (calendario de negocio, Fase 1) TODA la lógica de «¿atiende ahora?», «¿cuándo abre?» y «¿cuánto tiempo
+# hábil pasó?» vive en UN solo lugar, el módulo puro `agent/calendario_negocio.py`, y conoce además los feriados y días
+# especiales (`DiaEspecial`). Las funciones de acá conservan su firma pública (y aceptan un `ahora` opcional para
+# poder probarlas con una hora fija); el fallback sin filas (lunes a sábado 8:00-19:00) también vive en ese módulo.
+
+def _a_utc_naive(ahora: datetime | None) -> datetime:
+    """`ahora` como UTC naive (la convención del repo). Sin valor: la hora real. Un datetime con zona (p. ej. el de
+    Lima) se convierte; uno naive se toma como UTC."""
+    ahora = ahora or datetime.now(TZ_LIMA)
+    if ahora.tzinfo is not None:
+        return ahora.astimezone(timezone.utc).replace(tzinfo=None)
+    return ahora
 
 
-async def obtener_estado_horario_atencion(negocio_id: str | None) -> dict:
+async def obtener_estado_horario_atencion(negocio_id: str | None, ahora: datetime | None = None, fresco: bool = False) -> dict:
     """
     Calcula si AHORA MISMO (hora real de Lima) se está dentro del horario de
-    atención de los asesores humanos DE ESTE NEGOCIO. Un modelo de lenguaje
-    no tiene reloj propio — sin esto, no hay forma de que Gabi sepa si un
-    asesor está disponible en este momento o no.
+    atención de los asesores humanos DE ESTE NEGOCIO, contando feriados y días
+    especiales. Un modelo de lenguaje no tiene reloj propio — sin esto, no hay
+    forma de que Gabi sepa si un asesor está disponible en este momento o no.
 
-    Gate 4.2 — antes de este Gate, el rango estaba hardcodeado acá mismo
-    (lunes a sábado, 8:00-19:00) sin relación con `negocio_id`: un segundo
-    Negocio con otro horario recibía la respuesta de Cálidda. Ahora resuelve
-    `HorarioAtencion` por `negocio_id`; si el Negocio no tiene fila para el
-    día de hoy (no backfilleado todavía), cae al mismo rango que estaba
-    hardcodeado — comportamiento sin cambios para quien no fue migrado.
+    Devuelve `dentro_de_horario` y `fecha_hora_lima` (como siempre) más, ADITIVOS:
+    `motivo` (None con el negocio abierto; fuera_de_horario | feriado | no_laborable
+    | puente | dia_sin_atencion | cierre_propio), `nombre` (el del día especial de
+    hoy, si lo hay), `proxima_apertura` (UTC naive o None) y
+    `proxima_apertura_texto` ("mañana a las 8:00 a. m."). `ahora` (aware o UTC
+    naive) solo existe para probarlo con una hora fija; `fresco=True` salta la
+    caché de 60 s de los días especiales (lo usan los Cron).
     """
-    ahora = datetime.now(TZ_LIMA)
-    dia_semana = ahora.weekday()  # 0=lunes … 6=domingo
-    hora_actual = ahora.time()
-
-    horario_hoy = None
-    if negocio_id is not None:
-        horarios = await listar_horarios_atencion(negocio_id)
-        horario_hoy = next((h for h in horarios if h["dia_semana"] == dia_semana), None)
-
-    if horario_hoy is not None:
-        dentro = (
-            horario_hoy["habilitado"]
-            and horario_hoy["hora_apertura"] is not None
-            and horario_hoy["hora_cierre"] is not None
-            and time.fromisoformat(horario_hoy["hora_apertura"]) <= hora_actual < time.fromisoformat(horario_hoy["hora_cierre"])
-        )
-    else:
-        dentro = dia_semana in _FALLBACK_DIAS_HABILITADOS and _FALLBACK_HORA_APERTURA <= hora_actual < _FALLBACK_HORA_CIERRE
-
+    cal = await obtener_calendario_negocio(negocio_id, fresco=fresco)
+    ahora_utc = _a_utc_naive(ahora)
+    est = cal_negocio.estado(ahora_utc, cal)
+    lima = cal_negocio.a_lima(ahora_utc)
     return {
-        "dentro_de_horario": dentro,
-        "fecha_hora_lima": f"{DIAS_ES[dia_semana]} {ahora.strftime('%d/%m/%Y')}, {ahora.strftime('%H:%M')} (hora de Lima)",
+        "dentro_de_horario": est["abierto"],
+        "fecha_hora_lima": f"{DIAS_ES[lima.weekday()]} {lima.strftime('%d/%m/%Y')}, {lima.strftime('%H:%M')} (hora de Lima)",
+        "motivo": est["motivo"], "nombre": est["nombre"], "proxima_apertura": est["proxima_apertura"],
+        "proxima_apertura_texto": cal_negocio.describir_proxima_apertura(est["proxima_apertura"], ahora_utc),
     }
 
 
 def _hora_legible(hhmm: str) -> str:
     """"08:00" -> "8:00 a. m."; "19:00" -> "7:00 p. m." — como se escribe en Perú."""
-    hora = time.fromisoformat(hhmm)
-    sufijo = "a. m." if hora.hour < 12 else "p. m."
-    return f"{hora.hour % 12 or 12}:{hora.minute:02d} {sufijo}"
+    return cal_negocio.hora_legible(hhmm)
 
 
-async def _rangos_de_atencion_por_dia(negocio_id: str | None) -> dict[int, tuple[str, str] | None]:
-    """Para cada día de la semana (0=lunes), `(apertura, cierre)` o None si ese día no se
-    atiende. Mismo criterio que `obtener_estado_horario_atencion`: la fila de
-    `HorarioAtencion` del negocio manda; si el negocio no tiene fila para un día, se usa
-    el horario por defecto de siempre (lunes a sábado, 8:00 a 19:00)."""
-    filas = {}
-    if negocio_id is not None:
-        filas = {h["dia_semana"]: h for h in await listar_horarios_atencion(negocio_id)}
-    rangos: dict[int, tuple[str, str] | None] = {}
-    for dia in range(7):
-        h = filas.get(dia)
-        if h is not None:
-            abierto = h["habilitado"] and h["hora_apertura"] is not None and h["hora_cierre"] is not None
-            rangos[dia] = (h["hora_apertura"], h["hora_cierre"]) if abierto else None
-        elif dia in _FALLBACK_DIAS_HABILITADOS:
-            rangos[dia] = (_FALLBACK_HORA_APERTURA.strftime("%H:%M"), _FALLBACK_HORA_CIERRE.strftime("%H:%M"))
-        else:
-            rangos[dia] = None
+class RangosDeAtencion(dict):
+    """`{dia 0=lunes: (apertura, cierre) | None}` — el horario SEMANAL de siempre — con el `Calendario` completo
+    (feriados y días especiales incluidos) adjunto en `.calendario`. Las funciones de `atencion_atrasada` que reciben
+    `rangos` usan ese calendario si está, así los llamadores viejos (p. ej. `llamadas.py`) conocen los feriados sin
+    cambiar su firma."""
+    calendario: "cal_negocio.Calendario | None" = None
+
+
+async def _rangos_de_atencion_por_dia(negocio_id: str | None, fresco: bool = False) -> RangosDeAtencion:
+    """Para cada día de la semana (0=lunes), `(apertura, cierre)` o None si ese día no se atiende — el horario
+    semanal; el `HorarioAtencion` del negocio manda y un día sin fila usa el de siempre (lunes a sábado, 8:00 a
+    19:00). El calendario completo (con excepciones) va en `.calendario`."""
+    cal = await obtener_calendario_negocio(negocio_id, fresco=fresco)
+    rangos = RangosDeAtencion(cal_negocio.rangos_de_semana(cal))
+    rangos.calendario = cal
     return rangos
 
 
@@ -595,27 +586,32 @@ async def describir_horario_atencion(negocio_id: str | None) -> str:
 
 async def obtener_proxima_apertura(negocio_id: str | None, ahora: datetime | None = None) -> dict | None:
     """La próxima vez que este negocio abre (hora de Lima), según los `HorarioAtencion`
-    reales con el mismo fallback que `obtener_estado_horario_atencion`. Siempre es una
-    apertura FUTURA: con el negocio abierto ahora mismo, es la del siguiente día de
-    atención. `ahora` solo existe para poder probarlo con una hora fija.
+    reales (con el mismo fallback) Y los feriados/días especiales: un cierre largo
+    (hasta 3 semanas) se resuelve igual. Siempre es una apertura FUTURA: con el negocio
+    abierto ahora mismo, es la del siguiente rango. `ahora` solo existe para poder
+    probarlo con una hora fija.
 
     Devuelve `{"inicio": datetime (Lima), "dia": "lunes", "hora": "8:00 a. m.",
-    "dias_de_diferencia": int, "hoy_es_dia_de_atencion": bool}`, o None si el negocio no
-    atiende ningún día."""
-    ahora = ahora or datetime.now(TZ_LIMA)
-    rangos = await _rangos_de_atencion_por_dia(negocio_id)
-    for adelante in range(8):
-        fecha = (ahora + timedelta(days=adelante)).date()
-        rango = rangos[fecha.weekday()]
-        if rango is None:
-            continue
-        inicio = datetime.combine(fecha, time.fromisoformat(rango[0]), tzinfo=ahora.tzinfo or TZ_LIMA)
-        if inicio > ahora:
-            return {
-                "inicio": inicio, "dia": DIAS_ES[fecha.weekday()], "hora": _hora_legible(rango[0]),
-                "dias_de_diferencia": adelante, "hoy_es_dia_de_atencion": rangos[ahora.weekday()] is not None,
-            }
-    return None
+    "dias_de_diferencia": int, "hoy_es_dia_de_atencion": bool}` más, ADITIVOS, `fecha`
+    (date de Lima), `texto` ("el viernes 9 a las 8:00 a. m.") y `motivo_hoy`/`nombre_hoy`;
+    o None si no hay ninguna apertura en las próximas 3 semanas.
+    `hoy_es_dia_de_atencion` es False si HOY está cerrado todo el día (domingo, feriado,
+    día no laborable marcado como cerrado…)."""
+    cal = await obtener_calendario_negocio(negocio_id)
+    ahora_utc = _a_utc_naive(ahora)
+    apertura_utc = cal_negocio.proxima_apertura(ahora_utc, cal)
+    if apertura_utc is None:
+        return None
+    apertura = cal_negocio.a_lima(apertura_utc)
+    hoy = cal_negocio.a_lima(ahora_utc).date()
+    est = cal_negocio.estado(ahora_utc, cal)
+    return {
+        "inicio": apertura.replace(tzinfo=TZ_LIMA), "dia": DIAS_ES[apertura.weekday()],
+        "hora": _hora_legible(apertura.time()), "dias_de_diferencia": (apertura.date() - hoy).days,
+        "hoy_es_dia_de_atencion": not cal_negocio.cerrado_todo_el_dia(hoy, cal),
+        "fecha": apertura.date(), "texto": cal_negocio.describir_proxima_apertura(apertura_utc, ahora_utc),
+        "motivo_hoy": est["motivo"], "nombre_hoy": est["nombre"],
+    }
 
 
 async def obtener_contexto_relevante(

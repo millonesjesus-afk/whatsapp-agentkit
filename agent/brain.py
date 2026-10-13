@@ -32,6 +32,7 @@ from agent.tools import (
 from agent.memory import obtener_campana_por_nombre, obtener_configuracion, obtener_identidad_agente, obtener_negocio
 from agent.campanas import resolver_promo, resolver_familia_promo, obtener_codigos_promocionales_activos
 from agent import circuito_ia, formato_whatsapp
+from agent import calendario_negocio as cal_negocio
 
 load_dotenv()
 logger = logging.getLogger("agentkit")
@@ -362,15 +363,32 @@ def obtener_mensaje_escalado_por_confianza() -> str:
     )
 
 
-def obtener_mensaje_derivacion(dentro_de_horario: bool) -> str:
+def obtener_mensaje_derivacion(
+    dentro_de_horario: bool, proxima_apertura: str | None = None, motivo: str | None = None,
+) -> str:
     """Aviso al cliente cuando el sistema lo derivó a un asesor pero la
     respuesta de Gabi no lo dijo (red de seguridad determinista de
-    agent/main.py — el prompt lo pide, pero un LLM no lo garantiza)."""
+    agent/main.py — el prompt lo pide, pero un LLM no lo garantiza).
+
+    Calendario de negocio (2026-10-12): fuera de horario, si se conoce la próxima atención
+    (`proxima_apertura`, ej. "mañana a las 8:00 a. m." o "el viernes 9 a las 8:00 a. m.") el aviso dice la hora
+    exacta en que se reinicia el horario, y `motivo` (ej. "hoy es feriado: Combate de Angamos") la razón. No promete
+    plazos: no dice cuánto tardará el asesor, solo cuándo vuelve el equipo. Si el texto está configurado en
+    prompts.yaml (`derivacion_fuera_horario_message`) manda esa configuración, que puede usar `{proxima_apertura}`."""
     config = cargar_config_prompts()
     if dentro_de_horario:
         return config.get(
             "derivacion_dentro_horario_message",
             "Te estoy derivando con un asesor comercial 😊 En breve continuará la conversación contigo.",
+        )
+    if proxima_apertura:
+        configurado = config.get("derivacion_fuera_horario_message")
+        if configurado:
+            return configurado.replace("{proxima_apertura}", proxima_apertura)
+        razon = f" ({motivo})" if motivo else ""
+        return (
+            f"Te estoy derivando con un asesor comercial 😊 Ahora estamos fuera del horario de atención{razon}; "
+            f"nuestro equipo vuelve a atender {proxima_apertura} y apenas se reinicie te contactará."
         )
     return config.get(
         "derivacion_fuera_horario_message",
@@ -440,7 +458,16 @@ async def _armar_bloques_contexto(
     # relación con el Negocio del canal por el que llegó el mensaje).
     estado_horario = await obtener_estado_horario_atencion(negocio_id)
     disponibilidad = "DENTRO del horario de atención" if estado_horario["dentro_de_horario"] else "FUERA del horario de atención"
-    bloques.append(f"Ahora mismo es {estado_horario['fecha_hora_lima']} — estás {disponibilidad} de los asesores humanos.")
+    bloque_horario = f"Ahora mismo es {estado_horario['fecha_hora_lima']} — estás {disponibilidad} de los asesores humanos."
+    if not estado_horario["dentro_de_horario"]:
+        # Calendario de negocio (2026-10-12): con el negocio cerrado Gabi también sabe POR QUÉ (feriado, día no laborable…)
+        # y CUÁNDO vuelven los asesores, para no decirle al cliente «mañana» un día de feriado.
+        motivo = cal_negocio.describir_motivo(estado_horario.get("motivo"), estado_horario.get("nombre"))
+        if motivo:
+            bloque_horario += f" {motivo[0].upper()}{motivo[1:]}."
+        if estado_horario.get("proxima_apertura_texto"):
+            bloque_horario += f" Los asesores humanos vuelven a atender {estado_horario['proxima_apertura_texto']}."
+    bloques.append(bloque_horario)
 
     codigos_propios = set()
     if lead:

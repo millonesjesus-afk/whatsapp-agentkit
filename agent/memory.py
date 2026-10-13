@@ -18,16 +18,18 @@ from urllib.parse import urlparse
 # `time` (el módulo, ya importado arriba para time.perf_counter) choca de
 # nombre con datetime.time (la clase de hora del día) — se importa aparte
 # con alias, mismo motivo que cualquier otro alias de este archivo.
-from datetime import datetime, timedelta, time as hora_del_dia
+from datetime import date, datetime, timedelta, time as hora_del_dia
 from cryptography.fernet import Fernet
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, aliased
 from sqlalchemy import (
-    String, Text, DateTime, select, Integer, Boolean, Float, func, case, delete, update, JSON,
+    String, Text, DateTime, Date, select, Integer, Boolean, Float, func, case, delete, update, JSON,
     ForeignKey, Index, text, and_ as sa_and, or_ as sa_or, exists as sa_exists,
 )
 from sqlalchemy.exc import IntegrityError
 from dotenv import load_dotenv
+
+from agent import calendario_negocio as cal_negocio
 
 load_dotenv()
 logger = logging.getLogger("agentkit")
@@ -2888,6 +2890,45 @@ class HorarioAtencion(Base):
     )
 
 
+class DiaEspecial(Base):
+    """Excepción de fecha del horario de atención, POR NEGOCIO (2026-10-12, calendario de negocio Fase 1; lógica pura
+    en `agent/calendario_negocio.py`). Una fila por día de Lima: feriado nacional, día no laborable, puente, día de
+    atención especial (horario reducido o extendido) o cierre propio del negocio. Manda sobre `HorarioAtencion`.
+
+    `atiende=False` = cerrado todo el día; `atiende=True` con `hora_apertura`/`hora_cierre` = ese horario especial.
+    Borrado LÓGICO (`eliminado_en`): el índice único parcial permite una sola fila VIVA por (negocio, fecha) y
+    conserva las eliminadas (así la siembra respeta lo que el administrador quitó). `origen`: precargado_pe (siembra
+    de feriados nacionales) | manual."""
+    __tablename__ = "dias_especiales"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_generar_uuid)
+    negocio_id: Mapped[str] = mapped_column(String(36), ForeignKey("negocios.id"), nullable=False, index=True)
+    fecha: Mapped[date] = mapped_column(Date, nullable=False)       # día de Lima
+    tipo: Mapped[str] = mapped_column(String(20), nullable=False)    # feriado | no_laborable | puente | atencion_especial | cierre_propio
+    nombre: Mapped[str] = mapped_column(String(100), nullable=False)
+    atiende: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    hora_apertura: Mapped[str | None] = mapped_column(String(5), nullable=True)   # "HH:MM"
+    hora_cierre: Mapped[str | None] = mapped_column(String(5), nullable=True)
+    origen: Mapped[str] = mapped_column(String(20), nullable=False, default="manual")
+    fuente_url: Mapped[str | None] = mapped_column(String(300), nullable=True)
+    creado: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    creado_por: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    actualizado: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    eliminado_en: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    eliminado_por: Mapped[str | None] = mapped_column(String(50), nullable=True)
+
+    __table_args__ = (
+        Index("ix_dias_especiales_negocio_fecha", "negocio_id", "fecha"),
+        # A lo sumo UNA fila viva por negocio y fecha; las eliminadas no cuentan (mismo patrón que
+        # ix_conversation_una_activa_por_contact). Funciona igual en SQLite y en Postgres.
+        Index(
+            "ix_dia_especial_una_viva_por_fecha", "negocio_id", "fecha", unique=True,
+            sqlite_where=text("eliminado_en IS NULL"),
+            postgresql_where=text("eliminado_en IS NULL"),
+        ),
+    )
+
+
 class Usuario(Base):
     """Cuenta de acceso al panel interno (/dashboard). Roles: admin, supervisor, asesor.
 
@@ -3601,6 +3642,525 @@ async def guardar_horario_atencion(
         return _horario_a_dict(horario)
 
 
+# ── Calendario de negocio: días especiales (2026-10-12, Fase 1) ──────────────────────────────────────────
+#
+# La lógica de fechas vive en `agent/calendario_negocio.py` (pura). Acá: el modelo `DiaEspecial`, el cargador con
+# caché de 60 s, el CRUD con auditoría y la siembra de los feriados nacionales de Perú (`agent/calendario_peru.py`).
+
+CLAVE_CALENDARIO_HABIL_DESDE = "calendario_habil_desde"   # "AAAA-MM-DD" (día de Lima); ausente = métricas hábiles apagadas
+ORIGEN_DIA_PRECARGADO_PE = "precargado_pe"
+ORIGEN_DIA_MANUAL = "manual"
+CALENDARIO_CACHE_SEGUNDOS = 60
+DIAS_EDICION_RETROACTIVA = 7          # un día especial pasado solo se puede tocar hasta 7 días atrás, y con motivo
+DIAS_AVISO_COBERTURA = 60             # aviso cuando faltan menos de estos días de calendario cargado
+# Qué hace cada tipo cuando el admin no dice `atiende`: el feriado nacional y el cierre propio cierran; el día no
+# laborable y el puente son VOLUNTARIOS para el sector privado, así que por defecto el negocio sigue atendiendo
+# (el admin marca `atiende=false` solo si decide cerrar); la atención especial siempre atiende.
+ATIENDE_POR_DEFECTO = {
+    cal_negocio.TIPO_FERIADO: False, cal_negocio.TIPO_NO_LABORABLE: True, cal_negocio.TIPO_PUENTE: True,
+    cal_negocio.TIPO_ATENCION_ESPECIAL: True, cal_negocio.TIPO_CIERRE_PROPIO: False,
+}
+
+# {negocio_id: (instante monotónico en que se leyó, {fecha: DiaEspecial puro})}
+_cache_excepciones: dict[str, tuple[float, dict]] = {}
+
+
+def _reloj_cache_calendario() -> float:
+    return time.monotonic()
+
+
+def invalidar_cache_calendario(negocio_id: str | None = None) -> None:
+    """Descarta la caché de excepciones (de un negocio, o de todos). Se llama al guardar para que el cambio rija al
+    instante en este proceso; los demás procesos (Cron, otras réplicas) lo ven en como máximo 60 s."""
+    if negocio_id is None:
+        _cache_excepciones.clear()
+    else:
+        _cache_excepciones.pop(negocio_id, None)
+
+
+def hoy_en_lima() -> date:
+    return (datetime.utcnow() - timedelta(hours=5)).date()
+
+
+def _dia_especial_a_dict(d: "DiaEspecial") -> dict:
+    return {
+        "id": d.id, "negocio_id": d.negocio_id, "fecha": d.fecha, "tipo": d.tipo, "nombre": d.nombre,
+        "atiende": bool(d.atiende), "hora_apertura": d.hora_apertura, "hora_cierre": d.hora_cierre,
+        "origen": d.origen, "fuente_url": d.fuente_url, "creado": d.creado, "creado_por": d.creado_por,
+        "actualizado": d.actualizado, "eliminado_en": d.eliminado_en,
+    }
+
+
+def _resumen_para_auditoria(d: dict) -> dict:
+    return {
+        "fecha": d["fecha"].isoformat(), "tipo": d["tipo"], "nombre": d["nombre"], "atiende": d["atiende"],
+        "hora_apertura": d["hora_apertura"], "hora_cierre": d["hora_cierre"],
+    }
+
+
+async def _excepciones_del_negocio(negocio_id: str, fresco: bool = False) -> dict:
+    """{fecha: DiaEspecial puro} de las filas VIVAS del negocio, con caché de 60 s (salvo `fresco=True`, que es lo
+    que usan los Cron). Si la tabla no se pudo leer (p. ej. la migración todavía no corrió) devuelve {} y deja un
+    aviso en el log: el sistema sigue con el horario semanal de siempre en vez de caerse."""
+    ahora = _reloj_cache_calendario()
+    if not fresco:
+        entrada = _cache_excepciones.get(negocio_id)
+        if entrada is not None and ahora - entrada[0] < CALENDARIO_CACHE_SEGUNDOS:
+            return entrada[1]
+    try:
+        async with async_session() as session:
+            filas = (await session.execute(
+                select(DiaEspecial).where(DiaEspecial.negocio_id == negocio_id, DiaEspecial.eliminado_en.is_(None))
+            )).scalars().all()
+        excepciones = {
+            f.fecha: cal_negocio.DiaEspecial(
+                fecha=f.fecha, tipo=f.tipo, nombre=f.nombre, atiende=bool(f.atiende),
+                hora_apertura=f.hora_apertura, hora_cierre=f.hora_cierre,
+            )
+            for f in filas
+        }
+    except Exception:
+        logger.warning("Calendario: no se pudieron leer los días especiales — rige solo el horario semanal", exc_info=True)
+        return {}
+    _cache_excepciones[negocio_id] = (ahora, excepciones)
+    return excepciones
+
+
+async def obtener_calendario_negocio(negocio_id: str | None, fresco: bool = False) -> "cal_negocio.Calendario":
+    """El calendario completo del negocio: horario semanal (`HorarioAtencion`, con el horario de siempre para un día sin
+    fila: lunes a sábado 8:00-19:00) más sus días especiales. El horario semanal se lee siempre fresco; los días
+    especiales vienen de una caché de 60 s que se invalida al guardar. `fresco=True` salta la caché (Cron).
+    `negocio_id=None` → el horario por defecto sin excepciones (comportamiento histórico)."""
+    if negocio_id is None:
+        return cal_negocio.calendario_desde_filas([])
+    filas = await listar_horarios_atencion(negocio_id)
+    return cal_negocio.calendario_desde_filas(filas, await _excepciones_del_negocio(negocio_id, fresco))
+
+
+async def obtener_calendario_habil_desde(negocio_id: str | None) -> date | None:
+    """Fecha (día de Lima) desde la que rigen los umbrales HÁBILES de atención atrasada/urgente. None = no fijada:
+    los consumidores usan los valores de siempre. Un valor inválido se trata como no fijado."""
+    if negocio_id is None:
+        return None
+    valor = await obtener_configuracion(CLAVE_CALENDARIO_HABIL_DESDE, "", negocio_id=negocio_id)
+    try:
+        return date.fromisoformat(valor.strip()) if valor and valor.strip() else None
+    except ValueError:
+        return None
+
+
+async def fijar_calendario_habil_desde(
+    negocio_id: str, fecha: date | None, autor: str | None = None, autor_rol: str | None = None,
+) -> dict:
+    """Fija (o borra con None) la fecha de vigencia de las métricas hábiles. Deja la fila de auditoría en la misma
+    transacción. Devuelve {"antes": "AAAA-MM-DD"|None, "despues": "AAAA-MM-DD"|None}."""
+    nuevo = fecha.isoformat() if fecha else ""
+    async with async_session() as session:
+        existente = (await session.execute(
+            select(Configuracion).where(Configuracion.clave == CLAVE_CALENDARIO_HABIL_DESDE, Configuracion.negocio_id == negocio_id)
+        )).scalar_one_or_none()
+        antes = existente.valor if existente is not None else ""
+        if existente is None:
+            session.add(Configuracion(clave=CLAVE_CALENDARIO_HABIL_DESDE, negocio_id=negocio_id, valor=nuevo))
+        else:
+            existente.valor = nuevo
+        if antes != nuevo:
+            session.add(RegistroAuditoria(
+                accion="calendario_habil_desde", actor=autor, negocio_id=negocio_id, entidad_tipo="configuracion",
+                payload={"antes": antes or None, "despues": nuevo or None, "actor_rol": autor_rol},
+            ))
+        await session.commit()
+    return {"antes": antes or None, "despues": nuevo or None}
+
+
+_HHMM = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
+
+
+def _fecha_dia_especial(valor) -> date:
+    if isinstance(valor, datetime):
+        raise ValueError("La fecha debe ser un día (AAAA-MM-DD), sin hora.")
+    if isinstance(valor, date):
+        fecha = valor
+    else:
+        try:
+            fecha = date.fromisoformat(str(valor or "").strip())
+        except ValueError:
+            raise ValueError("La fecha debe tener el formato AAAA-MM-DD y ser un día válido del calendario.")
+    if not 2020 <= fecha.year <= 2100:
+        raise ValueError("La fecha debe estar entre los años 2020 y 2100.")
+    return fecha
+
+
+def validar_dia_especial(
+    fecha, tipo, nombre, atiende=None, hora_apertura=None, hora_cierre=None,
+) -> dict:
+    """Valida y normaliza un día especial. Devuelve {fecha, tipo, nombre, atiende, hora_apertura, hora_cierre}; lanza
+    ValueError con el motivo en español. `atiende=None` usa el valor por defecto del tipo (ver ATIENDE_POR_DEFECTO)."""
+    fecha = _fecha_dia_especial(fecha)
+    if tipo not in cal_negocio.TIPOS_DIA_ESPECIAL:
+        raise ValueError(f"El tipo debe ser uno de: {', '.join(cal_negocio.TIPOS_DIA_ESPECIAL)}.")
+    if not isinstance(nombre, str) or not nombre.strip():
+        raise ValueError("El nombre del día es obligatorio (por ejemplo: «Feriado por elecciones»).")
+    nombre = " ".join(nombre.split())
+    if len(nombre) > 100:
+        raise ValueError("El nombre del día no puede pasar de 100 caracteres.")
+    if atiende is None:
+        atiende = ATIENDE_POR_DEFECTO[tipo]
+    if not isinstance(atiende, bool):
+        raise ValueError("`atiende` debe ser true o false.")
+    apertura = (hora_apertura or "").strip() if isinstance(hora_apertura, str) else hora_apertura
+    cierre = (hora_cierre or "").strip() if isinstance(hora_cierre, str) else hora_cierre
+    if (apertura or cierre) and not atiende:
+        apertura = cierre = None    # un día cerrado no lleva horario: se ignora en vez de rechazar
+    if atiende and (apertura or cierre):
+        if not apertura or not cierre:
+            raise ValueError("Indica la hora de apertura y la de cierre, o ninguna de las dos.")
+        for etiqueta, valor in (("La hora de apertura", apertura), ("La hora de cierre", cierre)):
+            if not isinstance(valor, str) or not _HHMM.match(valor):
+                raise ValueError(f"{etiqueta} debe tener el formato HH:MM (por ejemplo 08:00).")
+        if apertura >= cierre:
+            raise ValueError("La hora de apertura debe ser anterior a la de cierre.")
+    if tipo == cal_negocio.TIPO_ATENCION_ESPECIAL and not (atiende and apertura and cierre):
+        raise ValueError("Un día de atención especial necesita su hora de apertura y de cierre.")
+    return {
+        "fecha": fecha, "tipo": tipo, "nombre": nombre, "atiende": atiende,
+        "hora_apertura": apertura or None, "hora_cierre": cierre or None,
+    }
+
+
+def _exigir_edicion_permitida(fecha: date, motivo, hoy: date) -> str | None:
+    """Reglas de edición retroactiva: hasta 7 días atrás y con motivo obligatorio (un día pasado cambia cómo se
+    midieron las demoras). Hoy y el futuro no piden motivo. Devuelve el motivo limpio (o None)."""
+    motivo = " ".join(motivo.split()) if isinstance(motivo, str) else None
+    if fecha < hoy:
+        if (hoy - fecha).days > DIAS_EDICION_RETROACTIVA:
+            raise ValueError(f"No se puede modificar un día de hace más de {DIAS_EDICION_RETROACTIVA} días.")
+        if not motivo:
+            raise ValueError("Para modificar un día que ya pasó indica el motivo del cambio.")
+    if motivo and len(motivo) > 300:
+        raise ValueError("El motivo no puede pasar de 300 caracteres.")
+    return motivo or None
+
+
+async def listar_dias_especiales(
+    negocio_id: str, desde: date | None = None, hasta: date | None = None, incluir_eliminados: bool = False,
+) -> list[dict]:
+    """Los días especiales de ESTE negocio entre `desde` y `hasta` (ambos inclusive), por fecha."""
+    async with async_session() as session:
+        query = select(DiaEspecial).where(DiaEspecial.negocio_id == negocio_id)
+        if not incluir_eliminados:
+            query = query.where(DiaEspecial.eliminado_en.is_(None))
+        if desde is not None:
+            query = query.where(DiaEspecial.fecha >= desde)
+        if hasta is not None:
+            query = query.where(DiaEspecial.fecha <= hasta)
+        filas = (await session.execute(query.order_by(DiaEspecial.fecha.asc(), DiaEspecial.creado.asc()))).scalars().all()
+        return [_dia_especial_a_dict(f) for f in filas]
+
+
+async def guardar_dia_especial(
+    negocio_id: str, fecha, tipo, nombre, atiende=None, hora_apertura=None, hora_cierre=None,
+    autor: str | None = None, motivo: str | None = None, origen: str = ORIGEN_DIA_MANUAL,
+    fuente_url: str | None = None, hoy: date | None = None, autor_rol: str | None = None,
+) -> dict:
+    """Alta o cambio del día especial de UNA fecha del negocio (una fila viva por fecha). Devuelve
+    `{"accion": "creado" | "modificado" | "sin_cambios", "dia": {...}}`. Lanza ValueError (400) si algo no es válido.
+    Auditoría en la misma transacción: quién, con qué rol (`actor_rol`), cuándo, antes y después, y el motivo."""
+    datos = validar_dia_especial(fecha, tipo, nombre, atiende, hora_apertura, hora_cierre)
+    hoy = hoy or hoy_en_lima()
+    motivo = _exigir_edicion_permitida(datos["fecha"], motivo, hoy)
+    try:
+        async with async_session() as session:
+            actual = (await session.execute(
+                select(DiaEspecial).where(
+                    DiaEspecial.negocio_id == negocio_id, DiaEspecial.fecha == datos["fecha"], DiaEspecial.eliminado_en.is_(None),
+                )
+            )).scalar_one_or_none()
+            if actual is None:
+                fila = DiaEspecial(
+                    negocio_id=negocio_id, origen=origen, fuente_url=fuente_url, creado_por=autor, **datos,
+                )
+                session.add(fila)
+                await session.flush()
+                session.add(RegistroAuditoria(
+                    accion="dia_especial_creado", actor=autor, negocio_id=negocio_id, entidad_tipo="dia_especial",
+                    entidad_id=fila.id, payload={
+                        "despues": _resumen_para_auditoria(datos), "origen": origen, "motivo": motivo, "actor_rol": autor_rol,
+                    },
+                ))
+                accion = "creado"
+            else:
+                antes = _resumen_para_auditoria(_dia_especial_a_dict(actual))
+                despues = _resumen_para_auditoria(datos)
+                if antes == despues:
+                    return {"accion": "sin_cambios", "dia": _dia_especial_a_dict(actual)}
+                for campo in ("tipo", "nombre", "atiende", "hora_apertura", "hora_cierre"):
+                    setattr(actual, campo, datos[campo])
+                actual.actualizado = datetime.utcnow()
+                fila = actual
+                session.add(RegistroAuditoria(
+                    accion="dia_especial_modificado", actor=autor, negocio_id=negocio_id, entidad_tipo="dia_especial",
+                    entidad_id=actual.id, payload={"antes": antes, "despues": despues, "motivo": motivo, "actor_rol": autor_rol},
+                ))
+                accion = "modificado"
+            await session.commit()
+            await session.refresh(fila)
+            resultado = _dia_especial_a_dict(fila)
+    except IntegrityError:
+        raise ValueError("Ya existe un día especial en esa fecha. Recarga la lista e inténtalo de nuevo.")
+    invalidar_cache_calendario(negocio_id)
+    return {"accion": accion, "dia": resultado}
+
+
+async def eliminar_dia_especial(
+    negocio_id: str, fecha, autor: str | None = None, motivo: str | None = None, hoy: date | None = None,
+    autor_rol: str | None = None,
+) -> dict | None:
+    """Quita (borrado lógico) el día especial de esa fecha. None si no hay ninguno vivo. Mismas reglas de edición
+    retroactiva que `guardar_dia_especial`. Queda en la auditoría."""
+    fecha = _fecha_dia_especial(fecha)
+    hoy = hoy or hoy_en_lima()
+    motivo = _exigir_edicion_permitida(fecha, motivo, hoy)
+    async with async_session() as session:
+        fila = (await session.execute(
+            select(DiaEspecial).where(
+                DiaEspecial.negocio_id == negocio_id, DiaEspecial.fecha == fecha, DiaEspecial.eliminado_en.is_(None),
+            )
+        )).scalar_one_or_none()
+        if fila is None:
+            return None
+        antes = _resumen_para_auditoria(_dia_especial_a_dict(fila))
+        fila.eliminado_en = datetime.utcnow()
+        fila.eliminado_por = autor
+        session.add(RegistroAuditoria(
+            accion="dia_especial_eliminado", actor=autor, negocio_id=negocio_id, entidad_tipo="dia_especial",
+            entidad_id=fila.id, payload={"antes": antes, "motivo": motivo, "actor_rol": autor_rol},
+        ))
+        await session.commit()
+        resultado = _dia_especial_a_dict(fila)
+    invalidar_cache_calendario(negocio_id)
+    return resultado
+
+
+async def marcar_manana_no_laborable(
+    negocio_id: str, autor: str | None = None, nombre: str | None = None, hoy: date | None = None,
+    autor_rol: str | None = None,
+) -> dict:
+    """Atajo del panel: mañana (día de Lima) queda CERRADO como día no laborable y rige en como máximo 60 s en cada
+    proceso (en este, al instante). Si mañana ya tenía un día especial (p. ej. un feriado con horario especial) se
+    conservan su tipo y su nombre y solo pasa a no atender; si ya estaba cerrado → `sin_cambios`."""
+    hoy = hoy or hoy_en_lima()
+    manana = hoy + timedelta(days=1)
+    existente = next(iter(await listar_dias_especiales(negocio_id, manana, manana)), None)
+    if existente is not None:
+        return await guardar_dia_especial(
+            negocio_id, manana, existente["tipo"], existente["nombre"], False, None, None, autor=autor, hoy=hoy,
+            autor_rol=autor_rol,
+        )
+    return await guardar_dia_especial(
+        negocio_id, manana, cal_negocio.TIPO_NO_LABORABLE, (nombre or "").strip() or "Día no laborable", False, None, None,
+        autor=autor, hoy=hoy, autor_rol=autor_rol,
+    )
+
+
+async def sembrar_calendario(
+    negocio_id: str, anio: int, autor: str | None = None, restaurar_eliminados: bool = False, simular: bool = False,
+    autor_rol: str | None = None,
+) -> dict:
+    """Siembra los feriados nacionales de Perú de `anio` (ver `agent/calendario_peru.py`) para UN negocio. IDEMPOTENTE:
+    una fecha que ya tiene un día especial vivo no se toca, y una fecha cuyo feriado el administrador quitó antes NO
+    se vuelve a crear salvo `restaurar_eliminados=True` (la acción explícita «Cargar feriados» del panel). Solo
+    feriados (atiende=False): nunca inserta días no laborables ni puentes. `simular=True` no escribe nada.
+
+    Devuelve `{"anio", "verificado", "nota", "insertados": [fechas], "ya_existian": [fechas], "omitidos_por_eliminados":
+    [fechas]}` (fechas como `date`)."""
+    from agent import calendario_peru
+    feriados = calendario_peru.feriados_de(anio)     # ValueError si el año no está disponible
+    async with async_session() as session:
+        filas = (await session.execute(
+            select(DiaEspecial).where(
+                DiaEspecial.negocio_id == negocio_id, DiaEspecial.fecha >= date(anio, 1, 1), DiaEspecial.fecha <= date(anio, 12, 31),
+            )
+        )).scalars().all()
+        vivas = {f.fecha for f in filas if f.eliminado_en is None}
+        eliminadas = {f.fecha for f in filas if f.eliminado_en is not None}
+        insertados: list[date] = []
+        ya_existian: list[date] = []
+        omitidos: list[date] = []
+        for f in feriados:
+            if f["fecha"] in vivas:
+                ya_existian.append(f["fecha"])
+            elif f["fecha"] in eliminadas and not restaurar_eliminados:
+                omitidos.append(f["fecha"])
+            else:
+                insertados.append(f["fecha"])
+                if not simular:
+                    session.add(DiaEspecial(
+                        negocio_id=negocio_id, fecha=f["fecha"], tipo=cal_negocio.TIPO_FERIADO, nombre=f["nombre"],
+                        atiende=False, origen=ORIGEN_DIA_PRECARGADO_PE, fuente_url=f["fuente_url"], creado_por=autor,
+                    ))
+        if insertados and not simular:
+            session.add(RegistroAuditoria(
+                accion="calendario_feriados_cargados", actor=autor, negocio_id=negocio_id, entidad_tipo="dia_especial",
+                payload={
+                    "anio": anio, "insertados": [d.isoformat() for d in insertados],
+                    "verificado": calendario_peru.VERIFICADO_POR_ANIO.get(anio, False), "restaurar_eliminados": restaurar_eliminados,
+                    "actor_rol": autor_rol,
+                },
+            ))
+        if not simular:
+            await session.commit()
+    if insertados and not simular:
+        invalidar_cache_calendario(negocio_id)
+    return {
+        "anio": anio, "verificado": calendario_peru.VERIFICADO_POR_ANIO.get(anio, False),
+        "nota": calendario_peru.nota_del_anio(anio), "insertados": insertados, "ya_existian": ya_existian,
+        "omitidos_por_eliminados": omitidos,
+    }
+
+
+async def resumen_cobertura_calendario(negocio_id: str, hoy: date | None = None) -> dict:
+    """Cuánto calendario hay cargado: la última fecha de FERIADO cargada y los días que faltan hasta ella. `aviso` es
+    True si no hay ningún feriado o faltan menos de 60 días. `{"ultima_fecha_cargada": date|None, "dias_restantes":
+    int|None, "aviso": bool, "mensaje": str|None}`."""
+    hoy = hoy or hoy_en_lima()
+    async with async_session() as session:
+        ultima = (await session.execute(
+            select(func.max(DiaEspecial.fecha)).where(
+                DiaEspecial.negocio_id == negocio_id, DiaEspecial.eliminado_en.is_(None), DiaEspecial.tipo == cal_negocio.TIPO_FERIADO,
+            )
+        )).scalar_one_or_none()
+    if ultima is None:
+        return {
+            "ultima_fecha_cargada": None, "dias_restantes": None, "aviso": True,
+            "mensaje": "No hay feriados cargados: el sistema atenderá todos los días hábiles de la semana, incluso en feriados.",
+        }
+    restantes = (ultima - hoy).days
+    aviso = restantes < DIAS_AVISO_COBERTURA
+    return {
+        "ultima_fecha_cargada": ultima, "dias_restantes": restantes, "aviso": aviso,
+        "mensaje": (
+            f"El calendario cargado llega hasta el {ultima.day} de {cal_negocio.MESES_ES[ultima.month - 1]} de {ultima.year} "
+            f"({max(restantes, 0)} días): carga los feriados del año siguiente."
+        ) if aviso else None,
+    }
+
+
+# ── Calendario: historial legible, límite de frecuencia y aviso al admin (2026-10-12, permisos del supervisor) ──
+#
+# Todo sale de `RegistroAuditoria` (ya existente, append-only): no hay tabla nueva ni migración. Contratos en
+# docs/contrato_calendario_supervisor.md.
+
+ACCIONES_CALENDARIO_DIA = ("dia_especial_creado", "dia_especial_modificado", "dia_especial_eliminado")
+ACCION_CALENDARIO_FERIADOS = "calendario_feriados_cargados"
+ACCION_CALENDARIO_HABIL_DESDE = "calendario_habil_desde"
+CLAVE_CALENDARIO_MAX_ESCRITURAS_HORA = "calendario_max_escrituras_hora"                 # tope por usuario y hora (no-admin)
+CLAVE_CALENDARIO_MAX_ESCRITURAS_HORA_ADMIN = "calendario_max_escrituras_hora_admin"     # tope por usuario y hora (admin)
+CALENDARIO_MAX_ESCRITURAS_HORA_POR_DEFECTO = 20
+CALENDARIO_MAX_ESCRITURAS_HORA_ADMIN_POR_DEFECTO = 100
+LIMITE_HISTORIAL_CALENDARIO = 100
+MAX_HISTORIAL_CALENDARIO = 200
+
+
+def _filtro_auditoria_calendario():
+    """Filas de auditoría que forman el historial del calendario: los días especiales y la fecha de vigencia de la
+    medición hábil (esta última se guarda como `entidad_tipo="configuracion"`)."""
+    return sa_or(
+        RegistroAuditoria.entidad_tipo == "dia_especial",
+        sa_and(RegistroAuditoria.entidad_tipo == "configuracion", RegistroAuditoria.accion == ACCION_CALENDARIO_HABIL_DESDE),
+    )
+
+
+def _item_historial_calendario(f: "RegistroAuditoria") -> dict:
+    """Una fila de auditoría del calendario en el contrato legible (`antes`/`despues` como objeto, el motivo aparte)."""
+    p = f.payload or {}
+    antes, despues = p.get("antes"), p.get("despues")
+    if f.accion == ACCION_CALENDARIO_FERIADOS:
+        antes = None
+        despues = {"anio": p.get("anio"), "insertados": list(p.get("insertados") or []), "verificado": p.get("verificado")}
+    fecha_dia = None
+    if f.accion in ACCIONES_CALENDARIO_DIA:
+        referencia = despues if isinstance(despues, dict) else antes
+        fecha_dia = referencia.get("fecha") if isinstance(referencia, dict) else None
+    return {
+        "creado": f.creado, "actor": f.actor, "actor_rol": p.get("actor_rol"), "accion": f.accion, "fecha_dia": fecha_dia,
+        "antes": antes, "despues": despues, "motivo": p.get("motivo"),
+    }
+
+
+async def listar_historial_calendario(
+    negocio_id: str, limite: int = LIMITE_HISTORIAL_CALENDARIO, antes_de: datetime | None = None,
+) -> dict:
+    """Historial de cambios del calendario de ESTE negocio, más reciente primero: `{"items": [...], "hay_mas": bool}`.
+    `antes_de` (UTC) pagina: solo filas anteriores a ese instante. `limite` se acota a 1..200."""
+    limite = max(1, min(int(limite), MAX_HISTORIAL_CALENDARIO))
+    async with async_session() as session:
+        consulta = select(RegistroAuditoria).where(RegistroAuditoria.negocio_id == negocio_id, _filtro_auditoria_calendario())
+        if antes_de is not None:
+            consulta = consulta.where(RegistroAuditoria.creado < antes_de)
+        filas = (await session.execute(consulta.order_by(RegistroAuditoria.creado.desc()).limit(limite + 1))).scalars().all()
+    return {"items": [_item_historial_calendario(f) for f in filas[:limite]], "hay_mas": len(filas) > limite}
+
+
+def _texto_json_auditoria(valor) -> str | None:
+    """Valor de auditoría como texto: un objeto va como JSON, una cadena tal cual (la fecha de `calendario_habil_desde`)."""
+    import json as _json
+    if valor is None:
+        return None
+    return valor if isinstance(valor, str) else _json.dumps(valor, ensure_ascii=False, sort_keys=True)
+
+
+def _cambios_de_auditoria_calendario(f: "RegistroAuditoria") -> dict:
+    """Forma de `cambios` que ya consume el historial de Configuración: `{accion: {antes, despues}}` con textos JSON y
+    el motivo DENTRO del JSON del día (así lo lee `describirCambioCalendario` del frontend)."""
+    item = _item_historial_calendario(f)
+    antes, despues, motivo = item["antes"], item["despues"], item["motivo"]
+    if f.accion in ("dia_especial_creado", "dia_especial_modificado") and isinstance(despues, dict):
+        despues = {**despues, "motivo": motivo}
+    elif f.accion == "dia_especial_eliminado" and isinstance(antes, dict):
+        antes = {**antes, "motivo": motivo}
+    return {f.accion: {"antes": _texto_json_auditoria(antes), "despues": _texto_json_auditoria(despues)}}
+
+
+async def contar_escrituras_calendario(negocio_id: str, actor: str | None, ahora: datetime | None = None) -> dict:
+    """Cuántas escrituras EFECTIVAS al calendario hizo `actor` en este negocio en la última hora (una por fila de
+    auditoría de días especiales: alta, cambio, baja o carga de feriados; un `sin_cambios` o un rechazo no escribe y no
+    cuenta). Se lee de la base —no de memoria del proceso—, así que el límite vale igual con varias réplicas.
+    `{"cantidad": int, "libera_en": datetime|None}` (`libera_en`: cuándo sale de la ventana la escritura más antigua)."""
+    ahora = ahora or datetime.utcnow()
+    desde = ahora - timedelta(hours=1)
+    async with async_session() as session:
+        creados = (await session.execute(
+            select(RegistroAuditoria.creado).where(
+                RegistroAuditoria.negocio_id == negocio_id, RegistroAuditoria.entidad_tipo == "dia_especial",
+                RegistroAuditoria.actor == actor, RegistroAuditoria.creado >= desde,
+            ).order_by(RegistroAuditoria.creado.asc())
+        )).scalars().all()
+    return {"cantidad": len(creados), "libera_en": (creados[0] + timedelta(hours=1)) if creados else None}
+
+
+async def resumen_cambios_calendario_de_supervisores(negocio_id: str, desde: datetime) -> dict:
+    """Cambios al calendario hechos por usuarios con rol `supervisor` desde `desde` (UTC), para el aviso del admin.
+    El rol es el que quedó en la auditoría al momento del cambio (`actor_rol`), no el de hoy. `{"total": int,
+    "supervisores": [usernames, el que más cambió primero], "ultimo": datetime|None}`."""
+    async with async_session() as session:
+        filas = (await session.execute(
+            select(RegistroAuditoria).where(
+                RegistroAuditoria.negocio_id == negocio_id, RegistroAuditoria.entidad_tipo == "dia_especial",
+                RegistroAuditoria.creado >= desde,
+            ).order_by(RegistroAuditoria.creado.desc())
+        )).scalars().all()
+    de_supervisores = [f for f in filas if (f.payload or {}).get("actor_rol") == "supervisor"]
+    cuentas: dict[str, int] = {}
+    for f in de_supervisores:
+        cuentas[f.actor or "?"] = cuentas.get(f.actor or "?", 0) + 1
+    return {
+        "total": len(de_supervisores),
+        "supervisores": [u for u, _ in sorted(cuentas.items(), key=lambda par: (-par[1], par[0]))],
+        "ultimo": de_supervisores[0].creado if de_supervisores else None,
+    }
+
+
 async def marcar_mensaje_procesado(mensaje_id: str) -> bool:
     """Idempotencia general del webhook (API Architecture) — intenta
     registrar mensaje_id como ya procesado. Usa la restricción de clave
@@ -4219,20 +4779,25 @@ async def guardar_configuracion_uso_meta(negocio_id: str, datos: dict, autor: st
 
 async def listar_cambios_configuracion(negocio_id: str, limite: int = 50) -> list[dict]:
     """Historial de cambios de la configuración de uso y envíos (más reciente
-    primero): quién, cuándo, y el valor anterior y nuevo de cada clave."""
+    primero): quién, cuándo, y el valor anterior y nuevo de cada clave. Desde
+    2026-10-12 incluye también los cambios del calendario de negocio (días
+    especiales, feriados cargados y fecha de la medición hábil), con la misma
+    forma `cambios: {accion: {antes, despues}}` (textos JSON, motivo dentro)."""
     async with async_session() as session:
         filas = (await session.execute(
             select(RegistroAuditoria).where(
-                RegistroAuditoria.negocio_id == negocio_id, RegistroAuditoria.entidad_tipo == "configuracion",
+                RegistroAuditoria.negocio_id == negocio_id,
+                sa_or(RegistroAuditoria.entidad_tipo == "configuracion", _filtro_auditoria_calendario()),
             ).order_by(RegistroAuditoria.creado.desc()).limit(max(1, min(limite, 200)))
         )).scalars().all()
-    return [
-        {
-            "creado": f.creado, "actor": f.actor, "accion": f.accion,
-            "cambios": (f.payload or {}).get("cambios", {}), "riesgo_confirmado": bool((f.payload or {}).get("riesgo_confirmado")),
-        }
-        for f in filas
-    ]
+    resultado = []
+    for f in filas:
+        if f.entidad_tipo == "dia_especial" or f.accion == ACCION_CALENDARIO_HABIL_DESDE:
+            cambios, riesgo = _cambios_de_auditoria_calendario(f), False
+        else:
+            cambios, riesgo = (f.payload or {}).get("cambios", {}), bool((f.payload or {}).get("riesgo_confirmado"))
+        resultado.append({"creado": f.creado, "actor": f.actor, "accion": f.accion, "cambios": cambios, "riesgo_confirmado": riesgo})
+    return resultado
 
 
 async def obtener_configuracion_envios(negocio_id: str) -> dict:
@@ -7113,29 +7678,13 @@ async def liberar_asignacion(telefono: str, autor: str | None = None, motivo: st
     )
 
 
-# Punto 2 (2026-09-29) — mismo fallback que agent/tools.py::
-# obtener_estado_horario_atencion (lunes a sábado, 8:00-19:00) para un
-# Negocio que todavía no tiene fila de HorarioAtencion para hoy. Duplicado
-# acá (no importado) por el mismo motivo que rango_periodo_utc no importa
-# de tools.py: tools.py ya importa DE memory.py, así que memory.py
-# importando de tools.py cerraría un ciclo.
-_FALLBACK_DIAS_HABILITADOS_TURNO = range(0, 6)  # lunes a sábado
-_FALLBACK_HORA_APERTURA_TURNO = hora_del_dia(8, 0)
-_FALLBACK_HORA_CIERRE_TURNO = hora_del_dia(19, 0)
+# Punto 2 (2026-09-29) / calendario de negocio (2026-10-12): ya no hay una copia propia del cálculo de horario acá.
+# `ejecutar_ciclo_de_espera` consulta `obtener_calendario_negocio` (horario semanal + feriados y días especiales,
+# lógica pura en agent/calendario_negocio.py, que memory.py SÍ puede importar porque no depende de memory).
 
-
-def _dentro_de_horario_ahora(horarios: list[dict], ahora_lima: datetime) -> bool:
-    """¿El negocio está abierto AHORA (hora de Lima)? Mismo cálculo que
-    `agent/tools.py::obtener_estado_horario_atencion`, reescrito acá para
-    que `listar_leads_para_rotar_o_liberar` no dependa de otro módulo."""
-    dia_semana = ahora_lima.weekday()
-    hora_actual = ahora_lima.time()
-    horario_hoy = next((h for h in horarios if h["dia_semana"] == dia_semana), None)
-    if horario_hoy is not None:
-        if not horario_hoy["habilitado"] or horario_hoy["hora_apertura"] is None or horario_hoy["hora_cierre"] is None:
-            return False
-        return hora_del_dia.fromisoformat(horario_hoy["hora_apertura"]) <= hora_actual < hora_del_dia.fromisoformat(horario_hoy["hora_cierre"])
-    return dia_semana in _FALLBACK_DIAS_HABILITADOS_TURNO and _FALLBACK_HORA_APERTURA_TURNO <= hora_actual < _FALLBACK_HORA_CIERRE_TURNO
+# Anti-avalancha (2026-10-12, apagado por defecto): con N > 0, el reloj de 30 min corre solo para los primeros N casos
+# sin respuesta de cada asesor (por antigüedad de la derivación); los demás quedan «en fila» y no suman minutos.
+CLAVE_ROTACION_RELOJ_MAX_CASOS = "rotacion_reloj_max_casos_por_asesor"
 
 
 async def listar_leads_para_rotar_o_liberar(
@@ -7201,7 +7750,11 @@ async def ejecutar_ciclo_de_espera(
     - Solo suma `intervalo_minutos` a `Lead.minutos_espera_asesor` si AHORA
       MISMO el negocio está dentro de su horario de atención (Horario
       Atencion) Y el asesor asignado está `disponible` — las horas fuera de
-      turno no cuentan.
+      turno no cuentan. Desde el calendario de negocio (2026-10-12) «dentro
+      de su horario» también descarta feriados y días especiales cerrados
+      (`agent/calendario_negocio.py`, leído fresco). Anti-avalancha opcional
+      (`rotacion_reloj_max_casos_por_asesor`, 0 = apagado): con N > 0 solo
+      corre el reloj de los N casos más antiguos de cada asesor.
     - Al llegar a `umbral_rotacion_minutos` (30 por defecto): si
       `veces_rotado_espera == 0`, el lead califica para ROTAR — se retorna
       en la lista (memory.py no elige al siguiente asesor, eso vive en
@@ -7224,7 +7777,7 @@ async def ejecutar_ciclo_de_espera(
     camino de escritura sin acordarse de este desarme. Un lead pausado a
     mano nunca debe rotar ni liberarse, así se haya colado por donde se
     haya colado."""
-    ahora_lima = datetime.utcnow() - timedelta(hours=5)
+    ahora_utc = datetime.utcnow()
     a_liberar: list[str] = []
     a_rotar: list[dict] = []
 
@@ -7234,18 +7787,38 @@ async def ejecutar_ciclo_de_espera(
             Lead.pausado_manual.is_(False),
             sa_or(Lead.resultado.is_(None), Lead.resultado == ""),
         )
-        candidatos = (await session.execute(query)).scalars().all()
+        candidatos = sorted(
+            (await session.execute(query)).scalars().all(), key=lambda l: (l.derivado_en, l.telefono),
+        )
 
-        cache_horarios: dict[str, list[dict]] = {}
+        # Calendario de negocio (2026-10-12): horario semanal + feriados y días especiales, leído FRESCO (el Cron
+        # no usa la caché de 60 s). Un día cerrado por calendario no suma minutos de turno a nadie.
+        cache_calendarios: dict[str, cal_negocio.Calendario] = {}
+        cache_tope_en_fila: dict[str, int] = {}
+        posicion_en_fila: dict[tuple[str, str], int] = {}
         cache_disponibilidad: dict[tuple[str, str], bool] = {}
 
         for lead in candidatos:
-            if lead.negocio_id not in cache_horarios:
-                cache_horarios[lead.negocio_id] = await listar_horarios_atencion(lead.negocio_id)
-            if not _dentro_de_horario_ahora(cache_horarios[lead.negocio_id], ahora_lima):
+            clave_asesor = (lead.negocio_id, lead.asesor_asignado)
+            posicion = posicion_en_fila.get(clave_asesor, 0)     # 0 = el caso más antiguo de ese asesor
+            posicion_en_fila[clave_asesor] = posicion + 1
+
+            if lead.negocio_id not in cache_calendarios:
+                cache_calendarios[lead.negocio_id] = await obtener_calendario_negocio(lead.negocio_id, fresco=True)
+            if not cal_negocio.esta_abierto(ahora_utc, cache_calendarios[lead.negocio_id]):
                 continue
 
-            clave_asesor = (lead.negocio_id, lead.asesor_asignado)
+            # Anti-avalancha (apagado por defecto = 0): solo los primeros N casos de cada asesor corren el reloj.
+            if lead.negocio_id not in cache_tope_en_fila:
+                try:
+                    cache_tope_en_fila[lead.negocio_id] = max(0, int(
+                        await obtener_configuracion(CLAVE_ROTACION_RELOJ_MAX_CASOS, "0", negocio_id=lead.negocio_id)
+                    ))
+                except (TypeError, ValueError):
+                    cache_tope_en_fila[lead.negocio_id] = 0
+            tope = cache_tope_en_fila[lead.negocio_id]
+            if tope > 0 and posicion >= tope:
+                continue    # «en fila»: el reloj de 30 min arranca cuando el asesor despeje casos más antiguos
             if clave_asesor not in cache_disponibilidad:
                 usuario = await _obtener_usuario_orm(session, lead.negocio_id, lead.asesor_asignado)
                 cache_disponibilidad[clave_asesor] = bool(usuario and usuario.disponible)

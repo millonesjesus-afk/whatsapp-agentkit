@@ -1,8 +1,11 @@
 """Plantilla automática para la "zona muerta" — 2026-10-07 (Q2). APAGADA por defecto.
 
-El negocio cierra el sábado a las 19:00 y abre el lunes a las 8:00 (61 h): un cliente derivado que escribe
-entre el sábado 19:00 y el domingo 8:00 ve cerrarse su ventana de 24 h de WhatsApp antes de que alguien pueda
-atenderlo, y después solo se le puede escribir con una plantilla aprobada. Este Cron manda UNA plantilla
+Con el horario por defecto el negocio cierra el sábado a las 19:00 y abre el lunes a las 8:00 (37 h): un cliente
+derivado que escribe entre el sábado 19:00 y el domingo 8:00 ve cerrarse su ventana de 24 h de WhatsApp antes de que
+alguien pueda atenderlo, y después solo se le puede escribir con una plantilla aprobada. Un feriado o un día
+especial cerrado (calendario de negocio, 2026-10-12) alarga ese hueco: «cerrado» y «próxima apertura» salen de
+agent/calendario_negocio.py, y además se marcan candidatos en la VÍSPERA de un cierre por calendario (ver
+`atencion_atrasada.candidatos_zona_muerta`). Este Cron manda UNA plantilla
 (la misma "retomar consulta" que los asesores mandan a mano, ver agent/plantilla_retomar.py) a esos clientes
 mientras todavía tienen la ventana abierta —o la cerraron hace poco—, para que al tocar un botón abran una
 ventana nueva con alguien ya disponible.

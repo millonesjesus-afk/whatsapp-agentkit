@@ -67,12 +67,15 @@ async def _nivel_requerido(interes: str, negocio_id: str | None) -> str:
 
 async def negocio_abierto_ahora(negocio_id: str | None) -> bool:
     """¿El negocio atiende AHORA (hora de Lima, según su `HorarioAtencion`, con el fallback de siempre
-    lunes a sábado 8:00-19:00)? Misma función que usa Gabi para saber si hay asesores humanos."""
+    lunes a sábado 8:00-19:00) y su calendario de feriados/días especiales (2026-10-12)? Un feriado o un día no
+    laborable marcado como cerrado cuenta como CERRADO: el lead queda derivado, sin asesor y con Gabi activa, igual
+    que de noche. Misma función que usa Gabi para saber si hay asesores humanos."""
     return bool((await obtener_estado_horario_atencion(negocio_id))["dentro_de_horario"])
 
 
 async def elegir_asesor_automatico(
     interes: str, negocio_id: str | None, excluir: str | None = None, respetar_horario: bool = True,
+    max_activos_por_asesor: int = 0,
 ) -> str | None:
     """Retorna el username del asesor más adecuado y disponible, o None si no hay ninguno.
 
@@ -95,7 +98,11 @@ async def elegir_asesor_automatico(
     `excluir` (Punto 2, 2026-09-29): usado por `rotar_leads_inactivos` para
     pedir "el mejor asesor DISTINTO del que ya no respondió" — sin esto, la
     rotación por inactividad podría "rotar" un lead al mismo asesor que
-    acaba de fallar en responder, si es el único (o el de menor carga)."""
+    acaba de fallar en responder, si es el único (o el de menor carga).
+
+    `max_activos_por_asesor` (2026-10-12, anti-avalancha, 0 = sin límite = comportamiento de siempre): con N > 0 no se
+    elige a un asesor que ya tiene N o más leads activos; si todos están en el tope devuelve None (el lead sigue en la
+    cola). Solo lo pasa el reparto de la cola al abrir."""
     if negocio_id is None:
         return None
     if respetar_horario and not await negocio_abierto_ahora(negocio_id):
@@ -123,6 +130,11 @@ async def elegir_asesor_automatico(
         carga = await contar_leads_activos(asesor["username"])
         cargas.append((carga, asesor["username"]))
     cargas.sort(key=lambda item: item[0])
+    if max_activos_por_asesor > 0:
+        cargas = [c for c in cargas if c[0] < max_activos_por_asesor]
+        if not cargas:
+            logger.info(f"Asignación automática omitida: todos los asesores disponibles tienen {max_activos_por_asesor} o más casos activos")
+            return None
 
     elegido = cargas[0][1]
     logger.info(f"Asignación automática: {elegido} (nivel requerido: {nivel_req})")
@@ -235,6 +247,20 @@ VENTANA_META_24H = timedelta(hours=24)
 # su carga activa, así que el reparto por carga también reparte el lote entre los asesores disponibles.
 COLA_APERTURA_MAX_POR_CORRIDA_DEFAULT = 10
 
+# Anti-avalancha (2026-10-12, APAGADO por defecto): tope de casos activos por asesor al repartir la cola al abrir,
+# configurable por negocio con `cola_apertura_max_activos_por_asesor`. 0 = sin límite (el comportamiento de siempre).
+# Con un tope N un asesor con N casos activos ya no recibe más de la cola: se reparte a los demás y el resto espera
+# para que, tras un feriado, 30 leads no caigan de golpe sobre dos personas y disparen todos los relojes a la vez.
+CLAVE_COLA_MAX_ACTIVOS_POR_ASESOR = "cola_apertura_max_activos_por_asesor"
+
+
+async def _max_activos_por_asesor(negocio_id: str) -> int:
+    valor = await obtener_configuracion(CLAVE_COLA_MAX_ACTIVOS_POR_ASESOR, "0", negocio_id=negocio_id)
+    try:
+        return max(0, int(valor))
+    except (TypeError, ValueError):
+        return 0
+
 
 async def _limite_por_corrida(negocio_id: str) -> int:
     valor = await obtener_configuracion(
@@ -297,6 +323,7 @@ async def asignar_cola_pendiente_al_abrir(max_por_corrida: int | None = None) ->
         if not cola:
             continue
         limite = max_por_corrida if max_por_corrida is not None else await _limite_por_corrida(negocio_id)
+        tope_activos = await _max_activos_por_asesor(negocio_id)
         hechos = 0
         for lead in cola:
             if hechos >= limite:
@@ -307,9 +334,11 @@ async def asignar_cola_pendiente_al_abrir(max_por_corrida: int | None = None) ->
                 or fresco.get("escalado_supervision_en") or fresco.get("paso_flujo") != "derivado_asesor"
             ):
                 continue
-            asesor = await elegir_asesor_automatico(fresco.get("interes") or "", negocio_id)
+            asesor = await elegir_asesor_automatico(
+                fresco.get("interes") or "", negocio_id, max_activos_por_asesor=tope_activos,
+            )
             if asesor is None:
-                break  # sin asesores disponibles (o el negocio cerró entre medio): para los demás también
+                break  # sin asesores disponibles (o el negocio cerró entre medio, o todos están en el tope): para los demás también
             await asignar_asesor_a_lead(lead["telefono"], asesor, automatico=True)
             logger.info(f"Cola al abrir: lead {lead['telefono']} asignado a {asesor}")
             asignados.append((lead["telefono"], asesor))

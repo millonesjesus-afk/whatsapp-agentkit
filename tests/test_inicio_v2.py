@@ -352,7 +352,7 @@ async def test_totales_son_reales_aunque_los_items_tengan_tope():
     assert (t["cliente_esperando"], t["ventana_abierta"], t["citas_proximas"], t["citas_vencidas"]) == (10, 10, 5, 4)
 
 
-async def test_ventana_por_vencer_cuenta_las_abiertas_con_menos_de_4_horas():
+async def test_ventana_por_vencer_cuenta_las_abiertas_con_menos_de_6_horas():
     negocio, canal = await _negocio_con_canal("iv2-q", "40100000017")
     asesor = await _usuario(negocio, "asesor1", "asesor")
     for tel, hace in (("51910000060", _h(21)), ("51910000061", _h(10)), ("51910000062", _h(30))):
@@ -571,3 +571,77 @@ async def test_si_los_avisos_fallan_inicio_sigue_funcionando(monkeypatch):
     assert cuerpo["avisos"] == []
     assert [i["telefono"] for i in cuerpo["zona_accion"]["items"]] == ["51910000099"]
     assert len(cuerpo["zona_indicadores"]) == 3
+
+
+# ---------------------------------------------------------------------------
+# Inicio unificado (2026-10-12): indicador, umbral único de ventana, campos para ordenar la cola
+# ---------------------------------------------------------------------------
+
+def test_indicador_esperando_muestra_solo_ventana_abierta_y_nota_si_hay_cerradas():
+    totales = {"cliente_esperando": 5, "esperando_ventana_abierta": 2, "esperando_ventana_cerrada": 3, "citas_7_dias": 0}
+    asesor = dashboard._zona_indicadores_asesor_datos(4, totales)
+    assert asesor[1] == {"valor": 2, "etiqueta": "Esperando respuesta", "nota": "+3 con ventana cerrada"}
+    admin = dashboard._zona_indicadores_admin_datos(4, totales, [{"disponible": True}])
+    assert admin[1] == {"valor": 2, "etiqueta": "Esperando respuesta", "nota": "+3 con ventana cerrada"}
+
+
+def test_indicador_esperando_sin_cerradas_no_trae_nota_y_sin_desglose_usa_el_total():
+    assert dashboard._indicador_esperando(
+        {"cliente_esperando": 2, "esperando_ventana_abierta": 2, "esperando_ventana_cerrada": 0}
+    ) == {"valor": 2, "etiqueta": "Esperando respuesta"}
+    # Totales de un backend anterior (sin el desglose): el valor es el total de siempre.
+    assert dashboard._indicador_esperando({"cliente_esperando": 7}) == {"valor": 7, "etiqueta": "Esperando respuesta"}
+
+
+async def test_indicador_del_inicio_coincide_con_el_badge_de_responde_ahora():
+    negocio, canal = await _negocio_con_canal("iv2-ind", "40100000041")
+    asesor = await _usuario(negocio, "asesor1", "asesor")
+    for tel, hace in (("51910000401", _h(2)), ("51910000402", _h(30)), ("51910000403", _h(50))):
+        await _lead(negocio, canal, tel, asesor="asesor1")
+        await _mensaje(negocio, tel, "user", "Hola", hace)
+    cuerpo = await _inicio(asesor)
+    t = cuerpo["zona_accion"]["totales"]
+    assert t["cliente_esperando"] == 3 and t["esperando_ventana_abierta"] == 1 and t["esperando_ventana_cerrada"] == 2
+    esperando = [i for i in cuerpo["zona_indicadores"] if i["etiqueta"] == "Esperando respuesta"][0]
+    assert esperando == {"valor": 1, "etiqueta": "Esperando respuesta", "nota": "+2 con ventana cerrada"}
+
+
+async def test_ventana_por_vencer_usa_el_mismo_umbral_que_la_ultima_llamada_6h_por_defecto():
+    negocio, canal = await _negocio_con_canal("iv2-um", "40100000042")
+    asesor = await _usuario(negocio, "asesor1", "asesor")
+    # Quedan ~5 h (antes NO contaba: el umbral era 4 h), ~7 h y ~3 h.
+    for tel, hace in (("51910000411", _h(19)), ("51910000412", _h(17)), ("51910000413", _h(21))):
+        await _lead(negocio, canal, tel, asesor="asesor1")
+        await _mensaje(negocio, tel, "user", "Hola", hace)
+    t = (await _inicio(asesor))["zona_accion"]["totales"]
+    assert t["ventana_umbral_horas"] == 6.0
+    assert t["ventana_por_vencer"] == 2
+    assert t["atencion_ultima_llamada"] == 2           # el mismo conjunto que la insignia «Última llamada»
+
+
+async def test_el_umbral_de_ventana_se_puede_configurar_con_la_clave_de_ultima_llamada():
+    negocio, canal = await _negocio_con_canal("iv2-um2", "40100000043")
+    asesor = await _usuario(negocio, "asesor1", "asesor")
+    await mem.guardar_configuracion("atencion_ultima_llamada_horas", "8", negocio_id=negocio["id"])
+    await _lead(negocio, canal, "51910000421", asesor="asesor1")
+    await _mensaje(negocio, "51910000421", "user", "Hola", _h(17))       # quedan ~7 h: con 8 h cuenta
+    t = (await _inicio(asesor))["zona_accion"]["totales"]
+    assert t["ventana_umbral_horas"] == 8.0 and t["ventana_por_vencer"] == 1 and t["atencion_ultima_llamada"] == 1
+
+
+async def test_items_de_cita_y_escalado_traen_el_instante_para_ordenar():
+    negocio, canal = await _negocio_con_canal("iv2-cola", "40100000044")
+    admin = await _usuario(negocio, "admin1", "admin")
+    ahora_lima = datetime.utcnow() - timedelta(hours=5)
+    await _lead(negocio, canal, "51910000431", asesor="a1", resultado="agendado",
+                fecha_agendada=ahora_lima + timedelta(minutes=40))
+    await _lead(negocio, canal, "51910000432", asesor="a1", resultado="agendado",
+                fecha_agendada=ahora_lima - timedelta(days=1))
+    await _lead(negocio, canal, "51910000433", escalado=True, paso_flujo="derivado_asesor")
+    z = (await _inicio(admin))["zona_accion"]
+    por_tel = {i["telefono"]: i for i in z["items"]}
+    cita = datetime.fromisoformat(por_tel["51910000431"]["cita_en"].replace("Z", "+00:00")).replace(tzinfo=None)
+    # La cita se guardó en hora de Lima: el instante UTC es 5 h después y cae a ~40 min de "ahora".
+    assert timedelta(minutes=35) <= cita - datetime.utcnow() <= timedelta(minutes=45)
+    assert por_tel["51910000432"]["cita_en"].endswith("Z")
+    assert por_tel["51910000433"]["escalado_en"].endswith("Z")
