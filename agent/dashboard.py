@@ -7529,6 +7529,52 @@ async def listar_equipo_json(usuario: dict = Depends(_usuario_actual)):
     })
 
 
+@router.post("/equipo/nuevo")
+async def crear_equipo_usuario(
+    request: Request,
+    usuario: dict = Depends(servicio_identidad.requiere_rol("admin")),
+    _csrf: None = Depends(verificar_csrf),
+):
+    """Versión JSON de `crear_usuario_nuevo` (arriba) para la pantalla Equipo
+    de la Nueva Experiencia — mismas reglas (admin-only, username único por
+    Negocio, rol/nivel válidos). Devuelve la contraseña temporal UNA vez; el
+    frontend no la vuelve a poder pedir (mismo contrato que el reset)."""
+    try:
+        datos = await request.json()
+    except Exception:
+        datos = {}
+    if not isinstance(datos, dict):
+        datos = {}
+    username = str(datos.get("username") or "").strip()
+    nombre = str(datos.get("nombre") or "").strip()
+    rol = str(datos.get("rol") or "")
+    nivel = str(datos.get("nivel") or "")
+
+    if not username or len(username) > 50:
+        raise HTTPException(status_code=400, detail="El usuario es obligatorio (máximo 50 caracteres)")
+    if not nombre or len(nombre) > 100:
+        raise HTTPException(status_code=400, detail="El nombre es obligatorio (máximo 100 caracteres)")
+    if rol not in ("admin", "supervisor", "asesor"):
+        raise HTTPException(status_code=400, detail="Rol inválido")
+    if rol == "asesor" and nivel not in NIVELES_ASESOR:
+        raise HTTPException(status_code=400, detail="Nivel inválido")
+
+    if await obtener_usuario(username, negocio_id=usuario["negocio_id"]) is not None:
+        raise HTTPException(status_code=409, detail=f"Ya existe una cuenta con el usuario {username} — elige otro.")
+
+    nueva_password = secrets.token_urlsafe(9)
+    await crear_usuario(
+        username, nueva_password, nombre, rol, negocio_id=usuario["negocio_id"],
+        nivel=nivel if rol == "asesor" else None,
+    )
+    return JSONResponse({
+        "username": username,
+        "nombre": nombre,
+        "rol": rol,
+        "password_temporal": nueva_password,
+    })
+
+
 @router.post("/equipo/{username}/resetear")
 async def resetear_password_equipo(
     username: str,

@@ -51,6 +51,7 @@ def _dependencia_usuario(func):
     dashboard.actualizar_nivel,
     dashboard.actualizar_umbrales_asignacion,
     dashboard.resetear_password_equipo,
+    dashboard.crear_equipo_usuario,
 ])
 async def test_supervisor_recibe_403(ruta_func):
     dependencia = _dependencia_usuario(ruta_func)
@@ -64,6 +65,7 @@ async def test_supervisor_recibe_403(ruta_func):
     dashboard.actualizar_nivel,
     dashboard.actualizar_umbrales_asignacion,
     dashboard.resetear_password_equipo,
+    dashboard.crear_equipo_usuario,
 ])
 async def test_asesor_recibe_403(ruta_func):
     dependencia = _dependencia_usuario(ruta_func)
@@ -77,6 +79,7 @@ async def test_asesor_recibe_403(ruta_func):
     dashboard.actualizar_nivel,
     dashboard.actualizar_umbrales_asignacion,
     dashboard.resetear_password_equipo,
+    dashboard.crear_equipo_usuario,
 ])
 async def test_admin_pasa(ruta_func):
     dependencia = _dependencia_usuario(ruta_func)
@@ -237,3 +240,48 @@ async def test_pagina_legacy_muestra_acciones_para_admin():
     html_out = await dashboard._pagina_gestionar_asesores(usuario_admin)
     assert "Resetear contraseña" in html_out
     assert 'name="nivel"' in html_out
+
+
+# ---------------------------------------------------------------------------
+# Alta de cuenta desde la Nueva Experiencia — POST /dashboard/equipo/nuevo
+# ---------------------------------------------------------------------------
+
+class _ReqJson:
+    def __init__(self, datos):
+        self._datos = datos
+
+    async def json(self):
+        return self._datos
+
+
+async def test_crear_equipo_usuario_crea_asesor_y_devuelve_password_una_vez():
+    negocio = await _negocio_con_equipo("eq-nuevo")
+    admin = {"username": "admin_eq-nuevo", "rol": "admin", "negocio_id": negocio["id"]}
+    respuesta = await dashboard.crear_equipo_usuario(
+        _ReqJson({"username": "nueva_ase", "nombre": "Nueva Asesora", "rol": "asesor", "nivel": "intermedio"}),
+        usuario=admin, _csrf=None,
+    )
+    cuerpo = json.loads(respuesta.body)
+    creado = await mem.obtener_usuario("nueva_ase", negocio_id=negocio["id"])
+    assert cuerpo["password_temporal"]
+    assert creado["rol"] == "asesor" and creado["nivel"] == "intermedio"
+
+
+async def test_crear_equipo_usuario_duplicado_409_y_datos_invalidos_400():
+    negocio = await _negocio_con_equipo("eq-dup")
+    admin = {"username": "admin_eq-dup", "rol": "admin", "negocio_id": negocio["id"]}
+    with pytest.raises(HTTPException) as exc:
+        await dashboard.crear_equipo_usuario(
+            _ReqJson({"username": "ase1_eq-dup", "nombre": "X", "rol": "asesor", "nivel": "junior"}),
+            usuario=admin, _csrf=None,
+        )
+    assert exc.value.status_code == 409
+    for malo in (
+        {"username": "", "nombre": "X", "rol": "asesor", "nivel": "junior"},
+        {"username": "u1", "nombre": "", "rol": "asesor", "nivel": "junior"},
+        {"username": "u1", "nombre": "X", "rol": "dios"},
+        {"username": "u1", "nombre": "X", "rol": "asesor", "nivel": "mega"},
+    ):
+        with pytest.raises(HTTPException) as exc:
+            await dashboard.crear_equipo_usuario(_ReqJson(malo), usuario=admin, _csrf=None)
+        assert exc.value.status_code == 400
