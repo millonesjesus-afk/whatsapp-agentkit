@@ -30,7 +30,7 @@ from agent import envios
 from agent.memory import (
     listar_campanas, asignar_campana_origen, obtener_campana_por_nombre,
     obtener_lead, actualizar_lead, registrar_attribution_event,
-    registrar_attribution_event_adicional, existe_attribution_event_reciente,
+    registrar_attribution_event_adicional, existe_attribution_event_reciente, obtener_reglas_anuncio,
 )
 from agent.tools import obtener_producto_por_codigo, obtener_familia_producto, formatear_producto
 
@@ -155,6 +155,26 @@ def _resolver_campana_por_referral(campanas: list[dict], referral: dict) -> dict
     return max(coincidencias, key=lambda c: len(_normalizar(c["patron"])))
 
 
+async def resolver_campana_por_referral(campanas: list[dict], referral: dict, negocio_id: str) -> dict | None:
+    """Campaña de un referral de Meta. Primero la regla EXPLÍCITA del anuncio
+    (`anuncio_campana`, escrita al asignarlo desde "Anuncios detectados"); si
+    no hay (o su campaña está inactiva), la detección por patrón de siempre.
+    Una falla leyendo las reglas nunca debe impedir atender al lead: se
+    registra y se sigue con el patrón."""
+    source_id = str((referral or {}).get("source_id") or "").strip()
+    if source_id:
+        try:
+            campana_id = (await obtener_reglas_anuncio(negocio_id)).get(source_id)
+        except Exception:  # noqa: BLE001 — cae al comportamiento previo
+            logger.exception("No se pudieron leer las reglas anuncio→campaña; se usa el patrón")
+            campana_id = None
+        if campana_id is not None:
+            regla = next((c for c in campanas if c["id"] == campana_id), None)
+            if regla is not None:
+                return regla
+    return _resolver_campana_por_referral(campanas, referral)
+
+
 # Ventana en la que el MISMO referral (mismo anuncio y mismo clic) no vuelve a
 # registrarse: cubre los reintentos de Meta de un mismo mensaje.
 VENTANA_DEDUPE_REFERRAL_MINUTOS = 30
@@ -185,7 +205,7 @@ async def registrar_referral_entrante(
     if not (lead and lead.get("campana_origen")):
         return await detectar_y_asignar_campana(telefono, texto_mensaje, referral, negocio_id)
     # Ya tenía campaña: solo queda evidencia, sin tocar el first-touch.
-    campana = _resolver_campana_por_referral(await listar_campanas(negocio_id, solo_activas=True), referral)
+    campana = await resolver_campana_por_referral(await listar_campanas(negocio_id, solo_activas=True), referral, negocio_id)
     if campana:
         await registrar_attribution_event_adicional(telefono, "meta_ads", referral=referral, campana_nombre=campana["nombre"])
     else:
@@ -228,7 +248,7 @@ async def detectar_y_asignar_campana(
 
     # 1. Anuncios de Meta (Click-to-WhatsApp) — más específico y confiable
     if referral:
-        campana = _resolver_campana_por_referral(campanas, referral)
+        campana = await resolver_campana_por_referral(campanas, referral, negocio_id)
         if campana:
             await asignar_campana_origen(telefono, campana["nombre"])
             logger.info(f"Campaña detectada (Meta Ads) para {telefono}: {campana['nombre']}")

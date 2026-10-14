@@ -189,3 +189,74 @@ def test_dominios_parecidos_no_se_confunden_con_instagram_o_facebook():
     assert mem._red_de_referral({"source_url": "https://instagram.com.evil.io/p/1"}) == "otra"
     assert mem._red_de_referral({"source_url": "no es una url"}) == "otra"
     assert mem._red_de_referral(None) == "otra"
+
+
+# ---------------------------------------------------------------------------
+# 2026-10-13 — regla explícita anuncio→campaña, comodines y diagnóstico
+# ---------------------------------------------------------------------------
+
+async def _nuevo_referral(negocio, canal, telefono, source_id, headline="Terma a gas", body="Cuerpo terma"):
+    await mem.actualizar_lead(telefono, negocio_id=negocio["id"], numero_whatsapp_id="x")
+    await mem.resolver_conversation_activa(telefono, negocio["id"], canal["id"])
+    return await detectar_y_asignar_campana(
+        telefono, "", {"source_id": source_id, "headline": headline, "body": body}, negocio["id"],
+    )
+
+
+async def test_asignar_a_campana_existente_reconoce_a_los_leads_futuros():
+    negocio, canal = await _negocio("g-anu-10")
+    existente = await mem.crear_campana("Campaña Existente", "referral_meta", "zzz-no-aparece", negocio_id=negocio["id"])
+    await _lead_de_anuncio(negocio, canal, "51901100101", "ADX")
+
+    await mem.asignar_anuncio_a_campana(negocio["id"], "ADX", existente["id"], autor="jesus")
+    campana = await _nuevo_referral(negocio, canal, "51901100102", "ADX", headline="Otro", body="Otro")
+
+    assert campana is not None and campana["nombre"] == "Campaña Existente"
+    assert (await mem.obtener_lead("51901100102", negocio_id=negocio["id"]))["campana_origen"] == "Campaña Existente"
+
+
+async def test_la_regla_gana_al_patron_y_rechaza_campanas_ajenas():
+    negocio, canal = await _negocio("g-anu-11")
+    await mem.crear_campana("Comodín", "referral_meta", "terma", negocio_id=negocio["id"])
+    destino = await mem.crear_campana("Destino", "referral_meta", "zzz-no-aparece", negocio_id=negocio["id"])
+    await mem.guardar_regla_anuncio(negocio["id"], "ADY", destino["id"])
+
+    ganada = await _nuevo_referral(negocio, canal, "51901100111", "ADY")
+    assert ganada["nombre"] == "Destino"
+
+    with pytest.raises(LookupError):
+        await mem.guardar_regla_anuncio(negocio["id"], "ADY", 999999)
+
+
+async def test_migrar_comodines_conserva_los_anuncios_y_deja_de_atribuir_los_nuevos():
+    negocio, canal = await _negocio("g-anu-12")
+    comodin = await mem.crear_campana("Meta Terma Julio", "referral_meta", "terma", negocio_id=negocio["id"])
+    por_id = await mem.crear_campana("Con ID", "referral_meta", "12024860142", negocio_id=negocio["id"])
+    await _nuevo_referral(negocio, canal, "51901100121", "AD-VIEJO")
+    await _nuevo_referral(negocio, canal, "51901100122", "12024860142", headline="Otro", body="Otro")
+
+    plan = await mem.plan_migrar_comodines(negocio["id"])
+    assert [c["nombre"] for c in plan["campanas_a_convertir"]] == ["Meta Terma Julio"]
+    assert [r["source_id"] for r in plan["reglas_a_crear"]] == ["AD-VIEJO"]
+    assert (await mem.obtener_campana(comodin["id"]))["tipo_deteccion"] == "referral_meta"  # el plan no toca nada
+
+    resumen = await mem.aplicar_migrar_comodines(negocio["id"], autor="jesus")
+    assert resumen == {"campanas": 1, "reglas": 1}
+    assert (await mem.obtener_campana(comodin["id"]))["tipo_deteccion"] == "por_anuncio"
+    assert (await mem.obtener_campana(por_id["id"]))["tipo_deteccion"] == "referral_meta"
+
+    assert (await _nuevo_referral(negocio, canal, "51901100123", "AD-VIEJO"))["nombre"] == "Meta Terma Julio"
+    assert await _nuevo_referral(negocio, canal, "51901100124", "AD-NUEVO") is None  # ya no se atribuye por palabra
+
+
+async def test_diagnostico_muestra_la_evidencia_de_los_leads_sin_campana():
+    negocio, canal = await _negocio("g-anu-13")
+    await mem.actualizar_lead("51901100131", negocio_id=negocio["id"], numero_whatsapp_id="x")
+    await mem.resolver_conversation_activa("51901100131", negocio["id"], canal["id"])
+    await mem.registrar_attribution_event("51901100131", "meta_ads_no_resuelto", referral={"source_id": "ADZ"})
+
+    filas = await mem.diagnostico_anuncios_sin_campana(negocio["id"])
+
+    assert len(filas) == 1 and filas[0]["source_id"] == "ADZ"
+    assert filas[0]["tiene_headline"] is False and filas[0]["tiene_body"] is False
+    assert filas[0]["telefono"] == "…0131"

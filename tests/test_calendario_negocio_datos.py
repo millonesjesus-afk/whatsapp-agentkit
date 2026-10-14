@@ -426,7 +426,7 @@ def test_la_migracion_cuelga_del_head_anterior():
     asunto = (RAIZ / "migrations" / "versions" / "d1a4c7e92b58_dias_especiales_calendario_de_negocio.py").read_text(encoding="utf-8")
     assert "down_revision: Union[str, Sequence[str], None] = 'b8e2d4f6a1c3'" in asunto
     versiones = (RAIZ / "migrations" / "versions").glob("*.py")
-    assert sum("'d1a4c7e92b58'" in v.read_text(encoding="utf-8") and "down_revision" in v.read_text(encoding="utf-8") for v in versiones) == 1
+    assert sum("'d1a4c7e92b58'" in v.read_text(encoding="utf-8") and "down_revision" in v.read_text(encoding="utf-8") for v in versiones) == 2  # ella misma + la migración siguiente (a9c4e1d7b3f2, regla anuncio→campaña)
 
 
 # ── Script scripts/sembrar_calendario.py ────────────────────────────────────

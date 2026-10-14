@@ -354,7 +354,9 @@ def test_hay_un_solo_head_y_la_migracion_cuelga_del_head_anterior():
     cfg.set_main_option("script_location", str(RAIZ / "migrations"))
     guion = ScriptDirectory.from_config(cfg)
     # 2026-10-12: la migración del calendario de negocio (d1a4c7e92b58) cuelga de la de "Para llamar" y es el head actual.
-    assert guion.get_heads() == ["d1a4c7e92b58"]
+    # 2026-10-13: la regla anuncio→campaña (a9c4e1d7b3f2) cuelga de la del calendario y es el head actual.
+    assert guion.get_heads() == ["a9c4e1d7b3f2"]
+    assert guion.get_revision("a9c4e1d7b3f2").down_revision == "d1a4c7e92b58"
     assert guion.get_revision("d1a4c7e92b58").down_revision == "b8e2d4f6a1c3"
     assert guion.get_revision("b8e2d4f6a1c3").down_revision == "a7d3b9e2c4f1"
     assert guion.get_revision("a7d3b9e2c4f1").down_revision == "e5a1c8f3b2d7"

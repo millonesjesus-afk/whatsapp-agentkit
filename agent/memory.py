@@ -1121,6 +1121,116 @@ async def listar_atribucion_sin_campana_periodo(
     }
 
 
+async def obtener_reglas_anuncio(negocio_id: str) -> dict[str, int]:
+    """`{source_id: campana_id}` de las reglas explícitas anuncio→campaña del Negocio."""
+    async with async_session() as session:
+        filas = (await session.execute(
+            select(AnuncioCampana.source_id, AnuncioCampana.campana_id).where(AnuncioCampana.negocio_id == negocio_id)
+        )).all()
+    return {source_id: campana_id for source_id, campana_id in filas}
+
+
+async def guardar_regla_anuncio(negocio_id: str, source_id: str, campana_id: int, autor: str | None = None) -> None:
+    """Crea o actualiza la regla del anuncio (una campaña por anuncio). La
+    campaña debe ser del mismo Negocio — `LookupError` si no."""
+    async with async_session() as session:
+        campana = await session.get(Campana, campana_id)
+        if campana is None or campana.negocio_id != negocio_id:
+            raise LookupError("La campaña no existe.")
+        regla = (await session.execute(
+            select(AnuncioCampana).where(AnuncioCampana.negocio_id == negocio_id, AnuncioCampana.source_id == source_id)
+        )).scalars().first()
+        if regla is None:
+            session.add(AnuncioCampana(negocio_id=negocio_id, source_id=source_id, campana_id=campana_id, creado_por=autor))
+        else:
+            regla.campana_id = campana_id
+            regla.creado_por = autor
+        await session.commit()
+
+
+async def diagnostico_anuncios_sin_campana(negocio_id: str) -> list[dict]:
+    """Solo lectura. Por cada conversación que llegó de un anuncio de Meta y
+    hoy NO tiene campaña: qué evidencia trajo (¿título/texto presentes?, ¿era
+    primer contacto?, ¿qué campaña resolvió el evento?). Sirve para saber por
+    qué un anuncio ya reconocido deja leads "Sin campaña". Teléfono enmascarado."""
+    async with async_session() as session:
+        filas = (await session.execute(
+            select(AttributionEvent, Conversation.creado, Conversation.campana_origen_id)
+            .join(Conversation, Conversation.id == AttributionEvent.conversation_id)
+            .where(
+                AttributionEvent.negocio_id == negocio_id,
+                AttributionEvent.tipo_origen.in_(_TIPOS_ORIGEN_ANUNCIO),
+                AttributionEvent.source_id.is_not(None), AttributionEvent.source_id != "",
+                Conversation.campana_origen_id.is_(None),
+            )
+            .order_by(AttributionEvent.source_id, AttributionEvent.creado.asc())
+        )).all()
+    return [
+        {
+            "source_id": e.source_id, "evento_creado": e.creado, "conversacion_creada": conv_creada,
+            "tipo_origen": e.tipo_origen, "first_touch": bool(e.first_touch),
+            "tiene_headline": bool(e.headline), "tiene_body": bool(e.body),
+            "campana_del_evento": e.campana_nombre,
+            "telefono": "…" + (e.lead_telefono or "")[-4:],
+        }
+        for e, conv_creada, _ in filas
+    ]
+
+
+def _es_campana_comodin(c: dict) -> bool:
+    """Campaña de Meta que detecta por una PALABRA clave ("secadora", "terma") en
+    vez de por el ID de un anuncio: atribuye en silencio cualquier anuncio
+    nuevo que mencione esa palabra. Las de ID exacto tienen patrón numérico."""
+    return c["tipo_deteccion"] == "referral_meta" and not str(c["patron"]).strip().isdigit()
+
+
+async def plan_migrar_comodines(negocio_id: str) -> dict:
+    """Solo lectura. Qué haría `aplicar_migrar_comodines`: las campañas
+    comodín que se convertirían a detección SOLO por regla de anuncio
+    (`por_anuncio`) y las reglas anuncio→campaña que se escribirían para que
+    los anuncios que hoy atribuyen sigan igual (la campaña con más
+    conversaciones de ese anuncio, si es un comodín). Sin tocar nada."""
+    campanas = await listar_campanas(negocio_id)
+    comodines = {c["nombre"]: c for c in campanas if _es_campana_comodin(c)}
+    reglas = await obtener_reglas_anuncio(negocio_id)
+    nuevas = []
+    for a in await listar_anuncios_detectados(negocio_id):
+        if a["source_id"] in reglas or not a["campanas"]:
+            continue
+        mejor = a["campanas"][0]  # ya vienen ordenadas por conversaciones, de mayor a menor
+        empate = len(a["campanas"]) > 1 and a["campanas"][1]["conversaciones"] == mejor["conversaciones"]
+        if mejor["campana"] in comodines and not empate:
+            nuevas.append({
+                "source_id": a["source_id"], "headline": a["headline"], "campana": mejor["campana"],
+                "campana_id": comodines[mejor["campana"]]["id"],
+                "conversaciones": mejor["conversaciones"], "sin_campana": a["sin_campana"],
+            })
+    return {
+        "campanas_a_convertir": [{"id": c["id"], "nombre": c["nombre"], "patron": c["patron"]} for c in comodines.values()],
+        "reglas_a_crear": nuevas,
+    }
+
+
+async def aplicar_migrar_comodines(negocio_id: str, autor: str | None = None) -> dict:
+    """Aplica el plan: escribe las reglas y pasa las campañas comodín a
+    `por_anuncio`. Las conversaciones ya atribuidas NO se tocan (la
+    Analítica no cambia); solo cambia cómo se reconocen los anuncios nuevos."""
+    plan = await plan_migrar_comodines(negocio_id)
+    for r in plan["reglas_a_crear"]:
+        await guardar_regla_anuncio(negocio_id, r["source_id"], r["campana_id"], autor=autor)
+    async with async_session() as session:
+        for c in plan["campanas_a_convertir"]:
+            fila = await session.get(Campana, c["id"])
+            if fila is not None and fila.negocio_id == negocio_id:
+                fila.tipo_deteccion = "por_anuncio"
+        await session.commit()
+    await registrar_auditoria(
+        "campanas_comodin_migradas", actor=autor, negocio_id=negocio_id, entidad_tipo="campana", entidad_id="*",
+        payload={"campanas": [c["id"] for c in plan["campanas_a_convertir"]], "reglas": len(plan["reglas_a_crear"])},
+    )
+    return {"campanas": len(plan["campanas_a_convertir"]), "reglas": len(plan["reglas_a_crear"])}
+
+
 async def asignar_anuncio_a_campana(negocio_id: str, source_id: str, campana_id: int, autor: str | None = None) -> dict:
     """Decisión humana: asigna TODOS los leads de un anuncio a una campaña,
     reemplazando la que tuvieran (incluso "sin campaña"). Escribe en los dos
@@ -1156,6 +1266,9 @@ async def asignar_anuncio_a_campana(negocio_id: str, source_id: str, campana_id:
             lead.campana_origen = campana.nombre
             lead.actualizado = datetime.utcnow()
         await session.commit()
+
+    # Los leads FUTUROS de este anuncio también caen en esta campaña (regla explícita).
+    await guardar_regla_anuncio(negocio_id, source_id, campana_id, autor=autor)
 
     resumen = {"conversaciones": len(conversaciones), "leads": len(leads)}
     await registrar_auditoria(
@@ -2735,6 +2848,27 @@ class Campana(Base):
     # inventa) — las campañas existentes no pueden backfillearse sin
     # inventar una Unidad, lo cual está expresamente prohibido.
     unidad_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("unidades_de_negocio.id"), nullable=True)
+
+
+class AnuncioCampana(Base):
+    """Regla explícita "este anuncio de Meta (source_id) pertenece a esta
+    campaña" (2026-10-13). Es lo que reconoce a los leads FUTUROS de un
+    anuncio sin depender de palabras clave: se escribe al asignar un anuncio
+    a una campaña desde "Anuncios detectados". Una sola campaña por anuncio
+    y Negocio. Gana siempre sobre la detección por patrón (ver
+    campanas.resolver_campana_por_referral)."""
+    __tablename__ = "anuncio_campana"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_generar_uuid)
+    negocio_id: Mapped[str] = mapped_column(String(36), ForeignKey("negocios.id"), nullable=False, index=True)
+    source_id: Mapped[str] = mapped_column(String(200))
+    campana_id: Mapped[int] = mapped_column(Integer, ForeignKey("campanas.id"), nullable=False)
+    creado: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    creado_por: Mapped[str | None] = mapped_column(String(50), nullable=True)
+
+    __table_args__ = (
+        Index("ix_anuncio_campana_negocio_source", "negocio_id", "source_id", unique=True),
+    )
 
 
 class CanalWhatsApp(Base):

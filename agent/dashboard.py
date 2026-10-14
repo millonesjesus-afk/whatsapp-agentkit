@@ -57,6 +57,7 @@ from agent.memory import (
     toggle_usuario_activo, eliminar_usuario,
     listar_campanas, crear_campana, actualizar_campana, contar_opportunities_por_campana, eliminar_campana,
     obtener_campana, obtener_canal_whatsapp, listar_anuncios_detectados, asignar_anuncio_a_campana,
+    diagnostico_anuncios_sin_campana, plan_migrar_comodines, aplicar_migrar_comodines,
     listar_atribucion_sin_campana_periodo, cerrar_lead_definitivamente_via_conversation, reabrir_caso_cerrado, MOTIVO_REABRIR_MAXIMO, CIERRE_GRACIA_HORAS_POR_DEFECTO,
     rango_periodo_utc, contar_flujo_periodo, calcular_embudo_comercial, contar_oportunidades_por_asesor,
     distribucion_resultados_periodo, resumen_ventas_periodo, productos_vendidos_periodo,
@@ -7932,6 +7933,37 @@ async def anuncios_json(usuario: dict = Depends(servicio_identidad.requiere_rol(
         "anuncios": [_anuncio_a_json(a) for a in anuncios],
         "puede_gestionar": usuario["rol"] == "admin",
     })
+
+
+@router.get("/anuncios/diagnostico.json")
+async def anuncios_diagnostico_json(usuario: dict = Depends(servicio_identidad.requiere_rol("admin"))):
+    """Solo lectura, admin. Leads de anuncios que hoy están "Sin campaña", con la
+    evidencia que trajeron (¿título/texto presentes?, ¿primer contacto?), para
+    saber POR QUÉ un anuncio ya reconocido dejó leads sin campaña."""
+    filas = await diagnostico_anuncios_sin_campana(usuario["negocio_id"])
+    return JSONResponse({"total": len(filas), "filas": [
+        {**f, "evento_creado": iso_utc(f["evento_creado"]), "conversacion_creada": iso_utc(f["conversacion_creada"])}
+        for f in filas
+    ]})
+
+
+@router.post("/anuncios/comodines.json")
+async def migrar_comodines_json(
+    request: Request,
+    usuario: dict = Depends(servicio_identidad.requiere_rol("admin")),
+    _csrf: None = Depends(verificar_csrf),
+):
+    """Campañas "comodín" (detectan por una palabra clave y atribuyen anuncios
+    que no son suyos) → solo por regla de anuncio. Por defecto SOLO muestra el
+    plan; con `{"confirmar": true}` lo aplica. Las conversaciones ya atribuidas
+    no cambian."""
+    try:
+        cuerpo = await request.json()
+    except Exception:
+        cuerpo = {}
+    if isinstance(cuerpo, dict) and cuerpo.get("confirmar") is True:
+        return JSONResponse({"aplicado": True, **await aplicar_migrar_comodines(usuario["negocio_id"], autor=usuario.get("username"))})
+    return JSONResponse({"aplicado": False, **await plan_migrar_comodines(usuario["negocio_id"])})
 
 
 @router.post("/anuncios/asignar.json")
