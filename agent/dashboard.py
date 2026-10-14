@@ -93,6 +93,7 @@ from agent import atencion_atrasada
 from agent import calendario_negocio as cal_negocio
 from agent import llamadas
 from agent import derivacion_automatica
+from agent import origen_conversacion
 from agent import memory as mem
 from agent.memory import obtener_estado_ventana
 
@@ -2778,6 +2779,17 @@ async def bandeja_conversaciones(
         resultado=resultado, orden=orden, direccion=dir, pagina=pagina, por_pagina=por_pagina,
         ids_ordenados=ids_ordenados,
     )
+    # De dónde vino cada conversación (chip de campaña y banner de origen), en lote. Aditivo:
+    # si falla, la bandeja sale igual, sin `origen`.
+    try:
+        origenes = await origen_conversacion.origenes_de_conversaciones(
+            usuario["negocio_id"], [fila["id"] for fila in conversaciones],
+        )
+    except Exception:
+        logger.exception("No se pudo calcular el origen de las conversaciones de la bandeja")
+        origenes = {}
+    for fila in conversaciones:
+        fila["origen"] = origenes.get(fila["id"])
     if vista:
         for fila in conversaciones:
             e = entradas_vista[fila["id"]]
@@ -2926,6 +2938,10 @@ async def conversation_detalle(conversation_id: str, usuario: dict = Depends(_us
     except Exception:
         logger.exception(f"No se pudo calcular el estado de la ventana de la conversación {conversation_id}")
         dto["ventana_whatsapp"] = None
+    # De dónde vino y con qué oferta (aditivo; `None` si no se pudo calcular). `campana_origen` es
+    # el nombre vigente de la campaña: la ficha del lead lo muestra y este DTO nunca lo traía.
+    dto["origen"] = await origen_conversacion.origen_de_conversacion(usuario["negocio_id"], conversation_id)
+    dto["campana_origen"] = ((dto["origen"] or {}).get("campana") or {}).get("nombre")
     return JSONResponse(dto)
 
 

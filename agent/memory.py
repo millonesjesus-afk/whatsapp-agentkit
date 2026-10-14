@@ -1121,6 +1121,71 @@ async def listar_atribucion_sin_campana_periodo(
     }
 
 
+async def cargar_datos_origen_conversaciones(negocio_id: str, conversation_ids: list[str]) -> dict:
+    """Solo lectura, EN LOTE (4 consultas fijas, sin importar cuántas
+    conversaciones se pidan): la evidencia que `agent/origen_conversacion.py`
+    necesita para decir de dónde vino cada conversación — la conversación, su
+    lead (origen de contacto y campaña histórica por nombre), los eventos de
+    atribución de esos teléfonos (del más antiguo al más nuevo) y las
+    campañas involucradas. Todo filtrado por `negocio_id`: un id de otro
+    Negocio simplemente no aparece. Sin teléfonos ni datos personales en la
+    salida más allá de lo que el llamador ya tiene."""
+    ids = list(dict.fromkeys(i for i in conversation_ids if i))
+    if not ids:
+        return {"conversaciones": {}, "leads": {}, "eventos": {}, "campanas": {}}
+    async with async_session() as session:
+        convs = (await session.execute(
+            select(
+                Conversation.id, Conversation.creado, Conversation.campana_origen_id,
+                Conversation.origen_contacto, Contact.telefono,
+            )
+            .join(Contact, Contact.id == Conversation.contact_id)
+            .where(Conversation.negocio_id == negocio_id, Conversation.id.in_(ids))
+        )).all()
+        conversaciones = {
+            c.id: {
+                "id": c.id, "creado": c.creado, "campana_origen_id": c.campana_origen_id,
+                "origen_contacto": c.origen_contacto, "telefono": c.telefono,
+            }
+            for c in convs
+        }
+        telefonos = list({c["telefono"] for c in conversaciones.values() if c["telefono"]})
+        leads: dict[str, dict] = {}
+        eventos: dict[str, list[dict]] = {}
+        if telefonos:
+            for tel, campana_origen, origen_contacto in (await session.execute(
+                select(Lead.telefono, Lead.campana_origen, Lead.origen_contacto)
+                .where(Lead.negocio_id == negocio_id, Lead.telefono.in_(telefonos))
+            )).all():
+                leads[tel] = {"campana_origen": campana_origen, "origen_contacto": origen_contacto}
+            for e in (await session.execute(
+                select(AttributionEvent)
+                .where(AttributionEvent.negocio_id == negocio_id, AttributionEvent.lead_telefono.in_(telefonos))
+                .order_by(AttributionEvent.creado.asc(), AttributionEvent.id.asc())
+            )).scalars().all():
+                eventos.setdefault(e.lead_telefono, []).append({
+                    "id": e.id, "conversation_id": e.conversation_id, "tipo_origen": e.tipo_origen,
+                    "source_id": e.source_id, "headline": e.headline, "body": e.body,
+                    "source_url": (e.referral_raw or {}).get("source_url") if isinstance(e.referral_raw, dict) else None,
+                    "referral_raw": e.referral_raw if isinstance(e.referral_raw, dict) else None,
+                    "campana_nombre": e.campana_nombre, "first_touch": bool(e.first_touch), "creado": e.creado,
+                })
+        ids_campana = {c["campana_origen_id"] for c in conversaciones.values() if c["campana_origen_id"] is not None}
+        nombres_campana = {l["campana_origen"] for l in leads.values() if l["campana_origen"]}
+        campanas: dict[int, dict] = {}
+        condiciones = []
+        if ids_campana:
+            condiciones.append(Campana.id.in_(ids_campana))
+        if nombres_campana:
+            condiciones.append(Campana.nombre.in_(nombres_campana))
+        if condiciones:
+            for c in (await session.execute(
+                select(Campana).where(Campana.negocio_id == negocio_id, sa_or(*condiciones))
+            )).scalars().all():
+                campanas[c.id] = _campana_a_dict(c)
+    return {"conversaciones": conversaciones, "leads": leads, "eventos": eventos, "campanas": campanas}
+
+
 async def obtener_reglas_anuncio(negocio_id: str) -> dict[str, int]:
     """`{source_id: campana_id}` de las reglas explícitas anuncio→campaña del Negocio."""
     async with async_session() as session:
