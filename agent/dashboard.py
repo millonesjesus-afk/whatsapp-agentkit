@@ -59,6 +59,7 @@ from agent.memory import (
     obtener_campana, obtener_canal_whatsapp, listar_anuncios_detectados, asignar_anuncio_a_campana,
     diagnostico_anuncios_sin_campana, plan_migrar_comodines, aplicar_migrar_comodines, obtener_reglas_anuncio, guardar_regla_anuncio,
     historico_rellenar_conversaciones, historico_corregir_anuncios, historico_revertir,
+    diagnostico_atribucion_multiple, historico_recalcular_primer_anuncio,
     listar_atribucion_sin_campana_periodo, cerrar_lead_definitivamente_via_conversation, reabrir_caso_cerrado, MOTIVO_REABRIR_MAXIMO, CIERRE_GRACIA_HORAS_POR_DEFECTO,
     rango_periodo_utc, contar_flujo_periodo, calcular_embudo_comercial, contar_oportunidades_por_asesor,
     distribucion_resultados_periodo, resumen_ventas_periodo, productos_vendidos_periodo,
@@ -7796,6 +7797,23 @@ async def editar_promo_campana_json(
     return JSONResponse({"ok": True, "campana": _campana_a_json(campana_actualizada)})
 
 
+@router.post("/campanas/{campana_id}/eliminar.json")
+async def eliminar_campana_json(
+    campana_id: int,
+    usuario: dict = Depends(servicio_identidad.requiere_rol("admin")),
+    _csrf: None = Depends(verificar_csrf),
+):
+    """Elimina una campaña SOLO si nunca tuvo conversaciones (así no se pierde historial). Con
+    actividad, el camino es desactivarla. Sus reglas de anuncio se borran con ella."""
+    campana = await _verificar_ownership_campana(usuario, campana_id)
+    if not await eliminar_campana(campana_id, usuario["negocio_id"]):
+        raise HTTPException(
+            status_code=400,
+            detail=f"«{campana['nombre']}» ya tiene conversaciones: no se puede eliminar sin perder su historial. Desactívala en su lugar.",
+        )
+    return JSONResponse({"ok": True})
+
+
 @router.post("/campanas/{campana_id}/toggle.json")
 async def toggle_campana_json(
     campana_id: int,
@@ -7986,6 +8004,13 @@ async def anuncios_diagnostico_json(usuario: dict = Depends(servicio_identidad.r
     ]})
 
 
+@router.get("/anuncios/multiples.json")
+async def anuncios_multiples_json(usuario: dict = Depends(servicio_identidad.requiere_rol("admin"))):
+    """Solo lectura, admin. Conversaciones con anuncios de dos orígenes: de qué anuncio entraron primero,
+    en qué campaña están hoy y cuál es la regla de su primer anuncio."""
+    return JSONResponse(await diagnostico_atribucion_multiple(usuario["negocio_id"]))
+
+
 @router.post("/anuncios/comodines.json")
 async def migrar_comodines_json(
     request: Request,
@@ -8018,6 +8043,7 @@ async def corregir_historico_json(
     """Corrección de la atribución HISTÓRICA (solo admin). `accion`:
     - "rellenar": conversaciones sin campaña cuyo evento sí resolvió una.
     - "corregir": `source_ids` + `desde_campana_ids` (campañas de las que se corrige) + `campana_id` (null = sin campaña).
+    - "recalcular_primer_anuncio": cada conversación con anuncios de dos orígenes vuelve a la campaña de su primer anuncio.
     - "revertir": `auditoria_id` de una corrección anterior.
     Sin `confirmar: true` solo cuenta lo que cambiaría. Nunca toca la evidencia de Meta."""
     cuerpo = await request.json()
@@ -8037,6 +8063,8 @@ async def corregir_historico_json(
                 negocio_id, source_ids, int(campana_id) if campana_id is not None else None, aplicar, autor=autor,
                 desde_campana_ids=desde,
             ))
+        if accion == "recalcular_primer_anuncio":
+            return JSONResponse(await historico_recalcular_primer_anuncio(negocio_id, aplicar, autor=autor))
         if accion == "revertir":
             return JSONResponse({"aplicado": True, **await historico_revertir(
                 negocio_id, str(cuerpo.get("auditoria_id") or ""), autor=autor,

@@ -474,3 +474,99 @@ async def test_rellenar_no_deshace_una_correccion_a_sin_campana():
     vista = await mem.historico_rellenar_conversaciones(negocio["id"], aplicar=False)
 
     assert vista["conversaciones"] == 0
+
+
+# ---------------------------------------------------------------------------
+# 2026-10-16 — conversaciones con anuncios de dos orígenes, asignación segura y eliminar campaña
+# ---------------------------------------------------------------------------
+
+async def _conversacion_con_dos_anuncios(negocio, canal, telefono, primero, segundo, regla_primero_id=None):
+    """El lead entra por `primero` y, en la MISMA conversación, llega después un referral de `segundo`."""
+    await _nuevo_referral(negocio, canal, telefono, primero, headline="h1", body="b1")
+    if regla_primero_id is not None:
+        await mem.asignar_campana_origen(telefono, (await mem.obtener_campana(regla_primero_id))["nombre"])
+    await mem.registrar_attribution_event_adicional(
+        telefono, "meta_ads_no_resuelto", referral={"source_id": segundo, "headline": "h2", "body": "b2"},
+    )
+
+
+async def test_asignar_un_anuncio_no_pisa_lo_que_entro_primero_por_otro():
+    negocio, canal = await _negocio("g-anu-40")
+    x = await mem.crear_campana_de_anuncio("Campaña A", "AD-A", negocio["id"])
+    y = await mem.crear_campana("Campaña B", "por_anuncio", "AD-B", negocio_id=negocio["id"])
+    await _conversacion_con_dos_anuncios(negocio, canal, "51901100401", "AD-A", "AD-B", regla_primero_id=x["id"])
+    await _nuevo_referral(negocio, canal, "51901100402", "AD-B")  # éste entró PRIMERO por AD-B
+
+    anuncios = {a["source_id"]: a for a in await mem.listar_anuncios_detectados(negocio["id"])}
+    assert anuncios["AD-B"]["conversaciones"] == 2 and anuncios["AD-B"]["propias"] == 1
+
+    resumen = await mem.asignar_anuncio_a_campana(negocio["id"], "AD-B", y["id"], autor="jesus")
+
+    assert resumen == {"conversaciones": 1, "leads": 1}
+    assert (await mem.obtener_lead("51901100401", negocio_id=negocio["id"]))["campana_origen"] == "Campaña A"
+    assert (await mem.obtener_lead("51901100402", negocio_id=negocio["id"]))["campana_origen"] == "Campaña B"
+    totales = await _totales(negocio["id"])
+    assert totales["Campaña A"] == 1 and totales["Campaña B"] == 1
+
+
+async def test_recalcular_primer_anuncio_devuelve_cada_conversacion_a_su_campana_y_se_revierte():
+    negocio, canal = await _negocio("g-anu-41")
+    a = await mem.crear_campana_de_anuncio("Campaña A", "AD-A", negocio["id"])
+    b = await mem.crear_campana_de_anuncio("Campaña B", "AD-B", negocio["id"])
+    await _conversacion_con_dos_anuncios(negocio, canal, "51901100411", "AD-A", "AD-B", regla_primero_id=a["id"])
+    # Estado dañado por la asignación antigua: la conversación y el lead quedaron en la campaña del segundo anuncio.
+    async with mem.async_session() as session:
+        contact = await mem._obtener_contact(session, negocio["id"], "51901100411")
+        conv = await mem._obtener_conversation_activa(session, contact.id)
+        conv.campana_origen_id = b["id"]
+        lead = await session.get(mem.Lead, "51901100411")
+        lead.campana_origen = "Campaña B"
+        await session.commit()
+
+    diag = await mem.diagnostico_atribucion_multiple(negocio["id"])
+    assert diag["conversaciones_con_varios_anuncios"] == 1 and diag["no_coinciden_con_su_primer_anuncio"] == 1
+    assert diag["grupos"][0]["campana_actual"] == "Campaña B" and diag["grupos"][0]["campana_regla_del_primero"] == "Campaña A"
+
+    vista = await mem.historico_recalcular_primer_anuncio(negocio["id"], aplicar=False)
+    assert vista == {"aplicado": False, "conversaciones": 1, "leads": 1, "por_campana": {"Campaña A": 1}}
+    assert (await _totales(negocio["id"]))["Campaña B"] == 1
+
+    hecho = await mem.historico_recalcular_primer_anuncio(negocio["id"], aplicar=True, autor="jesus")
+    assert hecho["aplicado"] is True
+    totales = await _totales(negocio["id"])
+    assert totales["Campaña A"] == 1 and totales["Campaña B"] == 0
+    assert (await mem.obtener_lead("51901100411", negocio_id=negocio["id"]))["campana_origen"] == "Campaña A"
+    assert (await mem.historico_recalcular_primer_anuncio(negocio["id"], aplicar=False))["conversaciones"] == 0
+
+    await mem.historico_revertir(negocio["id"], hecho["auditoria_id"], autor="jesus")
+    assert (await _totales(negocio["id"]))["Campaña B"] == 1
+    assert (await mem.obtener_lead("51901100411", negocio_id=negocio["id"]))["campana_origen"] == "Campaña B"
+
+
+async def test_recalcular_no_toca_el_primer_anuncio_sin_regla():
+    negocio, canal = await _negocio("g-anu-42")
+    await mem.crear_campana_de_anuncio("Campaña B", "AD-B", negocio["id"])
+    await _conversacion_con_dos_anuncios(negocio, canal, "51901100421", "AD-SIN-REGLA", "AD-B")
+    assert (await mem.historico_recalcular_primer_anuncio(negocio["id"], aplicar=False))["conversaciones"] == 0
+
+
+async def test_eliminar_campana_solo_sin_conversaciones_y_borra_sus_reglas():
+    negocio, canal = await _negocio("g-anu-43")
+    admin = {"negocio_id": negocio["id"], "rol": "admin", "username": "jesus"}
+    sin_uso = await mem.crear_campana_de_anuncio("Sin uso", "AD-NUNCA", negocio["id"])
+    con_uso = await mem.crear_campana_de_anuncio("Con uso", "AD-USADO", negocio["id"])
+    await _legacy(negocio, canal, "51901100431", "AD-USADO", "Con uso")
+
+    with pytest.raises(HTTPException) as e:
+        await dashboard.eliminar_campana_json(con_uso["id"], usuario=admin, _csrf=None)
+    assert e.value.status_code == 400 and "Desactívala" in e.value.detail
+    assert await mem.obtener_campana(con_uso["id"]) is not None
+
+    assert _cuerpo(await dashboard.eliminar_campana_json(sin_uso["id"], usuario=admin, _csrf=None)) == {"ok": True}
+    assert await mem.obtener_campana(sin_uso["id"]) is None
+    assert "AD-NUNCA" not in await mem.obtener_reglas_anuncio(negocio["id"])
+
+    otro, _ = await _negocio("g-anu-44")
+    with pytest.raises(HTTPException) as e:  # de otro Negocio: 404, nunca se toca
+        await dashboard.eliminar_campana_json(con_uso["id"], usuario={"negocio_id": otro["id"], "rol": "admin"}, _csrf=None)
+    assert e.value.status_code == 404
