@@ -260,3 +260,125 @@ async def test_diagnostico_muestra_la_evidencia_de_los_leads_sin_campana():
     assert len(filas) == 1 and filas[0]["source_id"] == "ADZ"
     assert filas[0]["tiene_headline"] is False and filas[0]["tiene_body"] is False
     assert filas[0]["telefono"] == "…0131"
+
+
+# ---------------------------------------------------------------------------
+# 2026-10-16 — atribución por conversación y corrección histórica
+# ---------------------------------------------------------------------------
+
+from agent.campanas import registrar_referral_entrante
+
+
+async def _cerrar_conversacion(telefono: str, negocio_id: str, canal_id: int):
+    """Simula que el cliente vuelve: cierra la conversación activa y abre otra nueva."""
+    from sqlalchemy import update
+    async with mem.async_session() as session:
+        contact = await mem._obtener_contact(session, negocio_id, telefono)
+        await session.execute(
+            update(mem.Conversation).where(mem.Conversation.contact_id == contact.id).values(estado="cerrada")
+        )
+        await session.commit()
+    await mem.resolver_conversation_activa(telefono, negocio_id, canal_id)
+
+
+async def test_lead_que_vuelve_por_otro_anuncio_conserva_su_primer_contacto_y_la_conversacion_nueva_toma_la_nueva():
+    negocio, canal = await _negocio("g-anu-20")
+    primera = await mem.crear_campana("Primera", "referral_meta", "ad-uno", negocio_id=negocio["id"])
+    segunda = await mem.crear_campana("Segunda", "referral_meta", "ad-dos", negocio_id=negocio["id"])
+    await _nuevo_referral(negocio, canal, "51901100201", "ad-uno", headline="x", body="x")
+    assert (await mem.obtener_lead("51901100201", negocio_id=negocio["id"]))["campana_origen"] == "Primera"
+
+    await _cerrar_conversacion("51901100201", negocio["id"], canal["id"])
+    await registrar_referral_entrante(
+        "51901100201", "", {"source_id": "ad-dos", "headline": "y", "body": "y"}, negocio["id"],
+    )
+
+    assert (await mem.obtener_lead("51901100201", negocio_id=negocio["id"]))["campana_origen"] == "Primera"
+    totales = await _totales(negocio["id"])
+    assert totales["Primera"] == 1 and totales["Segunda"] == 1
+
+
+async def test_la_conversacion_que_ya_tiene_campana_no_se_pisa():
+    negocio, canal = await _negocio("g-anu-21")
+    await mem.crear_campana("Primera", "referral_meta", "ad-uno", negocio_id=negocio["id"])
+    await mem.crear_campana("Segunda", "referral_meta", "ad-dos", negocio_id=negocio["id"])
+    await _nuevo_referral(negocio, canal, "51901100211", "ad-uno", headline="x", body="x")
+    await registrar_referral_entrante(
+        "51901100211", "", {"source_id": "ad-dos", "headline": "y", "body": "y"}, negocio["id"],
+    )
+    totales = await _totales(negocio["id"])
+    assert totales["Primera"] == 1 and totales["Segunda"] == 0
+
+
+async def test_historico_rellena_conversaciones_vacias_y_se_puede_revertir():
+    negocio, canal = await _negocio("g-anu-22")
+    await mem.crear_campana("Julio", "referral_meta", "ad-julio", negocio_id=negocio["id"])
+    await _nuevo_referral(negocio, canal, "51901100221", "ad-julio", headline="x", body="x")
+    await _cerrar_conversacion("51901100221", negocio["id"], canal["id"])
+    # Evento del segundo ingreso que SÍ resolvió campaña, pero la conversación nueva quedó vacía (comportamiento anterior).
+    await mem.registrar_attribution_event_adicional(
+        "51901100221", "meta_ads", referral={"source_id": "ad-julio"}, campana_nombre="Julio",
+    )
+    assert (await _totales(negocio["id"]))["Julio"] == 1
+
+    vista = await mem.historico_rellenar_conversaciones(negocio["id"], aplicar=False)
+    assert vista == {"aplicado": False, "conversaciones": 1, "por_campana": {"Julio": 1}}
+    assert (await _totales(negocio["id"]))["Julio"] == 1
+
+    hecho = await mem.historico_rellenar_conversaciones(negocio["id"], aplicar=True, autor="jesus")
+    assert hecho["aplicado"] is True and (await _totales(negocio["id"]))["Julio"] == 2
+
+    await mem.historico_revertir(negocio["id"], hecho["auditoria_id"], autor="jesus")
+    assert (await _totales(negocio["id"]))["Julio"] == 1
+
+
+async def test_historico_corrige_anuncios_a_sin_campana_y_revierte():
+    negocio, canal = await _negocio("g-anu-23")
+    comodin = await mem.crear_campana("Meta Secadora Julio", "referral_meta", "secadora", negocio_id=negocio["id"])
+    await _nuevo_referral(negocio, canal, "51901100231", "AD-DUAL", headline="Financia", body="secadora y terma")
+    await _nuevo_referral(negocio, canal, "51901100232", "AD-BUENO", headline="Secadora", body="secadora")
+    assert (await _totales(negocio["id"]))["Meta Secadora Julio"] == 2
+
+    vista = await mem.historico_corregir_anuncios(negocio["id"], ["AD-DUAL"], None, aplicar=False)
+    assert vista == {"aplicado": False, "conversaciones": 1, "leads": 1, "campana_nueva": None}
+    assert (await _totales(negocio["id"]))["Meta Secadora Julio"] == 2
+
+    hecho = await mem.historico_corregir_anuncios(negocio["id"], ["AD-DUAL"], None, aplicar=True, autor="jesus")
+    assert hecho["aplicado"] is True and hecho["conversaciones"] == 1
+    assert (await _totales(negocio["id"]))["Meta Secadora Julio"] == 1
+    assert (await mem.obtener_lead("51901100231", negocio_id=negocio["id"]))["campana_origen"] is None
+    assert (await mem.obtener_lead("51901100232", negocio_id=negocio["id"]))["campana_origen"] == "Meta Secadora Julio"
+
+    await mem.historico_revertir(negocio["id"], hecho["auditoria_id"], autor="jesus")
+    assert (await _totales(negocio["id"]))["Meta Secadora Julio"] == 2
+    assert (await mem.obtener_lead("51901100231", negocio_id=negocio["id"]))["campana_origen"] == "Meta Secadora Julio"
+
+    with pytest.raises(LookupError):
+        await mem.historico_corregir_anuncios(negocio["id"], ["AD-DUAL"], 999999, aplicar=False)
+    with pytest.raises(ValueError):
+        await mem.historico_corregir_anuncios(negocio["id"], [], None, aplicar=False)
+    _ = comodin
+
+
+async def test_historico_no_toca_conversaciones_de_campanas_con_id_ni_de_otro_anuncio():
+    negocio, canal = await _negocio("g-anu-24")
+    await mem.crear_campana("Con ID", "referral_meta", "120245009911", negocio_id=negocio["id"])
+    await _nuevo_referral(negocio, canal, "51901100241", "120245009911", headline="x", body="x")
+    hecho = await mem.historico_corregir_anuncios(negocio["id"], ["120245009911"], None, aplicar=True)
+    assert hecho["conversaciones"] == 0 and (await _totales(negocio["id"]))["Con ID"] == 1
+
+
+async def test_endpoint_historico_valida_accion_y_permiso():
+    negocio, _ = await _negocio("g-anu-25")
+    admin = {"negocio_id": negocio["id"], "rol": "admin", "username": "jesus"}
+    with pytest.raises(HTTPException) as e:
+        await dashboard.corregir_historico_json(_RequestFalso({"accion": "inventada"}), usuario=admin, _csrf=None)
+    assert e.value.status_code == 400
+    with pytest.raises(HTTPException) as e:
+        await dashboard.corregir_historico_json(_RequestFalso({"accion": "corregir", "source_ids": []}), usuario=admin, _csrf=None)
+    assert e.value.status_code == 400
+    with pytest.raises(HTTPException) as e:
+        await dashboard.corregir_historico_json(_RequestFalso({"accion": "revertir", "auditoria_id": "no-existe"}), usuario=admin, _csrf=None)
+    assert e.value.status_code == 404
+    vista = json.loads((await dashboard.corregir_historico_json(_RequestFalso({"accion": "rellenar"}), usuario=admin, _csrf=None)).body)
+    assert vista["aplicado"] is False

@@ -31,6 +31,7 @@ from agent.memory import (
     listar_campanas, asignar_campana_origen, obtener_campana_por_nombre,
     obtener_lead, actualizar_lead, registrar_attribution_event,
     registrar_attribution_event_adicional, existe_attribution_event_reciente, obtener_reglas_anuncio,
+    asignar_campana_a_conversation_activa,
 )
 from agent.tools import obtener_producto_por_codigo, obtener_familia_producto, formatear_producto
 
@@ -208,6 +209,8 @@ async def registrar_referral_entrante(
     campana = await resolver_campana_por_referral(await listar_campanas(negocio_id, solo_activas=True), referral, negocio_id)
     if campana:
         await registrar_attribution_event_adicional(telefono, "meta_ads", referral=referral, campana_nombre=campana["nombre"])
+        # El lead conserva su campaña de primer contacto; esta conversación cuenta para la campaña por la que entró ahora.
+        await asignar_campana_a_conversation_activa(telefono, campana["id"])
     else:
         await registrar_attribution_event_adicional(telefono, "meta_ads_no_resuelto", referral=referral)
     return None

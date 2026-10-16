@@ -58,6 +58,7 @@ from agent.memory import (
     listar_campanas, crear_campana, actualizar_campana, contar_opportunities_por_campana, eliminar_campana,
     obtener_campana, obtener_canal_whatsapp, listar_anuncios_detectados, asignar_anuncio_a_campana,
     diagnostico_anuncios_sin_campana, plan_migrar_comodines, aplicar_migrar_comodines,
+    historico_rellenar_conversaciones, historico_corregir_anuncios, historico_revertir,
     listar_atribucion_sin_campana_periodo, cerrar_lead_definitivamente_via_conversation, reabrir_caso_cerrado, MOTIVO_REABRIR_MAXIMO, CIERRE_GRACIA_HORAS_POR_DEFECTO,
     rango_periodo_utc, contar_flujo_periodo, calcular_embudo_comercial, contar_oportunidades_por_asesor,
     distribucion_resultados_periodo, resumen_ventas_periodo, productos_vendidos_periodo,
@@ -7977,9 +7978,50 @@ async def migrar_comodines_json(
         cuerpo = await request.json()
     except Exception:
         cuerpo = {}
-    if isinstance(cuerpo, dict) and cuerpo.get("confirmar") is True:
-        return JSONResponse({"aplicado": True, **await aplicar_migrar_comodines(usuario["negocio_id"], autor=usuario.get("username"))})
-    return JSONResponse({"aplicado": False, **await plan_migrar_comodines(usuario["negocio_id"])})
+    cuerpo = cuerpo if isinstance(cuerpo, dict) else {}
+    excluir = [str(x) for x in (cuerpo.get("excluir") or [])]
+    if cuerpo.get("confirmar") is True:
+        return JSONResponse({"aplicado": True, **await aplicar_migrar_comodines(
+            usuario["negocio_id"], autor=usuario.get("username"), excluir=excluir,
+        )})
+    return JSONResponse({"aplicado": False, **await plan_migrar_comodines(usuario["negocio_id"], excluir=excluir)})
+
+
+@router.post("/anuncios/historico.json")
+async def corregir_historico_json(
+    request: Request,
+    usuario: dict = Depends(servicio_identidad.requiere_rol("admin")),
+    _csrf: None = Depends(verificar_csrf),
+):
+    """Corrección de la atribución HISTÓRICA (solo admin). `accion`:
+    - "rellenar": conversaciones sin campaña cuyo evento sí resolvió una.
+    - "corregir": `source_ids` + `campana_id` (null = sin campaña).
+    - "revertir": `auditoria_id` de una corrección anterior.
+    Sin `confirmar: true` solo cuenta lo que cambiaría. Nunca toca la evidencia de Meta."""
+    cuerpo = await request.json()
+    if not isinstance(cuerpo, dict):
+        raise HTTPException(status_code=400, detail="El cuerpo debe ser un objeto JSON.")
+    negocio_id, autor = usuario["negocio_id"], usuario.get("username")
+    aplicar = cuerpo.get("confirmar") is True
+    accion = cuerpo.get("accion")
+    try:
+        if accion == "rellenar":
+            return JSONResponse(await historico_rellenar_conversaciones(negocio_id, aplicar, autor=autor))
+        if accion == "corregir":
+            source_ids = [str(x) for x in (cuerpo.get("source_ids") or [])]
+            campana_id = cuerpo.get("campana_id")
+            return JSONResponse(await historico_corregir_anuncios(
+                negocio_id, source_ids, int(campana_id) if campana_id is not None else None, aplicar, autor=autor,
+            ))
+        if accion == "revertir":
+            return JSONResponse({"aplicado": True, **await historico_revertir(
+                negocio_id, str(cuerpo.get("auditoria_id") or ""), autor=autor,
+            )})
+    except LookupError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    raise HTTPException(status_code=400, detail="Acción inválida.")
 
 
 @router.post("/anuncios/asignar.json")

@@ -235,15 +235,18 @@ class RegistroAuditoria(Base):
 async def registrar_auditoria(
     accion: str, actor: str | None = None, negocio_id: str | None = None,
     entidad_tipo: str | None = None, entidad_id: str | None = None, payload: dict | None = None,
-) -> None:
+) -> str:
     """Único punto de escritura de RegistroAuditoria — append-only, sin
-    UPDATE/DELETE en ningún llamador (Gate 5.2, esqueleto base)."""
+    UPDATE/DELETE en ningún llamador (Gate 5.2, esqueleto base). Devuelve el id
+    de la fila (los llamadores existentes lo ignoran)."""
+    fila_id = _generar_uuid()
     async with async_session() as session:
         session.add(RegistroAuditoria(
-            accion=accion, actor=actor, negocio_id=negocio_id,
+            id=fila_id, accion=accion, actor=actor, negocio_id=negocio_id,
             entidad_tipo=entidad_tipo, entidad_id=entidad_id, payload=payload,
         ))
         await session.commit()
+    return fila_id
 
 
 def _negocio_a_dict(n: "Negocio") -> dict:
@@ -906,6 +909,21 @@ async def registrar_attribution_event_adicional(
         }
 
 
+async def asignar_campana_a_conversation_activa(telefono: str, campana_id: int) -> bool:
+    """Atribuye la campaña de un anuncio a la conversación ACTIVA del lead SOLO
+    si esa conversación aún no tiene campaña. No toca `Lead.campana_origen`
+    (primer contacto) ni pisa la campaña que la conversación ya traía. Sirve
+    para un lead que vuelve por otro (o el mismo) anuncio: su conversación
+    nueva cuenta para la campaña por la que entró ahora."""
+    async with async_session() as session:
+        conversation = await _obtener_conversation_activa_por_telefono(session, telefono)
+        if conversation is None or conversation.campana_origen_id is not None:
+            return False
+        conversation.campana_origen_id = campana_id
+        await session.commit()
+        return True
+
+
 async def existe_attribution_event_reciente(
     telefono: str, negocio_id: str, referral: dict | None, minutos: int = 30,
 ) -> bool:
@@ -1249,7 +1267,7 @@ def _es_campana_comodin(c: dict) -> bool:
     return c["tipo_deteccion"] == "referral_meta" and not str(c["patron"]).strip().isdigit()
 
 
-async def plan_migrar_comodines(negocio_id: str) -> dict:
+async def plan_migrar_comodines(negocio_id: str, excluir: list[str] | None = None) -> dict:
     """Solo lectura. Qué haría `aplicar_migrar_comodines`: las campañas
     comodín que se convertirían a detección SOLO por regla de anuncio
     (`por_anuncio`) y las reglas anuncio→campaña que se escribirían para que
@@ -1260,7 +1278,7 @@ async def plan_migrar_comodines(negocio_id: str) -> dict:
     reglas = await obtener_reglas_anuncio(negocio_id)
     nuevas = []
     for a in await listar_anuncios_detectados(negocio_id):
-        if a["source_id"] in reglas or not a["campanas"]:
+        if a["source_id"] in reglas or a["source_id"] in set(excluir or []) or not a["campanas"]:
             continue
         mejor = a["campanas"][0]  # ya vienen ordenadas por conversaciones, de mayor a menor
         empate = len(a["campanas"]) > 1 and a["campanas"][1]["conversaciones"] == mejor["conversaciones"]
@@ -1276,11 +1294,11 @@ async def plan_migrar_comodines(negocio_id: str) -> dict:
     }
 
 
-async def aplicar_migrar_comodines(negocio_id: str, autor: str | None = None) -> dict:
+async def aplicar_migrar_comodines(negocio_id: str, autor: str | None = None, excluir: list[str] | None = None) -> dict:
     """Aplica el plan: escribe las reglas y pasa las campañas comodín a
     `por_anuncio`. Las conversaciones ya atribuidas NO se tocan (la
     Analítica no cambia); solo cambia cómo se reconocen los anuncios nuevos."""
-    plan = await plan_migrar_comodines(negocio_id)
+    plan = await plan_migrar_comodines(negocio_id, excluir=excluir)
     for r in plan["reglas_a_crear"]:
         await guardar_regla_anuncio(negocio_id, r["source_id"], r["campana_id"], autor=autor)
     async with async_session() as session:
@@ -1294,6 +1312,158 @@ async def aplicar_migrar_comodines(negocio_id: str, autor: str | None = None) ->
         payload={"campanas": [c["id"] for c in plan["campanas_a_convertir"]], "reglas": len(plan["reglas_a_crear"])},
     )
     return {"campanas": len(plan["campanas_a_convertir"]), "reglas": len(plan["reglas_a_crear"])}
+
+
+def _es_comodin_o_migrada(c: dict) -> bool:
+    return _es_campana_comodin(c) or c["tipo_deteccion"] == "por_anuncio"
+
+
+async def _primer_anuncio_por_conversation(session, negocio_id: str) -> tuple[dict[str, tuple[str, str]], dict[str, str]]:
+    """({conversation_id: (source_id, lead_telefono)} con el PRIMER anuncio de cada
+    conversación, {lead_telefono: source_id} con el primer anuncio de cada lead)."""
+    eventos = (await session.execute(
+        select(AttributionEvent.conversation_id, AttributionEvent.source_id, AttributionEvent.lead_telefono)
+        .where(
+            AttributionEvent.negocio_id == negocio_id, AttributionEvent.tipo_origen.in_(_TIPOS_ORIGEN_ANUNCIO),
+            AttributionEvent.source_id.is_not(None), AttributionEvent.source_id != "",
+        )
+        .order_by(AttributionEvent.creado.asc(), AttributionEvent.id.asc())
+    )).all()
+    por_conversation: dict[str, tuple[str, str]] = {}
+    por_lead: dict[str, str] = {}
+    for conversation_id, source_id, telefono in eventos:
+        por_conversation.setdefault(conversation_id, (source_id, telefono))
+        por_lead.setdefault(telefono, source_id)
+    return por_conversation, por_lead
+
+
+async def historico_rellenar_conversaciones(negocio_id: str, aplicar: bool, autor: str | None = None) -> dict:
+    """Conversaciones SIN campaña cuyo evento de anuncio SÍ resolvió una (lead que
+    volvió por un anuncio y su conversación nueva no la tomó): se les atribuye la
+    campaña que el propio evento resolvió. Solo `Conversation.campana_origen_id`;
+    nunca `Lead.campana_origen`. Con `aplicar=False` solo cuenta."""
+    async with async_session() as session:
+        campanas = {c.nombre: c.id for c in (await session.execute(
+            select(Campana).where(Campana.negocio_id == negocio_id)
+        )).scalars().all()}
+        eventos = (await session.execute(
+            select(AttributionEvent.conversation_id, AttributionEvent.campana_nombre, AttributionEvent.source_id)
+            .join(Conversation, Conversation.id == AttributionEvent.conversation_id)
+            .where(
+                AttributionEvent.negocio_id == negocio_id, AttributionEvent.tipo_origen == "meta_ads",
+                AttributionEvent.campana_nombre.is_not(None), Conversation.campana_origen_id.is_(None),
+            )
+            .order_by(AttributionEvent.creado.asc(), AttributionEvent.id.asc())
+        )).all()
+        elegido: dict[str, tuple[str, str]] = {}
+        for conversation_id, nombre, source_id in eventos:
+            if nombre in campanas:
+                elegido.setdefault(conversation_id, (nombre, source_id))
+        resumen: dict = {"conversaciones": len(elegido), "por_campana": {}}
+        for nombre, _ in elegido.values():
+            resumen["por_campana"][nombre] = resumen["por_campana"].get(nombre, 0) + 1
+        if not aplicar or not elegido:
+            return {"aplicado": False, **resumen}
+        for conversation_id, (nombre, _) in elegido.items():
+            conversation = await session.get(Conversation, conversation_id)
+            conversation.campana_origen_id = campanas[nombre]
+        await session.commit()
+    auditoria_id = await registrar_auditoria(
+        "atribucion_historica_rellenada", actor=autor, negocio_id=negocio_id, entidad_tipo="conversation", entidad_id="*",
+        payload={"conversaciones": [
+            {"conversation_id": c, "campana_anterior_id": None, "campana_nueva_id": campanas[n]} for c, (n, _) in elegido.items()
+        ]},
+    )
+    return {"aplicado": True, "auditoria_id": auditoria_id, **resumen}
+
+
+async def historico_corregir_anuncios(
+    negocio_id: str, source_ids: list[str], campana_id: int | None, aplicar: bool, autor: str | None = None,
+) -> dict:
+    """Corrige la atribución HISTÓRICA de los anuncios dados: las conversaciones
+    cuyo PRIMER anuncio es uno de ellos y hoy están en una campaña comodín pasan a
+    `campana_id` (None = sin campaña). El lead (`Lead.campana_origen`) solo se
+    corrige si su primer anuncio es uno de ellos y su campaña era la comodín de
+    esa conversación. No toca la evidencia (AttributionEvent). Guarda en la
+    auditoría el valor anterior de cada cambio para poder revertirlo."""
+    if not source_ids:
+        raise ValueError("Falta al menos un anuncio.")
+    elegidos = set(source_ids)
+    async with async_session() as session:
+        campanas = {c.id: c for c in (await session.execute(
+            select(Campana).where(Campana.negocio_id == negocio_id)
+        )).scalars().all()}
+        if campana_id is not None and campana_id not in campanas:
+            raise LookupError("La campaña no existe.")
+        comodin_ids = {i for i, c in campanas.items() if _es_comodin_o_migrada(_campana_a_dict(c))}
+        por_conversation, por_lead = await _primer_anuncio_por_conversation(session, negocio_id)
+        objetivo = {cid: tel for cid, (src, tel) in por_conversation.items() if src in elegidos}
+        conversaciones = (await session.execute(
+            select(Conversation).where(
+                Conversation.negocio_id == negocio_id, Conversation.id.in_(list(objetivo) or [""]),
+                Conversation.campana_origen_id.in_(list(comodin_ids) or [-1]),
+            )
+        )).scalars().all()
+        nueva = campanas[campana_id].nombre if campana_id is not None else None
+        cambios_conv, cambios_lead = [], []
+        for conv in conversaciones:
+            telefono = objetivo[conv.id]
+            cambios_conv.append({
+                "conversation_id": conv.id, "campana_anterior_id": conv.campana_origen_id, "campana_nueva_id": campana_id,
+            })
+            lead = await session.get(Lead, telefono)
+            nombre_anterior = campanas[conv.campana_origen_id].nombre
+            if (
+                lead is not None and lead.negocio_id == negocio_id and lead.campana_origen == nombre_anterior
+                and por_lead.get(telefono) in elegidos
+                and not any(x["lead_telefono"] == telefono for x in cambios_lead)
+            ):
+                cambios_lead.append({"lead_telefono": telefono, "campana_anterior": nombre_anterior, "campana_nueva": nueva})
+        resumen = {"conversaciones": len(cambios_conv), "leads": len(cambios_lead), "campana_nueva": nueva}
+        if not aplicar or not cambios_conv:
+            return {"aplicado": False, **resumen}
+        por_id = {c.id: c for c in conversaciones}
+        for cambio in cambios_conv:
+            por_id[cambio["conversation_id"]].campana_origen_id = campana_id
+        for cambio in cambios_lead:
+            lead = await session.get(Lead, cambio["lead_telefono"])
+            lead.campana_origen = nueva
+            lead.actualizado = datetime.utcnow()
+        await session.commit()
+    auditoria_id = await registrar_auditoria(
+        "atribucion_historica_corregida", actor=autor, negocio_id=negocio_id, entidad_tipo="anuncio", entidad_id="*",
+        payload={"source_ids": list(source_ids), "campana_id": campana_id, "conversaciones": cambios_conv, "leads": cambios_lead},
+    )
+    return {"aplicado": True, "auditoria_id": auditoria_id, **resumen}
+
+
+async def historico_revertir(negocio_id: str, auditoria_id: str, autor: str | None = None) -> dict:
+    """Deshace una corrección/relleno histórico: devuelve cada conversación y lead al valor
+    anterior guardado en la auditoría. Solo si la fila es de este Negocio y de un tipo
+    de corrección histórica."""
+    async with async_session() as session:
+        fila = await session.get(RegistroAuditoria, auditoria_id)
+        if fila is None or fila.negocio_id != negocio_id or fila.accion not in (
+            "atribucion_historica_corregida", "atribucion_historica_rellenada",
+        ):
+            raise LookupError("No existe esa corrección.")
+        payload = fila.payload or {}
+        for cambio in payload.get("conversaciones", []):
+            conv = await session.get(Conversation, cambio["conversation_id"])
+            if conv is not None and conv.negocio_id == negocio_id:
+                conv.campana_origen_id = cambio["campana_anterior_id"]
+        for cambio in payload.get("leads", []):
+            lead = await session.get(Lead, cambio["lead_telefono"])
+            if lead is not None and lead.negocio_id == negocio_id:
+                lead.campana_origen = cambio["campana_anterior"]
+                lead.actualizado = datetime.utcnow()
+        await session.commit()
+        resumen = {"conversaciones": len(payload.get("conversaciones", [])), "leads": len(payload.get("leads", []))}
+    await registrar_auditoria(
+        "atribucion_historica_revertida", actor=autor, negocio_id=negocio_id, entidad_tipo="auditoria",
+        entidad_id=auditoria_id, payload=resumen,
+    )
+    return resumen
 
 
 async def asignar_anuncio_a_campana(negocio_id: str, source_id: str, campana_id: int, autor: str | None = None) -> dict:
