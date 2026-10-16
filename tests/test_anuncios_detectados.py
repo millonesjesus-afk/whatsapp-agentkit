@@ -111,7 +111,7 @@ async def test_endpoint_crea_campana_por_id_de_anuncio_y_asigna():
     cuerpo = _cuerpo(respuesta)
     assert cuerpo["ok"] is True and cuerpo["asignados"] == {"conversaciones": 1, "leads": 1}
     campana = await mem.obtener_campana(cuerpo["campana_id"])
-    assert campana["tipo_deteccion"] == "referral_meta" and campana["patron"] == "ad9"
+    assert campana["tipo_deteccion"] == "por_anuncio" and campana["patron"] == "ad9"
     assert (await _totales(negocio["id"]))["Meta Terma Setiembre"] == 1
 
 
@@ -236,16 +236,17 @@ async def test_migrar_comodines_conserva_los_anuncios_y_deja_de_atribuir_los_nue
     await _nuevo_referral(negocio, canal, "51901100122", "12024860142", headline="Otro", body="Otro")
 
     plan = await mem.plan_migrar_comodines(negocio["id"])
-    assert [c["nombre"] for c in plan["campanas_a_convertir"]] == ["Meta Terma Julio"]
-    assert [r["source_id"] for r in plan["reglas_a_crear"]] == ["AD-VIEJO"]
+    assert {c["nombre"] for c in plan["campanas_a_convertir"]} == {"Meta Terma Julio", "Con ID"}
+    assert {r["source_id"] for r in plan["reglas_a_crear"]} == {"AD-VIEJO", "12024860142"}
     assert (await mem.obtener_campana(comodin["id"]))["tipo_deteccion"] == "referral_meta"  # el plan no toca nada
 
     resumen = await mem.aplicar_migrar_comodines(negocio["id"], autor="jesus")
-    assert resumen == {"campanas": 1, "reglas": 1}
+    assert (resumen["campanas"], resumen["reglas"]) == (2, 2)
     assert (await mem.obtener_campana(comodin["id"]))["tipo_deteccion"] == "por_anuncio"
-    assert (await mem.obtener_campana(por_id["id"]))["tipo_deteccion"] == "referral_meta"
+    assert (await mem.obtener_campana(por_id["id"]))["tipo_deteccion"] == "por_anuncio"
 
     assert (await _nuevo_referral(negocio, canal, "51901100123", "AD-VIEJO"))["nombre"] == "Meta Terma Julio"
+    assert (await _nuevo_referral(negocio, canal, "51901100125", "12024860142", headline="z", body="z"))["nombre"] == "Con ID"
     assert await _nuevo_referral(negocio, canal, "51901100124", "AD-NUEVO") is None  # ya no se atribuye por palabra
 
 
@@ -339,11 +340,11 @@ async def test_historico_corrige_anuncios_a_sin_campana_y_revierte():
     await _nuevo_referral(negocio, canal, "51901100232", "AD-BUENO", headline="Secadora", body="secadora")
     assert (await _totales(negocio["id"]))["Meta Secadora Julio"] == 2
 
-    vista = await mem.historico_corregir_anuncios(negocio["id"], ["AD-DUAL"], None, aplicar=False)
+    vista = await mem.historico_corregir_anuncios(negocio["id"], ["AD-DUAL"], None, aplicar=False, desde_campana_ids=[comodin["id"]])
     assert vista == {"aplicado": False, "conversaciones": 1, "leads": 1, "campana_nueva": None}
     assert (await _totales(negocio["id"]))["Meta Secadora Julio"] == 2
 
-    hecho = await mem.historico_corregir_anuncios(negocio["id"], ["AD-DUAL"], None, aplicar=True, autor="jesus")
+    hecho = await mem.historico_corregir_anuncios(negocio["id"], ["AD-DUAL"], None, aplicar=True, autor="jesus", desde_campana_ids=[comodin["id"]])
     assert hecho["aplicado"] is True and hecho["conversaciones"] == 1
     assert (await _totales(negocio["id"]))["Meta Secadora Julio"] == 1
     assert (await mem.obtener_lead("51901100231", negocio_id=negocio["id"]))["campana_origen"] is None
@@ -354,17 +355,22 @@ async def test_historico_corrige_anuncios_a_sin_campana_y_revierte():
     assert (await mem.obtener_lead("51901100231", negocio_id=negocio["id"]))["campana_origen"] == "Meta Secadora Julio"
 
     with pytest.raises(LookupError):
-        await mem.historico_corregir_anuncios(negocio["id"], ["AD-DUAL"], 999999, aplicar=False)
+        await mem.historico_corregir_anuncios(negocio["id"], ["AD-DUAL"], 999999, aplicar=False, desde_campana_ids=[comodin["id"]])
     with pytest.raises(ValueError):
-        await mem.historico_corregir_anuncios(negocio["id"], [], None, aplicar=False)
-    _ = comodin
+        await mem.historico_corregir_anuncios(negocio["id"], [], None, aplicar=False, desde_campana_ids=[comodin["id"]])
+    with pytest.raises(ValueError):
+        await mem.historico_corregir_anuncios(negocio["id"], ["AD-DUAL"], None, aplicar=False)
 
 
 async def test_historico_no_toca_conversaciones_de_campanas_con_id_ni_de_otro_anuncio():
     negocio, canal = await _negocio("g-anu-24")
-    await mem.crear_campana("Con ID", "referral_meta", "120245009911", negocio_id=negocio["id"])
+    con_id = await mem.crear_campana("Con ID", "referral_meta", "120245009911", negocio_id=negocio["id"])
+    comodin = await mem.crear_campana("Comodín", "referral_meta", "zzz", negocio_id=negocio["id"])
     await _nuevo_referral(negocio, canal, "51901100241", "120245009911", headline="x", body="x")
-    hecho = await mem.historico_corregir_anuncios(negocio["id"], ["120245009911"], None, aplicar=True)
+    hecho = await mem.historico_corregir_anuncios(
+        negocio["id"], ["120245009911"], None, aplicar=True, desde_campana_ids=[comodin["id"]],
+    )
+    _ = con_id
     assert hecho["conversaciones"] == 0 and (await _totales(negocio["id"]))["Con ID"] == 1
 
 
@@ -378,7 +384,69 @@ async def test_endpoint_historico_valida_accion_y_permiso():
         await dashboard.corregir_historico_json(_RequestFalso({"accion": "corregir", "source_ids": []}), usuario=admin, _csrf=None)
     assert e.value.status_code == 400
     with pytest.raises(HTTPException) as e:
+        await dashboard.corregir_historico_json(_RequestFalso({"accion": "corregir", "source_ids": ["1"]}), usuario=admin, _csrf=None)
+    assert e.value.status_code == 400
+    with pytest.raises(HTTPException) as e:
         await dashboard.corregir_historico_json(_RequestFalso({"accion": "revertir", "auditoria_id": "no-existe"}), usuario=admin, _csrf=None)
     assert e.value.status_code == 404
     vista = json.loads((await dashboard.corregir_historico_json(_RequestFalso({"accion": "rellenar"}), usuario=admin, _csrf=None)).body)
     assert vista["aplicado"] is False
+
+
+# ---------------------------------------------------------------------------
+# 2026-10-16 — un solo mecanismo para Meta: la regla anuncio→campaña
+# ---------------------------------------------------------------------------
+
+async def test_unificar_pasa_todas_las_campanas_de_meta_a_regla_y_se_revierte():
+    negocio, canal = await _negocio("g-anu-30")
+    con_id = await mem.crear_campana("Con ID", "referral_meta", "120245000111", negocio_id=negocio["id"])
+    comodin = await mem.crear_campana("Comodín", "referral_meta", "terma", negocio_id=negocio["id"])
+    saludo = await mem.crear_campana("SMS", "texto_saludo", "hola gas", negocio_id=negocio["id"])
+    await _nuevo_referral(negocio, canal, "51901100301", "AD-UNO", headline="Terma", body="terma")
+    await _nuevo_referral(negocio, canal, "51901100302", "AD-DOS", headline="Terma", body="terma")
+
+    plan = await mem.plan_migrar_comodines(negocio["id"], excluir=["AD-DOS"])
+    assert {c["nombre"] for c in plan["campanas_a_convertir"]} == {"Con ID", "Comodín"}
+    assert {(r["source_id"], r["origen"]) for r in plan["reglas_a_crear"]} == {("120245000111", "id"), ("AD-UNO", "comodin")}
+
+    hecho = await mem.aplicar_migrar_comodines(negocio["id"], autor="jesus", excluir=["AD-DOS"])
+    assert hecho["campanas"] == 2 and hecho["reglas"] == 2
+    assert (await mem.obtener_campana(con_id["id"]))["tipo_deteccion"] == "por_anuncio"
+    assert (await mem.obtener_campana(saludo["id"]))["tipo_deteccion"] == "texto_saludo"
+    assert await mem.obtener_reglas_anuncio(negocio["id"]) == {"120245000111": con_id["id"], "AD-UNO": comodin["id"]}
+
+    # El anuncio con ID y el de un producto siguen reconociéndose; el excluido y uno nuevo ya no se atribuyen por palabra.
+    assert (await _nuevo_referral(negocio, canal, "51901100303", "120245000111", headline="x", body="x"))["nombre"] == "Con ID"
+    assert (await _nuevo_referral(negocio, canal, "51901100304", "AD-UNO", headline="x", body="x"))["nombre"] == "Comodín"
+    assert await _nuevo_referral(negocio, canal, "51901100305", "AD-DOS") is None
+    assert await _nuevo_referral(negocio, canal, "51901100306", "AD-NUEVO") is None
+
+    await mem.historico_revertir(negocio["id"], hecho["auditoria_id"], autor="jesus")
+    assert (await mem.obtener_campana(con_id["id"]))["tipo_deteccion"] == "referral_meta"
+    assert await mem.obtener_reglas_anuncio(negocio["id"]) == {}
+
+
+async def test_alta_de_campana_de_meta_exige_id_de_anuncio_y_crea_su_regla():
+    negocio, _ = await _negocio("g-anu-31")
+    admin = {"negocio_id": negocio["id"], "rol": "admin", "username": "jesus"}
+    base = {"nombre": "Meta Nueva", "tipo_deteccion": "referral_meta"}
+
+    with pytest.raises(HTTPException) as e:
+        await dashboard.crear_campana_nueva_json(_RequestFalso({**base, "patron": "terma"}), usuario=admin, _csrf=None)
+    assert e.value.status_code == 400
+
+    creada = _cuerpo(await dashboard.crear_campana_nueva_json(_RequestFalso({**base, "patron": "120245000222"}), usuario=admin, _csrf=None))
+    assert creada["campana"]["tipo_deteccion"] == "por_anuncio"
+    assert await mem.obtener_reglas_anuncio(negocio["id"]) == {"120245000222": creada["campana"]["id"]}
+
+    with pytest.raises(HTTPException) as e:  # ese anuncio ya pertenece a otra campaña
+        await dashboard.crear_campana_nueva_json(
+            _RequestFalso({"nombre": "Otra", "tipo_deteccion": "por_anuncio", "patron": "120245000222"}), usuario=admin, _csrf=None,
+        )
+    assert e.value.status_code == 400
+
+    # Las campañas de saludo (SMS, wa.link) no cambian.
+    sms = _cuerpo(await dashboard.crear_campana_nueva_json(
+        _RequestFalso({"nombre": "SMS X", "tipo_deteccion": "texto_saludo", "patron": "hola"}), usuario=admin, _csrf=None,
+    ))
+    assert sms["campana"]["tipo_deteccion"] == "texto_saludo"

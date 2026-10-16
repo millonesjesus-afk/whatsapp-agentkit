@@ -57,7 +57,7 @@ from agent.memory import (
     toggle_usuario_activo, eliminar_usuario,
     listar_campanas, crear_campana, actualizar_campana, contar_opportunities_por_campana, eliminar_campana,
     obtener_campana, obtener_canal_whatsapp, listar_anuncios_detectados, asignar_anuncio_a_campana,
-    diagnostico_anuncios_sin_campana, plan_migrar_comodines, aplicar_migrar_comodines,
+    diagnostico_anuncios_sin_campana, plan_migrar_comodines, aplicar_migrar_comodines, obtener_reglas_anuncio, guardar_regla_anuncio,
     historico_rellenar_conversaciones, historico_corregir_anuncios, historico_revertir,
     listar_atribucion_sin_campana_periodo, cerrar_lead_definitivamente_via_conversation, reabrir_caso_cerrado, MOTIVO_REABRIR_MAXIMO, CIERRE_GRACIA_HORAS_POR_DEFECTO,
     rango_periodo_utc, contar_flujo_periodo, calcular_embudo_comercial, contar_oportunidades_por_asesor,
@@ -7655,8 +7655,27 @@ async def eliminar_equipo_usuario(
 TIPOS_DETECCION = {
     "texto_saludo": "Texto del saludo (wa.link)",
     "referral_meta": "Anuncio de Meta (referral)",
+    "por_anuncio": "Anuncio de Meta (regla por anuncio)",
     "leadgen_meta": "Formulario de Meta (Lead Ads)",
 }
+
+
+async def _preparar_deteccion_meta(tipo_deteccion: str, patron: str, negocio_id: str) -> tuple[str, str]:
+    """Las campañas de anuncios de Meta tienen UN solo mecanismo: la regla
+    anuncio→campaña. Cualquier alta de tipo "referral_meta"/"por_anuncio" se normaliza a
+    "por_anuncio" y exige el ID NUMÉRICO del anuncio como patrón (nunca una palabra
+    clave); además ese anuncio no puede pertenecer ya a otra campaña."""
+    if tipo_deteccion not in ("referral_meta", "por_anuncio"):
+        return tipo_deteccion, patron
+    patron = patron.strip()
+    if not patron.isdigit():
+        raise HTTPException(
+            status_code=400,
+            detail="Para una campaña de anuncio de Meta indica el ID numérico del anuncio (lo ves en «Anuncios detectados»), no una palabra clave.",
+        )
+    if patron in await obtener_reglas_anuncio(negocio_id):
+        raise HTTPException(status_code=400, detail="Ese anuncio ya pertenece a otra campaña.")
+    return "por_anuncio", patron
 
 
 def _campana_a_json(c: dict) -> dict:
@@ -7737,12 +7756,15 @@ async def crear_campana_nueva_json(
                 detail="El patrón no aparece dentro del mensaje de saludo — así nunca se detectaría esta campaña. Usa un fragmento que sí esté en el saludo.",
             )
 
+    tipo_deteccion, patron = await _preparar_deteccion_meta(tipo_deteccion, patron, usuario["negocio_id"])
     campana_creada = await crear_campana(
         nombre=nombre, tipo_deteccion=tipo_deteccion, patron=patron.lower(),
         texto_saludo=texto_saludo, codigo_material=codigo_material,
         producto_promocional=producto_promocional, precio_promocional=precio_promocional,
         negocio_id=usuario["negocio_id"],
     )
+    if tipo_deteccion == "por_anuncio":
+        await guardar_regla_anuncio(usuario["negocio_id"], patron, campana_creada["id"], autor=usuario.get("username"))
     return JSONResponse({"ok": True, "campana": {**_campana_a_json(campana_creada), "conteo": {"total": 0, "vendidos": 0}}})
 
 
@@ -7995,7 +8017,7 @@ async def corregir_historico_json(
 ):
     """Corrección de la atribución HISTÓRICA (solo admin). `accion`:
     - "rellenar": conversaciones sin campaña cuyo evento sí resolvió una.
-    - "corregir": `source_ids` + `campana_id` (null = sin campaña).
+    - "corregir": `source_ids` + `desde_campana_ids` (campañas de las que se corrige) + `campana_id` (null = sin campaña).
     - "revertir": `auditoria_id` de una corrección anterior.
     Sin `confirmar: true` solo cuenta lo que cambiaría. Nunca toca la evidencia de Meta."""
     cuerpo = await request.json()
@@ -8010,8 +8032,10 @@ async def corregir_historico_json(
         if accion == "corregir":
             source_ids = [str(x) for x in (cuerpo.get("source_ids") or [])]
             campana_id = cuerpo.get("campana_id")
+            desde = [int(x) for x in (cuerpo.get("desde_campana_ids") or [])]
             return JSONResponse(await historico_corregir_anuncios(
                 negocio_id, source_ids, int(campana_id) if campana_id is not None else None, aplicar, autor=autor,
+                desde_campana_ids=desde,
             ))
         if accion == "revertir":
             return JSONResponse({"aplicado": True, **await historico_revertir(
@@ -8051,7 +8075,7 @@ async def asignar_anuncio_json(
         if any(c["nombre"].strip().lower() == nombre_nueva.lower() for c in await listar_campanas(negocio_id)):
             raise HTTPException(status_code=400, detail="Ya existe una campaña con ese nombre.")
         campana = await crear_campana(
-            nombre=nombre_nueva, tipo_deteccion="referral_meta", patron=source_id.lower(), negocio_id=negocio_id,
+            nombre=nombre_nueva, tipo_deteccion="por_anuncio", patron=source_id.lower(), negocio_id=negocio_id,
         )
         campana_id = campana["id"]
     try:
@@ -8454,12 +8478,15 @@ async def crear_campana_nueva(
     # mismo criterio que crear_usuario_nuevo. unidad_id queda sin pasar
     # (None) — las Unidades reales de Cálidda son dato pendiente, no se
     # inventa (Arquitectura Contractual §5, excepción de migración).
+    tipo_deteccion, patron = await _preparar_deteccion_meta(tipo_deteccion, patron, usuario["negocio_id"])
     campana_creada = await crear_campana(
         nombre=nombre.strip(), tipo_deteccion=tipo_deteccion, patron=patron.strip().lower(),
         texto_saludo=texto_saludo.strip(), codigo_material=codigo_material,
         producto_promocional=producto_promocional.strip(), precio_promocional=precio_promocional.strip(),
         negocio_id=usuario["negocio_id"],
     )
+    if tipo_deteccion == "por_anuncio":
+        await guardar_regla_anuncio(usuario["negocio_id"], patron, campana_creada["id"], autor=usuario.get("username"))
     return RedirectResponse(url=f"/dashboard/campanas?creada={campana_creada['id']}", status_code=303)
 
 

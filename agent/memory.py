@@ -1267,18 +1267,37 @@ def _es_campana_comodin(c: dict) -> bool:
     return c["tipo_deteccion"] == "referral_meta" and not str(c["patron"]).strip().isdigit()
 
 
+def _es_campana_por_id(c: dict) -> bool:
+    """Campaña de Meta cuyo patrón es el ID numérico de UN anuncio (las de setiembre)."""
+    return c["tipo_deteccion"] == "referral_meta" and str(c["patron"]).strip().isdigit()
+
+
 async def plan_migrar_comodines(negocio_id: str, excluir: list[str] | None = None) -> dict:
-    """Solo lectura. Qué haría `aplicar_migrar_comodines`: las campañas
-    comodín que se convertirían a detección SOLO por regla de anuncio
-    (`por_anuncio`) y las reglas anuncio→campaña que se escribirían para que
-    los anuncios que hoy atribuyen sigan igual (la campaña con más
-    conversaciones de ese anuncio, si es un comodín). Sin tocar nada."""
+    """Solo lectura. Qué haría `aplicar_migrar_comodines` para dejar TODAS las
+    campañas de Meta con un único mecanismo, la regla anuncio→campaña
+    (`por_anuncio`):
+      · las campañas con ID de anuncio como patrón → una regla (ese ID → esa campaña);
+      · las campañas comodín (palabra clave) → una regla por cada anuncio que hoy
+        atribuyen (la campaña con más conversaciones, si es un comodín), salvo los
+        `excluir`, que quedan sin regla (para asignarlos a mano).
+    Las conversaciones ya atribuidas no cambian. Sin tocar nada."""
     campanas = await listar_campanas(negocio_id)
     comodines = {c["nombre"]: c for c in campanas if _es_campana_comodin(c)}
-    reglas = await obtener_reglas_anuncio(negocio_id)
+    por_id = [c for c in campanas if _es_campana_por_id(c)]
+    reglas = dict(await obtener_reglas_anuncio(negocio_id))
+    omitidos = set(excluir or [])
     nuevas = []
+    for c in por_id:
+        source_id = str(c["patron"]).strip()
+        if source_id in reglas:
+            continue  # ya tiene regla: no se pisa
+        reglas[source_id] = c["id"]
+        nuevas.append({
+            "source_id": source_id, "headline": None, "campana": c["nombre"], "campana_id": c["id"],
+            "conversaciones": 0, "sin_campana": 0, "origen": "id",
+        })
     for a in await listar_anuncios_detectados(negocio_id):
-        if a["source_id"] in reglas or a["source_id"] in set(excluir or []) or not a["campanas"]:
+        if a["source_id"] in reglas or a["source_id"] in omitidos or not a["campanas"]:
             continue
         mejor = a["campanas"][0]  # ya vienen ordenadas por conversaciones, de mayor a menor
         empate = len(a["campanas"]) > 1 and a["campanas"][1]["conversaciones"] == mejor["conversaciones"]
@@ -1286,18 +1305,23 @@ async def plan_migrar_comodines(negocio_id: str, excluir: list[str] | None = Non
             nuevas.append({
                 "source_id": a["source_id"], "headline": a["headline"], "campana": mejor["campana"],
                 "campana_id": comodines[mejor["campana"]]["id"],
-                "conversaciones": mejor["conversaciones"], "sin_campana": a["sin_campana"],
+                "conversaciones": mejor["conversaciones"], "sin_campana": a["sin_campana"], "origen": "comodin",
             })
     return {
-        "campanas_a_convertir": [{"id": c["id"], "nombre": c["nombre"], "patron": c["patron"]} for c in comodines.values()],
+        "campanas_a_convertir": [
+            {"id": c["id"], "nombre": c["nombre"], "patron": c["patron"], "tipo_anterior": c["tipo_deteccion"],
+             "origen": "comodin" if _es_campana_comodin(c) else "id"}
+            for c in campanas if _es_campana_comodin(c) or _es_campana_por_id(c)
+        ],
         "reglas_a_crear": nuevas,
     }
 
 
 async def aplicar_migrar_comodines(negocio_id: str, autor: str | None = None, excluir: list[str] | None = None) -> dict:
-    """Aplica el plan: escribe las reglas y pasa las campañas comodín a
-    `por_anuncio`. Las conversaciones ya atribuidas NO se tocan (la
-    Analítica no cambia); solo cambia cómo se reconocen los anuncios nuevos."""
+    """Aplica el plan: escribe las reglas y pasa las campañas de Meta a
+    `por_anuncio`. Las conversaciones ya atribuidas NO se tocan (la Analítica no
+    cambia); solo cambia cómo se reconocen los anuncios. Guarda en la auditoría lo
+    necesario para deshacerlo (`historico_revertir`)."""
     plan = await plan_migrar_comodines(negocio_id, excluir=excluir)
     for r in plan["reglas_a_crear"]:
         await guardar_regla_anuncio(negocio_id, r["source_id"], r["campana_id"], autor=autor)
@@ -1307,15 +1331,16 @@ async def aplicar_migrar_comodines(negocio_id: str, autor: str | None = None, ex
             if fila is not None and fila.negocio_id == negocio_id:
                 fila.tipo_deteccion = "por_anuncio"
         await session.commit()
-    await registrar_auditoria(
+    auditoria_id = await registrar_auditoria(
         "campanas_comodin_migradas", actor=autor, negocio_id=negocio_id, entidad_tipo="campana", entidad_id="*",
-        payload={"campanas": [c["id"] for c in plan["campanas_a_convertir"]], "reglas": len(plan["reglas_a_crear"])},
+        payload={
+            "campanas": [{"id": c["id"], "tipo_anterior": c["tipo_anterior"]} for c in plan["campanas_a_convertir"]],
+            "reglas": [r["source_id"] for r in plan["reglas_a_crear"]],
+        },
     )
-    return {"campanas": len(plan["campanas_a_convertir"]), "reglas": len(plan["reglas_a_crear"])}
-
-
-def _es_comodin_o_migrada(c: dict) -> bool:
-    return _es_campana_comodin(c) or c["tipo_deteccion"] == "por_anuncio"
+    return {
+        "campanas": len(plan["campanas_a_convertir"]), "reglas": len(plan["reglas_a_crear"]), "auditoria_id": auditoria_id,
+    }
 
 
 async def _primer_anuncio_por_conversation(session, negocio_id: str) -> tuple[dict[str, tuple[str, str]], dict[str, str]]:
@@ -1379,15 +1404,19 @@ async def historico_rellenar_conversaciones(negocio_id: str, aplicar: bool, auto
 
 async def historico_corregir_anuncios(
     negocio_id: str, source_ids: list[str], campana_id: int | None, aplicar: bool, autor: str | None = None,
+    desde_campana_ids: list[int] | None = None,
 ) -> dict:
     """Corrige la atribución HISTÓRICA de los anuncios dados: las conversaciones
-    cuyo PRIMER anuncio es uno de ellos y hoy están en una campaña comodín pasan a
+    cuyo PRIMER anuncio es uno de ellos y hoy están en una de las campañas
+    `desde_campana_ids` (las comodín que atribuyeron mal) pasan a
     `campana_id` (None = sin campaña). El lead (`Lead.campana_origen`) solo se
     corrige si su primer anuncio es uno de ellos y su campaña era la comodín de
     esa conversación. No toca la evidencia (AttributionEvent). Guarda en la
     auditoría el valor anterior de cada cambio para poder revertirlo."""
     if not source_ids:
         raise ValueError("Falta al menos un anuncio.")
+    if not desde_campana_ids:
+        raise ValueError("Indica de qué campañas se corrige (desde_campana_ids).")
     elegidos = set(source_ids)
     async with async_session() as session:
         campanas = {c.id: c for c in (await session.execute(
@@ -1395,7 +1424,7 @@ async def historico_corregir_anuncios(
         )).scalars().all()}
         if campana_id is not None and campana_id not in campanas:
             raise LookupError("La campaña no existe.")
-        comodin_ids = {i for i, c in campanas.items() if _es_comodin_o_migrada(_campana_a_dict(c))}
+        comodin_ids = {i for i in desde_campana_ids if i in campanas}
         por_conversation, por_lead = await _primer_anuncio_por_conversation(session, negocio_id)
         objetivo = {cid: tel for cid, (src, tel) in por_conversation.items() if src in elegidos}
         conversaciones = (await session.execute(
@@ -1444,10 +1473,25 @@ async def historico_revertir(negocio_id: str, auditoria_id: str, autor: str | No
     async with async_session() as session:
         fila = await session.get(RegistroAuditoria, auditoria_id)
         if fila is None or fila.negocio_id != negocio_id or fila.accion not in (
-            "atribucion_historica_corregida", "atribucion_historica_rellenada",
+            "atribucion_historica_corregida", "atribucion_historica_rellenada", "campanas_comodin_migradas",
         ):
             raise LookupError("No existe esa corrección.")
         payload = fila.payload or {}
+        if fila.accion == "campanas_comodin_migradas":
+            for c in payload.get("campanas", []):
+                campana = await session.get(Campana, c["id"])
+                if campana is not None and campana.negocio_id == negocio_id:
+                    campana.tipo_deteccion = c["tipo_anterior"]
+            await session.execute(delete(AnuncioCampana).where(
+                AnuncioCampana.negocio_id == negocio_id, AnuncioCampana.source_id.in_(payload.get("reglas", []) or [""]),
+            ))
+            await session.commit()
+            resumen = {"campanas": len(payload.get("campanas", [])), "reglas": len(payload.get("reglas", []))}
+            await registrar_auditoria(
+                "atribucion_historica_revertida", actor=autor, negocio_id=negocio_id, entidad_tipo="auditoria",
+                entidad_id=auditoria_id, payload=resumen,
+            )
+            return resumen
         for cambio in payload.get("conversaciones", []):
             conv = await session.get(Conversation, cambio["conversation_id"])
             if conv is not None and conv.negocio_id == negocio_id:
