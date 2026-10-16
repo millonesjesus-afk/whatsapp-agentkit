@@ -1380,9 +1380,13 @@ async def historico_rellenar_conversaciones(negocio_id: str, aplicar: bool, auto
             )
             .order_by(AttributionEvent.creado.asc(), AttributionEvent.id.asc())
         )).all()
+        # Solo si la regla ACTUAL del anuncio sigue siendo esa campaña: un anuncio sin regla (por
+        # ejemplo uno corregido a "Sin campaña") o con otra campaña no se vuelve a rellenar con la
+        # evidencia vieja del evento.
+        reglas = await obtener_reglas_anuncio(negocio_id)
         elegido: dict[str, tuple[str, str]] = {}
         for conversation_id, nombre, source_id in eventos:
-            if nombre in campanas:
+            if nombre in campanas and reglas.get(source_id) == campanas[nombre]:
                 elegido.setdefault(conversation_id, (nombre, source_id))
         resumen: dict = {"conversaciones": len(elegido), "por_campana": {}}
         for nombre, _ in elegido.values():
@@ -1508,6 +1512,16 @@ async def historico_revertir(negocio_id: str, auditoria_id: str, autor: str | No
         entidad_id=auditoria_id, payload=resumen,
     )
     return resumen
+
+
+async def crear_campana_de_anuncio(nombre: str, source_id: str, negocio_id: str, autor: str | None = None, **extra) -> dict:
+    """Campaña de un anuncio de Meta: tipo `por_anuncio` + su regla anuncio→campaña
+    (el ID del anuncio es el único dato que la reconoce)."""
+    campana = await crear_campana(
+        nombre=nombre, tipo_deteccion="por_anuncio", patron=source_id.lower(), negocio_id=negocio_id, **extra,
+    )
+    await guardar_regla_anuncio(negocio_id, source_id, campana["id"], autor=autor)
+    return campana
 
 
 async def asignar_anuncio_a_campana(negocio_id: str, source_id: str, campana_id: int, autor: str | None = None) -> dict:

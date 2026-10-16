@@ -77,9 +77,8 @@ async def _armar(
         nombre=f"Canal {codigo}", phone_number_id=f"4094000{codigo[-2:]}", negocio_id=negocio["id"],
     )
     if con_campana:
-        await mem.crear_campana(
-            nombre=f"Anuncio terma {codigo}", tipo_deteccion="referral_meta", patron="terma a gas desde s/419.90",
-            negocio_id=negocio["id"],
+        await mem.crear_campana_de_anuncio(
+            f"Anuncio terma {codigo}", (referral or REFERRAL)["source_id"], negocio["id"],
         )
     canal = {
         "id": canal_db["id"], "negocio_id": negocio["id"], "unidad_id": None,

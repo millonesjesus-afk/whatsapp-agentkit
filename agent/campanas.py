@@ -140,40 +140,25 @@ def generar_link_whatsapp(texto_saludo: str) -> str:
     return f"https://wa.me/{WHATSAPP_NUMERO_PUBLICO}?text={texto_codificado}"
 
 
-def _resolver_campana_por_referral(campanas: list[dict], referral: dict) -> dict | None:
-    """Campaña "referral_meta" cuyo patrón aparece en los datos del anuncio
-    (source_id, headline, body). Si coinciden varias (p. ej. "terma" y el ID
-    exacto de un anuncio), gana la de patrón más largo: la más específica."""
-    fuente_meta = _normalizar(
-        f"{referral.get('source_id', '')} {referral.get('headline', '')} {referral.get('body', '')}"
-    )
-    coincidencias = [
-        c for c in campanas
-        if c["tipo_deteccion"] == "referral_meta" and _normalizar(c["patron"]) and _normalizar(c["patron"]) in fuente_meta
-    ]
-    if not coincidencias:
-        return None
-    return max(coincidencias, key=lambda c: len(_normalizar(c["patron"])))
-
-
 async def resolver_campana_por_referral(campanas: list[dict], referral: dict, negocio_id: str) -> dict | None:
-    """Campaña de un referral de Meta. Primero la regla EXPLÍCITA del anuncio
-    (`anuncio_campana`, escrita al asignarlo desde "Anuncios detectados"); si
-    no hay (o su campaña está inactiva), la detección por patrón de siempre.
-    Una falla leyendo las reglas nunca debe impedir atender al lead: se
-    registra y se sigue con el patrón."""
+    """Campaña de un referral de Meta: SOLO por la regla anuncio→campaña
+    (`anuncio_campana`, escrita al asignar el anuncio desde "Anuncios
+    detectados" o al crear la campaña con el ID del anuncio). Ya no se infiere
+    por palabras del título o del texto (2026-10-16): un anuncio sin regla, o
+    cuya campaña está inactiva, queda sin campaña hasta que se asigne. Una
+    falla leyendo las reglas nunca impide atender al lead: se registra y el
+    anuncio queda sin resolver (la evidencia de Meta se guarda igual)."""
     source_id = str((referral or {}).get("source_id") or "").strip()
-    if source_id:
-        try:
-            campana_id = (await obtener_reglas_anuncio(negocio_id)).get(source_id)
-        except Exception:  # noqa: BLE001 — cae al comportamiento previo
-            logger.exception("No se pudieron leer las reglas anuncio→campaña; se usa el patrón")
-            campana_id = None
-        if campana_id is not None:
-            regla = next((c for c in campanas if c["id"] == campana_id), None)
-            if regla is not None:
-                return regla
-    return _resolver_campana_por_referral(campanas, referral)
+    if not source_id:
+        return None
+    try:
+        campana_id = (await obtener_reglas_anuncio(negocio_id)).get(source_id)
+    except Exception:  # noqa: BLE001 — el lead se atiende igual
+        logger.exception("No se pudieron leer las reglas anuncio→campaña; el anuncio queda sin resolver")
+        return None
+    if campana_id is None:
+        return None
+    return next((c for c in campanas if c["id"] == campana_id), None)
 
 
 # Ventana en la que el MISMO referral (mismo anuncio y mismo clic) no vuelve a

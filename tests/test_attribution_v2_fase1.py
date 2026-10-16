@@ -36,10 +36,7 @@ REFERRAL_ANUNCIO = {
 
 async def test_caso_a_meta_ads_resoluble_crea_evento_y_mantiene_campana_origen():
     negocio, _canal, _conv = await _preparar_conversacion("a", "51900000101")
-    await mem.crear_campana(
-        nombre="SMS Terma a gas", tipo_deteccion="referral_meta", patron="terma a gas desde s/419.90",
-        negocio_id=negocio["id"],
-    )
+    await mem.crear_campana_de_anuncio("SMS Terma a gas", REFERRAL_ANUNCIO["source_id"], negocio["id"])
 
     resultado = await campanas.detectar_y_asignar_campana(
         "51900000101", "Hola, quiero información", REFERRAL_ANUNCIO, negocio["id"],

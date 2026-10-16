@@ -134,18 +134,16 @@ async def test_endpoint_valida_la_entrada():
         assert e.value.status_code == esperado, payload
 
 
-async def test_deteccion_prefiere_la_campana_mas_especifica():
+async def test_la_deteccion_solo_usa_la_regla_del_anuncio_no_palabras_del_texto():
     negocio, canal = await _negocio("g-anu-07")
-    await mem.crear_campana("Meta Terma Julio", "referral_meta", "terma", negocio_id=negocio["id"])
-    await mem.crear_campana("Meta Terma Setiembre", "referral_meta", "120245001", negocio_id=negocio["id"])
-    await mem.actualizar_lead("51901100051", negocio_id=negocio["id"], numero_whatsapp_id="x")
-    await mem.resolver_conversation_activa("51901100051", negocio["id"], canal["id"])
+    await mem.crear_campana("Meta Terma Julio", "referral_meta", "terma", negocio_id=negocio["id"])  # campaña antigua, por palabra
+    await mem.crear_campana_de_anuncio("Meta Terma Setiembre", "120245001", negocio["id"])
 
-    campana = await detectar_y_asignar_campana(
-        "51901100051", "Hola", {"source_id": "120245001", "headline": "Terma a gas", "body": ""}, negocio["id"],
-    )
+    por_regla = await _nuevo_referral(negocio, canal, "51901100051", "120245001", headline="Terma a gas", body="")
+    por_texto = await _nuevo_referral(negocio, canal, "51901100052", "OTRO", headline="Terma a gas", body="terma")
 
-    assert campana["nombre"] == "Meta Terma Setiembre"
+    assert por_regla["nombre"] == "Meta Terma Setiembre"
+    assert por_texto is None  # el título dice "terma", pero ese anuncio no tiene regla
 
 
 async def test_el_endpoint_de_lista_devuelve_fechas_y_permiso():
@@ -195,6 +193,12 @@ def test_dominios_parecidos_no_se_confunden_con_instagram_o_facebook():
 # 2026-10-13 — regla explícita anuncio→campaña, comodines y diagnóstico
 # ---------------------------------------------------------------------------
 
+async def _legacy(negocio, canal, telefono, source_id, campana_nombre, headline="x", body="x"):
+    """Lead que llegó por un anuncio y quedó atribuido a una campaña ANTES de la unificación (estado histórico)."""
+    await _nuevo_referral(negocio, canal, telefono, source_id, headline=headline, body=body)
+    await mem.asignar_campana_origen(telefono, campana_nombre)
+
+
 async def _nuevo_referral(negocio, canal, telefono, source_id, headline="Terma a gas", body="Cuerpo terma"):
     await mem.actualizar_lead(telefono, negocio_id=negocio["id"], numero_whatsapp_id="x")
     await mem.resolver_conversation_activa(telefono, negocio["id"], canal["id"])
@@ -232,8 +236,8 @@ async def test_migrar_comodines_conserva_los_anuncios_y_deja_de_atribuir_los_nue
     negocio, canal = await _negocio("g-anu-12")
     comodin = await mem.crear_campana("Meta Terma Julio", "referral_meta", "terma", negocio_id=negocio["id"])
     por_id = await mem.crear_campana("Con ID", "referral_meta", "12024860142", negocio_id=negocio["id"])
-    await _nuevo_referral(negocio, canal, "51901100121", "AD-VIEJO")
-    await _nuevo_referral(negocio, canal, "51901100122", "12024860142", headline="Otro", body="Otro")
+    await _legacy(negocio, canal, "51901100121", "AD-VIEJO", "Meta Terma Julio")
+    await _legacy(negocio, canal, "51901100122", "12024860142", "Con ID", headline="Otro", body="Otro")
 
     plan = await mem.plan_migrar_comodines(negocio["id"])
     assert {c["nombre"] for c in plan["campanas_a_convertir"]} == {"Meta Terma Julio", "Con ID"}
@@ -284,8 +288,8 @@ async def _cerrar_conversacion(telefono: str, negocio_id: str, canal_id: int):
 
 async def test_lead_que_vuelve_por_otro_anuncio_conserva_su_primer_contacto_y_la_conversacion_nueva_toma_la_nueva():
     negocio, canal = await _negocio("g-anu-20")
-    primera = await mem.crear_campana("Primera", "referral_meta", "ad-uno", negocio_id=negocio["id"])
-    segunda = await mem.crear_campana("Segunda", "referral_meta", "ad-dos", negocio_id=negocio["id"])
+    await mem.crear_campana_de_anuncio("Primera", "ad-uno", negocio["id"])
+    await mem.crear_campana_de_anuncio("Segunda", "ad-dos", negocio["id"])
     await _nuevo_referral(negocio, canal, "51901100201", "ad-uno", headline="x", body="x")
     assert (await mem.obtener_lead("51901100201", negocio_id=negocio["id"]))["campana_origen"] == "Primera"
 
@@ -301,8 +305,8 @@ async def test_lead_que_vuelve_por_otro_anuncio_conserva_su_primer_contacto_y_la
 
 async def test_la_conversacion_que_ya_tiene_campana_no_se_pisa():
     negocio, canal = await _negocio("g-anu-21")
-    await mem.crear_campana("Primera", "referral_meta", "ad-uno", negocio_id=negocio["id"])
-    await mem.crear_campana("Segunda", "referral_meta", "ad-dos", negocio_id=negocio["id"])
+    await mem.crear_campana_de_anuncio("Primera", "ad-uno", negocio["id"])
+    await mem.crear_campana_de_anuncio("Segunda", "ad-dos", negocio["id"])
     await _nuevo_referral(negocio, canal, "51901100211", "ad-uno", headline="x", body="x")
     await registrar_referral_entrante(
         "51901100211", "", {"source_id": "ad-dos", "headline": "y", "body": "y"}, negocio["id"],
@@ -313,7 +317,8 @@ async def test_la_conversacion_que_ya_tiene_campana_no_se_pisa():
 
 async def test_historico_rellena_conversaciones_vacias_y_se_puede_revertir():
     negocio, canal = await _negocio("g-anu-22")
-    await mem.crear_campana("Julio", "referral_meta", "ad-julio", negocio_id=negocio["id"])
+    julio = await mem.crear_campana("Julio", "referral_meta", "ad-julio", negocio_id=negocio["id"])
+    await mem.guardar_regla_anuncio(negocio["id"], "ad-julio", julio["id"])
     await _nuevo_referral(negocio, canal, "51901100221", "ad-julio", headline="x", body="x")
     await _cerrar_conversacion("51901100221", negocio["id"], canal["id"])
     # Evento del segundo ingreso que SÍ resolvió campaña, pero la conversación nueva quedó vacía (comportamiento anterior).
@@ -336,8 +341,8 @@ async def test_historico_rellena_conversaciones_vacias_y_se_puede_revertir():
 async def test_historico_corrige_anuncios_a_sin_campana_y_revierte():
     negocio, canal = await _negocio("g-anu-23")
     comodin = await mem.crear_campana("Meta Secadora Julio", "referral_meta", "secadora", negocio_id=negocio["id"])
-    await _nuevo_referral(negocio, canal, "51901100231", "AD-DUAL", headline="Financia", body="secadora y terma")
-    await _nuevo_referral(negocio, canal, "51901100232", "AD-BUENO", headline="Secadora", body="secadora")
+    await _legacy(negocio, canal, "51901100231", "AD-DUAL", "Meta Secadora Julio", headline="Financia", body="secadora y terma")
+    await _legacy(negocio, canal, "51901100232", "AD-BUENO", "Meta Secadora Julio", headline="Secadora", body="secadora")
     assert (await _totales(negocio["id"]))["Meta Secadora Julio"] == 2
 
     vista = await mem.historico_corregir_anuncios(negocio["id"], ["AD-DUAL"], None, aplicar=False, desde_campana_ids=[comodin["id"]])
@@ -366,7 +371,7 @@ async def test_historico_no_toca_conversaciones_de_campanas_con_id_ni_de_otro_an
     negocio, canal = await _negocio("g-anu-24")
     con_id = await mem.crear_campana("Con ID", "referral_meta", "120245009911", negocio_id=negocio["id"])
     comodin = await mem.crear_campana("Comodín", "referral_meta", "zzz", negocio_id=negocio["id"])
-    await _nuevo_referral(negocio, canal, "51901100241", "120245009911", headline="x", body="x")
+    await _legacy(negocio, canal, "51901100241", "120245009911", "Con ID")
     hecho = await mem.historico_corregir_anuncios(
         negocio["id"], ["120245009911"], None, aplicar=True, desde_campana_ids=[comodin["id"]],
     )
@@ -402,8 +407,9 @@ async def test_unificar_pasa_todas_las_campanas_de_meta_a_regla_y_se_revierte():
     con_id = await mem.crear_campana("Con ID", "referral_meta", "120245000111", negocio_id=negocio["id"])
     comodin = await mem.crear_campana("Comodín", "referral_meta", "terma", negocio_id=negocio["id"])
     saludo = await mem.crear_campana("SMS", "texto_saludo", "hola gas", negocio_id=negocio["id"])
-    await _nuevo_referral(negocio, canal, "51901100301", "AD-UNO", headline="Terma", body="terma")
-    await _nuevo_referral(negocio, canal, "51901100302", "AD-DOS", headline="Terma", body="terma")
+    await _legacy(negocio, canal, "51901100301", "AD-UNO", "Comodín", headline="Terma", body="terma")
+    await _legacy(negocio, canal, "51901100302", "AD-DOS", "Comodín", headline="Terma", body="terma")
+    await _legacy(negocio, canal, "51901100307", "120245000111", "Con ID")
 
     plan = await mem.plan_migrar_comodines(negocio["id"], excluir=["AD-DOS"])
     assert {c["nombre"] for c in plan["campanas_a_convertir"]} == {"Con ID", "Comodín"}
@@ -450,3 +456,21 @@ async def test_alta_de_campana_de_meta_exige_id_de_anuncio_y_crea_su_regla():
         _RequestFalso({"nombre": "SMS X", "tipo_deteccion": "texto_saludo", "patron": "hola"}), usuario=admin, _csrf=None,
     ))
     assert sms["campana"]["tipo_deteccion"] == "texto_saludo"
+
+
+async def test_rellenar_no_deshace_una_correccion_a_sin_campana():
+    negocio, canal = await _negocio("g-anu-32")
+    comodin = await mem.crear_campana("Comodín", "referral_meta", "terma", negocio_id=negocio["id"])
+    await _legacy(negocio, canal, "51901100321", "AD-DUAL", "Comodín", headline="x", body="terma")
+    # La evidencia original del evento dice "Comodín" (así lo resolvía la palabra clave entonces).
+    await mem.registrar_attribution_event_adicional(
+        "51901100321", "meta_ads", referral={"source_id": "AD-DUAL"}, campana_nombre="Comodín",
+    )
+    await mem.historico_corregir_anuncios(
+        negocio["id"], ["AD-DUAL"], None, aplicar=True, autor="jesus", desde_campana_ids=[comodin["id"]],
+    )
+    assert (await _totales(negocio["id"]))["Comodín"] == 0
+
+    vista = await mem.historico_rellenar_conversaciones(negocio["id"], aplicar=False)
+
+    assert vista["conversaciones"] == 0
