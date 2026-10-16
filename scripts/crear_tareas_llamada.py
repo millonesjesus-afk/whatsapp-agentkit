@@ -12,6 +12,11 @@ configurarlo por script: scripts/configurar_llamadas.py.
 
 No envía ningún mensaje (la oferta de Gabi la manda scripts/procesar_inactividad_clientes.py, apagada por defecto).
 
+Además corre, AISLADO al final, la SOMBRA del experimento «solo clic» (agent/solo_clic.py, Fase B, 2026-10-16): registra qué
+brazo y qué acción le tocarían a cada conversación de «solo clic» y su desenlace a 24/72 h, sin enviar ni llamar a nadie.
+Apagada por defecto (`sc_exp_modo`); un error ahí nunca afecta a la creación de tareas. Se configura con
+scripts/configurar_solo_clic.py. No hay Cron nuevo: corre dentro de éste.
+
 Pensado para correr como un Cron Schedule de Railway cada 15 minutos:  */15 * * * *
 Uso local (prueba manual, no corre en Railway automáticamente):
     python scripts/crear_tareas_llamada.py
@@ -29,6 +34,31 @@ from agent import llamadas
 from agent.memory import esperar_base_de_datos
 
 
+async def _sombra_solo_clic() -> None:
+    """Experimento «solo clic», Fase B (agent/solo_clic.py): REGISTRA a qué brazo iría cada conversación de «solo clic» y qué
+    habría hecho el sistema, y el desenlace natural a 24 h y 72 h. NO envía ni llama a nadie. Va AISLADO: pase lo que pase aquí
+    (la base, un dato raro, un error de código) la creación de tareas de llamada de arriba ya terminó y este bloque jamás lanza.
+    Con `sc_exp_modo` apagado (default) solo lee esa clave por negocio y sale. Con la IA caída no corre (Gabi no está
+    conversando y el «primer mensaje de Gabi» dejaría de ser comparable)."""
+    try:
+        from agent import circuito_ia, solo_clic
+
+        if await circuito_ia.esta_abierto():
+            return
+        resultados = await solo_clic.ejecutar_sombra()
+        for negocio_id, r in resultados.items():
+            if "error" in r:
+                print(f"ERROR en la sombra «solo clic» del negocio {negocio_id[:8]} (no afecta a las tareas de llamada): {r['error']}", file=sys.stderr)
+            elif r.get("modo") == solo_clic.MODO_SOMBRA:
+                c = r.get("cohorte") or {}
+                print(
+                    f"Solo clic [sombra] negocio {negocio_id[:8]}: {c.get('registradas', 0)} conversación(es) registrada(s) de "
+                    f"{c.get('candidatas', 0)} candidata(s), {r.get('resultados_registrados', 0)} desenlace(s) a 24/72 h."
+                )
+    except Exception as e:  # noqa: BLE001 — nunca debe romper el Cron de las tareas de llamada
+        print(f"ERROR en la sombra «solo clic» (no afecta a las tareas de llamada): {type(e).__name__}: {e}", file=sys.stderr)
+
+
 async def main() -> None:
     await esperar_base_de_datos()
     resultados = await llamadas.ejecutar_corrida()
@@ -44,6 +74,7 @@ async def main() -> None:
             f"{r.get('asignadas', 0)} asignada(s), {r.get('reasignadas', 0)} reasignada(s), {r.get('escaladas', 0)} sin hacer."
             + (f" Creación omitida: {r['creacion_omitida']}." if r.get("creacion_omitida") else "")
         )
+    await _sombra_solo_clic()
     if errores:
         print(f"Con error (se reintentan en la próxima corrida): {', '.join(n[:8] for n in errores)}")
         raise RuntimeError(f"{len(errores)} negocio(s) con error")

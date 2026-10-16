@@ -34,6 +34,9 @@
 # RESPUESTA A LA OFERTA (2026-10-11): Gabi ahora entiende la primera respuesta del cliente a la oferta de llamada («sí»,
 # «a las 3», «no me llamen»): ver la sección «Respuesta del cliente a la oferta» y `procesar_respuesta_del_cliente`.
 #
+# SOLO CLIC (2026-10-16): con `sc_exp_modo` != apagado, `crear_tareas` omite a los leads «solo clic» (motivo
+# `solo_clic_en_experimento`): ver agent/solo_clic.py. Con el experimento apagado este módulo no cambia en nada.
+#
 # Todo lo que toca la base es seguro de repetir: el índice único parcial garantiza una tarea abierta por conversación.
 
 import asyncio
@@ -645,7 +648,26 @@ async def crear_tareas(negocio_id: str, config: Config, ahora: datetime, rangos:
                 continue
             evaluaciones.append((lead, ev))
 
+    # EXPERIMENTO «SOLO CLIC» (2026-10-16, agent/solo_clic.py): con el experimento encendido (sombra o activo), un lead de «solo
+    # clic» —abrió el chat con el texto prellenado del anuncio y no volvió a escribir— NO recibe tarea automática: no se llama a
+    # nadie de ese segmento sin un SÍ explícito, aunque «Para llamar» esté en modo activo. Con `sc_exp_modo` apagado (default)
+    # solo se lee esa clave y todo sigue EXACTAMENTE igual que antes. Si la comprobación falla con el experimento encendido, el
+    # lead se OMITE (falla cerrado: se reintenta en la próxima corrida) en vez de arriesgar una llamada sin consentimiento.
+    from agent import solo_clic     # import tardío: solo_clic importa este módulo
+    sc_encendido = bool(evaluaciones) and await solo_clic.modo_efectivo(negocio_id) != solo_clic.MODO_APAGADO
+    ctx_sc = await solo_clic.contexto_de_negocio(negocio_id, ahora) if sc_encendido else None
+
     for lead, ev in evaluaciones:
+        if sc_encendido:
+            try:
+                es_solo_clic = await solo_clic.es_solo_clic_conversacion(ev.conversation_id, negocio_id, ctx_sc, ahora)
+            except Exception:  # noqa: BLE001
+                logger.exception("Para llamar: no se pudo comprobar «solo clic»; el lead se omite en esta corrida")
+                por_motivo["solo_clic_error"] += 1
+                continue
+            if es_solo_clic:
+                por_motivo["solo_clic_en_experimento"] += 1
+                continue
         segmento = segmento_de(ev.puntaje, config.puntaje_minimo)
         if segmento is None and 2 <= ev.puntaje < config.puntaje_minimo and entra_a_exploracion(ev.conversation_id, config.exploracion_pct):
             segmento = SEGMENTO_EXPLORACION

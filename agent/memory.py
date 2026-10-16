@@ -646,7 +646,14 @@ TIPOS_EVENTO_LLAMADA_INTERNOS = (
     EVENTO_LLAMADA_PENDIENTE_CREADA, EVENTO_LLAMADA_ASIGNADA, EVENTO_LLAMADA_CANCELADA_POR_RESPUESTA,
     EVENTO_LLAMADA_EXPIRADA, EVENTO_LLAMADA_ESCALADA,
 )
-TIPOS_EVENTO_INTERNOS = (EVENTO_TRIAJE_ATC_SOMBRA, EVENTO_TRIAJE_ATC_FALLIDO) + TIPOS_EVENTO_LLAMADA_INTERNOS
+# Experimento «solo clic» (2026-10-16, agent/solo_clic.py, Fases A-B): la SOMBRA registra a qué brazo iría cada conversación
+# de «solo clic» y qué habría hecho el sistema (`exp_solo_clic_sombra`), y luego el desenlace natural observado a 24 h y 72 h
+# (`exp_solo_clic_resultado`, uno por horizonte). Son INTERNOS (medición, no gestión): no salen en el Timeline. Los dos caben
+# de sobra en eventos_lead.tipo (TIPO_EVENTO_LARGO_MAX).
+EVENTO_EXP_SOLO_CLIC_SOMBRA = "exp_solo_clic_sombra"
+EVENTO_EXP_SOLO_CLIC_RESULTADO = "exp_solo_clic_resultado"
+TIPOS_EVENTO_EXP_SOLO_CLIC = (EVENTO_EXP_SOLO_CLIC_SOMBRA, EVENTO_EXP_SOLO_CLIC_RESULTADO)
+TIPOS_EVENTO_INTERNOS = (EVENTO_TRIAJE_ATC_SOMBRA, EVENTO_TRIAJE_ATC_FALLIDO) + TIPOS_EVENTO_LLAMADA_INTERNOS + TIPOS_EVENTO_EXP_SOLO_CLIC
 
 
 class EventoLead(Base):
