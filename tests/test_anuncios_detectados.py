@@ -570,3 +570,25 @@ async def test_eliminar_campana_solo_sin_conversaciones_y_borra_sus_reglas():
     with pytest.raises(HTTPException) as e:  # de otro Negocio: 404, nunca se toca
         await dashboard.eliminar_campana_json(con_uso["id"], usuario={"negocio_id": otro["id"], "rol": "admin"}, _csrf=None)
     assert e.value.status_code == 404
+
+
+async def test_auditoria_de_cierre_explica_por_que_no_se_abrio_una_conversacion_nueva():
+    negocio, canal = await _negocio("g-anu-50")
+    await mem.crear_campana_de_anuncio("Campaña A", "AD-A", negocio["id"])
+    await _conversacion_con_dos_anuncios(negocio, canal, "51901100501", "AD-A", "AD-B")  # sin resultado: abierto
+    await _conversacion_con_dos_anuncios(negocio, canal, "51901100502", "AD-A", "AD-B")
+    await mem.actualizar_lead("51901100502", negocio_id=negocio["id"], resultado="no_interesado")  # cerrado, sin asesor
+    await _conversacion_con_dos_anuncios(negocio, canal, "51901100503", "AD-A", "AD-B")
+    await mem.actualizar_lead("51901100503", negocio_id=negocio["id"], resultado="vendido")
+
+    datos = await mem.auditoria_cierre_conversaciones_multiples(negocio["id"])
+
+    assert datos["total"] == 3
+    assert datos["por_motivo"] == {
+        "resultado_abierto_o_sin_resultado": 1, "cerrado_sin_asesor_la_regla_no_aplica": 1,
+        "vendido_nunca_se_cierra_solo": 1,
+    }
+    assert all(c["telefono"].startswith("…") and c["dias_entre_anuncios"] is not None for c in datos["conversaciones"])
+    admin = {"negocio_id": negocio["id"], "rol": "admin"}
+    respuesta = json.loads((await dashboard.anuncios_multiples_cierre_json(usuario=admin)).body)
+    assert respuesta["total"] == 3 and isinstance(respuesta["conversaciones"][0]["primer_contacto"], str)

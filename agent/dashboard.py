@@ -59,7 +59,7 @@ from agent.memory import (
     obtener_campana, obtener_canal_whatsapp, listar_anuncios_detectados, asignar_anuncio_a_campana,
     diagnostico_anuncios_sin_campana, plan_migrar_comodines, aplicar_migrar_comodines, obtener_reglas_anuncio, guardar_regla_anuncio,
     historico_rellenar_conversaciones, historico_corregir_anuncios, historico_revertir,
-    diagnostico_atribucion_multiple, historico_recalcular_primer_anuncio,
+    diagnostico_atribucion_multiple, historico_recalcular_primer_anuncio, auditoria_cierre_conversaciones_multiples,
     listar_atribucion_sin_campana_periodo, cerrar_lead_definitivamente_via_conversation, reabrir_caso_cerrado, MOTIVO_REABRIR_MAXIMO, CIERRE_GRACIA_HORAS_POR_DEFECTO,
     rango_periodo_utc, contar_flujo_periodo, calcular_embudo_comercial, contar_oportunidades_por_asesor,
     distribucion_resultados_periodo, resumen_ventas_periodo, productos_vendidos_periodo,
@@ -8009,6 +8009,21 @@ async def anuncios_multiples_json(usuario: dict = Depends(servicio_identidad.req
     """Solo lectura, admin. Conversaciones con anuncios de dos orígenes: de qué anuncio entraron primero,
     en qué campaña están hoy y cuál es la regla de su primer anuncio."""
     return JSONResponse(await diagnostico_atribucion_multiple(usuario["negocio_id"]))
+
+
+@router.get("/anuncios/multiples/cierre.json")
+async def anuncios_multiples_cierre_json(usuario: dict = Depends(servicio_identidad.requiere_rol("admin"))):
+    """Solo lectura, admin. Para cada conversación con anuncios de dos orígenes: por qué no se
+    cerró definitivamente (y por eso no se abrió una conversación nueva), contra las reglas reales."""
+    datos = await auditoria_cierre_conversaciones_multiples(usuario["negocio_id"])
+    return JSONResponse({
+        **datos,
+        "conversaciones": [
+            {k: (iso_utc(v) if k in ("primer_contacto", "segundo_anuncio_en", "ultimo_mensaje_cliente", "cerrada_definitivamente_en") else v)
+             for k, v in c.items()}
+            for c in datos["conversaciones"]
+        ],
+    })
 
 
 @router.post("/anuncios/comodines.json")

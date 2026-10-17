@@ -1417,6 +1417,71 @@ async def _conversaciones_con_varios_anuncios(session, negocio_id: str) -> list[
     ]
 
 
+async def auditoria_cierre_conversaciones_multiples(negocio_id: str, dias_silencio: int = 7) -> dict:
+    """Solo lectura. Por cada conversación que recibió anuncios de 2 orígenes: ¿por qué no se
+    cerró (y por eso no se abrió una conversación nueva para el segundo anuncio)? Compara su
+    estado real contra las reglas de cierre definitivo (`cerrar_leads_definitivamente_inactivos`:
+    asesor asignado + resultado cerrado distinto de vendido + `dias_silencio` sin respuesta del
+    cliente). Teléfonos enmascarados."""
+    ahora = datetime.utcnow()
+    async with async_session() as session:
+        filas = await _conversaciones_con_varios_anuncios(session, negocio_id)
+        if not filas:
+            return {"total": 0, "por_motivo": {}, "conversaciones": []}
+        ids = [f["conversation_id"] for f in filas]
+        eventos = (await session.execute(
+            select(AttributionEvent.conversation_id, AttributionEvent.source_id, AttributionEvent.creado)
+            .where(AttributionEvent.conversation_id.in_(ids), AttributionEvent.tipo_origen.in_(_TIPOS_ORIGEN_ANUNCIO))
+            .order_by(AttributionEvent.creado.asc(), AttributionEvent.id.asc())
+        )).all()
+        por_conv: dict[str, list] = {}
+        for conversation_id, source_id, creado in eventos:
+            por_conv.setdefault(conversation_id, []).append((source_id, creado))
+        conversaciones = {c.id: c for c in (await session.execute(
+            select(Conversation).where(Conversation.id.in_(ids))
+        )).scalars().all()}
+        resultado_filas = []
+        for f in filas:
+            conv = conversaciones[f["conversation_id"]]
+            lead = await session.get(Lead, f["telefono"])
+            ultimo_cliente = (await session.execute(
+                select(Mensaje.timestamp).where(Mensaje.telefono == f["telefono"], Mensaje.role == "user")
+                .order_by(Mensaje.timestamp.desc()).limit(1)
+            )).first()
+            ultimo_cliente = ultimo_cliente[0] if ultimo_cliente else None
+            evs = por_conv.get(f["conversation_id"], [])
+            t1 = evs[0][1] if evs else None
+            t2 = next((c for s_, c in evs if s_ != evs[0][0]), None)
+            resultado = lead.resultado if lead else None
+            asesor = (lead.asesor_asignado if lead else None) or conv.asesor_asignado_id
+            cerrado_en = conv.cerrado_definitivamente_en or (lead.cerrado_definitivamente_en if lead else None)
+            if cerrado_en is not None:
+                motivo = "ya_cerrada_definitivamente"
+            elif resultado == "vendido":
+                motivo = "vendido_nunca_se_cierra_solo"
+            elif resultado not in RESULTADOS_CERRADOS:
+                motivo = "resultado_abierto_o_sin_resultado"
+            elif not asesor:
+                motivo = "cerrado_sin_asesor_la_regla_no_aplica"
+            elif ultimo_cliente is None or ultimo_cliente >= ahora - timedelta(days=dias_silencio):
+                motivo = "cliente_activo_menos_de_7_dias"
+            else:
+                motivo = "cumple_la_regla_pero_no_se_cerro"
+            resultado_filas.append({
+                "telefono": "…" + (f["telefono"] or "")[-4:], "primer_anuncio": f["primero"], "otros_anuncios": f["otros"],
+                "conversacion_estado": conv.estado, "resultado": resultado, "tiene_asesor": bool(asesor),
+                "primer_contacto": t1, "segundo_anuncio_en": t2,
+                "dias_entre_anuncios": round((t2 - t1).total_seconds() / 86400, 1) if t1 and t2 else None,
+                "ultimo_mensaje_cliente": ultimo_cliente,
+                "dias_sin_responder_el_cliente": round((ahora - ultimo_cliente).total_seconds() / 86400, 1) if ultimo_cliente else None,
+                "cerrada_definitivamente_en": cerrado_en, "motivo": motivo,
+            })
+    por_motivo: dict[str, int] = {}
+    for r in resultado_filas:
+        por_motivo[r["motivo"]] = por_motivo.get(r["motivo"], 0) + 1
+    return {"total": len(resultado_filas), "por_motivo": por_motivo, "conversaciones": resultado_filas}
+
+
 async def diagnostico_atribucion_multiple(negocio_id: str) -> dict:
     """Solo lectura. Conversaciones con anuncios de dos orígenes, agrupadas por primer
     anuncio y campaña actual, y cuántas NO coinciden con la regla de su primer anuncio."""
