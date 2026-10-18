@@ -60,6 +60,7 @@ from agent.memory import (
     diagnostico_anuncios_sin_campana, plan_migrar_comodines, aplicar_migrar_comodines, obtener_reglas_anuncio, guardar_regla_anuncio,
     historico_rellenar_conversaciones, historico_corregir_anuncios, historico_revertir,
     diagnostico_atribucion_multiple, historico_recalcular_primer_anuncio, auditoria_cierre_conversaciones_multiples,
+    obtener_modo_reingreso_anuncio, guardar_modo_reingreso_anuncio, resumen_reingreso_anuncio,
     listar_atribucion_sin_campana_periodo, cerrar_lead_definitivamente_via_conversation, reabrir_caso_cerrado, MOTIVO_REABRIR_MAXIMO, CIERRE_GRACIA_HORAS_POR_DEFECTO,
     rango_periodo_utc, contar_flujo_periodo, calcular_embudo_comercial, contar_oportunidades_por_asesor,
     distribucion_resultados_periodo, resumen_ventas_periodo, productos_vendidos_periodo,
@@ -8024,6 +8025,35 @@ async def anuncios_multiples_cierre_json(usuario: dict = Depends(servicio_identi
             for c in datos["conversaciones"]
         ],
     })
+
+
+@router.get("/anuncios/reingreso.json")
+async def anuncios_reingreso_json(usuario: dict = Depends(servicio_identidad.requiere_rol("admin"))):
+    """Solo lectura, admin. Modo del reingreso por otro anuncio y lo que habría hecho (sombra) o hizo (activo)
+    en los últimos 7 días. Teléfonos enmascarados."""
+    negocio_id = usuario["negocio_id"]
+    resumen = await resumen_reingreso_anuncio(negocio_id)
+    return JSONResponse({
+        "modo": await obtener_modo_reingreso_anuncio(negocio_id),
+        **resumen,
+        "ultimos": [{**u, "creado": iso_utc(u["creado"])} for u in resumen["ultimos"]],
+    })
+
+
+@router.post("/anuncios/reingreso/modo.json")
+async def anuncios_reingreso_modo_json(
+    request: Request,
+    usuario: dict = Depends(servicio_identidad.requiere_rol("admin")),
+    _csrf: None = Depends(verificar_csrf),
+):
+    """Cambia el modo del reingreso por otro anuncio: "apagado", "sombra" o "activo" (solo admin)."""
+    cuerpo = await request.json()
+    modo = str((cuerpo or {}).get("modo") or "") if isinstance(cuerpo, dict) else ""
+    try:
+        guardado = await guardar_modo_reingreso_anuncio(usuario["negocio_id"], modo, autor=usuario.get("username"))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return JSONResponse({"ok": True, "modo": guardado})
 
 
 @router.post("/anuncios/comodines.json")

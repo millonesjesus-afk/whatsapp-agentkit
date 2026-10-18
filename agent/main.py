@@ -31,7 +31,7 @@ from agent.memory import (
     existe_mensaje_con_id_meta, liberar_marca_mensaje_procesado,
     evaluar_cierre_cortesia, registrar_evento_lead,
     agradecimiento_cierre_activo, obtener_texto_agradecimiento_cierre, agradecimiento_cierre_ya_enviado,
-    registrar_agradecimiento_cierre, obtener_estado_ventana,
+    registrar_agradecimiento_cierre, obtener_estado_ventana, procesar_reingreso_por_anuncio,
 )
 from agent.memory import (
     es_texto_de_error_tecnico, es_texto_de_reenganche_automatico, textos_de_error_tecnico_conocidos, es_cierre_cortesia,
@@ -448,6 +448,19 @@ def _debe_limpiar_sin_respuesta(lead: dict | None) -> bool:
     if not lead or lead.get("resultado") != "sin_respuesta":
         return False
     return not lead.get("asesor_asignado") and not lead.get("pausado_manual")
+
+
+async def _reingreso_por_otro_anuncio(msg, canal: dict) -> None:
+    """Un cliente con el caso cerrado (sin respuesta / no interesado / no califica) que escribe desde un anuncio
+    DISTINTO abre una conversación nueva: se cierra definitivamente el caso anterior y DR-4 hace el resto. Va ANTES de
+    `resolver_conversation_activa`. Según el modo del negocio solo mide ("sombra") o actúa ("activo"). FAIL-OPEN:
+    cualquier error se registra y el mensaje sigue por el camino de siempre."""
+    if not getattr(msg, "referral", None):
+        return
+    try:
+        await procesar_reingreso_por_anuncio(msg.telefono, canal["negocio_id"], msg.referral)
+    except Exception:
+        logger.exception(f"No se pudo evaluar el reingreso por otro anuncio de {msg.telefono} — se sigue por el camino normal")
 
 
 async def _absorber_si_cierre_sin_reabrir(msg, canal: dict) -> bool:
@@ -1100,6 +1113,8 @@ async def webhook_handler(request: Request):
                     # NOT NULL) — se deja para el próximo mensaje que sí
                     # resuelva canal, mismo criterio fail-closed que ya usa
                     # actualizar_lead() arriba.
+                    await _reingreso_por_otro_anuncio(msg, canal)
+
                     conversation_actual, _opportunity_actual = await resolver_conversation_activa(
                         msg.telefono, canal["negocio_id"], canal["id"],
                         unidad_id=canal.get("unidad_id"),

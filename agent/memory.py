@@ -1417,6 +1417,144 @@ async def _conversaciones_con_varios_anuncios(session, negocio_id: str) -> list[
     ]
 
 
+# ── Reingreso por otro anuncio (2026-10-17) ──────────────────────────────
+# Un cliente cuyo caso ya tiene un resultado de cierre comercial y vuelve a escribir desde un anuncio DISTINTO a los
+# de su conversación abre una conversación nueva: se cierra definitivamente el caso anterior (cierre automático, el
+# mismo de siempre) justo antes de `resolver_conversation_activa`, y desde ahí todo sigue por el camino existente
+# (DR-4, evento "reabierto por el cliente", resultado limpio, asesor liberado, Gabi retoma). Tres modos por negocio:
+# "apagado" (nada), "sombra" (solo deja rastro de lo que habría hecho) y "activo". Nace en sombra.
+CLAVE_REINGRESO_ANUNCIO_MODO = "reingreso_otro_anuncio_modo"
+MODOS_REINGRESO_ANUNCIO = ("apagado", "sombra", "activo")
+MODO_REINGRESO_ANUNCIO_POR_DEFECTO = "sombra"
+RESULTADOS_REINGRESO_ANUNCIO = ("sin_respuesta", "no_interesado", "no_califica")
+ACCION_REINGRESO_SOMBRA = "reingreso_anuncio_sombra"
+ACCION_REINGRESO_APLICADO = "reingreso_otro_anuncio_aplicado"
+
+
+async def obtener_modo_reingreso_anuncio(negocio_id: str | None) -> str:
+    """Modo del negocio. Sin ajuste guardado: "sombra". Si la lectura falla: "apagado" (no hace nada)."""
+    try:
+        valor = await obtener_configuracion(
+            CLAVE_REINGRESO_ANUNCIO_MODO, MODO_REINGRESO_ANUNCIO_POR_DEFECTO, negocio_id=negocio_id,
+        )
+    except Exception:
+        return "apagado"
+    return valor if valor in MODOS_REINGRESO_ANUNCIO else MODO_REINGRESO_ANUNCIO_POR_DEFECTO
+
+
+async def guardar_modo_reingreso_anuncio(negocio_id: str, modo: str, autor: str | None = None) -> str:
+    if modo not in MODOS_REINGRESO_ANUNCIO:
+        raise ValueError("Modo inválido.")
+    anterior = await obtener_modo_reingreso_anuncio(negocio_id)
+    await guardar_configuracion(CLAVE_REINGRESO_ANUNCIO_MODO, modo, negocio_id=negocio_id)
+    await registrar_auditoria(
+        "reingreso_otro_anuncio_modo_cambiado", actor=autor, negocio_id=negocio_id, entidad_tipo="configuracion",
+        entidad_id=CLAVE_REINGRESO_ANUNCIO_MODO, payload={"anterior": anterior, "nuevo": modo},
+    )
+    return modo
+
+
+async def evaluar_reingreso_por_anuncio(telefono: str, negocio_id: str, referral: dict | None) -> dict | None:
+    """Solo lectura. Si este mensaje con anuncio cumple las condiciones del reingreso, devuelve la decisión
+    (`tipo`: "otro_anuncio" actuaría; "mismo_anuncio" solo se mide); si no, None. Condiciones: el mensaje trae un
+    anuncio; el contacto tiene una conversación activa que NO está cerrada definitivamente; su resultado es de cierre
+    comercial (`RESULTADOS_REINGRESO_ANUNCIO`: nunca vendido, abierto, agendado, postventa ni ATC)."""
+    source_id = str((referral or {}).get("source_id") or "").strip()
+    if not source_id:
+        return None
+    async with async_session() as session:
+        contact = await _obtener_contact(session, negocio_id, telefono)
+        if contact is None:
+            return None
+        conversation = await _obtener_conversation_activa(session, contact.id)
+        if conversation is None or conversation.cerrado_definitivamente_en is not None:
+            return None
+        lead = await session.get(Lead, telefono)
+        if lead is None or lead.negocio_id not in (None, negocio_id) or lead.cerrado_definitivamente_en is not None:
+            return None
+        if lead.resultado not in RESULTADOS_REINGRESO_ANUNCIO:
+            return None
+        previos = {row[0] for row in (await session.execute(
+            select(AttributionEvent.source_id).where(
+                AttributionEvent.conversation_id == conversation.id,
+                AttributionEvent.tipo_origen.in_(_TIPOS_ORIGEN_ANUNCIO),
+                AttributionEvent.source_id.is_not(None), AttributionEvent.source_id != "",
+            )
+        )).all()}
+        return {
+            "tipo": "mismo_anuncio" if source_id in previos else "otro_anuncio",
+            "conversation_id": conversation.id, "source_id": source_id, "anuncios_previos": sorted(previos),
+            "resultado": lead.resultado, "tiene_asesor": bool(lead.asesor_asignado or conversation.asesor_asignado_id),
+        }
+
+
+async def _existe_auditoria(accion: str, negocio_id: str, entidad_id: str) -> bool:
+    async with async_session() as session:
+        fila = await session.execute(select(RegistroAuditoria.id).where(
+            RegistroAuditoria.accion == accion, RegistroAuditoria.negocio_id == negocio_id,
+            RegistroAuditoria.entidad_id == entidad_id,
+        ).limit(1))
+        return fila.first() is not None
+
+
+async def procesar_reingreso_por_anuncio(telefono: str, negocio_id: str, referral: dict | None) -> dict | None:
+    """Punto de entrada del webhook, ANTES de `resolver_conversation_activa`. Según el modo del negocio: "apagado"
+    no hace nada; "sombra" deja el rastro de lo que habría hecho (una vez por conversación y anuncio); "activo"
+    cierra definitivamente el caso anterior cuando el anuncio es distinto (el mismo anuncio solo se mide)."""
+    modo = await obtener_modo_reingreso_anuncio(negocio_id)
+    if modo == "apagado":
+        return None
+    decision = await evaluar_reingreso_por_anuncio(telefono, negocio_id, referral)
+    if decision is None:
+        return None
+    payload = {
+        "tipo": decision["tipo"], "source_id": decision["source_id"], "anuncios_previos": decision["anuncios_previos"],
+        "resultado": decision["resultado"], "tiene_asesor": decision["tiene_asesor"], "telefono": "…" + telefono[-4:],
+    }
+    if modo == "activo" and decision["tipo"] == "otro_anuncio":
+        if await cerrar_lead_definitivamente(telefono, negocio_id, autor=None):
+            decision["aplicado"] = True
+            await registrar_auditoria(
+                ACCION_REINGRESO_APLICADO, actor=None, negocio_id=negocio_id, entidad_tipo="conversation",
+                entidad_id=decision["conversation_id"], payload=payload,
+            )
+        return decision
+    clave = f"{decision['conversation_id']}:{decision['source_id']}"
+    if not await _existe_auditoria(ACCION_REINGRESO_SOMBRA, negocio_id, clave):
+        await registrar_auditoria(
+            ACCION_REINGRESO_SOMBRA, actor=None, negocio_id=negocio_id, entidad_tipo="conversation",
+            entidad_id=clave, payload=payload,
+        )
+    return decision
+
+
+async def resumen_reingreso_anuncio(negocio_id: str, dias: int = 7) -> dict:
+    """Solo lectura. Lo que el reingreso habría hecho (sombra) o hizo (activo) en los últimos `dias`."""
+    desde = datetime.utcnow() - timedelta(days=dias)
+    async with async_session() as session:
+        filas = (await session.execute(
+            select(RegistroAuditoria).where(
+                RegistroAuditoria.negocio_id == negocio_id,
+                RegistroAuditoria.accion.in_([ACCION_REINGRESO_SOMBRA, ACCION_REINGRESO_APLICADO]),
+                RegistroAuditoria.creado >= desde,
+            ).order_by(RegistroAuditoria.creado.desc())
+        )).scalars().all()
+    por_tipo: dict[str, int] = {}
+    por_resultado: dict[str, int] = {}
+    for f in filas:
+        p = f.payload or {}
+        clave = f"{'aplicado' if f.accion == ACCION_REINGRESO_APLICADO else 'sombra'}_{p.get('tipo')}"
+        por_tipo[clave] = por_tipo.get(clave, 0) + 1
+        por_resultado[p.get("resultado")] = por_resultado.get(p.get("resultado"), 0) + 1
+    return {
+        "dias": dias, "total": len(filas), "por_tipo": por_tipo, "por_resultado": por_resultado,
+        "con_asesor": sum(1 for f in filas if (f.payload or {}).get("tiene_asesor")),
+        "ultimos": [
+            {"creado": f.creado, "accion": f.accion, **(f.payload or {})} for f in filas[:25]
+        ],
+    }
+
+
 async def auditoria_cierre_conversaciones_multiples(negocio_id: str, dias_silencio: int = 7) -> dict:
     """Solo lectura. Por cada conversación que recibió anuncios de 2 orígenes: ¿por qué no se
     cerró (y por eso no se abrió una conversación nueva para el segundo anuncio)? Compara su
