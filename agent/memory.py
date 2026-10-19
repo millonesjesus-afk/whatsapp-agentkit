@@ -1555,6 +1555,48 @@ async def resumen_reingreso_anuncio(negocio_id: str, dias: int = 7) -> dict:
     }
 
 
+async def diagnostico_campos_referral(negocio_id: str) -> dict:
+    """Solo lectura. Qué campos trae REALMENTE el `referral` de Meta en los avisos guardados: frecuencia de cada
+    clave, valores de `media_type` / `source_type` (cortos, no sensibles), presencia de enlaces a la imagen o el
+    video (solo si existen, nunca el enlace) y de `ref`, por anuncio. No expone enlaces, textos ni teléfonos."""
+    async with async_session() as session:
+        filas = (await session.execute(
+            select(AttributionEvent.source_id, AttributionEvent.referral_raw).where(
+                AttributionEvent.negocio_id == negocio_id, AttributionEvent.tipo_origen.in_(_TIPOS_ORIGEN_ANUNCIO),
+                AttributionEvent.source_id.is_not(None), AttributionEvent.source_id != "",
+            )
+        )).all()
+    claves: dict[str, int] = {}
+    media_type: dict[str, int] = {}
+    source_type: dict[str, int] = {}
+    refs: dict[str, int] = {}
+    por_anuncio: dict[str, dict] = {}
+    for source_id, referral in filas:
+        r = referral if isinstance(referral, dict) else {}
+        for k in r:
+            claves[k] = claves.get(k, 0) + 1
+        mt = str(r.get("media_type") or "(ausente)")[:20]
+        st = str(r.get("source_type") or "(ausente)")[:20]
+        media_type[mt] = media_type.get(mt, 0) + 1
+        source_type[st] = source_type.get(st, 0) + 1
+        if r.get("ref"):
+            valor = str(r["ref"])[:40]
+            refs[valor] = refs.get(valor, 0) + 1
+        a = por_anuncio.setdefault(source_id, {
+            "eventos": 0, "media_type": {}, "con_image_url": 0, "con_video_url": 0, "con_thumbnail_url": 0,
+        })
+        a["eventos"] += 1
+        a["media_type"][mt] = a["media_type"].get(mt, 0) + 1
+        a["con_image_url"] += 1 if r.get("image_url") else 0
+        a["con_video_url"] += 1 if r.get("video_url") else 0
+        a["con_thumbnail_url"] += 1 if r.get("thumbnail_url") else 0
+    return {
+        "eventos": len(filas), "anuncios": len(por_anuncio), "claves": dict(sorted(claves.items())),
+        "media_type": media_type, "source_type": source_type, "ref_valores": dict(list(refs.items())[:10]),
+        "por_anuncio": [{"source_id": sid, **datos} for sid, datos in por_anuncio.items()],
+    }
+
+
 async def auditoria_cierre_conversaciones_multiples(negocio_id: str, dias_silencio: int = 7) -> dict:
     """Solo lectura. Por cada conversación que recibió anuncios de 2 orígenes: ¿por qué no se
     cerró (y por eso no se abrió una conversación nueva para el segundo anuncio)? Compara su

@@ -60,7 +60,7 @@ from agent.memory import (
     diagnostico_anuncios_sin_campana, plan_migrar_comodines, aplicar_migrar_comodines, obtener_reglas_anuncio, guardar_regla_anuncio,
     historico_rellenar_conversaciones, historico_corregir_anuncios, historico_revertir,
     diagnostico_atribucion_multiple, historico_recalcular_primer_anuncio, auditoria_cierre_conversaciones_multiples,
-    obtener_modo_reingreso_anuncio, guardar_modo_reingreso_anuncio, resumen_reingreso_anuncio,
+    obtener_modo_reingreso_anuncio, guardar_modo_reingreso_anuncio, resumen_reingreso_anuncio, diagnostico_campos_referral,
     listar_atribucion_sin_campana_periodo, cerrar_lead_definitivamente_via_conversation, reabrir_caso_cerrado, MOTIVO_REABRIR_MAXIMO, CIERRE_GRACIA_HORAS_POR_DEFECTO,
     rango_periodo_utc, contar_flujo_periodo, calcular_embudo_comercial, contar_oportunidades_por_asesor,
     distribucion_resultados_periodo, resumen_ventas_periodo, productos_vendidos_periodo,
@@ -8025,6 +8025,13 @@ async def anuncios_multiples_cierre_json(usuario: dict = Depends(servicio_identi
             for c in datos["conversaciones"]
         ],
     })
+
+
+@router.get("/anuncios/campos-referral.json")
+async def anuncios_campos_referral_json(usuario: dict = Depends(servicio_identidad.requiere_rol("admin"))):
+    """Solo lectura, admin. Qué campos trae el `referral` de Meta en los avisos reales (media_type, source_type,
+    presencia de imagen/video/miniatura, `ref`). Nunca devuelve enlaces, textos ni teléfonos."""
+    return JSONResponse(await diagnostico_campos_referral(usuario["negocio_id"]))
 
 
 @router.get("/anuncios/reingreso.json")

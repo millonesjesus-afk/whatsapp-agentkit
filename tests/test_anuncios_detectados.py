@@ -592,3 +592,27 @@ async def test_auditoria_de_cierre_explica_por_que_no_se_abrio_una_conversacion_
     admin = {"negocio_id": negocio["id"], "rol": "admin"}
     respuesta = json.loads((await dashboard.anuncios_multiples_cierre_json(usuario=admin)).body)
     assert respuesta["total"] == 3 and isinstance(respuesta["conversaciones"][0]["primer_contacto"], str)
+
+
+async def test_diagnostico_de_campos_del_referral_cuenta_sin_exponer_enlaces():
+    negocio, canal = await _negocio("g-anu-60")
+    for tel, src, extra in (
+        ("51901100601", "AD-V", {"media_type": "video", "video_url": "https://cdn/x.mp4", "thumbnail_url": "https://cdn/t.jpg", "source_type": "ad"}),
+        ("51901100602", "AD-I", {"media_type": "image", "image_url": "https://cdn/i.jpg", "source_type": "ad", "ref": "empresa=estratek"}),
+        ("51901100603", "AD-I", {"source_type": "ad"}),
+    ):
+        await mem.actualizar_lead(tel, negocio_id=negocio["id"], numero_whatsapp_id="x")
+        await mem.resolver_conversation_activa(tel, negocio["id"], canal["id"])
+        await mem.registrar_attribution_event(
+            tel, "meta_ads_no_resuelto", referral={"source_id": src, "headline": "h", "body": "b", **extra},
+        )
+    admin = {"negocio_id": negocio["id"], "rol": "admin"}
+
+    datos = json.loads((await dashboard.anuncios_campos_referral_json(usuario=admin)).body)
+
+    assert datos["eventos"] == 3 and datos["anuncios"] == 2
+    assert datos["media_type"] == {"video": 1, "image": 1, "(ausente)": 1}
+    assert datos["ref_valores"] == {"empresa=estratek": 1} and datos["claves"]["source_id"] == 3
+    por = {a["source_id"]: a for a in datos["por_anuncio"]}
+    assert por["AD-V"]["con_video_url"] == 1 and por["AD-I"]["con_image_url"] == 1 and por["AD-I"]["eventos"] == 2
+    assert "cdn" not in json.dumps(datos)  # nunca se exponen enlaces
