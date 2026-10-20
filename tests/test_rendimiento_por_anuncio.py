@@ -179,3 +179,38 @@ async def test_endpoints_alcance_y_permiso():
         _Req({"aplicar_sugeridas": True}), usuario=admin, _csrf=None,
     )).body)
     assert vista["aplicado"] is False
+
+
+async def test_la_sugerencia_exige_mayoria_y_no_la_deciden_conversaciones_sueltas():
+    negocio, canal = await _negocio("rpa-06")
+    # 4 conversaciones del grupo en una campaña SIN empresa; 1 suelta en una campaña con empresa
+    for i in range(4):
+        await _lead(negocio, canal, f"5190330070{i}", "AD-MAYORIA", headline="Chatea", body="mismo")
+    await _lead(negocio, canal, "51903300709", "AD-SUELTA", headline="Chatea", body="mismo")
+    await mem.crear_campana_de_anuncio("Secadora Julio", "AD-MAYORIA", negocio["id"])
+    await mem.crear_campana_de_anuncio("Meta Estratek - Reel", "AD-SUELTA", negocio["id"])
+    for i in range(4):
+        await mem.asignar_campana_origen(f"5190330070{i}", "Secadora Julio")
+    await mem.asignar_campana_origen("51903300709", "Meta Estratek - Reel")
+
+    datos = await mem.rendimiento_por_anuncio(negocio["id"], *_periodo())
+
+    assert datos["grupos"][0]["conversaciones"] == 5
+    assert datos["grupos"][0]["empresa_sugerida"] is None  # 1 de 5 no alcanza
+
+
+async def test_la_sugerencia_no_se_da_si_hay_dos_empresas_presentes():
+    negocio, canal = await _negocio("rpa-07")
+    for i in range(3):
+        await _lead(negocio, canal, f"5190330080{i}", "AD-A", headline="Mixto", body="mismo")
+    await _lead(negocio, canal, "51903300809", "AD-B", headline="Mixto", body="mismo")
+    await mem.crear_campana_de_anuncio("Meta Estratek - A", "AD-A", negocio["id"])
+    await mem.crear_campana_de_anuncio("Meta Calidda - B", "AD-B", negocio["id"])
+    for i in range(3):
+        await mem.asignar_campana_origen(f"5190330080{i}", "Meta Estratek - A")
+    await mem.asignar_campana_origen("51903300809", "Meta Calidda - B")
+
+    datos = await mem.rendimiento_por_anuncio(negocio["id"], *_periodo())
+
+    assert datos["grupos"][0]["empresa_sugerida"] is None  # 75% Estratek pero 25% Cálidda: ambiguo
+

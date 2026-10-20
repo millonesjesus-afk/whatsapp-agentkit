@@ -1604,12 +1604,29 @@ async def obtener_empresas_anuncio(negocio_id: str | None) -> list[str]:
     return [e.strip() for e in valor.split(",") if e.strip()]
 
 
-def _empresa_en_nombres(nombres: set[str], empresas: list[str]) -> str | None:
-    """La empresa que aparece en los nombres de campaña, solo si es UNA (si hay dos distintas, no se adivina)."""
-    hallazgos = {
-        e for e in empresas for n in nombres if _normalizar_texto_anuncio(e) in _normalizar_texto_anuncio(n)
+# Una empresa se SUGIERE solo si la campaña de al menos esta fracción de las conversaciones del grupo la menciona, y
+# ninguna otra empresa pasa del umbral bajo: unas pocas conversaciones sueltas en otra campaña no deciden nada.
+UMBRAL_EMPRESA_SUGERIDA = 0.6
+UMBRAL_EMPRESA_AJENA = 0.1
+
+
+def _empresa_en_nombres(nombres: dict[str, int], empresas: list[str], total: int) -> str | None:
+    """La empresa que aparece en los nombres de campaña de la MAYORÍA de las conversaciones del grupo.
+    `nombres` = {nombre de campaña: conversaciones}. Sin mayoría clara, o con otra empresa presente, no se adivina."""
+    if total <= 0:
+        return None
+    cobertura = {
+        e: sum(n for nombre, n in nombres.items() if _normalizar_texto_anuncio(e) in _normalizar_texto_anuncio(nombre)) / total
+        for e in empresas
     }
-    return next(iter(hallazgos)) if len(hallazgos) == 1 else None
+    if not cobertura:
+        return None
+    mejor = max(cobertura, key=lambda e: cobertura[e])
+    if cobertura[mejor] < UMBRAL_EMPRESA_SUGERIDA:
+        return None
+    if any(c > UMBRAL_EMPRESA_AJENA for e, c in cobertura.items() if e != mejor):
+        return None
+    return mejor
 
 
 def _por_lotes(valores: list, tamano: int = 400):
@@ -1684,16 +1701,17 @@ async def rendimiento_por_anuncio(
         g = grupos.setdefault(clave, {
             "clave": clave, "titulo": i["headline"] or "(sin título)", "texto": (i["body"] or "")[:140] or None,
             "formato": formato_de_anuncio(i["media_type"]), "producto": producto_de_anuncio(i["headline"], i["body"]),
-            "anuncios": {}, "contactos": set(), "conversaciones": 0, "ventas": 0, "nombres_campana": set(),
+            "anuncios": {}, "contactos": set(), "conversaciones": 0, "ventas": 0, "nombres_campana": {},
         })
         g["conversaciones"] += 1
         g["contactos"].add(contact_id)
         g["ventas"] += 1 if conversation_id in vendidas else 0
         a = g["anuncios"].setdefault(source_id, {"source_id": source_id, "conversaciones": 0, "url": i["url"], "ultimo": i["ultimo"]})
         a["conversaciones"] += 1
-        for nombre in (campanas.get(campana_id), regla_nombre.get(source_id)):
-            if nombre:
-                g["nombres_campana"].add(nombre)
+        # La campaña de ESTA conversación; si no tiene, la regla vigente de su anuncio.
+        nombre = campanas.get(campana_id) or regla_nombre.get(source_id)
+        if nombre:
+            g["nombres_campana"][nombre] = g["nombres_campana"].get(nombre, 0) + 1
 
     salida = []
     for g in grupos.values():
@@ -1702,7 +1720,7 @@ async def rendimiento_por_anuncio(
         salida.append({
             "clave": g["clave"], "titulo": g["titulo"], "texto": g["texto"], "formato": g["formato"],
             "producto": g["producto"], "empresa": empresa,
-            "empresa_sugerida": None if empresa else _empresa_en_nombres(g["nombres_campana"], empresas_config),
+            "empresa_sugerida": None if empresa else _empresa_en_nombres(g["nombres_campana"], empresas_config, g["conversaciones"]),
             "anuncios_total": len(anuncios), "anuncios": anuncios[:50],
             "leads": len(g["contactos"]), "conversaciones": g["conversaciones"], "ventas": g["ventas"],
         })
