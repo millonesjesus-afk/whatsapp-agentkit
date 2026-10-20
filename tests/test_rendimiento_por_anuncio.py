@@ -1,0 +1,181 @@
+# tests/test_rendimiento_por_anuncio.py — Analítica "Rendimiento por anuncio": conversaciones, leads y ventas por GRUPO
+# de anuncios (título + texto + formato), sin asignar campañas; empresa como etiqueta por grupo.
+
+import json
+from datetime import datetime, timedelta
+
+import pytest
+from fastapi import HTTPException
+
+from agent import dashboard, memory as mem
+
+
+async def _negocio(codigo: str):
+    negocio = await mem.crear_negocio(f"Negocio {codigo}", codigo)
+    canal = await mem.crear_canal_whatsapp(
+        nombre=f"Canal {codigo}", phone_number_id=f"4096000{codigo[-2:]}", negocio_id=negocio["id"],
+    )
+    return negocio, canal
+
+
+async def _lead(
+    negocio, canal, telefono, source_id, headline="Financia tu artefacto",
+    body="Con el gas natural de Cálidda secadora y terma", media="image", asesor=None,
+):
+    await mem.actualizar_lead(telefono, negocio_id=negocio["id"], numero_whatsapp_id="x")
+    await mem.resolver_conversation_activa(telefono, negocio["id"], canal["id"])
+    await mem.registrar_attribution_event(
+        telefono, "meta_ads_no_resuelto",
+        referral={
+            "source_id": source_id, "headline": headline, "body": body, "media_type": media,
+            "source_url": f"https://fb.me/{source_id}",
+        },
+    )
+    if asesor:
+        await mem.asignar_asesor_a_lead(telefono, asesor)
+
+
+def _periodo():
+    return datetime.utcnow() - timedelta(days=1), datetime.utcnow() + timedelta(days=1)
+
+
+def test_clave_de_grupo_incluye_formato_y_normaliza_texto():
+    a = mem.clave_grupo_anuncio("Chatea con nosotros", "Hola", "video")
+    assert a == mem.clave_grupo_anuncio("  CHATEA con   nosotros", "hola", "video")
+    assert a != mem.clave_grupo_anuncio("Chatea con nosotros", "Hola", "image")  # mismo texto, otro formato
+    assert mem.formato_de_anuncio("video") == "video" and mem.formato_de_anuncio("image") == "imagen"
+    assert mem.formato_de_anuncio(None) == "desconocido"
+
+
+@pytest.mark.parametrize("titulo,cuerpo,esperado", [
+    ("Una sola vez y te vas", "Tender no es la tarea: la secadora", "secadora"),
+    ("Agua Caliente Cálidda", "terma a gas", "terma"),
+    ("Renueva tu cocina ahora", "", "cocina"),
+    ("Financia tu artefacto", "secadora y terma", "varios"),
+    ("Hola", "gracias", "sin_definir"),
+])
+def test_producto_desde_el_texto(titulo, cuerpo, esperado):
+    assert mem.producto_de_anuncio(titulo, cuerpo) == esperado
+
+
+async def test_agrupa_por_texto_y_formato_y_cuenta_una_vez_por_primer_anuncio():
+    negocio, canal = await _negocio("rpa-01")
+    await _lead(negocio, canal, "51903300101", "AD-1")
+    await _lead(negocio, canal, "51903300102", "AD-2")  # mismo texto y formato: mismo grupo, otro anuncio
+    await _lead(negocio, canal, "51903300103", "AD-3", media="video")  # mismo texto, otro formato: otro grupo
+    # el lead 1 llega después por otro anuncio en la MISMA conversación: no se cuenta dos veces
+    await mem.registrar_attribution_event_adicional(
+        "51903300101", "meta_ads_no_resuelto",
+        referral={
+            "source_id": "AD-3", "headline": "Financia tu artefacto",
+            "body": "Con el gas natural de Cálidda secadora y terma", "media_type": "video",
+        },
+    )
+
+    datos = await mem.rendimiento_por_anuncio(negocio["id"], *_periodo())
+
+    por_formato = {g["formato"]: g for g in datos["grupos"]}
+    assert len(datos["grupos"]) == 2
+    assert por_formato["imagen"]["anuncios_total"] == 2 and por_formato["imagen"]["conversaciones"] == 2
+    assert por_formato["video"]["anuncios_total"] == 1 and por_formato["video"]["conversaciones"] == 1
+    assert por_formato["imagen"]["producto"] == "varios" and por_formato["imagen"]["leads"] == 2
+    assert datos["resumen"]["conversaciones"] == 3 and datos["resumen"]["sin_empresa"] == 2
+    assert por_formato["imagen"]["anuncios"][0]["url"].startswith("https://fb.me/")
+
+
+async def test_ventas_periodo_y_alcance_por_asesor():
+    negocio, canal = await _negocio("rpa-02")
+    await _lead(negocio, canal, "51903300201", "AD-1", asesor="ana")
+    await _lead(negocio, canal, "51903300202", "AD-1", asesor="beto")
+    await mem.actualizar_lead("51903300201", negocio_id=negocio["id"], resultado="vendido")
+
+    todos = await mem.rendimiento_por_anuncio(negocio["id"], *_periodo())
+    de_ana = await mem.rendimiento_por_anuncio(negocio["id"], *_periodo(), asesor="ana")
+    fuera = await mem.rendimiento_por_anuncio(
+        negocio["id"], datetime.utcnow() - timedelta(days=30), datetime.utcnow() - timedelta(days=20),
+    )
+
+    assert todos["grupos"][0]["conversaciones"] == 2 and todos["grupos"][0]["ventas"] == 1
+    assert de_ana["grupos"][0]["conversaciones"] == 1 and de_ana["grupos"][0]["ventas"] == 1
+    assert fuera["grupos"] == []
+
+
+async def test_empresa_sugerida_desde_nombres_de_campana_y_etiqueta_manual():
+    negocio, canal = await _negocio("rpa-03")
+    await _lead(negocio, canal, "51903300301", "AD-E", headline="Se paga en tu recibo", body="secadora", media="video")
+    await _lead(negocio, canal, "51903300302", "AD-C", headline="Financia", body="otra", media="image")
+    await _lead(negocio, canal, "51903300303", "AD-X", headline="Sin pista", body="nada", media="image")
+    await mem.crear_campana_de_anuncio("Meta Estratek - Reel Secadora", "AD-E", negocio["id"])
+    await mem.crear_campana_de_anuncio("Meta Calidda - Pieza Terma", "AD-C", negocio["id"])
+    await mem.crear_campana_de_anuncio("Meta Calidda Estratek mezcla", "AD-X", negocio["id"])  # ambigua: no se adivina
+
+    datos = await mem.rendimiento_por_anuncio(negocio["id"], *_periodo())
+    sug = {g["titulo"]: g["empresa_sugerida"] for g in datos["grupos"]}
+    assert sug == {"Se paga en tu recibo": "Estratek", "Financia": "Cálidda", "Sin pista": None}
+
+    plan = await mem.aplicar_empresas_sugeridas(negocio["id"], aplicar=False)
+    assert plan["aplicado"] is False and len(plan["grupos_a_etiquetar"]) == 2 and len(plan["sin_sugerencia"]) == 1
+    assert (await mem.rendimiento_por_anuncio(negocio["id"], *_periodo()))["resumen"]["sin_empresa"] == 3
+
+    hecho = await mem.aplicar_empresas_sugeridas(negocio["id"], aplicar=True, autor="jesus")
+    assert hecho["aplicado"] is True
+    datos = await mem.rendimiento_por_anuncio(negocio["id"], *_periodo())
+    assert {g["titulo"]: g["empresa"] for g in datos["grupos"]} == {
+        "Se paga en tu recibo": "Estratek", "Financia": "Cálidda", "Sin pista": None,
+    }
+
+    clave = next(g["clave"] for g in datos["grupos"] if g["titulo"] == "Sin pista")
+    assert await mem.guardar_empresa_grupo(negocio["id"], clave, "Estratek", autor="jesus") == "Estratek"
+    assert await mem.guardar_empresa_grupo(negocio["id"], clave, "") is None  # vacía = quitar
+    assert (await mem.rendimiento_por_anuncio(negocio["id"], *_periodo()))["resumen"]["sin_empresa"] == 1
+    with pytest.raises(ValueError):
+        await mem.guardar_empresa_grupo(negocio["id"], "", "X")
+
+
+async def test_un_anuncio_nuevo_con_el_mismo_contenido_hereda_la_empresa():
+    negocio, canal = await _negocio("rpa-04")
+    await _lead(negocio, canal, "51903300401", "AD-1")
+    clave = (await mem.rendimiento_por_anuncio(negocio["id"], *_periodo()))["grupos"][0]["clave"]
+    await mem.guardar_empresa_grupo(negocio["id"], clave, "Cálidda")
+    await _lead(negocio, canal, "51903300402", "AD-NUEVO")  # otro ID, mismo contenido
+
+    grupo = (await mem.rendimiento_por_anuncio(negocio["id"], *_periodo()))["grupos"]
+    assert len(grupo) == 1 and grupo[0]["anuncios_total"] == 2 and grupo[0]["empresa"] == "Cálidda"
+
+
+async def test_endpoints_alcance_y_permiso():
+    negocio, canal = await _negocio("rpa-05")
+    await _lead(negocio, canal, "51903300501", "AD-1", asesor="ana")
+    await _lead(negocio, canal, "51903300502", "AD-1", asesor="beto")
+    admin = {"negocio_id": negocio["id"], "rol": "admin", "username": "jesus"}
+    asesor = {"negocio_id": negocio["id"], "rol": "asesor", "username": "ana"}
+
+    ve_todo = json.loads((await dashboard.analitica_anuncios_json(usuario=admin)).body)
+    ve_lo_suyo = json.loads((await dashboard.analitica_anuncios_json(usuario=asesor, asesor="beto")).body)
+    assert ve_todo["grupos"][0]["conversaciones"] == 2 and ve_todo["puede_gestionar"] is True
+    # el filtro de otro asesor se ignora: un asesor solo ve lo suyo
+    assert ve_lo_suyo["grupos"][0]["conversaciones"] == 1 and ve_lo_suyo["puede_gestionar"] is False
+    assert isinstance(ve_todo["grupos"][0]["anuncios"][0]["ultimo"], str)
+    with pytest.raises(HTTPException) as e:
+        await dashboard.analitica_anuncios_json(usuario=admin, desde="mal", hasta="fecha")
+    assert e.value.status_code == 400
+
+    class _Req:
+        def __init__(self, d):
+            self._d = d
+
+        async def json(self):
+            return self._d
+
+    clave = ve_todo["grupos"][0]["clave"]
+    ok = json.loads((await dashboard.analitica_anuncios_empresa_json(
+        _Req({"clave_grupo": clave, "empresa": "Estratek"}), usuario=admin, _csrf=None,
+    )).body)
+    assert ok == {"ok": True, "empresa": "Estratek"}
+    with pytest.raises(HTTPException) as e:
+        await dashboard.analitica_anuncios_empresa_json(_Req({"clave_grupo": "", "empresa": "X"}), usuario=admin, _csrf=None)
+    assert e.value.status_code == 400
+    vista = json.loads((await dashboard.analitica_anuncios_empresa_json(
+        _Req({"aplicar_sugeridas": True}), usuario=admin, _csrf=None,
+    )).body)
+    assert vista["aplicado"] is False

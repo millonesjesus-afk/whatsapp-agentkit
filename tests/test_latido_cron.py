@@ -355,7 +355,9 @@ def test_hay_un_solo_head_y_la_migracion_cuelga_del_head_anterior():
     guion = ScriptDirectory.from_config(cfg)
     # 2026-10-12: la migración del calendario de negocio (d1a4c7e92b58) cuelga de la de "Para llamar" y es el head actual.
     # 2026-10-13: la regla anuncio→campaña (a9c4e1d7b3f2) cuelga de la del calendario y es el head actual.
-    assert guion.get_heads() == ["a9c4e1d7b3f2"]
+    # 2026-10-19: las etiquetas de empresa por grupo de anuncios (b7e3c9a5d1f4) cuelgan de la regla anuncio→campaña.
+    assert guion.get_heads() == ["b7e3c9a5d1f4"]
+    assert guion.get_revision("b7e3c9a5d1f4").down_revision == "a9c4e1d7b3f2"
     assert guion.get_revision("a9c4e1d7b3f2").down_revision == "d1a4c7e92b58"
     assert guion.get_revision("d1a4c7e92b58").down_revision == "b8e2d4f6a1c3"
     assert guion.get_revision("b8e2d4f6a1c3").down_revision == "a7d3b9e2c4f1"

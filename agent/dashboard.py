@@ -61,6 +61,7 @@ from agent.memory import (
     historico_rellenar_conversaciones, historico_corregir_anuncios, historico_revertir,
     diagnostico_atribucion_multiple, historico_recalcular_primer_anuncio, auditoria_cierre_conversaciones_multiples,
     obtener_modo_reingreso_anuncio, guardar_modo_reingreso_anuncio, resumen_reingreso_anuncio, diagnostico_campos_referral,
+    rendimiento_por_anuncio, guardar_empresa_grupo, aplicar_empresas_sugeridas,
     listar_atribucion_sin_campana_periodo, cerrar_lead_definitivamente_via_conversation, reabrir_caso_cerrado, MOTIVO_REABRIR_MAXIMO, CIERRE_GRACIA_HORAS_POR_DEFECTO,
     rango_periodo_utc, contar_flujo_periodo, calcular_embudo_comercial, contar_oportunidades_por_asesor,
     distribucion_resultados_periodo, resumen_ventas_periodo, productos_vendidos_periodo,
@@ -8686,6 +8687,59 @@ def _senales_analitica_p0(flujo_periodo: dict, valor_vendido: dict) -> list[dict
             "texto": f"{valor_vendido['ventas_excluidas']} venta(s) del período con un precio no numérico — excluidas del monto total.",
         })
     return senales[:3]
+
+
+@router.get("/analitica/anuncios.json")
+async def analitica_anuncios_json(
+    usuario: dict = Depends(_usuario_actual),
+    desde: str = "",
+    hasta: str = "",
+    asesor: str = "",
+):
+    """Rendimiento por anuncio (2026-10-19): conversaciones, leads y ventas por GRUPO de anuncios (título + texto +
+    formato), con sus anuncios y el enlace "Ver anuncio". Sin asignar campañas. Mismo alcance por rol que
+    `analitica.json`: un Asesor solo ve lo suyo. La empresa de cada grupo la pone un admin una vez."""
+    vision_total = usuario["rol"] in ROLES_CON_VISION_TOTAL
+    asesor_scope = asesor if (vision_total and asesor) else (None if vision_total else usuario["username"])
+    if not desde or not hasta:
+        desde, hasta = _mes_actual_lima()
+    try:
+        inicio, fin = rango_periodo_utc(desde, hasta)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Fechas inválidas.")
+    datos = await rendimiento_por_anuncio(usuario["negocio_id"], inicio, fin, asesor=asesor_scope)
+    return JSONResponse({
+        "periodo": {"desde": desde, "hasta": hasta},
+        **{**datos, "grupos": [
+            {**g, "anuncios": [{**a, "ultimo": iso_utc(a["ultimo"])} for a in g["anuncios"]]} for g in datos["grupos"]
+        ]},
+        "puede_gestionar": usuario["rol"] == "admin",
+    })
+
+
+@router.post("/analitica/anuncios/empresa.json")
+async def analitica_anuncios_empresa_json(
+    request: Request,
+    usuario: dict = Depends(servicio_identidad.requiere_rol("admin")),
+    _csrf: None = Depends(verificar_csrf),
+):
+    """Admin. Pone la empresa de UN grupo (`{clave_grupo, empresa}`; empresa vacía la quita) o aplica las sugeridas
+    desde los nombres de campaña (`{aplicar_sugeridas: true}`; sin `confirmar: true` solo muestra qué haría)."""
+    cuerpo = await request.json()
+    if not isinstance(cuerpo, dict):
+        raise HTTPException(status_code=400, detail="El cuerpo debe ser un objeto JSON.")
+    if cuerpo.get("aplicar_sugeridas") is True:
+        return JSONResponse(await aplicar_empresas_sugeridas(
+            usuario["negocio_id"], cuerpo.get("confirmar") is True, autor=usuario.get("username"),
+        ))
+    try:
+        empresa = await guardar_empresa_grupo(
+            usuario["negocio_id"], str(cuerpo.get("clave_grupo") or ""), str(cuerpo.get("empresa") or ""),
+            autor=usuario.get("username"),
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return JSONResponse({"ok": True, "empresa": empresa})
 
 
 @router.get("/analitica.json")

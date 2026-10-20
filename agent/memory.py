@@ -20,6 +20,8 @@ from urllib.parse import urlparse
 # con alias, mismo motivo que cualquier otro alias de este archivo.
 from datetime import date, datetime, timedelta, time as hora_del_dia
 from cryptography.fernet import Fernet
+import hashlib
+import unicodedata
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, aliased
 from sqlalchemy import (
@@ -1553,6 +1555,219 @@ async def resumen_reingreso_anuncio(negocio_id: str, dias: int = 7) -> dict:
             {"creado": f.creado, "accion": f.accion, **(f.payload or {})} for f in filas[:25]
         ],
     }
+
+
+# ── Rendimiento por anuncio (2026-10-19) ─────────────────────────────────
+# Analítica por anuncio y por GRUPO de anuncios, sin asignar campañas. El grupo se arma solo (título + texto + formato);
+# el formato sale del `media_type` del aviso de Meta (video / imagen); el producto, del texto; la empresa es una etiqueta
+# por grupo (se puede sugerir desde los nombres de campaña actuales). Cada conversación cuenta UNA vez, para el anuncio
+# por el que entró primero (misma regla de primer contacto que la atribución).
+CLAVE_EMPRESAS_ANUNCIO = "analitica_empresas"
+EMPRESAS_ANUNCIO_POR_DEFECTO = "Cálidda,Estratek"
+_PRODUCTOS_ANUNCIO = (
+    ("secadora", ("secadora",)),
+    ("terma", ("terma", "agua caliente", "calefon", "ducha")),
+    ("cocina", ("cocina",)),
+)
+
+
+def _normalizar_texto_anuncio(texto: str | None) -> str:
+    sin_tildes = unicodedata.normalize("NFD", (texto or "").lower())
+    sin_tildes = "".join(c for c in sin_tildes if unicodedata.category(c) != "Mn")
+    return " ".join(sin_tildes.split())
+
+
+def formato_de_anuncio(media_type: str | None) -> str:
+    return {"video": "video", "image": "imagen"}.get((media_type or "").strip().lower(), "desconocido")
+
+
+def clave_grupo_anuncio(headline: str | None, body: str | None, media_type: str | None) -> str:
+    """Clave estable del grupo: título + inicio del texto (normalizados) + formato. El mismo texto en video y en imagen
+    son DOS grupos; un anuncio nuevo con el mismo contenido cae solo en el grupo existente."""
+    base = f"{_normalizar_texto_anuncio(headline)}|{_normalizar_texto_anuncio(body)[:80]}|{formato_de_anuncio(media_type)}"
+    return hashlib.sha1(base.encode("utf-8")).hexdigest()[:16]
+
+
+def producto_de_anuncio(headline: str | None, body: str | None) -> str:
+    """"secadora" / "terma" / "cocina" si el texto menciona uno solo; "varios" si menciona más de uno; "sin_definir"."""
+    texto = _normalizar_texto_anuncio(f"{headline or ''} {body or ''}")
+    hallados = [nombre for nombre, palabras in _PRODUCTOS_ANUNCIO if any(p in texto for p in palabras)]
+    return hallados[0] if len(hallados) == 1 else ("varios" if hallados else "sin_definir")
+
+
+async def obtener_empresas_anuncio(negocio_id: str | None) -> list[str]:
+    """Empresas conocidas del negocio (ajuste `analitica_empresas`, separadas por coma)."""
+    try:
+        valor = await obtener_configuracion(CLAVE_EMPRESAS_ANUNCIO, EMPRESAS_ANUNCIO_POR_DEFECTO, negocio_id=negocio_id)
+    except Exception:
+        valor = EMPRESAS_ANUNCIO_POR_DEFECTO
+    return [e.strip() for e in valor.split(",") if e.strip()]
+
+
+def _empresa_en_nombres(nombres: set[str], empresas: list[str]) -> str | None:
+    """La empresa que aparece en los nombres de campaña, solo si es UNA (si hay dos distintas, no se adivina)."""
+    hallazgos = {
+        e for e in empresas for n in nombres if _normalizar_texto_anuncio(e) in _normalizar_texto_anuncio(n)
+    }
+    return next(iter(hallazgos)) if len(hallazgos) == 1 else None
+
+
+def _por_lotes(valores: list, tamano: int = 400):
+    for i in range(0, len(valores), tamano):
+        yield valores[i:i + tamano]
+
+
+async def rendimiento_por_anuncio(
+    negocio_id: str, desde: datetime, hasta: datetime, asesor: str | None = None,
+) -> dict:
+    """Solo lectura. Conversaciones creadas en [desde, hasta) agrupadas por el anuncio por el que entraron primero y por
+    GRUPO de anuncios (título + texto + formato). Por grupo: formato, producto, empresa (etiqueta o sugerida desde los
+    nombres de campaña), leads (personas distintas), conversaciones, ventas y sus anuncios con enlace."""
+    async with async_session() as session:
+        eventos = (await session.execute(
+            select(
+                AttributionEvent.conversation_id, AttributionEvent.source_id, AttributionEvent.headline,
+                AttributionEvent.body, AttributionEvent.referral_raw, AttributionEvent.creado,
+            )
+            .where(
+                AttributionEvent.negocio_id == negocio_id, AttributionEvent.tipo_origen.in_(_TIPOS_ORIGEN_ANUNCIO),
+                AttributionEvent.source_id.is_not(None), AttributionEvent.source_id != "",
+            )
+            .order_by(AttributionEvent.creado.asc(), AttributionEvent.id.asc())
+        )).all()
+        info: dict[str, dict] = {}
+        primer: dict[str, str] = {}
+        for conversation_id, source_id, headline, body, raw, creado in eventos:
+            r = raw if isinstance(raw, dict) else {}
+            i = info.setdefault(source_id, {"headline": None, "body": None, "media_type": None, "url": None, "ultimo": creado})
+            i["headline"] = headline or i["headline"]
+            i["body"] = body or i["body"]
+            i["media_type"] = r.get("media_type") or i["media_type"]
+            i["url"] = r.get("source_url") or i["url"]
+            i["ultimo"] = creado
+            primer.setdefault(conversation_id, source_id)
+
+        conversaciones: list[tuple] = []
+        for lote in _por_lotes(list(primer)):
+            consulta = select(Conversation.id, Conversation.contact_id, Conversation.campana_origen_id).where(
+                Conversation.negocio_id == negocio_id, Conversation.id.in_(lote),
+                Conversation.creado >= desde, Conversation.creado < hasta,
+            )
+            if asesor is not None:
+                consulta = consulta.where(Conversation.asesor_asignado_id == asesor)
+            conversaciones.extend((await session.execute(consulta)).all())
+
+        vendidas: set[str] = set()
+        for lote in _por_lotes([c[0] for c in conversaciones]):
+            vendidas.update(row[0] for row in (await session.execute(
+                select(Opportunity.conversation_id).where(
+                    Opportunity.conversation_id.in_(lote), Opportunity.resultado == "vendido",
+                )
+            )).all())
+
+        campanas = {c.id: c.nombre for c in (await session.execute(
+            select(Campana).where(Campana.negocio_id == negocio_id)
+        )).scalars().all()}
+        regla_nombre = {src: campanas.get(cid) for src, cid in (await session.execute(
+            select(AnuncioCampana.source_id, AnuncioCampana.campana_id).where(AnuncioCampana.negocio_id == negocio_id)
+        )).all()}
+        etiquetas = {e.clave_grupo: e.empresa for e in (await session.execute(
+            select(EtiquetaGrupoAnuncio).where(EtiquetaGrupoAnuncio.negocio_id == negocio_id)
+        )).scalars().all()}
+    empresas_config = await obtener_empresas_anuncio(negocio_id)
+
+    grupos: dict[str, dict] = {}
+    for conversation_id, contact_id, campana_id in conversaciones:
+        source_id = primer[conversation_id]
+        i = info[source_id]
+        clave = clave_grupo_anuncio(i["headline"], i["body"], i["media_type"])
+        g = grupos.setdefault(clave, {
+            "clave": clave, "titulo": i["headline"] or "(sin título)", "texto": (i["body"] or "")[:140] or None,
+            "formato": formato_de_anuncio(i["media_type"]), "producto": producto_de_anuncio(i["headline"], i["body"]),
+            "anuncios": {}, "contactos": set(), "conversaciones": 0, "ventas": 0, "nombres_campana": set(),
+        })
+        g["conversaciones"] += 1
+        g["contactos"].add(contact_id)
+        g["ventas"] += 1 if conversation_id in vendidas else 0
+        a = g["anuncios"].setdefault(source_id, {"source_id": source_id, "conversaciones": 0, "url": i["url"], "ultimo": i["ultimo"]})
+        a["conversaciones"] += 1
+        for nombre in (campanas.get(campana_id), regla_nombre.get(source_id)):
+            if nombre:
+                g["nombres_campana"].add(nombre)
+
+    salida = []
+    for g in grupos.values():
+        empresa = etiquetas.get(g["clave"])
+        anuncios = sorted(g["anuncios"].values(), key=lambda x: -x["conversaciones"])
+        salida.append({
+            "clave": g["clave"], "titulo": g["titulo"], "texto": g["texto"], "formato": g["formato"],
+            "producto": g["producto"], "empresa": empresa,
+            "empresa_sugerida": None if empresa else _empresa_en_nombres(g["nombres_campana"], empresas_config),
+            "anuncios_total": len(anuncios), "anuncios": anuncios[:50],
+            "leads": len(g["contactos"]), "conversaciones": g["conversaciones"], "ventas": g["ventas"],
+        })
+    salida.sort(key=lambda x: -x["conversaciones"])
+    empresas = sorted({*empresas_config, *(g["empresa"] for g in salida if g["empresa"])})
+    return {
+        "grupos": salida, "empresas": empresas,
+        "resumen": {
+            "grupos": len(salida), "anuncios": sum(g["anuncios_total"] for g in salida),
+            "conversaciones": sum(g["conversaciones"] for g in salida),
+            "sin_empresa": sum(1 for g in salida if not g["empresa"]),
+        },
+    }
+
+
+async def guardar_empresa_grupo(negocio_id: str, clave_grupo: str, empresa: str, autor: str | None = None) -> str | None:
+    """Pone (o, con texto vacío, quita) la empresa de un grupo. Devuelve la empresa guardada o None."""
+    clave_grupo = (clave_grupo or "").strip()
+    empresa = (empresa or "").strip()
+    if not clave_grupo or len(clave_grupo) > 40 or len(empresa) > 60:
+        raise ValueError("Grupo o empresa inválidos.")
+    async with async_session() as session:
+        fila = (await session.execute(
+            select(EtiquetaGrupoAnuncio).where(
+                EtiquetaGrupoAnuncio.negocio_id == negocio_id, EtiquetaGrupoAnuncio.clave_grupo == clave_grupo,
+            )
+        )).scalars().first()
+        if not empresa:
+            if fila is not None:
+                await session.delete(fila)
+                await session.commit()
+            return None
+        if fila is None:
+            session.add(EtiquetaGrupoAnuncio(negocio_id=negocio_id, clave_grupo=clave_grupo, empresa=empresa, actualizado_por=autor))
+        else:
+            fila.empresa = empresa
+            fila.actualizado = datetime.utcnow()
+            fila.actualizado_por = autor
+        await session.commit()
+    return empresa
+
+
+async def aplicar_empresas_sugeridas(negocio_id: str, aplicar: bool, autor: str | None = None) -> dict:
+    """Etiqueta con la empresa SUGERIDA (la que aparece en los nombres de campaña) a todos los grupos que aún no
+    tienen empresa. Con `aplicar=False` solo muestra qué haría."""
+    datos = await rendimiento_por_anuncio(negocio_id, datetime(2000, 1, 1), datetime.utcnow() + timedelta(days=1))
+    a_etiquetar = [g for g in datos["grupos"] if not g["empresa"] and g["empresa_sugerida"]]
+    sin_sugerencia = [g for g in datos["grupos"] if not g["empresa"] and not g["empresa_sugerida"]]
+    resumen = {
+        "grupos_a_etiquetar": [
+            {"clave": g["clave"], "titulo": g["titulo"], "formato": g["formato"], "empresa": g["empresa_sugerida"]}
+            for g in a_etiquetar
+        ],
+        "sin_sugerencia": [{"clave": g["clave"], "titulo": g["titulo"], "formato": g["formato"]} for g in sin_sugerencia],
+    }
+    if not aplicar:
+        return {"aplicado": False, **resumen}
+    for g in a_etiquetar:
+        await guardar_empresa_grupo(negocio_id, g["clave"], g["empresa_sugerida"], autor=autor)
+    if a_etiquetar:
+        await registrar_auditoria(
+            "empresas_de_grupos_de_anuncios_aplicadas", actor=autor, negocio_id=negocio_id, entidad_tipo="grupo_anuncio",
+            entidad_id="*", payload={"grupos": [{"clave": g["clave"], "empresa": g["empresa_sugerida"]} for g in a_etiquetar]},
+        )
+    return {"aplicado": True, **resumen}
 
 
 async def diagnostico_campos_referral(negocio_id: str) -> dict:
@@ -3542,6 +3757,24 @@ class AnuncioCampana(Base):
 
     __table_args__ = (
         Index("ix_anuncio_campana_negocio_source", "negocio_id", "source_id", unique=True),
+    )
+
+
+class EtiquetaGrupoAnuncio(Base):
+    """Empresa de un GRUPO de anuncios (2026-10-19, "Rendimiento por anuncio"). El grupo se arma solo por
+    título + texto + formato (`clave_grupo_anuncio`); la empresa (Cálidda, Estratek…) no viene en el aviso de Meta,
+    así que la pone una persona UNA vez por grupo y los anuncios futuros del mismo grupo la heredan."""
+    __tablename__ = "etiquetas_grupo_anuncio"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_generar_uuid)
+    negocio_id: Mapped[str] = mapped_column(String(36), ForeignKey("negocios.id"), nullable=False, index=True)
+    clave_grupo: Mapped[str] = mapped_column(String(40))
+    empresa: Mapped[str] = mapped_column(String(60))
+    actualizado: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    actualizado_por: Mapped[str | None] = mapped_column(String(50), nullable=True)
+
+    __table_args__ = (
+        Index("ix_etiqueta_grupo_anuncio_negocio_clave", "negocio_id", "clave_grupo", unique=True),
     )
 
 
