@@ -312,3 +312,33 @@ async def test_endpoint_de_ventas_alcance_por_rol_y_total_que_cuadra():
         await dashboard.analitica_ventas_json(usuario=admin, desde="mal", hasta="fecha")
     assert e.value.status_code == 400
 
+
+async def test_red_estimada_por_grupo_con_leads_y_ventas_por_red():
+    negocio, canal = await _negocio("rpa-14")
+    await mem.actualizar_lead("51903301401", negocio_id=negocio["id"], numero_whatsapp_id="x")
+    await mem.resolver_conversation_activa("51903301401", negocio["id"], canal["id"])
+    await mem.registrar_attribution_event("51903301401", "meta_ads_no_resuelto", referral={
+        "source_id": "AD-1", "headline": "Financia", "body": "x", "media_type": "image", "source_url": "https://fb.me/abc",
+    })
+    await mem.actualizar_lead("51903301402", negocio_id=negocio["id"], numero_whatsapp_id="x")
+    await mem.resolver_conversation_activa("51903301402", negocio["id"], canal["id"])
+    await mem.registrar_attribution_event("51903301402", "meta_ads_no_resuelto", referral={
+        "source_id": "AD-1", "headline": "Financia", "body": "x", "media_type": "image", "source_url": "https://www.instagram.com/p/xyz/",
+    })
+    await mem.actualizar_lead("51903301403", negocio_id=negocio["id"], numero_whatsapp_id="x")
+    await mem.resolver_conversation_activa("51903301403", negocio["id"], canal["id"])
+    await mem.registrar_attribution_event("51903301403", "meta_ads_no_resuelto", referral={
+        "source_id": "AD-1", "headline": "Financia", "body": "x", "media_type": "image", "source_url": "https://fb.me/def",
+    })
+    await _vender(negocio, canal, "51903301402", [("Terma", "100")])  # la venta es de Instagram
+
+    datos = await mem.rendimiento_por_anuncio(negocio["id"], *_periodo())
+    redes = datos["grupos"][0]["redes"]
+    detalle = await mem.ventas_detalle_periodo(negocio["id"], *_periodo())
+
+    assert redes["facebook"] == {"leads": 2, "conversaciones": 2, "ventas": 0}
+    assert redes["instagram"] == {"leads": 1, "conversaciones": 1, "ventas": 1}
+    assert redes["otra"] == {"leads": 0, "conversaciones": 0, "ventas": 0}
+    assert sum(v["leads"] for v in redes.values()) == datos["grupos"][0]["leads"]  # las redes reparten el total, sin duplicar
+    assert detalle["ventas"][0]["red"] == "instagram"
+

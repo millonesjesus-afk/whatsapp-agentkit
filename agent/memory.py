@@ -1634,8 +1634,10 @@ def _por_lotes(valores: list, tamano: int = 400):
         yield valores[i:i + tamano]
 
 
-async def _cargar_info_anuncios(session, negocio_id: str) -> tuple[dict[str, dict], dict[str, str]]:
-    """({source_id: título, texto, media_type, enlace, último aviso}, {conversation_id: source_id del PRIMER anuncio})."""
+async def _cargar_info_anuncios(session, negocio_id: str) -> tuple[dict[str, dict], dict[str, str], dict[str, str]]:
+    """({source_id: título, texto, media_type, enlace, último aviso}, {conversation_id: source_id del PRIMER anuncio},
+    {conversation_id: red del primer aviso}). La red es una ESTIMACIÓN: se deduce del dominio del enlace del anuncio
+    (`_red_de_referral`), no es un dato oficial de Meta; hasta tener la API de Marketing es la mejor señal disponible."""
     eventos = (await session.execute(
         select(
             AttributionEvent.conversation_id, AttributionEvent.source_id, AttributionEvent.headline,
@@ -1649,6 +1651,7 @@ async def _cargar_info_anuncios(session, negocio_id: str) -> tuple[dict[str, dic
     )).all()
     info: dict[str, dict] = {}
     primer: dict[str, str] = {}
+    red_conv: dict[str, str] = {}
     for conversation_id, source_id, headline, body, raw, creado in eventos:
         r = raw if isinstance(raw, dict) else {}
         i = info.setdefault(source_id, {"headline": None, "body": None, "media_type": None, "url": None, "ultimo": creado})
@@ -1657,8 +1660,10 @@ async def _cargar_info_anuncios(session, negocio_id: str) -> tuple[dict[str, dic
         i["media_type"] = r.get("media_type") or i["media_type"]
         i["url"] = r.get("source_url") or i["url"]
         i["ultimo"] = creado
-        primer.setdefault(conversation_id, source_id)
-    return info, primer
+        if conversation_id not in primer:
+            primer[conversation_id] = source_id
+            red_conv[conversation_id] = _red_de_referral(r)
+    return info, primer, red_conv
 
 
 async def _ventas_cerradas_en_periodo(session, negocio_id: str, desde: datetime, hasta: datetime, asesor: str | None) -> list[tuple]:
@@ -1683,7 +1688,7 @@ async def rendimiento_por_anuncio(
     misma definición que el total "Ventas" de Analítica. Incluye formato, producto, empresa (etiqueta o sugerida desde
     los nombres de campaña) y sus anuncios con enlace. `resumen` cuadra con el total: ventas de anuncios + otras."""
     async with async_session() as session:
-        info, primer = await _cargar_info_anuncios(session, negocio_id)
+        info, primer, red_conv = await _cargar_info_anuncios(session, negocio_id)
 
         conversaciones: list[tuple] = []
         for lote in _por_lotes(list(primer)):
@@ -1717,6 +1722,7 @@ async def rendimiento_por_anuncio(
             "clave": clave, "titulo": i["headline"] or "(sin título)", "texto": (i["body"] or "")[:140] or None,
             "formato": formato_de_anuncio(i["media_type"]), "producto": producto_de_anuncio(i["headline"], i["body"]),
             "anuncios": {}, "contactos": set(), "conversaciones": 0, "ventas": 0, "nombres_campana": {},
+            "redes": {k: {"leads": set(), "conversaciones": 0, "ventas": 0} for k in ("facebook", "instagram", "otra")},
         })
         a = g["anuncios"].setdefault(source_id, {
             "source_id": source_id, "conversaciones": 0, "ventas": 0, "url": i["url"], "ultimo": i["ultimo"],
@@ -1729,6 +1735,9 @@ async def rendimiento_por_anuncio(
         g["conversaciones"] += 1
         g["contactos"].add(contact_id)
         a["conversaciones"] += 1
+        r_red = g["redes"][red_conv.get(conversation_id, "otra")]
+        r_red["conversaciones"] += 1
+        r_red["leads"].add(contact_id)
         # La campaña de ESTA conversación; si no tiene, la regla vigente de su anuncio.
         nombre = campanas.get(campana_id) or regla_nombre.get(source_id)
         if nombre:
@@ -1742,6 +1751,7 @@ async def rendimiento_por_anuncio(
         g, a = _grupo_y_anuncio(source_id)
         g["ventas"] += 1
         a["ventas"] += 1
+        g["redes"][red_conv.get(conversation_id, "otra")]["ventas"] += 1
         ventas_de_anuncios += 1
 
     salida = []
@@ -1754,6 +1764,8 @@ async def rendimiento_por_anuncio(
             "empresa_sugerida": None if empresa else _empresa_en_nombres(g["nombres_campana"], empresas_config, g["conversaciones"]),
             "anuncios_total": len(anuncios), "anuncios": anuncios[:50],
             "leads": len(g["contactos"]), "conversaciones": g["conversaciones"], "ventas": g["ventas"],
+            # Red ESTIMADA (dominio del enlace del anuncio), no un dato oficial de Meta.
+            "redes": {k: {"leads": len(v["leads"]), "conversaciones": v["conversaciones"], "ventas": v["ventas"]} for k, v in g["redes"].items()},
         })
     salida.sort(key=lambda x: (-x["conversaciones"], -x["ventas"]))
     empresas = sorted({*empresas_config, *(g["empresa"] for g in salida if g["empresa"])})
@@ -1777,7 +1789,7 @@ async def ventas_detalle_periodo(
     (SMS, wa.link…) o sin origen. Teléfonos enmascarados. El valor excluye las ventas con algún precio no numérico,
     igual que `resumen_ventas_periodo`."""
     async with async_session() as session:
-        info, primer = await _cargar_info_anuncios(session, negocio_id)
+        info, primer, red_conv = await _cargar_info_anuncios(session, negocio_id)
         ventas = await _ventas_cerradas_en_periodo(session, negocio_id, desde, hasta, asesor)
         ids_opp = [v[0] for v in ventas]
         ids_conv = list({v[1] for v in ventas})
@@ -1832,6 +1844,7 @@ async def ventas_detalle_periodo(
             "grupo_clave": clave, "grupo_titulo": (i["headline"] or "(sin título)") if i else None,
             "formato": formato_de_anuncio(i["media_type"]) if i else None, "empresa": etiquetas.get(clave) if clave else None,
             "source_id": source_id if i else None, "url": i["url"] if i else None, "campana": nombre_campana,
+            "red": red_conv.get(conversation_id, "otra") if i else None,
             "asesor": asesor_id, "telefono": "…" + (telefonos.get(contact_id) or "")[-4:],
         })
     filas.sort(key=lambda f: f["fecha_cierre"] or datetime.min, reverse=True)
