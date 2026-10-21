@@ -93,7 +93,10 @@ async def test_contar_flujo_periodo_conteos_basicos():
 
     hoy, inicio, fin = _periodo_hoy()
     flujo = await mem.contar_flujo_periodo(negocio["id"], inicio, fin)
-    assert flujo == {"leads": 2, "conversaciones": 2, "oportunidades": 2, "ventas": 1}
+    assert flujo == {
+        "leads": 2, "conversaciones": 2, "oportunidades": 2, "ventas": 1,
+        "ventas_de_leads_del_periodo": 1, "ventas_de_periodos_anteriores": 0,
+    }
 
 
 async def test_contar_flujo_periodo_leads_redefinido_como_contacts_distintos_con_filtro():
@@ -211,8 +214,14 @@ async def test_contar_flujo_periodo_no_mezcla_negocios_homonimos():
     hoy, inicio, fin = _periodo_hoy()
     flujo_a = await mem.contar_flujo_periodo(negocio_a["id"], inicio, fin)
     flujo_b = await mem.contar_flujo_periodo(negocio_b["id"], inicio, fin)
-    assert flujo_a == {"leads": 1, "conversaciones": 1, "oportunidades": 1, "ventas": 1}
-    assert flujo_b == {"leads": 1, "conversaciones": 1, "oportunidades": 1, "ventas": 0}
+    assert flujo_a == {
+        "leads": 1, "conversaciones": 1, "oportunidades": 1, "ventas": 1,
+        "ventas_de_leads_del_periodo": 1, "ventas_de_periodos_anteriores": 0,
+    }
+    assert flujo_b == {
+        "leads": 1, "conversaciones": 1, "oportunidades": 1, "ventas": 0,
+        "ventas_de_leads_del_periodo": 0, "ventas_de_periodos_anteriores": 0,
+    }
 
 
 # ---------------------------------------------------------------------------

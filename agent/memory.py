@@ -1055,6 +1055,7 @@ async def listar_anuncios_detectados(negocio_id: str) -> list[dict]:
 async def listar_atribucion_sin_campana_periodo(
     negocio_id: str, desde: datetime, hasta: datetime,
     unidad_id: str | None = None, asesor: str | None = None, red: str | None = None,
+    ids_conversacion: set[str] | None = None,
 ) -> dict:
     """Complementa `contar_opportunities_por_campana` (Gate Analítica P0 —
     tabla Campañas + Orgánicos): mismo universo y mismos filtros
@@ -1086,10 +1087,24 @@ async def listar_atribucion_sin_campana_periodo(
             query = query.where(Conversation.unidad_id == unidad_id)
         if asesor is not None:
             query = query.where(Conversation.asesor_asignado_id == asesor)
+        if ids_conversacion is not None:
+            query = query.where(_en_ids(Conversation.id, ids_conversacion))
         ids_conversation = [row[0] for row in (await session.execute(query)).all()]
 
         vacio = {"anuncios": [], "organico": {"total": 0, "vendidos": 0, "redes": {"facebook": 0, "instagram": 0, "otra": 0}}}
-        if not ids_conversation:
+        # Ventas CERRADAS en el período de conversaciones sin campaña (misma base que el total «Ventas»): pueden venir de
+        # clientes que entraron antes, así que se clasifican también aunque no estén entre las conversaciones del período.
+        ventas_por_conv: dict[str, int] = {}
+        for _opp, conv_id, campana_id_v, asesor_v, _creada in await _ventas_cerradas_con_conversacion(
+            session, negocio_id, desde, hasta, unidad_id, ids_conversacion,
+        ):
+            if campana_id_v is not None or (asesor is not None and asesor_v != asesor):
+                continue
+            ventas_por_conv[conv_id] = ventas_por_conv.get(conv_id, 0) + 1
+        ids_cohorte = set(ids_conversation)
+        # En orden (primero las del período, luego las que solo aportan ventas): el título de un anuncio es el del primero.
+        ids_todas = list(dict.fromkeys([*ids_conversation, *ventas_por_conv]))
+        if not ids_todas:
             return vacio
 
         eventos = (await session.execute(
@@ -1099,7 +1114,7 @@ async def listar_atribucion_sin_campana_periodo(
             )
             .where(
                 AttributionEvent.negocio_id == negocio_id,
-                AttributionEvent.conversation_id.in_(ids_conversation),
+                AttributionEvent.conversation_id.in_(ids_todas),
                 AttributionEvent.tipo_origen.in_(_TIPOS_ORIGEN_ANUNCIO),
                 AttributionEvent.source_id.is_not(None), AttributionEvent.source_id != "",
             )
@@ -1114,25 +1129,19 @@ async def listar_atribucion_sin_campana_periodo(
                 "red": _red_de_referral(referral_raw),
             })
 
-        query_vendidos = (
-            select(Conversation.id).select_from(Conversation)
-            .join(Opportunity, Opportunity.conversation_id == Conversation.id)
-            .where(Conversation.id.in_(ids_conversation), Opportunity.resultado == "vendido")
-        )
-        ids_vendidos = {row[0] for row in (await session.execute(query_vendidos)).all()}
-
     anuncios: dict[str, dict] = {}
     organico = {"total": 0, "vendidos": 0, "redes": {"facebook": 0, "instagram": 0, "otra": 0}}
-    for conversation_id in ids_conversation:
+    for conversation_id in ids_todas:
         info = anuncio_por_conversation.get(conversation_id)
-        vendido = conversation_id in ids_vendidos
+        en_cohorte = conversation_id in ids_cohorte
+        n_ventas = ventas_por_conv.get(conversation_id, 0)
         if info is None:
             if red is not None and red != "otra":
                 continue
-            organico["total"] += 1
-            organico["redes"]["otra"] += 1
-            if vendido:
-                organico["vendidos"] += 1
+            if en_cohorte:
+                organico["total"] += 1
+                organico["redes"]["otra"] += 1
+            organico["vendidos"] += n_ventas
         else:
             if red is not None and info["red"] != red:
                 continue
@@ -1142,10 +1151,10 @@ async def listar_atribucion_sin_campana_periodo(
             })
             a["headline"] = a["headline"] or info["headline"]
             a["body"] = a["body"] or info["body"]
-            a["total"] += 1
-            a["redes"][info["red"]] += 1
-            if vendido:
-                a["vendidos"] += 1
+            if en_cohorte:
+                a["total"] += 1
+                a["redes"][info["red"]] += 1
+            a["vendidos"] += n_ventas
 
     return {
         "anuncios": sorted(anuncios.values(), key=lambda a: -a["total"]),
@@ -1666,7 +1675,10 @@ async def _cargar_info_anuncios(session, negocio_id: str) -> tuple[dict[str, dic
     return info, primer, red_conv
 
 
-async def _ventas_cerradas_en_periodo(session, negocio_id: str, desde: datetime, hasta: datetime, asesor: str | None) -> list[tuple]:
+async def _ventas_cerradas_en_periodo(
+    session, negocio_id: str, desde: datetime, hasta: datetime, asesor: str | None,
+    ids_conversacion: set[str] | None = None,
+) -> list[tuple]:
     """(opportunity_id, conversation_id, fecha_cierre) de las ventas CERRADAS en el período — la misma definición que el
     total "Ventas" de Analítica (`_contar_ventas_periodo`): por fecha de cierre, sin importar cuándo entró el cliente."""
     consulta = select(Opportunity.id, Opportunity.conversation_id, Opportunity.fecha_cierre).where(
@@ -1677,11 +1689,15 @@ async def _ventas_cerradas_en_periodo(session, negocio_id: str, desde: datetime,
         consulta = consulta.join(Conversation, Conversation.id == Opportunity.conversation_id).where(
             Conversation.asesor_asignado_id == asesor,
         )
-    return list((await session.execute(consulta)).all())
+    filas = list((await session.execute(consulta)).all())
+    if ids_conversacion is not None:
+        filas = [f for f in filas if f[1] in ids_conversacion]
+    return filas
 
 
 async def rendimiento_por_anuncio(
     negocio_id: str, desde: datetime, hasta: datetime, asesor: str | None = None,
+    ids_conversacion: set[str] | None = None,
 ) -> dict:
     """Solo lectura. Por GRUPO de anuncios (título + texto + formato): leads y conversaciones de los clientes que
     ENTRARON en [desde, hasta) por ese anuncio (el primero de su conversación) y ventas CERRADAS en el período, con la
@@ -1699,8 +1715,10 @@ async def rendimiento_por_anuncio(
             if asesor is not None:
                 consulta = consulta.where(Conversation.asesor_asignado_id == asesor)
             conversaciones.extend((await session.execute(consulta)).all())
+        if ids_conversacion is not None:
+            conversaciones = [c for c in conversaciones if c[0] in ids_conversacion]
 
-        ventas = await _ventas_cerradas_en_periodo(session, negocio_id, desde, hasta, asesor)
+        ventas = await _ventas_cerradas_en_periodo(session, negocio_id, desde, hasta, asesor, ids_conversacion)
 
         campanas = {c.id: c.nombre for c in (await session.execute(
             select(Campana).where(Campana.negocio_id == negocio_id)
@@ -1783,6 +1801,7 @@ async def rendimiento_por_anuncio(
 
 async def ventas_detalle_periodo(
     negocio_id: str, desde: datetime, hasta: datetime, asesor: str | None = None,
+    ids_conversacion: set[str] | None = None,
 ) -> dict:
     """Solo lectura. Cada venta cerrada en el período (misma definición y mismo total que "Ventas" de Analítica) con sus
     productos, su valor y su ORIGEN: grupo de anuncios (con empresa, formato y anuncio), campaña no publicitaria
@@ -1790,7 +1809,7 @@ async def ventas_detalle_periodo(
     igual que `resumen_ventas_periodo`."""
     async with async_session() as session:
         info, primer, red_conv = await _cargar_info_anuncios(session, negocio_id)
-        ventas = await _ventas_cerradas_en_periodo(session, negocio_id, desde, hasta, asesor)
+        ventas = await _ventas_cerradas_en_periodo(session, negocio_id, desde, hasta, asesor, ids_conversacion)
         ids_opp = [v[0] for v in ventas]
         ids_conv = list({v[1] for v in ventas})
         lineas: dict[str, list[tuple]] = {}
@@ -1854,6 +1873,56 @@ async def ventas_detalle_periodo(
             "total": len(filas), "por_origen": por_origen, "valor_total": f"{valor_total:.2f}", "ventas_sin_valor": sin_valor,
         },
     }
+
+
+SIN_EMPRESA_FILTRO = "__sin__"
+PRODUCTOS_FILTRO_ANUNCIO = ("secadora", "terma", "cocina", "varios")
+FORMATOS_FILTRO_ANUNCIO = ("video", "imagen")
+
+
+async def ids_conversacion_de_segmento(
+    negocio_id: str, empresa: str | None = None, formato: str | None = None, producto: str | None = None,
+) -> set[str] | None:
+    """Conversaciones cuyo PRIMER anuncio pertenece al segmento pedido (empresa, formato y/o producto del grupo de anuncios).
+    `None` si no se pidió ningún filtro (no se acota nada). Con un filtro activo solo cuentan clientes que entraron por
+    anuncios de ese segmento: lo orgánico y las campañas no publicitarias quedan fuera. La empresa es la etiqueta confirmada
+    del grupo o, si no hay, la sugerida desde los nombres de campaña; `SIN_EMPRESA_FILTRO` pide los grupos sin ninguna."""
+    if not (empresa or formato or producto):
+        return None
+    async with async_session() as session:
+        info, primer, _red = await _cargar_info_anuncios(session, negocio_id)
+    efectiva: dict[str, str | None] = {}
+    if empresa:
+        todo = await rendimiento_por_anuncio(negocio_id, datetime(2000, 1, 1), datetime.utcnow() + timedelta(days=1))
+        efectiva = {g["clave"]: (g["empresa"] or g["empresa_sugerida"]) for g in todo["grupos"]}
+    resultado: set[str] = set()
+    for conversation_id, source_id in primer.items():
+        i = info.get(source_id)
+        if i is None:
+            continue
+        if formato and formato_de_anuncio(i["media_type"]) != formato:
+            continue
+        if producto and producto_de_anuncio(i["headline"], i["body"]) != producto:
+            continue
+        if empresa:
+            e = efectiva.get(clave_grupo_anuncio(i["headline"], i["body"], i["media_type"]))
+            if empresa == SIN_EMPRESA_FILTRO:
+                if e:
+                    continue
+            elif (e or "").lower() != empresa.lower():
+                continue
+        resultado.add(conversation_id)
+    return resultado
+
+
+async def listar_empresas_anuncio(negocio_id: str) -> list[str]:
+    """Empresas para el filtro: las conocidas del negocio y las que ya tienen alguna etiqueta."""
+    config = await obtener_empresas_anuncio(negocio_id)
+    async with async_session() as session:
+        etiquetadas = {e for (e,) in (await session.execute(
+            select(EtiquetaGrupoAnuncio.empresa).where(EtiquetaGrupoAnuncio.negocio_id == negocio_id)
+        )).all()}
+    return sorted({*config, *etiquetadas})
 
 
 async def guardar_empresa_grupo(negocio_id: str, clave_grupo: str, empresa: str, autor: str | None = None) -> str | None:
@@ -10402,7 +10471,7 @@ async def eliminar_campana(campana_id: int, negocio_id: str) -> bool:
 async def contar_opportunities_por_campana(
     negocio_id: str, unidad_id: str | None = None,
     desde: datetime | None = None, hasta: datetime | None = None,
-    asesor: str | None = None, red: str | None = None,
+    asesor: str | None = None, red: str | None = None, ids_conversacion: set[str] | None = None,
 ) -> list[dict]:
     """Cuenta Conversation/Opportunity por campaña de origen, scoped por
     Negocio (y opcionalmente Unidad) — para medir conversión por campaña.
@@ -10456,13 +10525,6 @@ async def contar_opportunities_por_campana(
             .where(Conversation.campana_origen_id.in_(ids_campana))
             .group_by(Conversation.campana_origen_id)
         )
-        query_vendidos = (
-            select(Conversation.campana_origen_id, func.count(func.distinct(Conversation.id)))
-            .select_from(Conversation)
-            .join(Opportunity, Opportunity.conversation_id == Conversation.id)
-            .where(Conversation.campana_origen_id.in_(ids_campana), Opportunity.resultado == "vendido")
-            .group_by(Conversation.campana_origen_id)
-        )
         redes_de_conversation = await _red_por_conversation(session, negocio_id)
         filtros = []
         if desde is not None:
@@ -10473,6 +10535,8 @@ async def contar_opportunities_por_campana(
             # Responsable ACTUAL (Gate Analítica P0) — mismo criterio ya
             # cerrado en todo el módulo, sin reconstruir historial.
             filtros.append(Conversation.asesor_asignado_id == asesor)
+        if ids_conversacion is not None:
+            filtros.append(_en_ids(Conversation.id, ids_conversacion))
         if red is not None:
             if red == "otra":
                 filtros.append(Conversation.id.not_in([c for c, r in redes_de_conversation.items() if r != "otra"]))
@@ -10480,10 +10544,23 @@ async def contar_opportunities_por_campana(
                 filtros.append(Conversation.id.in_([c for c, r in redes_de_conversation.items() if r == red]))
         if filtros:
             query_total = query_total.where(*filtros)
-            query_vendidos = query_vendidos.where(*filtros)
 
         totales = dict((await session.execute(query_total)).all())
-        vendidos = dict((await session.execute(query_vendidos)).all())
+        # `vendidos` = ventas CERRADAS en el período (misma base que el total «Ventas»), atribuidas por la campaña de la
+        # conversación; `total` sigue siendo las conversaciones que ENTRARON en el período.
+        vendidos: dict[int, int] = {}
+        for _opp, conversation_id, campana_id_v, asesor_v, _creada in await _ventas_cerradas_con_conversacion(
+            session, negocio_id, desde, hasta, unidad_id, ids_conversacion,
+        ):
+            if campana_id_v not in ids_campana:
+                continue
+            if asesor is not None and asesor_v != asesor:
+                continue
+            if red is not None:
+                red_v = redes_de_conversation.get(conversation_id, "otra")
+                if (red == "otra" and red_v != "otra") or (red != "otra" and red_v != red):
+                    continue
+            vendidos[campana_id_v] = vendidos.get(campana_id_v, 0) + 1
 
         redes_por_campana: dict[int, dict[str, int]] = {}
         query_conversaciones = select(Conversation.id, Conversation.campana_origen_id).where(
@@ -10543,25 +10620,68 @@ def rango_periodo_utc(desde: str, hasta: str) -> tuple[datetime, datetime]:
     return inicio_lima + offset, fin_lima + offset
 
 
-def _filtrar_opportunity_por_conversation(query, asesor: str | None, campana_id: int | None):
+def _en_ids(columna, ids):
+    """`columna IN (ids)` troceado en lotes: con cientos de ids evita pasar el límite de parámetros de la base. Sin ids no
+    coincide nada."""
+    lista = list(ids)
+    if not lista:
+        return columna.in_([""])
+    lotes = [lista[i:i + 500] for i in range(0, len(lista), 500)]
+    return columna.in_(lotes[0]) if len(lotes) == 1 else sa_or(*[columna.in_(lote) for lote in lotes])
+
+
+async def _ventas_cerradas_con_conversacion(
+    session, negocio_id: str, desde: datetime | None, hasta: datetime | None, unidad_id: str | None = None,
+    ids_conversacion: set[str] | None = None,
+) -> list[tuple]:
+    """(opportunity_id, conversation_id, campana_origen_id, asesor_asignado_id, conversacion_creada) de las ventas
+    CERRADAS en [desde, hasta) — por `fecha_cierre`, sin importar cuándo entró el cliente. Es la ÚNICA base de "ventas del
+    período" para todos los paneles de Analítica (total, asesores, campañas, anuncios, productos): así todos suman lo mismo.
+    Con `desde`/`hasta` en `None`, todo el histórico."""
+    consulta = (
+        select(
+            Opportunity.id, Opportunity.conversation_id, Conversation.campana_origen_id,
+            Conversation.asesor_asignado_id, Conversation.creado,
+        )
+        .join(Conversation, Conversation.id == Opportunity.conversation_id)
+        .where(Opportunity.negocio_id == negocio_id, Opportunity.resultado == "vendido")
+    )
+    if desde is not None:
+        consulta = consulta.where(Opportunity.fecha_cierre >= desde)
+    if hasta is not None:
+        consulta = consulta.where(Opportunity.fecha_cierre < hasta)
+    if unidad_id is not None:
+        consulta = consulta.where(Opportunity.unidad_id == unidad_id)
+    filas = list((await session.execute(consulta)).all())
+    if ids_conversacion is not None:
+        filas = [f for f in filas if f[1] in ids_conversacion]
+    return filas
+
+
+def _filtrar_opportunity_por_conversation(
+    query, asesor: str | None, campana_id: int | None, ids_conversacion: set[str] | None = None,
+):
     """Aplica el filtro de asesor/campaña a una query de `Opportunity` que
     todavía no se unió con `Conversation` (Gate Analítica P0) — un solo JOIN
     cuando cualquiera de los dos viene informado, nunca dos JOIN separados
     contra la misma tabla. `Opportunity` no tiene su propio campo de asesor
     ni de campaña; ambos viven en `Conversation`."""
-    if asesor is None and campana_id is None:
+    if asesor is None and campana_id is None and ids_conversacion is None:
         return query
     query = query.join(Conversation, Conversation.id == Opportunity.conversation_id)
     if asesor is not None:
         query = query.where(Conversation.asesor_asignado_id == asesor)
     if campana_id is not None:
         query = query.where(Conversation.campana_origen_id == campana_id)
+    if ids_conversacion is not None:
+        query = query.where(_en_ids(Conversation.id, ids_conversacion))
     return query
 
 
 async def _contar_ventas_periodo(
     negocio_id: str, desde: datetime, hasta: datetime,
     unidad_id: str | None = None, asesor: str | None = None, campana_id: int | None = None,
+    ids_conversacion: set[str] | None = None,
 ) -> int:
     """Única fuente de 'ventas del período' — `contar_flujo_periodo` y
     `calcular_embudo_comercial` llaman EXACTAMENTE esta función (Gate
@@ -10586,7 +10706,7 @@ async def _contar_ventas_periodo(
         )
         if unidad_id is not None:
             query = query.where(Opportunity.unidad_id == unidad_id)
-        query = _filtrar_opportunity_por_conversation(query, asesor, campana_id)
+        query = _filtrar_opportunity_por_conversation(query, asesor, campana_id, ids_conversacion)
         return (await session.execute(query)).scalar_one()
 
 
@@ -10732,6 +10852,7 @@ async def contar_consultas_atc_recientes(negocio_id: str, dias: int = 30) -> dic
 async def _contar_consultas_no_comerciales(
     session, negocio_id: str, desde: datetime, hasta: datetime, corte: datetime | None,
     unidad_id: str | None = None, asesor: str | None = None, campana_id: int | None = None,
+    ids_conversacion: set[str] | None = None,
 ) -> int:
     """Oportunidades del período con resultado `consulta_atc` (mismos filtros que el resto del embudo). Con
     `corte`, solo las creadas desde esa fecha."""
@@ -10746,7 +10867,7 @@ async def _contar_consultas_no_comerciales(
             Opportunity.creado >= inicio, Opportunity.creado < hasta,
         )
     )
-    query = _filtrar_opportunity_por_conversation(query, asesor, campana_id)
+    query = _filtrar_opportunity_por_conversation(query, asesor, campana_id, ids_conversacion)
     if unidad_id is not None:
         query = query.where(Opportunity.unidad_id == unidad_id)
     return (await session.execute(query)).scalar_one()
@@ -10763,6 +10884,7 @@ def _bloque_consultas_no_comerciales(cantidad: int, brutas: int, corte: datetime
 async def contar_flujo_periodo(
     negocio_id: str, desde: datetime, hasta: datetime,
     unidad_id: str | None = None, asesor: str | None = None, campana_id: int | None = None,
+    ids_conversacion: set[str] | None = None,
 ) -> dict:
     """Volumen registrado por etapa durante el período — CONTEXTO, no
     funnel de conversión (Gate Analítica P0): Contact→Conversation y
@@ -10777,7 +10899,7 @@ async def contar_flujo_periodo(
     cualquiera de los dos se redefine como Contacts DISTINTOS detrás de las
     Conversation que califican en el período — misma relación
     `Conversation.contact_id` ya existente, no una nueva."""
-    filtro_activo = asesor is not None or campana_id is not None
+    filtro_activo = asesor is not None or campana_id is not None or ids_conversacion is not None
     async with async_session() as session:
         if filtro_activo:
             query_leads = select(func.count(func.distinct(Conversation.contact_id))).where(
@@ -10788,6 +10910,8 @@ async def contar_flujo_periodo(
                 query_leads = query_leads.where(Conversation.asesor_asignado_id == asesor)
             if campana_id is not None:
                 query_leads = query_leads.where(Conversation.campana_origen_id == campana_id)
+            if ids_conversacion is not None:
+                query_leads = query_leads.where(_en_ids(Conversation.id, ids_conversacion))
         else:
             query_leads = select(func.count(Contact.id)).where(
                 Contact.negocio_id == negocio_id, Contact.eliminado_en.is_(None),
@@ -10801,6 +10925,8 @@ async def contar_flujo_periodo(
             query_conversaciones = query_conversaciones.where(Conversation.asesor_asignado_id == asesor)
         if campana_id is not None:
             query_conversaciones = query_conversaciones.where(Conversation.campana_origen_id == campana_id)
+        if ids_conversacion is not None:
+            query_conversaciones = query_conversaciones.where(_en_ids(Conversation.id, ids_conversacion))
 
         query_oportunidades = (
             select(func.count(Opportunity.id))
@@ -10810,7 +10936,7 @@ async def contar_flujo_periodo(
                 Opportunity.creado >= desde, Opportunity.creado < hasta,
             )
         )
-        query_oportunidades = _filtrar_opportunity_por_conversation(query_oportunidades, asesor, campana_id)
+        query_oportunidades = _filtrar_opportunity_por_conversation(query_oportunidades, asesor, campana_id, ids_conversacion)
         if unidad_id is not None:
             query_conversaciones = query_conversaciones.where(Conversation.unidad_id == unidad_id)
             query_oportunidades = query_oportunidades.where(Opportunity.unidad_id == unidad_id)
@@ -10820,11 +10946,22 @@ async def contar_flujo_periodo(
         politica = await obtener_politica_metricas(negocio_id)
         consultas = (
             await _contar_consultas_no_comerciales(
-                session, negocio_id, desde, hasta, politica["desde"], unidad_id, asesor, campana_id,
+                session, negocio_id, desde, hasta, politica["desde"], unidad_id, asesor, campana_id, ids_conversacion,
             ) if politica["excluir_consulta_atc"] else 0
         )
-    ventas = await _contar_ventas_periodo(negocio_id, desde, hasta, unidad_id, asesor, campana_id)
+    ventas = await _contar_ventas_periodo(negocio_id, desde, hasta, unidad_id, asesor, campana_id, ids_conversacion)
     flujo = {"leads": leads, "conversaciones": conversaciones, "oportunidades": oportunidades, "ventas": ventas}
+    # Desglose del total de ventas: de clientes que entraron en el período y de períodos anteriores (misma base de
+    # «Ventas»: cerradas en el período). Aditivo: ninguna clave existente cambia.
+    async with async_session() as session_v:
+        filas_ventas = await _ventas_cerradas_con_conversacion(session_v, negocio_id, desde, hasta, unidad_id, ids_conversacion)
+    de_leads_del_periodo = sum(
+        1 for _o, _c, camp_v, asesor_v, creada in filas_ventas
+        if (asesor is None or asesor_v == asesor) and (campana_id is None or camp_v == campana_id)
+        and desde <= creada < hasta
+    )
+    flujo["ventas_de_leads_del_periodo"] = de_leads_del_periodo
+    flujo["ventas_de_periodos_anteriores"] = ventas - de_leads_del_periodo
     if politica["excluir_consulta_atc"]:
         # Aditivo: `oportunidades` pasa a ser la comercial (misma cifra que el embudo) y la bruta sigue visible.
         flujo.update({
@@ -10837,6 +10974,7 @@ async def contar_flujo_periodo(
 async def calcular_embudo_comercial(
     negocio_id: str, desde: datetime, hasta: datetime,
     unidad_id: str | None = None, asesor: str | None = None, campana_id: int | None = None,
+    ids_conversacion: set[str] | None = None,
 ) -> dict:
     """El único funnel de desempeño comercial de P0 (Gate Analítica P0):
     Oportunidad → Venta. `tasa_cierre` es `None` (no 0) cuando no hubo
@@ -10851,17 +10989,17 @@ async def calcular_embudo_comercial(
                 Opportunity.creado >= desde, Opportunity.creado < hasta,
             )
         )
-        query = _filtrar_opportunity_por_conversation(query, asesor, campana_id)
+        query = _filtrar_opportunity_por_conversation(query, asesor, campana_id, ids_conversacion)
         if unidad_id is not None:
             query = query.where(Opportunity.unidad_id == unidad_id)
         oportunidades = (await session.execute(query)).scalar_one()
         politica = await obtener_politica_metricas(negocio_id)
         consultas = (
             await _contar_consultas_no_comerciales(
-                session, negocio_id, desde, hasta, politica["desde"], unidad_id, asesor, campana_id,
+                session, negocio_id, desde, hasta, politica["desde"], unidad_id, asesor, campana_id, ids_conversacion,
             ) if politica["excluir_consulta_atc"] else 0
         )
-    ventas = await _contar_ventas_periodo(negocio_id, desde, hasta, unidad_id, asesor, campana_id)
+    ventas = await _contar_ventas_periodo(negocio_id, desde, hasta, unidad_id, asesor, campana_id, ids_conversacion)
     if not politica["excluir_consulta_atc"]:
         tasa_cierre = (ventas / oportunidades) if oportunidades > 0 else None
         return {"oportunidades": oportunidades, "ventas": ventas, "tasa_cierre": tasa_cierre}
@@ -10880,24 +11018,27 @@ async def calcular_embudo_comercial(
 
 async def contar_oportunidades_por_asesor(
     negocio_id: str, usernames: list[str], desde: datetime, hasta: datetime,
-    unidad_id: str | None = None, campana_id: int | None = None,
+    unidad_id: str | None = None, campana_id: int | None = None, incluir_sin_asesor: bool = False,
+    ids_conversacion: set[str] | None = None,
 ) -> dict[str, dict]:
-    """Oportunidades/ventas/tasa de cierre por RESPONSABLE ACTUAL (Gate
-    Analítica P0) — `Conversation.asesor_asignado_id`, nunca reconstruye
-    quién tuvo el lead antes de una reasignación (misma decisión ya cerrada
-    para el filtro de asesor). Mismo patrón de JOIN y mismo criterio
-    temporal (`Conversation.creado`) que `contar_opportunities_por_campana`,
-    agrupado por asesor en vez de por campaña. `campana_id` combina ambos
-    filtros (ej. "el equipo, pero solo para esta campaña")."""
-    if not usernames:
+    """Oportunidades/ventas/tasa de cierre por RESPONSABLE ACTUAL (Gate Analítica P0) — `Conversation.asesor_asignado_id`,
+    nunca reconstruye quién tuvo el lead antes de una reasignación.
+
+    Homologado con el resto de Analítica (2026-10-21): `oportunidades` = las CREADAS en el período (comerciales: sin las
+    consultas ATC excluidas por la política de métricas, igual que el total) y `ventas` = las CERRADAS en el período, la
+    misma base que el total «Ventas». Con `incluir_sin_asesor`, la clave "" reúne lo que no tiene un asesor de esta lista
+    (sin asesor, o de un usuario que ya no está en ella), para que la tabla sume siempre el total."""
+    if not usernames and not incluir_sin_asesor:
         return {}
+    politica = await obtener_politica_metricas(negocio_id)
+    corte = politica["desde"]
+    inicio_exclusion = max(desde, corte) if corte is not None else desde
     async with async_session() as session:
         query = (
-            select(Conversation.asesor_asignado_id, Opportunity.resultado)
+            select(Conversation.asesor_asignado_id, Opportunity.resultado, Opportunity.creado)
             .join(Opportunity, Opportunity.conversation_id == Conversation.id)
             .where(
                 Conversation.negocio_id == negocio_id,
-                Conversation.asesor_asignado_id.in_(usernames),
                 Conversation.creado >= desde, Conversation.creado < hasta,
             )
         )
@@ -10905,12 +11046,33 @@ async def contar_oportunidades_por_asesor(
             query = query.where(Conversation.unidad_id == unidad_id)
         if campana_id is not None:
             query = query.where(Conversation.campana_origen_id == campana_id)
-        result = await session.execute(query)
-        datos = {u: {"oportunidades": 0, "ventas": 0} for u in usernames}
-        for asesor, resultado in result.all():
-            datos[asesor]["oportunidades"] += 1
-            if resultado == "vendido":
-                datos[asesor]["ventas"] += 1
+        if ids_conversacion is not None:
+            query = query.where(_en_ids(Conversation.id, ids_conversacion))
+        filas = (await session.execute(query)).all()
+        ventas = await _ventas_cerradas_con_conversacion(session, negocio_id, desde, hasta, unidad_id, ids_conversacion)
+
+    datos = {u: {"oportunidades": 0, "ventas": 0} for u in usernames}
+    if incluir_sin_asesor:
+        datos[""] = {"oportunidades": 0, "ventas": 0}
+
+    def _clave(asesor: str | None) -> str | None:
+        if asesor in datos and asesor != "":
+            return asesor
+        return "" if incluir_sin_asesor else None
+
+    for asesor, resultado, creado in filas:
+        clave = _clave(asesor)
+        if clave is None:
+            continue
+        if politica["excluir_consulta_atc"] and resultado == RESULTADO_CONSULTA_NO_COMERCIAL and creado >= inicio_exclusion:
+            continue
+        datos[clave]["oportunidades"] += 1
+    for _opp, _conv, campana_id_v, asesor_v, _creada in ventas:
+        if campana_id is not None and campana_id_v != campana_id:
+            continue
+        clave = _clave(asesor_v)
+        if clave is not None:
+            datos[clave]["ventas"] += 1
     for fila in datos.values():
         fila["tasa_cierre"] = (fila["ventas"] / fila["oportunidades"]) if fila["oportunidades"] > 0 else None
     return datos
@@ -10919,6 +11081,7 @@ async def contar_oportunidades_por_asesor(
 async def distribucion_resultados_periodo(
     negocio_id: str, desde: datetime, hasta: datetime,
     unidad_id: str | None = None, asesor: str | None = None, campana_id: int | None = None,
+    ids_conversacion: set[str] | None = None,
 ) -> list[dict]:
     """Oportunidades del período agrupadas por resultado — sin inventar
     categorías nuevas, usa exactamente los valores ya escritos en
@@ -10933,7 +11096,7 @@ async def distribucion_resultados_periodo(
             )
             .group_by(Opportunity.resultado)
         )
-        query = _filtrar_opportunity_por_conversation(query, asesor, campana_id)
+        query = _filtrar_opportunity_por_conversation(query, asesor, campana_id, ids_conversacion)
         if unidad_id is not None:
             query = query.where(Opportunity.unidad_id == unidad_id)
         result = await session.execute(query)
@@ -10943,6 +11106,7 @@ async def distribucion_resultados_periodo(
 async def resumen_ventas_periodo(
     negocio_id: str, desde: datetime, hasta: datetime,
     unidad_id: str | None = None, asesor: str | None = None, campana_id: int | None = None,
+    ids_conversacion: set[str] | None = None,
 ) -> dict:
     """Valor vendido del período, con el mismo fail-safe ya usado en
     `_resumen_venta` (dashboard.py): si AL MENOS una línea de una venta no
@@ -10959,7 +11123,7 @@ async def resumen_ventas_periodo(
                 Opportunity.fecha_cierre >= desde, Opportunity.fecha_cierre < hasta,
             )
         )
-        query = _filtrar_opportunity_por_conversation(query, asesor, campana_id)
+        query = _filtrar_opportunity_por_conversation(query, asesor, campana_id, ids_conversacion)
         if unidad_id is not None:
             query = query.where(Opportunity.unidad_id == unidad_id)
         filas = (await session.execute(query)).all()
@@ -10989,6 +11153,7 @@ async def resumen_ventas_periodo(
 async def productos_vendidos_periodo(
     negocio_id: str, desde: datetime, hasta: datetime,
     unidad_id: str | None = None, asesor: str | None = None, campana_id: int | None = None,
+    ids_conversacion: set[str] | None = None,
 ) -> list[dict]:
     """Unidades y valor por producto vendido en el período — `valor` es
     `None` (no un número parcial) para un producto puntual si alguna de sus
@@ -11004,7 +11169,7 @@ async def productos_vendidos_periodo(
                 Opportunity.fecha_cierre >= desde, Opportunity.fecha_cierre < hasta,
             )
         )
-        query = _filtrar_opportunity_por_conversation(query, asesor, campana_id)
+        query = _filtrar_opportunity_por_conversation(query, asesor, campana_id, ids_conversacion)
         if unidad_id is not None:
             query = query.where(Opportunity.unidad_id == unidad_id)
         filas = (await session.execute(query)).all()

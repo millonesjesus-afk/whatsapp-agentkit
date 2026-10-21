@@ -62,6 +62,7 @@ from agent.memory import (
     diagnostico_atribucion_multiple, historico_recalcular_primer_anuncio, auditoria_cierre_conversaciones_multiples,
     obtener_modo_reingreso_anuncio, guardar_modo_reingreso_anuncio, resumen_reingreso_anuncio, diagnostico_campos_referral,
     rendimiento_por_anuncio, guardar_empresa_grupo, aplicar_empresas_sugeridas, ventas_detalle_periodo,
+    ids_conversacion_de_segmento, listar_empresas_anuncio, FORMATOS_FILTRO_ANUNCIO, PRODUCTOS_FILTRO_ANUNCIO,
     listar_atribucion_sin_campana_periodo, cerrar_lead_definitivamente_via_conversation, reabrir_caso_cerrado, MOTIVO_REABRIR_MAXIMO, CIERRE_GRACIA_HORAS_POR_DEFECTO,
     rango_periodo_utc, contar_flujo_periodo, calcular_embudo_comercial, contar_oportunidades_por_asesor,
     distribucion_resultados_periodo, resumen_ventas_periodo, productos_vendidos_periodo,
@@ -8689,12 +8690,24 @@ def _senales_analitica_p0(flujo_periodo: dict, valor_vendido: dict) -> list[dict
     return senales[:3]
 
 
+def _validar_segmento_anuncios(empresa: str, formato: str, producto: str) -> tuple[str | None, str | None, str | None]:
+    """Filtros globales por anuncio (empresa, formato, producto): vacíos = sin filtro. Valores fuera de lista, 400."""
+    if formato and formato not in FORMATOS_FILTRO_ANUNCIO:
+        raise HTTPException(status_code=400, detail="Formato inválido.")
+    if producto and producto not in PRODUCTOS_FILTRO_ANUNCIO:
+        raise HTTPException(status_code=400, detail="Producto inválido.")
+    return (empresa.strip()[:60] or None), (formato or None), (producto or None)
+
+
 @router.get("/analitica/anuncios.json")
 async def analitica_anuncios_json(
     usuario: dict = Depends(_usuario_actual),
     desde: str = "",
     hasta: str = "",
     asesor: str = "",
+    empresa: str = "",
+    formato: str = "",
+    producto: str = "",
 ):
     """Rendimiento por anuncio (2026-10-19): conversaciones, leads y ventas por GRUPO de anuncios (título + texto +
     formato), con sus anuncios y el enlace "Ver anuncio". Sin asignar campañas. Mismo alcance por rol que
@@ -8707,7 +8720,8 @@ async def analitica_anuncios_json(
         inicio, fin = rango_periodo_utc(desde, hasta)
     except ValueError:
         raise HTTPException(status_code=400, detail="Fechas inválidas.")
-    datos = await rendimiento_por_anuncio(usuario["negocio_id"], inicio, fin, asesor=asesor_scope)
+    ids_conv = await ids_conversacion_de_segmento(usuario["negocio_id"], *_validar_segmento_anuncios(empresa, formato, producto))
+    datos = await rendimiento_por_anuncio(usuario["negocio_id"], inicio, fin, asesor=asesor_scope, ids_conversacion=ids_conv)
     return JSONResponse({
         "periodo": {"desde": desde, "hasta": hasta},
         **{**datos, "grupos": [
@@ -8723,6 +8737,9 @@ async def analitica_ventas_json(
     desde: str = "",
     hasta: str = "",
     asesor: str = "",
+    empresa: str = "",
+    formato: str = "",
+    producto: str = "",
 ):
     """Detalle de las ventas del período — las MISMAS que cuenta "Ventas" en Analítica — con sus productos, valor y
     origen (grupo de anuncios con su empresa y formato, campaña no publicitaria o sin origen). Mismo alcance por rol que
@@ -8735,7 +8752,8 @@ async def analitica_ventas_json(
         inicio, fin = rango_periodo_utc(desde, hasta)
     except ValueError:
         raise HTTPException(status_code=400, detail="Fechas inválidas.")
-    datos = await ventas_detalle_periodo(usuario["negocio_id"], inicio, fin, asesor=asesor_scope)
+    ids_conv = await ids_conversacion_de_segmento(usuario["negocio_id"], *_validar_segmento_anuncios(empresa, formato, producto))
+    datos = await ventas_detalle_periodo(usuario["negocio_id"], inicio, fin, asesor=asesor_scope, ids_conversacion=ids_conv)
     return JSONResponse({
         "periodo": {"desde": desde, "hasta": hasta}, **datos,
         "ventas": [{**v, "fecha_cierre": iso_utc(v["fecha_cierre"])} for v in datos["ventas"]],
@@ -8775,8 +8793,14 @@ async def analitica_json(
     asesor: str = "",
     campana_id: int | None = None,
     red: str = "",
+    empresa: str = "",
+    formato: str = "",
+    producto: str = "",
 ):
     """GATE ANALÍTICA P0 — Analítica para la Nueva Experiencia.
+
+    `empresa`/`formato`/`producto` (2026-10-21) acotan TODA la pantalla (menos «Pulso», que es una foto del momento) a los
+    clientes que entraron por anuncios de ese segmento: el grupo de anuncios del primer aviso de cada conversación.
 
     `red` ("facebook" | "instagram" | "otra") acota SOLO la tabla de campañas
     a las conversaciones de esa red — se deduce del enlace del anuncio de
@@ -8803,6 +8827,7 @@ async def analitica_json(
     if not desde or not hasta:
         desde, hasta = _mes_actual_lima()
     inicio, fin = rango_periodo_utc(desde, hasta)
+    ids_conv = await ids_conversacion_de_segmento(usuario["negocio_id"], *_validar_segmento_anuncios(empresa, formato, producto))
 
     # "estado_actual" es una FOTO del momento (nunca filtrada por período) —
     # misma fuente que Inicio (Pulso: "leads en curso"/"conversaciones con
@@ -8813,13 +8838,13 @@ async def analitica_json(
         "conversaciones_con_gabi": len(datos_bandeja["leads_con_gabi"]),
     }
 
-    flujo_periodo = await contar_flujo_periodo(usuario["negocio_id"], inicio, fin, asesor=asesor_scope, campana_id=campana_id)
-    embudo = await calcular_embudo_comercial(usuario["negocio_id"], inicio, fin, asesor=asesor_scope, campana_id=campana_id)
-    distribucion = await distribucion_resultados_periodo(usuario["negocio_id"], inicio, fin, asesor=asesor_scope, campana_id=campana_id)
-    valor_vendido = await resumen_ventas_periodo(usuario["negocio_id"], inicio, fin, asesor=asesor_scope, campana_id=campana_id)
-    productos = await productos_vendidos_periodo(usuario["negocio_id"], inicio, fin, asesor=asesor_scope, campana_id=campana_id)
+    flujo_periodo = await contar_flujo_periodo(usuario["negocio_id"], inicio, fin, asesor=asesor_scope, campana_id=campana_id, ids_conversacion=ids_conv)
+    embudo = await calcular_embudo_comercial(usuario["negocio_id"], inicio, fin, asesor=asesor_scope, campana_id=campana_id, ids_conversacion=ids_conv)
+    distribucion = await distribucion_resultados_periodo(usuario["negocio_id"], inicio, fin, asesor=asesor_scope, campana_id=campana_id, ids_conversacion=ids_conv)
+    valor_vendido = await resumen_ventas_periodo(usuario["negocio_id"], inicio, fin, asesor=asesor_scope, campana_id=campana_id, ids_conversacion=ids_conv)
+    productos = await productos_vendidos_periodo(usuario["negocio_id"], inicio, fin, asesor=asesor_scope, campana_id=campana_id, ids_conversacion=ids_conv)
     campanas = await contar_opportunities_por_campana(
-        usuario["negocio_id"], desde=inicio, hasta=fin, asesor=asesor_scope, red=red or None,
+        usuario["negocio_id"], desde=inicio, hasta=fin, asesor=asesor_scope, red=red or None, ids_conversacion=ids_conv,
     )
     # Complementa `campanas`: mismo universo/filtros, para las conversaciones
     # SIN campana_origen_id — anuncios de Meta pendientes de asignar y
@@ -8827,7 +8852,7 @@ async def analitica_json(
     # arriba de toda la pantalla) tampoco aplica acá, igual que en
     # `campanas`: la tabla de Campañas siempre muestra el desglose completo.
     atribucion_sin_campana = await listar_atribucion_sin_campana_periodo(
-        usuario["negocio_id"], desde=inicio, hasta=fin, asesor=asesor_scope, red=red or None,
+        usuario["negocio_id"], desde=inicio, hasta=fin, asesor=asesor_scope, red=red or None, ids_conversacion=ids_conv,
     )
 
     # "Brecha del período" / "Brecha oportunidad → venta" (Gate Analítica
@@ -8860,15 +8885,21 @@ async def analitica_json(
         "valor_vendido": valor_vendido,
         "puede_ver_equipo": vision_total,
         "senales": _senales_analitica_p0(flujo_periodo, valor_vendido),
+        # Opciones de los filtros por anuncio (aditivo): el selector de empresa se arma con las empresas del negocio.
+        "opciones_filtro": {
+            "empresas": await listar_empresas_anuncio(usuario["negocio_id"]),
+            "formatos": list(FORMATOS_FILTRO_ANUNCIO),
+            "productos": list(PRODUCTOS_FILTRO_ANUNCIO),
+        },
     }
 
     if vision_total:
         asesores = await listar_asesores(usuario["negocio_id"])
         usernames = [a["username"] for a in asesores]
         carga = await contar_conversations_activas_por_asesor(usuario["negocio_id"], usernames) if usernames else {}
-        resultados_asesor = (
-            await contar_oportunidades_por_asesor(usuario["negocio_id"], usernames, inicio, fin, campana_id=campana_id)
-            if usernames else {}
+        resultados_asesor = await contar_oportunidades_por_asesor(
+            usuario["negocio_id"], usernames, inicio, fin, campana_id=campana_id, incluir_sin_asesor=True,
+            ids_conversacion=ids_conv,
         )
         respuesta["equipo"] = [
             {
@@ -8878,6 +8909,14 @@ async def analitica_json(
             }
             for a in asesores
         ]
+        # Lo que no tiene un asesor de esta lista (sin asesor, o de un usuario que ya no está) va en su propia fila: así
+        # la tabla suma el mismo total que «Ventas» y «Oportunidades».
+        sin_asesor = resultados_asesor.get("", {"oportunidades": 0, "ventas": 0, "tasa_cierre": None})
+        if sin_asesor["oportunidades"] or sin_asesor["ventas"]:
+            respuesta["equipo"].append({
+                "username": "", "nombre": "Sin asesor asignado", "nivel": None, "disponible": None, "carga": None,
+                **sin_asesor,
+            })
 
     return JSONResponse(respuesta)
 
