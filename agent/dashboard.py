@@ -61,7 +61,7 @@ from agent.memory import (
     historico_rellenar_conversaciones, historico_corregir_anuncios, historico_revertir,
     diagnostico_atribucion_multiple, historico_recalcular_primer_anuncio, auditoria_cierre_conversaciones_multiples,
     obtener_modo_reingreso_anuncio, guardar_modo_reingreso_anuncio, resumen_reingreso_anuncio, diagnostico_campos_referral,
-    rendimiento_por_anuncio, guardar_empresa_grupo, aplicar_empresas_sugeridas,
+    rendimiento_por_anuncio, guardar_empresa_grupo, aplicar_empresas_sugeridas, ventas_detalle_periodo,
     listar_atribucion_sin_campana_periodo, cerrar_lead_definitivamente_via_conversation, reabrir_caso_cerrado, MOTIVO_REABRIR_MAXIMO, CIERRE_GRACIA_HORAS_POR_DEFECTO,
     rango_periodo_utc, contar_flujo_periodo, calcular_embudo_comercial, contar_oportunidades_por_asesor,
     distribucion_resultados_periodo, resumen_ventas_periodo, productos_vendidos_periodo,
@@ -8714,6 +8714,31 @@ async def analitica_anuncios_json(
             {**g, "anuncios": [{**a, "ultimo": iso_utc(a["ultimo"])} for a in g["anuncios"]]} for g in datos["grupos"]
         ]},
         "puede_gestionar": usuario["rol"] == "admin",
+    })
+
+
+@router.get("/analitica/ventas.json")
+async def analitica_ventas_json(
+    usuario: dict = Depends(_usuario_actual),
+    desde: str = "",
+    hasta: str = "",
+    asesor: str = "",
+):
+    """Detalle de las ventas del período — las MISMAS que cuenta "Ventas" en Analítica — con sus productos, valor y
+    origen (grupo de anuncios con su empresa y formato, campaña no publicitaria o sin origen). Mismo alcance por rol que
+    `analitica.json`: un Asesor solo ve las suyas. Teléfonos enmascarados."""
+    vision_total = usuario["rol"] in ROLES_CON_VISION_TOTAL
+    asesor_scope = asesor if (vision_total and asesor) else (None if vision_total else usuario["username"])
+    if not desde or not hasta:
+        desde, hasta = _mes_actual_lima()
+    try:
+        inicio, fin = rango_periodo_utc(desde, hasta)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Fechas inválidas.")
+    datos = await ventas_detalle_periodo(usuario["negocio_id"], inicio, fin, asesor=asesor_scope)
+    return JSONResponse({
+        "periodo": {"desde": desde, "hasta": hasta}, **datos,
+        "ventas": [{**v, "fecha_cierre": iso_utc(v["fecha_cierre"])} for v in datos["ventas"]],
     })
 
 

@@ -1634,35 +1634,56 @@ def _por_lotes(valores: list, tamano: int = 400):
         yield valores[i:i + tamano]
 
 
+async def _cargar_info_anuncios(session, negocio_id: str) -> tuple[dict[str, dict], dict[str, str]]:
+    """({source_id: título, texto, media_type, enlace, último aviso}, {conversation_id: source_id del PRIMER anuncio})."""
+    eventos = (await session.execute(
+        select(
+            AttributionEvent.conversation_id, AttributionEvent.source_id, AttributionEvent.headline,
+            AttributionEvent.body, AttributionEvent.referral_raw, AttributionEvent.creado,
+        )
+        .where(
+            AttributionEvent.negocio_id == negocio_id, AttributionEvent.tipo_origen.in_(_TIPOS_ORIGEN_ANUNCIO),
+            AttributionEvent.source_id.is_not(None), AttributionEvent.source_id != "",
+        )
+        .order_by(AttributionEvent.creado.asc(), AttributionEvent.id.asc())
+    )).all()
+    info: dict[str, dict] = {}
+    primer: dict[str, str] = {}
+    for conversation_id, source_id, headline, body, raw, creado in eventos:
+        r = raw if isinstance(raw, dict) else {}
+        i = info.setdefault(source_id, {"headline": None, "body": None, "media_type": None, "url": None, "ultimo": creado})
+        i["headline"] = headline or i["headline"]
+        i["body"] = body or i["body"]
+        i["media_type"] = r.get("media_type") or i["media_type"]
+        i["url"] = r.get("source_url") or i["url"]
+        i["ultimo"] = creado
+        primer.setdefault(conversation_id, source_id)
+    return info, primer
+
+
+async def _ventas_cerradas_en_periodo(session, negocio_id: str, desde: datetime, hasta: datetime, asesor: str | None) -> list[tuple]:
+    """(opportunity_id, conversation_id, fecha_cierre) de las ventas CERRADAS en el período — la misma definición que el
+    total "Ventas" de Analítica (`_contar_ventas_periodo`): por fecha de cierre, sin importar cuándo entró el cliente."""
+    consulta = select(Opportunity.id, Opportunity.conversation_id, Opportunity.fecha_cierre).where(
+        Opportunity.negocio_id == negocio_id, Opportunity.resultado == "vendido",
+        Opportunity.fecha_cierre >= desde, Opportunity.fecha_cierre < hasta,
+    )
+    if asesor is not None:
+        consulta = consulta.join(Conversation, Conversation.id == Opportunity.conversation_id).where(
+            Conversation.asesor_asignado_id == asesor,
+        )
+    return list((await session.execute(consulta)).all())
+
+
 async def rendimiento_por_anuncio(
     negocio_id: str, desde: datetime, hasta: datetime, asesor: str | None = None,
 ) -> dict:
-    """Solo lectura. Conversaciones creadas en [desde, hasta) agrupadas por el anuncio por el que entraron primero y por
-    GRUPO de anuncios (título + texto + formato). Por grupo: formato, producto, empresa (etiqueta o sugerida desde los
-    nombres de campaña), leads (personas distintas), conversaciones, ventas y sus anuncios con enlace."""
+    """Solo lectura. Por GRUPO de anuncios (título + texto + formato): leads y conversaciones de los clientes que
+    ENTRARON en [desde, hasta) por ese anuncio (el primero de su conversación) y ventas CERRADAS en el período, con la
+    misma definición que el total "Ventas" de Analítica. Incluye formato, producto, empresa (etiqueta o sugerida desde
+    los nombres de campaña) y sus anuncios con enlace. `resumen` cuadra con el total: ventas de anuncios + otras."""
     async with async_session() as session:
-        eventos = (await session.execute(
-            select(
-                AttributionEvent.conversation_id, AttributionEvent.source_id, AttributionEvent.headline,
-                AttributionEvent.body, AttributionEvent.referral_raw, AttributionEvent.creado,
-            )
-            .where(
-                AttributionEvent.negocio_id == negocio_id, AttributionEvent.tipo_origen.in_(_TIPOS_ORIGEN_ANUNCIO),
-                AttributionEvent.source_id.is_not(None), AttributionEvent.source_id != "",
-            )
-            .order_by(AttributionEvent.creado.asc(), AttributionEvent.id.asc())
-        )).all()
-        info: dict[str, dict] = {}
-        primer: dict[str, str] = {}
-        for conversation_id, source_id, headline, body, raw, creado in eventos:
-            r = raw if isinstance(raw, dict) else {}
-            i = info.setdefault(source_id, {"headline": None, "body": None, "media_type": None, "url": None, "ultimo": creado})
-            i["headline"] = headline or i["headline"]
-            i["body"] = body or i["body"]
-            i["media_type"] = r.get("media_type") or i["media_type"]
-            i["url"] = r.get("source_url") or i["url"]
-            i["ultimo"] = creado
-            primer.setdefault(conversation_id, source_id)
+        info, primer = await _cargar_info_anuncios(session, negocio_id)
 
         conversaciones: list[tuple] = []
         for lote in _por_lotes(list(primer)):
@@ -1674,13 +1695,7 @@ async def rendimiento_por_anuncio(
                 consulta = consulta.where(Conversation.asesor_asignado_id == asesor)
             conversaciones.extend((await session.execute(consulta)).all())
 
-        vendidas: set[str] = set()
-        for lote in _por_lotes([c[0] for c in conversaciones]):
-            vendidas.update(row[0] for row in (await session.execute(
-                select(Opportunity.conversation_id).where(
-                    Opportunity.conversation_id.in_(lote), Opportunity.resultado == "vendido",
-                )
-            )).all())
+        ventas = await _ventas_cerradas_en_periodo(session, negocio_id, desde, hasta, asesor)
 
         campanas = {c.id: c.nombre for c in (await session.execute(
             select(Campana).where(Campana.negocio_id == negocio_id)
@@ -1694,8 +1709,8 @@ async def rendimiento_por_anuncio(
     empresas_config = await obtener_empresas_anuncio(negocio_id)
 
     grupos: dict[str, dict] = {}
-    for conversation_id, contact_id, campana_id in conversaciones:
-        source_id = primer[conversation_id]
+
+    def _grupo_y_anuncio(source_id: str) -> tuple[dict, dict]:
         i = info[source_id]
         clave = clave_grupo_anuncio(i["headline"], i["body"], i["media_type"])
         g = grupos.setdefault(clave, {
@@ -1703,20 +1718,36 @@ async def rendimiento_por_anuncio(
             "formato": formato_de_anuncio(i["media_type"]), "producto": producto_de_anuncio(i["headline"], i["body"]),
             "anuncios": {}, "contactos": set(), "conversaciones": 0, "ventas": 0, "nombres_campana": {},
         })
+        a = g["anuncios"].setdefault(source_id, {
+            "source_id": source_id, "conversaciones": 0, "ventas": 0, "url": i["url"], "ultimo": i["ultimo"],
+        })
+        return g, a
+
+    for conversation_id, contact_id, campana_id in conversaciones:
+        source_id = primer[conversation_id]
+        g, a = _grupo_y_anuncio(source_id)
         g["conversaciones"] += 1
         g["contactos"].add(contact_id)
-        g["ventas"] += 1 if conversation_id in vendidas else 0
-        a = g["anuncios"].setdefault(source_id, {"source_id": source_id, "conversaciones": 0, "url": i["url"], "ultimo": i["ultimo"]})
         a["conversaciones"] += 1
         # La campaña de ESTA conversación; si no tiene, la regla vigente de su anuncio.
         nombre = campanas.get(campana_id) or regla_nombre.get(source_id)
         if nombre:
             g["nombres_campana"][nombre] = g["nombres_campana"].get(nombre, 0) + 1
 
+    ventas_de_anuncios = 0
+    for _opportunity_id, conversation_id, _cierre in ventas:
+        source_id = primer.get(conversation_id)
+        if source_id is None:
+            continue
+        g, a = _grupo_y_anuncio(source_id)
+        g["ventas"] += 1
+        a["ventas"] += 1
+        ventas_de_anuncios += 1
+
     salida = []
     for g in grupos.values():
         empresa = etiquetas.get(g["clave"])
-        anuncios = sorted(g["anuncios"].values(), key=lambda x: -x["conversaciones"])
+        anuncios = sorted(g["anuncios"].values(), key=lambda x: (-x["conversaciones"], -x["ventas"]))
         salida.append({
             "clave": g["clave"], "titulo": g["titulo"], "texto": g["texto"], "formato": g["formato"],
             "producto": g["producto"], "empresa": empresa,
@@ -1724,7 +1755,7 @@ async def rendimiento_por_anuncio(
             "anuncios_total": len(anuncios), "anuncios": anuncios[:50],
             "leads": len(g["contactos"]), "conversaciones": g["conversaciones"], "ventas": g["ventas"],
         })
-    salida.sort(key=lambda x: -x["conversaciones"])
+    salida.sort(key=lambda x: (-x["conversaciones"], -x["ventas"]))
     empresas = sorted({*empresas_config, *(g["empresa"] for g in salida if g["empresa"])})
     return {
         "grupos": salida, "empresas": empresas,
@@ -1732,6 +1763,82 @@ async def rendimiento_por_anuncio(
             "grupos": len(salida), "anuncios": sum(g["anuncios_total"] for g in salida),
             "conversaciones": sum(g["conversaciones"] for g in salida),
             "sin_empresa": sum(1 for g in salida if not g["empresa"]),
+            "ventas_periodo": len(ventas), "ventas_de_anuncios": ventas_de_anuncios,
+            "ventas_otras": len(ventas) - ventas_de_anuncios,
+        },
+    }
+
+
+async def ventas_detalle_periodo(
+    negocio_id: str, desde: datetime, hasta: datetime, asesor: str | None = None,
+) -> dict:
+    """Solo lectura. Cada venta cerrada en el período (misma definición y mismo total que "Ventas" de Analítica) con sus
+    productos, su valor y su ORIGEN: grupo de anuncios (con empresa, formato y anuncio), campaña no publicitaria
+    (SMS, wa.link…) o sin origen. Teléfonos enmascarados. El valor excluye las ventas con algún precio no numérico,
+    igual que `resumen_ventas_periodo`."""
+    async with async_session() as session:
+        info, primer = await _cargar_info_anuncios(session, negocio_id)
+        ventas = await _ventas_cerradas_en_periodo(session, negocio_id, desde, hasta, asesor)
+        ids_opp = [v[0] for v in ventas]
+        ids_conv = list({v[1] for v in ventas})
+        lineas: dict[str, list[tuple]] = {}
+        for lote in _por_lotes(ids_opp):
+            for opp_id, producto, precio in (await session.execute(
+                select(LineaVenta.opportunity_id, LineaVenta.producto, LineaVenta.precio)
+                .where(LineaVenta.opportunity_id.in_(lote)).order_by(LineaVenta.id)
+            )).all():
+                lineas.setdefault(opp_id, []).append((producto, precio))
+        convs: dict[str, tuple] = {}
+        for lote in _por_lotes(ids_conv):
+            for cid, contact_id, asesor_id, campana_id in (await session.execute(
+                select(Conversation.id, Conversation.contact_id, Conversation.asesor_asignado_id, Conversation.campana_origen_id)
+                .where(Conversation.id.in_(lote))
+            )).all():
+                convs[cid] = (contact_id, asesor_id, campana_id)
+        telefonos: dict[str, str] = {}
+        for lote in _por_lotes(list({c[0] for c in convs.values()})):
+            telefonos.update({cid: tel for cid, tel in (await session.execute(
+                select(Contact.id, Contact.telefono).where(Contact.id.in_(lote))
+            )).all()})
+        campanas = {c.id: c.nombre for c in (await session.execute(
+            select(Campana).where(Campana.negocio_id == negocio_id)
+        )).scalars().all()}
+        etiquetas = {e.clave_grupo: e.empresa for e in (await session.execute(
+            select(EtiquetaGrupoAnuncio).where(EtiquetaGrupoAnuncio.negocio_id == negocio_id)
+        )).scalars().all()}
+
+    filas = []
+    por_origen: dict[str, int] = {"anuncio": 0, "campana": 0, "sin_origen": 0}
+    valor_total = 0.0
+    sin_valor = 0
+    for opp_id, conversation_id, cierre in ventas:
+        contact_id, asesor_id, campana_id = convs.get(conversation_id, (None, None, None))
+        source_id = primer.get(conversation_id)
+        i = info.get(source_id) if source_id else None
+        nombre_campana = campanas.get(campana_id)
+        origen = "anuncio" if i else ("campana" if nombre_campana else "sin_origen")
+        por_origen[origen] += 1
+        productos = [{"producto": p, "precio": pr} for p, pr in lineas.get(opp_id, [])]
+        try:
+            valor = sum(float((pr or "0").replace(",", "")) for _, pr in lineas.get(opp_id, []))
+            valor_total += valor
+            valor_txt = f"{valor:.2f}"
+        except ValueError:
+            valor_txt = None
+            sin_valor += 1
+        clave = clave_grupo_anuncio(i["headline"], i["body"], i["media_type"]) if i else None
+        filas.append({
+            "opportunity_id": opp_id, "fecha_cierre": cierre, "origen": origen, "productos": productos, "valor": valor_txt,
+            "grupo_clave": clave, "grupo_titulo": (i["headline"] or "(sin título)") if i else None,
+            "formato": formato_de_anuncio(i["media_type"]) if i else None, "empresa": etiquetas.get(clave) if clave else None,
+            "source_id": source_id if i else None, "url": i["url"] if i else None, "campana": nombre_campana,
+            "asesor": asesor_id, "telefono": "…" + (telefonos.get(contact_id) or "")[-4:],
+        })
+    filas.sort(key=lambda f: f["fecha_cierre"] or datetime.min, reverse=True)
+    return {
+        "ventas": filas,
+        "resumen": {
+            "total": len(filas), "por_origen": por_origen, "valor_total": f"{valor_total:.2f}", "ventas_sin_valor": sin_valor,
         },
     }
 

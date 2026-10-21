@@ -35,6 +35,17 @@ async def _lead(
         await mem.asignar_asesor_a_lead(telefono, asesor)
 
 
+async def _vender(negocio, canal, telefono, lineas):
+    """Cierra la venta de la conversación activa del cliente con el flujo real (deja fecha de cierre y líneas)."""
+    _, opp = await mem.resolver_conversation_activa(telefono, negocio["id"], canal["id"])
+    ok = await mem.cerrar_opportunity_con_venta(
+        opp.id, opp.version,
+        [{"producto": p, "precio": pr, "marca": "M", "proveedor": "P"} for p, pr in lineas],
+        {"resultado": "vendido"},
+    )
+    assert ok
+
+
 def _periodo():
     return datetime.utcnow() - timedelta(days=1), datetime.utcnow() + timedelta(days=1)
 
@@ -87,7 +98,7 @@ async def test_ventas_periodo_y_alcance_por_asesor():
     negocio, canal = await _negocio("rpa-02")
     await _lead(negocio, canal, "51903300201", "AD-1", asesor="ana")
     await _lead(negocio, canal, "51903300202", "AD-1", asesor="beto")
-    await mem.actualizar_lead("51903300201", negocio_id=negocio["id"], resultado="vendido")
+    await _vender(negocio, canal, "51903300201", [("Terma 8L", "100")])
 
     todos = await mem.rendimiento_por_anuncio(negocio["id"], *_periodo())
     de_ana = await mem.rendimiento_por_anuncio(negocio["id"], *_periodo(), asesor="ana")
@@ -213,4 +224,91 @@ async def test_la_sugerencia_no_se_da_si_hay_dos_empresas_presentes():
     datos = await mem.rendimiento_por_anuncio(negocio["id"], *_periodo())
 
     assert datos["grupos"][0]["empresa_sugerida"] is None  # 75% Estratek pero 25% Cálidda: ambiguo
+
+
+async def test_las_ventas_se_cuentan_por_fecha_de_cierre_y_cuadran_con_el_total_de_analitica():
+    negocio, canal = await _negocio("rpa-10")
+    await _lead(negocio, canal, "51903301001", "AD-1", asesor="ana")                       # entra por anuncio
+    await _lead(negocio, canal, "51903301002", "AD-2", headline="Otro", body="otro", media="video")
+    await mem.actualizar_lead("51903301003", negocio_id=negocio["id"], numero_whatsapp_id="x")  # sin anuncio ni campaña
+    await mem.resolver_conversation_activa("51903301003", negocio["id"], canal["id"])
+    await _vender(negocio, canal, "51903301001", [("Terma 8L", "100"), ("Punto adicional", "50")])
+    await _vender(negocio, canal, "51903301002", [("Secadora", "300")])
+    await _vender(negocio, canal, "51903301003", [("Cocina", "200")])
+
+    inicio, fin = _periodo()
+    datos = await mem.rendimiento_por_anuncio(negocio["id"], inicio, fin)
+    total_analitica = await mem._contar_ventas_periodo(negocio["id"], inicio, fin)
+
+    assert total_analitica == 3
+    assert datos["resumen"]["ventas_periodo"] == total_analitica  # mismo total que "Ventas" de Analítica
+    assert datos["resumen"]["ventas_de_anuncios"] == 2 and datos["resumen"]["ventas_otras"] == 1
+    assert sum(g["ventas"] for g in datos["grupos"]) == 2
+    assert all(a["ventas"] in (0, 1) for g in datos["grupos"] for a in g["anuncios"])
+
+
+async def test_una_venta_cerrada_hoy_de_un_cliente_que_entro_antes_cuenta_en_su_grupo():
+    negocio, canal = await _negocio("rpa-11")
+    await _lead(negocio, canal, "51903301101", "AD-1")
+    await _vender(negocio, canal, "51903301101", [("Terma", "100")])
+    # período que NO incluye el ingreso del cliente pero SÍ el cierre de la venta
+    desde, hasta = datetime.utcnow() - timedelta(hours=1), datetime.utcnow() + timedelta(days=1)
+    antes_del_ingreso = datetime.utcnow() - timedelta(days=30), datetime.utcnow() - timedelta(days=20)
+
+    datos = await mem.rendimiento_por_anuncio(negocio["id"], desde, hasta)
+    fuera = await mem.rendimiento_por_anuncio(negocio["id"], *antes_del_ingreso)
+
+    assert datos["grupos"][0]["ventas"] == 1 and datos["grupos"][0]["leads"] == 1
+    assert fuera["grupos"] == [] and fuera["resumen"]["ventas_periodo"] == 0
+
+
+async def test_detalle_de_ventas_con_productos_valor_origen_y_telefono_enmascarado():
+    negocio, canal = await _negocio("rpa-12")
+    campana = await mem.crear_campana("SMS Secadora", "texto_saludo", "hola secadora", negocio_id=negocio["id"])
+    await _lead(negocio, canal, "51903301201", "AD-1", headline="Financia", body="secadora", media="image", asesor="ana")
+    await mem.actualizar_lead("51903301202", negocio_id=negocio["id"], numero_whatsapp_id="x")
+    await mem.resolver_conversation_activa("51903301202", negocio["id"], canal["id"])
+    await mem.asignar_campana_origen("51903301202", campana["nombre"])
+    await mem.actualizar_lead("51903301203", negocio_id=negocio["id"], numero_whatsapp_id="x")
+    await mem.resolver_conversation_activa("51903301203", negocio["id"], canal["id"])
+    await _vender(negocio, canal, "51903301201", [("Terma 8L", "100"), ("Punto adicional", "50")])
+    await _vender(negocio, canal, "51903301202", [("Secadora", "300")])
+    await _vender(negocio, canal, "51903301203", [("Ducteria", "consultar")])
+    clave = (await mem.rendimiento_por_anuncio(negocio["id"], *_periodo()))["grupos"][0]["clave"]
+    await mem.guardar_empresa_grupo(negocio["id"], clave, "Cálidda")
+
+    datos = await mem.ventas_detalle_periodo(negocio["id"], *_periodo())
+
+    por_origen = {v["origen"]: v for v in datos["ventas"]}
+    assert datos["resumen"]["total"] == 3
+    assert datos["resumen"]["por_origen"] == {"anuncio": 1, "campana": 1, "sin_origen": 1}
+    anuncio = por_origen["anuncio"]
+    assert [p["producto"] for p in anuncio["productos"]] == ["Terma 8L", "Punto adicional"] and anuncio["valor"] == "150.00"
+    assert anuncio["grupo_titulo"] == "Financia" and anuncio["formato"] == "imagen" and anuncio["empresa"] == "Cálidda"
+    assert anuncio["source_id"] == "AD-1" and anuncio["url"].startswith("https://fb.me/") and anuncio["asesor"] == "ana"
+    assert anuncio["telefono"] == "…1201" and "5190330" not in json.dumps(datos, default=str)
+    assert por_origen["campana"]["campana"] == "SMS Secadora" and por_origen["campana"]["valor"] == "300.00"
+    assert por_origen["sin_origen"]["valor"] is None  # precio no numérico: el valor no se inventa
+    # el valor total excluye la venta con precio no numérico (mismo criterio que resumen_ventas_periodo)
+    assert datos["resumen"]["valor_total"] == "450.00" and datos["resumen"]["ventas_sin_valor"] == 1
+    assert (await mem.resumen_ventas_periodo(negocio["id"], *_periodo()))["monto"] == "450.00"
+
+
+async def test_endpoint_de_ventas_alcance_por_rol_y_total_que_cuadra():
+    negocio, canal = await _negocio("rpa-13")
+    await _lead(negocio, canal, "51903301301", "AD-1", asesor="ana")
+    await _lead(negocio, canal, "51903301302", "AD-1", asesor="beto")
+    await _vender(negocio, canal, "51903301301", [("Terma", "100")])
+    await _vender(negocio, canal, "51903301302", [("Secadora", "200")])
+    admin = {"negocio_id": negocio["id"], "rol": "admin", "username": "jesus"}
+    ana = {"negocio_id": negocio["id"], "rol": "asesor", "username": "ana"}
+
+    todas = json.loads((await dashboard.analitica_ventas_json(usuario=admin)).body)
+    suyas = json.loads((await dashboard.analitica_ventas_json(usuario=ana, asesor="beto")).body)
+
+    assert todas["resumen"]["total"] == 2 and isinstance(todas["ventas"][0]["fecha_cierre"], str)
+    assert suyas["resumen"]["total"] == 1 and suyas["ventas"][0]["asesor"] == "ana"  # el filtro de otro asesor se ignora
+    with pytest.raises(HTTPException) as e:
+        await dashboard.analitica_ventas_json(usuario=admin, desde="mal", hasta="fecha")
+    assert e.value.status_code == 400
 
