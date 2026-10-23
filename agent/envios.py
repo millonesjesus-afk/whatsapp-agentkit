@@ -94,6 +94,11 @@ ORIGENES: dict[str, dict] = {
     # de Gabi en ese turno, igual que `triaje_atc`: esencial, ningún interruptor ni tope de gasto la frena. Sin agrupar:
     # «una vez por oferta» lo garantiza quien la envía (agent/llamadas.py). Si no sale, el turno sigue con Gabi.
     "gabi_confirma_llamada": {"esencial": True},
+    # Calificación guiada con botones (2026-10-23, agent/calificacion_guiada.py, apagada por defecto): las preguntas con botones o
+    # lista y los textos fijos que siguen a la respuesta del cliente. Son la respuesta de Gabi dentro de la ventana de 24 h que el
+    # propio cliente abrió (gratis dentro de la cuota), igual que `gabi_respuesta`: esenciales. Sin agrupar: «una pregunta por
+    # paso» lo garantiza quien las envía (eventos `calificacion_pregunta`).
+    "gabi_calificacion": {"esencial": True},
 }
 
 
@@ -102,7 +107,7 @@ ORIGENES: dict[str, dict] = {
 ORIGENES_CON_LIMPIEZA_DE_FORMATO = frozenset({
     "gabi_respuesta", "gabi_aviso_derivacion", "gabi_aviso_no_legible", "gabi_respaldo_sin_ia",
     "reenganche_inactividad", "agradecimiento_cierre", "triaje_atc", "gabi_oferta_llamada",
-    "triaje_emergencia_gas", "gabi_confirma_llamada",
+    "triaje_emergencia_gas", "gabi_confirma_llamada", "gabi_calificacion",
 })
 
 
@@ -318,6 +323,13 @@ async def enviar_audio(
     proveedor, telefono: str, media_id: str, *, origen: str, canal: dict | None = None, asesor: str | None = None,
 ) -> ResultadoEnvio:
     return await _enviar(origen, "audio", telefono, canal, lambda: proveedor.enviar_audio(telefono, media_id, canal=canal), asesor)
+
+
+async def enviar_interactivo(
+    proveedor, telefono: str, interactivo: dict, *, origen: str, canal: dict | None = None, asesor: str | None = None,
+) -> ResultadoEnvio:
+    """Mensaje interactivo (botones o lista) dentro de la ventana de 24 h. Pasa por la misma política de costo y registro."""
+    return await _enviar(origen, "interactivo", telefono, canal, lambda: proveedor.enviar_interactivo(telefono, interactivo, canal=canal), asesor)
 
 
 async def enviar_plantilla(

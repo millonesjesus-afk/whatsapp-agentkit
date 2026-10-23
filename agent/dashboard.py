@@ -207,7 +207,7 @@ ETIQUETAS_FUNNEL = {
 RESULTADOS = [
     "agendado", "vendido", "no_interesado", "no_califica", "no_es_cliente_calidda",
     "producto_sin_stock", "otro", "consulta_atc", "sin_saldo",
-    "servicio_postventa", "cartera_fnb", "sin_respuesta", "postventa",
+    "servicio_postventa", "cartera_fnb", "sin_respuesta", "postventa", "solicita_suministro_gas",
 ]
 # Los que NO están en RESULTADOS_CERRADOS (importado de memory.py) se
 # consideran "en seguimiento" — casos activos, con algo pendiente por
@@ -237,6 +237,9 @@ ETIQUETAS_RESULTADO = {
     # marca la Conversation nueva que se abre cuando un cliente con una
     # venta ("vendido") ya cerrada definitivamente vuelve a escribir.
     "postventa": "Postventa",
+    # Lo pone SOLO Gabi (agent/calificacion_guiada.py): el cliente no tiene gas natural y quiere contratarlo; esa venta es de
+    # otra subunidad de Cálidda Hogar (Nuevos suministros), a la que se le dio el teléfono. Cierra el caso.
+    "solicita_suministro_gas": "Solicita suministro de gas",
 }
 # ROLES_CON_VISION_TOTAL vive en agent/memory.py (importado arriba) — no acá:
 # agent/tiempo_real.py (el WebSocket) necesita el mismo valor para filtrar a
@@ -253,6 +256,7 @@ COLOR_RESULTADO = {
     "producto_sin_stock": "#f97316",
     "otro": "#6b7280",
     "consulta_atc": "#7c3aed",
+    "solicita_suministro_gas": "#0891b2",
     "sin_saldo": "#d97706",
     "servicio_postventa": "#0d9488",
     "cartera_fnb": "#4f46e5",

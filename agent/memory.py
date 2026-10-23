@@ -125,8 +125,13 @@ async_session = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit
 # para no duplicar la lista ni arriesgar que se desincronicen.
 RESULTADOS_CERRADOS = (
     "vendido", "no_interesado", "no_califica", "no_es_cliente_calidda", "otro", "consulta_atc",
-    "servicio_postventa", "cartera_fnb", "sin_respuesta",
+    "servicio_postventa", "cartera_fnb", "sin_respuesta", "solicita_suministro_gas",
 )
+
+# Resultado de los clientes que no tienen gas natural y quieren contratarlo (2026-10-23): la venta del suministro es de
+# OTRA subunidad de Cálidda Hogar (Nuevos suministros), a la que Gabi los deriva por teléfono (agent/calificacion_guiada.py).
+# Cierra el caso como `consulta_atc`; si el cliente vuelve, DR-4 abre un ciclo nuevo.
+RESULTADO_SOLICITA_SUMINISTRO = "solicita_suministro_gas"
 
 # Roles con visión total del panel (ven/editan cualquier lead, no solo los
 # suyos) — vive acá, no en dashboard.py, por el mismo motivo que
@@ -655,7 +660,11 @@ TIPOS_EVENTO_LLAMADA_INTERNOS = (
 EVENTO_EXP_SOLO_CLIC_SOMBRA = "exp_solo_clic_sombra"
 EVENTO_EXP_SOLO_CLIC_RESULTADO = "exp_solo_clic_resultado"
 TIPOS_EVENTO_EXP_SOLO_CLIC = (EVENTO_EXP_SOLO_CLIC_SOMBRA, EVENTO_EXP_SOLO_CLIC_RESULTADO)
-TIPOS_EVENTO_INTERNOS = (EVENTO_TRIAJE_ATC_SOMBRA, EVENTO_TRIAJE_ATC_FALLIDO) + TIPOS_EVENTO_LLAMADA_INTERNOS + TIPOS_EVENTO_EXP_SOLO_CLIC
+# Calificación guiada con botones (2026-10-23, agent/calificacion_guiada.py): la PREGUNTA enviada es interna (el mensaje de Gabi ya
+# la muestra en el chat; el evento solo evita repetirla) y la RESPUESTA es visible: le sirve al asesor («Titular: sí»).
+EVENTO_CALIFICACION_PREGUNTA = "calificacion_pregunta"
+EVENTO_CALIFICACION_RESPUESTA = "calificacion_respuesta"
+TIPOS_EVENTO_INTERNOS = (EVENTO_TRIAJE_ATC_SOMBRA, EVENTO_TRIAJE_ATC_FALLIDO) + TIPOS_EVENTO_LLAMADA_INTERNOS + TIPOS_EVENTO_EXP_SOLO_CLIC + (EVENTO_CALIFICACION_PREGUNTA,)
 
 
 class EventoLead(Base):
@@ -722,6 +731,33 @@ async def registrar_evento_lead(telefono: str, tipo: str, descripcion: str, auto
             tipo=tipo, descripcion=descripcion, autor=autor, payload=payload,
         ))
         await session.commit()
+
+
+async def obtener_estado_calificacion(telefono: str) -> dict:
+    """Estado de la calificación guiada de la Conversation ACTIVA de este teléfono: `{"preguntas": [paso, ...],
+    "respuestas": {paso: valor}}` (la última respuesta de cada paso gana). Vacío si no hay conversación. Solo lectura."""
+    async with async_session() as session:
+        conversation = await _obtener_conversation_activa_por_telefono(session, telefono)
+        if conversation is None:
+            return {"preguntas": [], "respuestas": {}}
+        filas = (await session.execute(
+            select(EventoLead.tipo, EventoLead.payload).where(
+                EventoLead.conversation_id == conversation.id, EventoLead.negocio_id == conversation.negocio_id,
+                EventoLead.tipo.in_((EVENTO_CALIFICACION_PREGUNTA, EVENTO_CALIFICACION_RESPUESTA)),
+            ).order_by(EventoLead.creado.asc(), EventoLead.id.asc())
+        )).all()
+    preguntas: list[str] = []
+    respuestas: dict[str, str] = {}
+    for tipo, payload in filas:
+        paso = (payload or {}).get("paso")
+        if not paso:
+            continue
+        if tipo == EVENTO_CALIFICACION_PREGUNTA:
+            if paso not in preguntas:
+                preguntas.append(paso)
+        else:
+            respuestas[paso] = (payload or {}).get("valor") or ""
+    return {"preguntas": preguntas, "respuestas": respuestas}
 
 
 async def listar_eventos_lead(telefono: str, limite: int | None = None) -> list[dict]:
@@ -2888,6 +2924,7 @@ _ETIQUETAS_RESULTADO_REAPERTURA = {
     "producto_sin_stock": "Producto sin stock", "otro": "Otro", "consulta_atc": "Consulta ATC",
     "sin_saldo": "Sin saldo", "servicio_postventa": "Servicio adicional Gas",
     "cartera_fnb": "Cartera FNB", "sin_respuesta": "Sin respuesta", "postventa": "Postventa",
+    "solicita_suministro_gas": "Solicita suministro de gas",
 }
 
 
@@ -9281,6 +9318,7 @@ async def cerrar_lead_definitivamente_via_conversation(conversation_id: str, neg
 
 
 _ETIQUETAS_CATEGORIA_TRIAJE = {"recibo": "recibo", "numero_cliente": "número de cliente", "pago_deuda": "pago o deuda"}
+_DESCRIPCION_CIERRE_SUMINISTRO = "Gabi derivó al cliente a Nuevos suministros (solicita suministro de gas) — caso cerrado"
 _DESCRIPCION_CIERRE_EMERGENCIA = "Triaje automático: emergencia de gas derivada a Emergencias de Cálidda — caso cerrado"
 
 # Resultado con que el triaje tipifica y cierra (2026-10-11, configurable por negocio desde el panel «Derivación
@@ -9290,7 +9328,7 @@ _DESCRIPCION_CIERRE_EMERGENCIA = "Triaje automático: emergencia de gas derivada
 # no_interesado/no_califica (pérdidas comerciales que ensuciarían la tasa de cierre) ni sin_respuesta (lo pone el barrido).
 CLAVE_TRIAJE_RESULTADO = "triaje_atc_resultado"
 RESULTADO_TRIAJE_POR_DEFECTO = "consulta_atc"
-RESULTADOS_TRIAJE_NO_PERMITIDOS = ("vendido", "no_interesado", "no_califica", "sin_respuesta")
+RESULTADOS_TRIAJE_NO_PERMITIDOS = ("vendido", "no_interesado", "no_califica", "sin_respuesta", RESULTADO_SOLICITA_SUMINISTRO)
 # El default va primero (así lo muestra el panel).
 RESULTADOS_TRIAJE_PERMITIDOS = (RESULTADO_TRIAJE_POR_DEFECTO,) + tuple(
     r for r in RESULTADOS_CERRADOS if r not in RESULTADOS_TRIAJE_NO_PERMITIDOS and r != RESULTADO_TRIAJE_POR_DEFECTO
@@ -9337,7 +9375,7 @@ async def cerrar_por_triaje(
     ahora = ahora or datetime.utcnow()
     if resultado is None:
         resultado = await obtener_resultado_triaje(negocio_id)
-    elif not resultado_triaje_valido(resultado):
+    elif not resultado_triaje_valido(resultado) and resultado != RESULTADO_SOLICITA_SUMINISTRO:
         raise ValueError(f"cerrar_por_triaje: resultado no permitido para el triaje: {resultado!r}")
     async with async_session() as session:
         async with session.begin():
@@ -9384,6 +9422,7 @@ async def cerrar_por_triaje(
                 tipo=EVENTO_TRIAJE_ATC_CERRADO, autor=None,
                 descripcion=(
                     _DESCRIPCION_CIERRE_EMERGENCIA if categoria == "emergencia_gas"
+                    else _DESCRIPCION_CIERRE_SUMINISTRO if resultado == RESULTADO_SOLICITA_SUMINISTRO
                     else f"Triaje automático: consulta de {etiqueta} derivada a la línea de atención — caso cerrado"
                 )[:300],
                 payload={"categoria": categoria, "origen": "triaje_atc", "cierre_en": ahora.isoformat(), "resultado": resultado},

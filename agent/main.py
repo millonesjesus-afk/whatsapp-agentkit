@@ -38,7 +38,7 @@ from agent.memory import (
 )
 from agent.providers import obtener_proveedor
 from agent import envios
-from agent import circuito_ia, respaldo_sin_ia, calidad_gabi, formato_whatsapp, triaje_atc, llamadas
+from agent import circuito_ia, respaldo_sin_ia, calidad_gabi, formato_whatsapp, triaje_atc, llamadas, calificacion_guiada
 from agent.dashboard import (
     router as dashboard_router, NoAutenticado,
     ARCHIVOS_DIR, EXTENSIONES_ARCHIVO_PERMITIDAS, TAMANO_MAXIMO_ARCHIVO_MB, _guardar_archivo_en_disco,
@@ -914,6 +914,14 @@ async def _generar_y_enviar_respuesta_ia(telefono: str, canal: dict | None) -> N
             await notificar_lead_derivado(telefono, lead_actualizado or {}, texto_actual)
             await _avisar_derivacion_si_falto(telefono, respuesta, canal)
 
+    # Calificación guiada (2026-10-23, apagada por defecto): tras la respuesta libre de Gabi, la primera pregunta con botones
+    # (¿tu casa tiene gas natural de Cálidda?). Solo en los primeros mensajes, una vez, sin asesor ni derivación. No lanza.
+    await calificacion_guiada.preguntar_gas_si_corresponde(
+        telefono, canal, await obtener_lead(telefono, negocio_id=canal.get("negocio_id") if canal else None), proveedor,
+        mensajes_cliente=sum(1 for m in historial_completo if m.get("role") == "user"),
+        derivado=ahora_derivado or ya_estaba_derivado,
+    )
+
 
 _MENCIONA_ASESOR = re.compile(r"asesor|especialista|ejecutiv", re.IGNORECASE)
 
@@ -1365,6 +1373,18 @@ async def webhook_handler(request: Request):
             if respuesta_llamada and respuesta_llamada.get("texto"):
                 if await llamadas.enviar_confirmacion(proveedor, msg.telefono, canal, respuesta_llamada["texto"]):
                     cron.marca("confirma_llamada")
+                    logger.info(f"webhook_tiempos {cron.resumen()}")
+                    return
+
+            # Calificación guiada con botones (2026-10-23, `calificacion_guiada_modo`, apagada por defecto): el cliente tocó un botón
+            # o una fila de la pregunta de gas / punto / titular. El sistema registra su respuesta y manda lo siguiente con textos
+            # fijos (cero tokens); Gabi NO conversa en este turno. Si no corresponde o algo falla, el turno sigue con Gabi.
+            if (
+                msg.interactivo_id and msg.interactivo_id.startswith(calificacion_guiada.PREFIJO)
+                and msg.tipo == "text" and msg.tipo_evento != "echo" and canal
+            ):
+                if await calificacion_guiada.procesar_respuesta(msg.telefono, canal, lead, msg.interactivo_id, msg.texto, proveedor):
+                    cron.marca("calificacion_guiada")
                     logger.info(f"webhook_tiempos {cron.resumen()}")
                     return
 

@@ -31,10 +31,10 @@ from agent.tools import (
 )
 from agent.memory import (
     obtener_campana_por_nombre, obtener_configuracion, obtener_identidad_agente, obtener_negocio,
-    obtener_conversation_activa_de_telefono,
+    obtener_conversation_activa_de_telefono, obtener_estado_calificacion,
 )
 from agent.campanas import resolver_promo, resolver_familia_promo, obtener_codigos_promocionales_activos
-from agent import circuito_ia, formato_whatsapp, contexto_anuncio
+from agent import circuito_ia, formato_whatsapp, contexto_anuncio, calificacion_guiada
 from agent.origen_conversacion import origen_de_conversacion
 from agent import calendario_negocio as cal_negocio
 
@@ -520,6 +520,7 @@ async def _armar_bloques_contexto(
                     )
 
     await _agregar_bloques_anuncio(bloques, lead, historial, negocio_id, hay_promo_de_campana, campana_sin_precio)
+    await _agregar_bloque_calificacion(bloques, lead, historial, negocio_id)
 
     # Los precios promocionales reservados a una campaña específica (ej. la
     # Terma a S/419.90 de "SMS Terma a gas") no deben aparecer en la búsqueda
@@ -555,6 +556,26 @@ async def _armar_bloques_contexto(
         bloques.append(f"Contexto relevante del catálogo/base de conocimiento:\n{contexto}")
 
     return bloques
+
+
+async def _agregar_bloque_calificacion(bloques: list[str], lead: dict | None, historial: list[dict], negocio_id: str | None) -> None:
+    """Calificación guiada con botones (2026-10-23, `calificacion_guiada_modo`, apagada por defecto): le dice a Claude qué preguntó el
+    sistema con botones y qué respondió el cliente (para no repetirlo) y, en el turno anterior a la primera pregunta, que no
+    pregunte ni pida datos porque el sistema la hará enseguida. Nunca rompe la respuesta."""
+    try:
+        if not lead or negocio_id is None or not lead.get("telefono"):
+            return
+        modo = await calificacion_guiada.obtener_modo(negocio_id)
+        if modo != calificacion_guiada.MODO_ACTIVO:
+            return
+        estado = await obtener_estado_calificacion(lead["telefono"])
+        mensajes_cliente = sum(1 for m in historial if m.get("role") == "user") + 1
+        va_la_primera = calificacion_guiada.lleva_pregunta_de_gas(lead, estado, mensajes_cliente, modo)
+        bloque = calificacion_guiada.bloque_contexto(estado, va_la_primera_pregunta=va_la_primera)
+        if bloque:
+            bloques.append(bloque)
+    except Exception:
+        logger.exception("No se pudo armar el contexto de la calificación guiada (se responde sin él)")
 
 
 async def _agregar_bloques_anuncio(

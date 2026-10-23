@@ -641,6 +641,27 @@ class ProveedorMeta(ProveedorWhatsApp):
             "form_id": datos.get("form_id", ""),
         }
 
+    async def enviar_interactivo(self, telefono: str, interactivo: dict, canal: dict | None = None) -> tuple[bool, str | None]:
+        """Envía un mensaje interactivo de Meta (`reply buttons` de hasta 3 botones, o `list`) dentro de la ventana de
+        24 h. `interactivo` es el objeto `interactive` completo (lo arma agent/calificacion_guiada.py). Retorna
+        (enviado, wamid) como los demás envíos."""
+        canal = canal or await self.resolver_canal(None)
+        if not canal or not canal.get("access_token"):
+            logger.warning("Ningún canal de WhatsApp configurado")
+            return False, None
+        url = f"https://graph.facebook.com/{self.api_version}/{canal['phone_number_id']}/messages"
+        headers = {
+            "Authorization": f"Bearer {canal['access_token']}",
+            "Content-Type": "application/json",
+        }
+        payload = {
+            "messaging_product": "whatsapp",
+            **_destinatario(telefono),
+            "type": "interactive",
+            "interactive": interactivo,
+        }
+        return await _enviar_a_meta(url, payload, headers, telefono, canal, "interactivo")
+
     async def enviar_plantilla(
         self, telefono: str, nombre_plantilla: str, parametros: list[str], idioma: str = "es", canal: dict | None = None
     ) -> tuple[bool, str | None]:

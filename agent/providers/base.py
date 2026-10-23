@@ -147,6 +147,11 @@ class ProveedorWhatsApp(ABC):
         debe sobreescribirlo."""
         return None
 
+    async def enviar_interactivo(self, telefono: str, interactivo: dict, canal: dict | None = None) -> bool:
+        """Envía un mensaje interactivo (botones de respuesta o lista) ya armado con el formato del proveedor. Solo
+        vale dentro de la ventana de 24 h. No-op por defecto — cada proveedor que lo soporte debe sobreescribirlo."""
+        return False
+
     async def enviar_plantilla(
         self, telefono: str, nombre_plantilla: str, parametros: list[str], idioma: str = "es", canal: dict | None = None
     ) -> bool:
