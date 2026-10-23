@@ -3876,6 +3876,35 @@ def _duracion_legible(delta: timedelta) -> str:
     return f"{minutos // (24 * 60)} días"
 
 
+async def _avisos_campanas_sin_material(negocio_id: str) -> list[dict]:
+    """Aviso SOLO para el admin (lo llama `_avisos_inicio`): campañas ACTIVAS cuyo material (`codigo_material`) ya no está
+    activo con precio en el catálogo. Gabi no cita precio de esa campaña (brain.py, mejora M1) hasta que se actualice el
+    catálogo o la campaña. Sin campañas afectadas no hay aviso. Nunca rompe Inicio."""
+    try:
+        campanas = [c for c in await mem.listar_campanas(negocio_id, solo_activas=True) if c.get("codigo_material")]
+        if not campanas:
+            return []
+        vigentes = await mem.codigos_hana_activos(negocio_id, [c["codigo_material"] for c in campanas])
+        # Con precio manual de respaldo la campaña sigue dando precio: no cuenta como afectada.
+        afectadas = [c for c in campanas if c["codigo_material"].strip() not in vigentes and not c.get("precio_promocional")]
+        if not afectadas:
+            return []
+        nombres = ", ".join(c["nombre"] for c in afectadas[:3]) + (f" y {len(afectadas) - 3} más" if len(afectadas) > 3 else "")
+        plural = len(afectadas) != 1
+        return [{
+            "id": "campanas_sin_material", "nivel": "warning",
+            "titulo": f"{len(afectadas)} campaña{'s' if plural else ''} sin precio vigente en el catálogo",
+            "detalle": (
+                f"{nombres}: su material ya no está activo en el catálogo, así que Gabi no dará precio de "
+                f"{'esas campañas' if plural else 'esa campaña'}. Actualiza el catálogo del mes o la campaña."
+            ),
+            "enlace": "/campanas",
+        }]
+    except Exception:
+        logger.exception("Inicio: no se pudo calcular el aviso de campañas sin material en el catálogo")
+        return []
+
+
 async def _avisos_procesos_programados() -> list[dict]:
     """Avisos del latido de los procesos programados (Cron de Railway), solo para el admin (lo
     llama `_avisos_inicio`). Por cada script vigilado (`CRONES_ESPERADOS`) que haya corrido ALGUNA
@@ -3942,6 +3971,7 @@ async def _avisos_inicio(usuario: dict) -> list[dict]:
     return (
         avisos + await _avisos_procesos_programados() + await _avisos_uso_inicio(usuario) + avisos_llamadas
         + await _avisos_cambios_calendario_supervisor(usuario["negocio_id"])
+        + await _avisos_campanas_sin_material(usuario["negocio_id"])
     )
 
 

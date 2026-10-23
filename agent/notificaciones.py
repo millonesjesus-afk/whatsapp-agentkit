@@ -83,13 +83,13 @@ async def notificar_lead_derivado(telefono: str, lead: dict, ultimo_mensaje: str
     asesor_asignado = lead.get("asesor_asignado")
 
     if asesor_asignado:
-        asunto = f"Nuevo lead Gaso+ asignado a {asesor_asignado} — {nombre}"
+        asunto = f"Nuevo lead Cálidda Hogar asignado a {asesor_asignado} — {nombre}"
         aviso_asignacion = f"<p style='color:#15803d'><strong>✅ Asignado automáticamente a:</strong> {asesor_asignado}</p>"
     else:
         if fuera_de_horario is None:
             fuera_de_horario = await _negocio_cerrado_ahora(lead.get("negocio_id"))
         if fuera_de_horario:
-            asunto = f"⚠️ Lead Gaso+ fuera de horario, sin asesor en turno — {nombre}"
+            asunto = f"⚠️ Lead Cálidda Hogar fuera de horario, sin asesor en turno — {nombre}"
             aviso_asignacion = (
                 "<p style='color:#b91c1c'><strong>⚠️ No hay asesor en turno</strong> — el cliente escribió "
                 "fuera del horario de atención y este lead quedó SIN asignar. Se asignará al primer "
@@ -99,7 +99,7 @@ async def notificar_lead_derivado(telefono: str, lead: dict, ultimo_mensaje: str
             if detalle_cierre:
                 aviso_asignacion += f"<p style='color:#b91c1c'>{html.escape(detalle_cierre)}</p>"
         else:
-            asunto = f"⚠️ Lead Gaso+ SIN ASESOR DISPONIBLE — {nombre}"
+            asunto = f"⚠️ Lead Cálidda Hogar SIN ASESOR DISPONIBLE — {nombre}"
             aviso_asignacion = (
                 "<p style='color:#b91c1c'><strong>⚠️ Ningún asesor estaba disponible</strong> — "
                 "este lead quedó SIN asignar. Se le asignará automáticamente al primer asesor que "
@@ -113,7 +113,7 @@ async def notificar_lead_derivado(telefono: str, lead: dict, ultimo_mensaje: str
         <p><strong>Teléfono:</strong> {telefono}</p>
         <p><strong>Interés:</strong> {interes}</p>
         <p><strong>Último mensaje del cliente:</strong> {ultimo_mensaje}</p>
-        <p>Este lead fue atendido primero por Gabi, el agente virtual de WhatsApp de Gaso+.</p>
+        <p>Este lead fue atendido primero por Gabi, el agente virtual de WhatsApp de Cálidda Hogar.</p>
     """
 
     headers = {

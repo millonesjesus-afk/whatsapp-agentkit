@@ -1,4 +1,4 @@
-# Programa de Gasodomésticos Cálidda — Gaso+
+# Programa de Gasodomésticos Cálidda — Cálidda Hogar
 
 Estructura comercial: financiamiento, canales y portafolio.
 

@@ -672,4 +672,4 @@ def test_ningun_tipo_de_evento_del_triaje_supera_el_limite_de_la_columna():
 def test_el_modulo_no_hardcodea_el_nombre_del_negocio_fuera_del_fallback_documentado():
     fuente = Path(t.__file__).read_text(encoding="utf-8")
     codigo = [l for l in fuente.splitlines() if not l.lstrip().startswith("#")]
-    assert [l.strip() for l in codigo if "Gaso+" in l] == ['NOMBRE_NEGOCIO_POR_DEFECTO = "Gaso+"']
+    assert [l.strip() for l in codigo if "Gaso+" in l or "Cálidda Hogar" in l] == ['NOMBRE_NEGOCIO_POR_DEFECTO = "Cálidda Hogar"']

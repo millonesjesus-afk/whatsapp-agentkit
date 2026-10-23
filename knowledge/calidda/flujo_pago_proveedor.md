@@ -1,4 +1,4 @@
-# Flujo de Pago a Proveedor — Comparativo de Canales (Gaso+)
+# Flujo de Pago a Proveedor — Comparativo de Canales (Cálidda Hogar)
 
 > Nota interna: describe el proceso operativo desde la venta hasta el abono en cuenta del proveedor. Es información de referencia interna; el ciclo de pago es el mismo para ambos canales.
 

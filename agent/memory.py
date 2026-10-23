@@ -11426,6 +11426,22 @@ async def listar_productos_activos(negocio_id: str) -> list[dict]:
         return [_producto_a_dict(p) for p in result.scalars().all()]
 
 
+async def codigos_hana_activos(negocio_id: str, codigos: list[str]) -> set[str]:
+    """Cuáles de estos CODIGO HANA tienen al menos un producto ACTIVO con precio en el catálogo de este Negocio
+    (una sola consulta). Sirve para avisar al admin cuando una campaña apunta a un material que salió del catálogo."""
+    codigos = [c for c in {(c or "").strip() for c in codigos} if c]
+    if not codigos:
+        return set()
+    async with async_session() as session:
+        filas = await session.execute(
+            select(Producto.codigo_hana).where(
+                Producto.negocio_id == negocio_id, Producto.activo.is_(True), Producto.codigo_hana.in_(codigos),
+                Producto.precio.is_not(None), Producto.precio != "",
+            ).distinct()
+        )
+        return {fila[0] for fila in filas.all()}
+
+
 async def obtener_producto_por_codigo_hana(codigo: str, negocio_id: str) -> dict | None:
     """Primer producto activo DE ESTE NEGOCIO con este CODIGO HANA, ordenado
     por id (mismo criterio de "primera fila que matchea" que ya usaba el

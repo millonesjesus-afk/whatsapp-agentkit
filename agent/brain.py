@@ -29,9 +29,13 @@ from agent.tools import (
     obtener_contexto_relevante, obtener_estado_horario_atencion, formatear_producto,
     obtener_tasas_financiamiento,
 )
-from agent.memory import obtener_campana_por_nombre, obtener_configuracion, obtener_identidad_agente, obtener_negocio
+from agent.memory import (
+    obtener_campana_por_nombre, obtener_configuracion, obtener_identidad_agente, obtener_negocio,
+    obtener_conversation_activa_de_telefono,
+)
 from agent.campanas import resolver_promo, resolver_familia_promo, obtener_codigos_promocionales_activos
-from agent import circuito_ia, formato_whatsapp
+from agent import circuito_ia, formato_whatsapp, contexto_anuncio
+from agent.origen_conversacion import origen_de_conversacion
 from agent import calendario_negocio as cal_negocio
 
 load_dotenv()
@@ -470,6 +474,8 @@ async def _armar_bloques_contexto(
     bloques.append(bloque_horario)
 
     codigos_propios = set()
+    hay_promo_de_campana = False
+    campana_sin_precio = None   # nombre de una campaña cuyo material ya no está en el catálogo
     if lead:
         campos_relevantes = ("nombre", "interes", "paso_flujo")
         datos_lead = ", ".join(f"{campo}: {lead[campo]}" for campo in campos_relevantes if lead.get(campo))
@@ -482,7 +488,10 @@ async def _armar_bloques_contexto(
         if lead.get("campana_origen") and negocio_id is not None:
             campana = await obtener_campana_por_nombre(lead["campana_origen"], negocio_id)
             promo = await resolver_promo(campana, negocio_id) if campana else None
+            if campana and not promo and campana.get("codigo_material"):
+                campana_sin_precio = campana["nombre"]
             if promo:
+                hay_promo_de_campana = True
                 detalle = f"Producto: {promo['producto']}"
                 if promo.get("precio"):
                     detalle += f", Precio promocional: {promo['precio']}"
@@ -509,6 +518,8 @@ async def _armar_bloques_contexto(
                         f"promocional de esta campaña (ofrécelas solo si el cliente pregunta por "
                         f"instalación/conexión/combo, no de entrada):\n{variantes_texto}"
                     )
+
+    await _agregar_bloques_anuncio(bloques, lead, historial, negocio_id, hay_promo_de_campana, campana_sin_precio)
 
     # Los precios promocionales reservados a una campaña específica (ej. la
     # Terma a S/419.90 de "SMS Terma a gas") no deben aparecer en la búsqueda
@@ -544,6 +555,41 @@ async def _armar_bloques_contexto(
         bloques.append(f"Contexto relevante del catálogo/base de conocimiento:\n{contexto}")
 
     return bloques
+
+
+async def _agregar_bloques_anuncio(
+    bloques: list[str], lead: dict | None, historial: list[dict], negocio_id: str | None,
+    hay_promo_de_campana: bool, campana_sin_precio: str | None,
+) -> None:
+    """Mejora M1 (2026-10-23): que Gabi sepa por qué anuncio entró el cliente y no cite precios sin respaldo en el
+    catálogo. Modo `gabi_contexto_anuncio_modo` (apagado / sombra / activo; por defecto sombra = solo registra el log
+    `contexto_anuncio`). Solo en los primeros mensajes del cliente. Nunca rompe la respuesta."""
+    try:
+        if not lead or negocio_id is None or not lead.get("telefono"):
+            return
+        modo = contexto_anuncio.normalizar_modo(
+            await obtener_configuracion(contexto_anuncio.CLAVE_MODO, contexto_anuncio.MODO_POR_DEFECTO, negocio_id)
+        )
+        if modo == contexto_anuncio.MODO_APAGADO:
+            return
+        mensajes_cliente = sum(1 for m in historial if m.get("role") == "user") + 1
+        if mensajes_cliente > contexto_anuncio.MAXIMO_MENSAJES_CLIENTE:
+            return
+        conversation = await obtener_conversation_activa_de_telefono(lead["telefono"], negocio_id)
+        origen = await origen_de_conversacion(negocio_id, conversation["id"]) if conversation else None
+        resumen = contexto_anuncio.resumen_sombra(
+            origen, hay_promo_de_campana=hay_promo_de_campana, precio_no_disponible=bool(campana_sin_precio),
+        )
+        logger.info("contexto_anuncio " + json.dumps({"modo": modo, **resumen}, ensure_ascii=False))
+        if modo != contexto_anuncio.MODO_ACTIVO:
+            return
+        if campana_sin_precio:
+            bloques.append(contexto_anuncio.bloque_precio_no_disponible(campana_sin_precio))
+        bloque = contexto_anuncio.bloque_anuncio(origen, hay_promo_de_campana=hay_promo_de_campana)
+        if bloque:
+            bloques.append(bloque)
+    except Exception:
+        logger.exception("No se pudo armar el contexto del anuncio (se responde sin él)")
 
 
 def _delimitar_contexto_y_mensaje(bloques_contexto: list[str], mensaje: str) -> str:

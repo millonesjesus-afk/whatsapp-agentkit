@@ -108,7 +108,7 @@ MAX_MENSAJES_CLIENTE_POR_DEFECTO = 4
 UMBRAL_CIERRE = 0.75  # confianza mínima para proponer el cierre
 UMBRAL_CANDIDATO = 0.60  # por debajo, la señal es demasiado débil (p. ej. solo "cómo pago"): ni se registra como candidato
 # Fallback DOCUMENTADO del nombre del negocio en el texto (deuda multi-negocio, ver la cabecera).
-NOMBRE_NEGOCIO_POR_DEFECTO = "Gaso+"
+NOMBRE_NEGOCIO_POR_DEFECTO = "Cálidda Hogar"
 
 TEXTO_POR_DEFECTO = (
     "¡Hola{nombre}! 😊 Para consultas de tu recibo, número de cliente, pagos o el servicio de gas, la atención la da "

@@ -21,7 +21,7 @@ CLAVE_CUERPO = "plantilla_retomar_cuerpo"
 NOMBRE_SUGERIDO = "retomar_consulta"
 IDIOMA_POR_DEFECTO = "es"
 CUERPO_POR_DEFECTO = (
-    "Hola {{1}}, soy {{2}} de Gaso+. Vi que consultaste por {{3}} y quiero ayudarte a continuar. ¿Seguimos por aquí?"
+    "Hola {{1}}, soy {{2}} de Cálidda Hogar. Vi que consultaste por {{3}} y quiero ayudarte a continuar. ¿Seguimos por aquí?"
 )
 # Botones de respuesta rápida de la plantilla propuesta. Son parte de la plantilla aprobada en Meta, no
 # llevan parámetros: no se mandan en el envío.

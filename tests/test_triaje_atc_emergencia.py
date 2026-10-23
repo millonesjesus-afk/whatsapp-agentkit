@@ -270,7 +270,7 @@ async def test_texto_propio_con_marcador_usa_la_linea_configurada(monkeypatch):
         monkeypatch, None, extra={**ACTIVA, t.CLAVE_EMERGENCIA_TEXTO: "Sal ya. Emergencias: {linea_emergencia}. Atención de {negocio}."},
     )
     await _hablar(proveedor, canal, _tel(10), "Hola", "hay fuga de gas")
-    assert proveedor.enviados[-1] == f"Sal ya. Emergencias: {LINEA_EM}. Atención de Gaso+."
+    assert proveedor.enviados[-1] == f"Sal ya. Emergencias: {LINEA_EM}. Atención de Cálidda Hogar."
 
 
 # ── Cero tokens ──────────────────────────────────────────────────────────────────────────────────

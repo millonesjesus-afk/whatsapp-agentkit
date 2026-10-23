@@ -370,7 +370,7 @@ def test_las_variables_van_en_una_linea_sin_vacios_y_con_genericos():
 def test_la_vista_previa_rellena_el_cuerpo_propuesto():
     variables = plantilla_retomar.variables_de_plantilla("Josué Ríos", "Lelespuru", "termas")
     assert plantilla_retomar.renderizar(plantilla_retomar.CUERPO_POR_DEFECTO, variables) == (
-        "Hola Josué, soy Lelespuru de Gaso+. Vi que consultaste por termas y quiero ayudarte a continuar. ¿Seguimos por aquí?"
+        "Hola Josué, soy Lelespuru de Cálidda Hogar. Vi que consultaste por termas y quiero ayudarte a continuar. ¿Seguimos por aquí?"
     )
     assert plantilla_retomar.cantidad_de_variables(plantilla_retomar.CUERPO_POR_DEFECTO) == 3
     assert plantilla_retomar.parametros_para_envio("Hola {{1}}, ¿seguimos?", variables) == ["Josué"]   # tantos como {{n}} tenga
@@ -410,7 +410,7 @@ async def test_get_plantilla_retomar_trae_la_vista_previa_del_lead_y_el_estado_d
     r = await dashboard.plantilla_retomar_del_lead(TEL, usuario=_usuario(negocio, nombre="Lelespuru Díaz"))
     d = json.loads(r.body)
     assert d["disponible"] is False and d["nombre"] is None
-    assert d["texto"] == "Hola Josué, soy Lelespuru Díaz de Gaso+. Vi que consultaste por termas y quiero ayudarte a continuar. ¿Seguimos por aquí?"
+    assert d["texto"] == "Hola Josué, soy Lelespuru Díaz de Cálidda Hogar. Vi que consultaste por termas y quiero ayudarte a continuar. ¿Seguimos por aquí?"
     assert d["variables_valores"] == ["Josué", "Lelespuru Díaz", "termas"] and d["categoria_supuesta"] == "marketing"
     assert d["ventana"]["ventana_abierta"] is False and d["ventana"]["fep_abierta"] is True and d["ventana"]["plantilla_disponible"] is False
     await _configurar_plantilla(negocio["id"])
@@ -450,7 +450,7 @@ async def test_envia_la_plantilla_atribuida_al_asesor_y_la_guarda_en_el_chat(pan
 
     r = await dashboard.responder_cliente_con_plantilla(TEL, usuario=_usuario(negocio, nombre="Lelespuru Díaz"), _csrf=None)
     d = json.loads(r.body)
-    texto = "Hola María, soy Lelespuru Díaz de Gaso+. Vi que consultaste por cocina empotrada y quiero ayudarte a continuar. ¿Seguimos por aquí?"
+    texto = "Hola María, soy Lelespuru Díaz de Cálidda Hogar. Vi que consultaste por cocina empotrada y quiero ayudarte a continuar. ¿Seguimos por aquí?"
     assert r.status_code == 200 and d["status"] == "ok" and d["texto"] == texto
 
     # A Meta le llegan el nombre y el idioma aprobados y SOLO los parámetros del cuerpo (los botones no llevan).
