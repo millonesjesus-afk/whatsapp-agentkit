@@ -412,3 +412,57 @@ async def test_con_asesor_asignado_no_se_manda_nada_fijo(monkeypatch):
 def test_el_resultado_nuevo_no_se_puede_elegir_como_resultado_del_triaje():
     assert mem.RESULTADO_SOLICITA_SUMINISTRO in mem.RESULTADOS_CERRADOS
     assert mem.RESULTADO_SOLICITA_SUMINISTRO not in mem.RESULTADOS_TRIAJE_PERMITIDOS
+
+
+# ── El primer mensaje lee la campaña y el anuncio (no solo el saludo) ───────
+
+def _referral(source_id: str, titulo: str, cuerpo: str = "Escríbenos y te contamos") -> dict:
+    return {"source_id": source_id, "headline": titulo, "body": cuerpo, "source_url": "https://fb.me/x", "source_type": "ad"}
+
+
+async def _entrar(monkeypatch, tel, texto, referral, campana=None):
+    negocio, canal, canal_dict, proveedor, gabi = await _escenario(monkeypatch, "activo")
+    if campana:
+        await mem.crear_campana_de_anuncio(campana["nombre"], referral["source_id"], negocio["id"], **campana.get("extra", {}))
+    _n["w"] += 1
+    await _correr(proveedor, [_msg(tel, canal, texto, f"wamid.cgr{_n['w']}", referral=referral)])
+    return negocio, proveedor, gabi
+
+
+async def test_campana_generica_por_tipo_sin_producto_ni_precio_salta_la_lista_de_producto(monkeypatch):
+    # el cliente solo dice «Hola»: el tipo (terma) sale del nombre de la campaña, aunque no traiga producto ni precio
+    negocio, proveedor, gabi = await _entrar(
+        monkeypatch, _tel(20), "Hola", _referral("AD-CG1", "Mejora tu baño"), campana={"nombre": "Meta Terma Octubre"},
+    )
+    assert gabi.llamadas == 0 and _cuerpo(proveedor).endswith("¿Tu casa ya tiene gas natural de Cálidda?")
+    assert (await mem.obtener_lead(_tel(20), negocio_id=negocio["id"]))["interes"] == "terma"
+
+
+async def test_campana_con_producto_y_precio_tampoco_los_menciona_en_el_primer_mensaje(monkeypatch):
+    negocio, proveedor, gabi = await _entrar(
+        monkeypatch, _tel(21), "Estoy interesado en financiar", _referral("AD-CG2", "Llévate la tuya"),
+        campana={"nombre": "Oferta del mes", "extra": {"producto_promocional": "Secadora a gas Rinnai 10 Kg", "precio_promocional": "2999"}},
+    )
+    assert gabi.llamadas == 0
+    cuerpo = _cuerpo(proveedor)
+    assert cuerpo.endswith("¿Tu casa ya tiene gas natural de Cálidda?") and "2999" not in cuerpo and "Rinnai" not in cuerpo
+    assert (await mem.obtener_lead(_tel(21), negocio_id=negocio["id"]))["interes"] == "secadora"
+    # y al llegar a la etapa de equipo sabe que es una secadora (solo punto de gas, sin ductería)
+    await _tocar(proveedor, proveedor_canal(proveedor), _tel(21), "cal:gas:si", "Sí, ya tengo")
+    assert "secadora" in _cuerpo(proveedor) and "ductería" not in _cuerpo(proveedor)
+
+
+def proveedor_canal(proveedor):
+    return proveedor._canal
+
+
+async def test_anuncio_sin_campana_se_entiende_por_su_titulo(monkeypatch):
+    negocio, proveedor, gabi = await _entrar(monkeypatch, _tel(22), "Buenas tardes", _referral("AD-CG3", "Renueva tu cocina ahora"))
+    assert gabi.llamadas == 0 and _cuerpo(proveedor).endswith("¿Tu casa ya tiene gas natural de Cálidda?")
+    assert (await mem.obtener_lead(_tel(22), negocio_id=negocio["id"]))["interes"] == "cocina"
+
+
+async def test_anuncio_sin_pistas_ni_campana_pregunta_el_producto_con_la_lista(monkeypatch):
+    negocio, proveedor, gabi = await _entrar(monkeypatch, _tel(23), "Hola", _referral("AD-CG4", "Financia tu artefacto"))
+    assert gabi.llamadas == 0 and proveedor.interactivos[-1]["type"] == "list"
+    assert _cuerpo(proveedor).endswith("¿Qué gasodoméstico te interesa?")
