@@ -734,12 +734,13 @@ async def registrar_evento_lead(telefono: str, tipo: str, descripcion: str, auto
 
 
 async def obtener_estado_calificacion(telefono: str) -> dict:
-    """Estado de la calificación guiada de la Conversation ACTIVA de este teléfono: `{"preguntas": [paso, ...],
-    "respuestas": {paso: valor}}` (la última respuesta de cada paso gana). Vacío si no hay conversación. Solo lectura."""
+    """Estado de la calificación guiada de la Conversation ACTIVA de este teléfono: `{"preguntas": [paso, ...] (orden de la primera
+    vez), "conteo": {paso: veces que se preguntó}, "respuestas": {paso: valor}}` (la última respuesta de cada paso gana). Vacío si no
+    hay conversación. Solo lectura."""
     async with async_session() as session:
         conversation = await _obtener_conversation_activa_por_telefono(session, telefono)
         if conversation is None:
-            return {"preguntas": [], "respuestas": {}}
+            return {"preguntas": [], "conteo": {}, "respuestas": {}}
         filas = (await session.execute(
             select(EventoLead.tipo, EventoLead.payload).where(
                 EventoLead.conversation_id == conversation.id, EventoLead.negocio_id == conversation.negocio_id,
@@ -747,17 +748,19 @@ async def obtener_estado_calificacion(telefono: str) -> dict:
             ).order_by(EventoLead.creado.asc(), EventoLead.id.asc())
         )).all()
     preguntas: list[str] = []
+    conteo: dict[str, int] = {}
     respuestas: dict[str, str] = {}
     for tipo, payload in filas:
         paso = (payload or {}).get("paso")
         if not paso:
             continue
         if tipo == EVENTO_CALIFICACION_PREGUNTA:
+            conteo[paso] = conteo.get(paso, 0) + 1
             if paso not in preguntas:
                 preguntas.append(paso)
         else:
             respuestas[paso] = (payload or {}).get("valor") or ""
-    return {"preguntas": preguntas, "respuestas": respuestas}
+    return {"preguntas": preguntas, "conteo": conteo, "respuestas": respuestas}
 
 
 async def listar_eventos_lead(telefono: str, limite: int | None = None) -> list[dict]:

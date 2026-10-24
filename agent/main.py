@@ -792,6 +792,11 @@ async def _generar_y_enviar_respuesta_ia(telefono: str, canal: dict | None) -> N
     historial = historial_completo[:-1]
     texto_actual = mensaje_actual["content"]
 
+    # Calificación guiada (2026-10-23, apagada por defecto): si el cliente solo mandó el texto prellenado del anuncio o un saludo, el
+    # primer mensaje es FIJO (sin IA, sin producto, sin precio) con la primera pregunta de botones; Claude no responde este turno.
+    if await calificacion_guiada.primer_mensaje_fijo(telefono, canal, lead, proveedor, historial_completo):
+        return
+
     await _avisar_que_gabi_escribe(telefono, canal)
 
     modo_canal = (canal or {}).get("modo", "produccion")
@@ -916,7 +921,7 @@ async def _generar_y_enviar_respuesta_ia(telefono: str, canal: dict | None) -> N
 
     # Calificación guiada (2026-10-23, apagada por defecto): tras la respuesta libre de Gabi, la primera pregunta con botones
     # (¿tu casa tiene gas natural de Cálidda?). Solo en los primeros mensajes, una vez, sin asesor ni derivación. No lanza.
-    await calificacion_guiada.preguntar_gas_si_corresponde(
+    await calificacion_guiada.continuar_flujo(
         telefono, canal, await obtener_lead(telefono, negocio_id=canal.get("negocio_id") if canal else None), proveedor,
         mensajes_cliente=sum(1 for m in historial_completo if m.get("role") == "user"),
         derivado=ahora_derivado or ya_estaba_derivado,

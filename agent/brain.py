@@ -520,7 +520,7 @@ async def _armar_bloques_contexto(
                     )
 
     await _agregar_bloques_anuncio(bloques, lead, historial, negocio_id, hay_promo_de_campana, campana_sin_precio)
-    await _agregar_bloque_calificacion(bloques, lead, historial, negocio_id)
+    await _agregar_bloque_calificacion(bloques, lead, historial, negocio_id, mensaje)
 
     # Los precios promocionales reservados a una campaña específica (ej. la
     # Terma a S/419.90 de "SMS Terma a gas") no deben aparecer en la búsqueda
@@ -558,7 +558,9 @@ async def _armar_bloques_contexto(
     return bloques
 
 
-async def _agregar_bloque_calificacion(bloques: list[str], lead: dict | None, historial: list[dict], negocio_id: str | None) -> None:
+async def _agregar_bloque_calificacion(
+    bloques: list[str], lead: dict | None, historial: list[dict], negocio_id: str | None, mensaje: str = "",
+) -> None:
     """Calificación guiada con botones (2026-10-23, `calificacion_guiada_modo`, apagada por defecto): le dice a Claude qué preguntó el
     sistema con botones y qué respondió el cliente (para no repetirlo) y, en el turno anterior a la primera pregunta, que no
     pregunte ni pida datos porque el sistema la hará enseguida. Nunca rompe la respuesta."""
@@ -571,7 +573,13 @@ async def _agregar_bloque_calificacion(bloques: list[str], lead: dict | None, hi
         estado = await obtener_estado_calificacion(lead["telefono"])
         mensajes_cliente = sum(1 for m in historial if m.get("role") == "user") + 1
         va_la_primera = calificacion_guiada.lleva_pregunta_de_gas(lead, estado, mensajes_cliente, modo)
-        bloque = calificacion_guiada.bloque_contexto(estado, va_la_primera_pregunta=va_la_primera)
+        tipo = await calificacion_guiada.tipo_del_lead(lead["telefono"], lead, negocio_id, estado)
+        dichos = [m["content"] for m in historial if m.get("role") == "user"]
+        bloque = calificacion_guiada.bloque_contexto(
+            estado, va_la_primera_pregunta=va_la_primera, tipo_producto=tipo,
+            pidio_el_precio=calificacion_guiada.pidio_precio(mensaje, *dichos),
+            derivado=lead.get("paso_flujo") == "derivado_asesor",
+        )
         if bloque:
             bloques.append(bloque)
     except Exception:
