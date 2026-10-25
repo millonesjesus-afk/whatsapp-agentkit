@@ -37,8 +37,8 @@ REEMPLAZOS = (
         "- Representas a Cálidda Hogar, que ofrece gasodomésticos con financiamiento en el recibo de gas de Cálidda.",
     ),
     (
-        "  Gaso+ permite a clientes de Cálidda",
-        "  Cálidda Hogar permite a clientes de Cálidda",
+        "Gaso+ permite a clientes de Cálidda",     # en la base va SIN la sangría que tiene config/prompts.yaml
+        "Cálidda Hogar permite a clientes de Cálidda",
     ),
 )
 
