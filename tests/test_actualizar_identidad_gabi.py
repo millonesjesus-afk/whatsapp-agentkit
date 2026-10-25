@@ -16,8 +16,7 @@ def test_solo_cambia_la_identidad_y_deja_el_bloque_uso_del_contexto():
     nuevo, problemas = s.aplicar_reemplazos(PROMPT)
     assert problemas == []
     assert "asesora virtual de Cálidda Hogar" in nuevo and "Representas a Cálidda Hogar" in nuevo
-    assert "
-Cálidda Hogar permite" in nuevo
+    assert "\nCálidda Hogar permite" in nuevo
     # el bloque que `brain._reducir_texto_legacy_calidda` busca por texto exacto no se toca
     assert "base de conocimiento de Gaso+. Básate" in nuevo
 
