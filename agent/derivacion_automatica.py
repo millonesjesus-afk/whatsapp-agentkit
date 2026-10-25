@@ -39,7 +39,7 @@ ETIQUETAS_CATEGORIA = {
 # Variables que reconoce `triaje_atc.texto_para` y su ejemplo para la vista previa.
 VARIABLES = (
     {"nombre": "{nombre}", "descripcion": "Primer nombre del cliente, con su espacio delante («¡Hola{nombre}!»); queda vacío si no hay uno presentable.", "ejemplo": " Yasmin"},
-    {"nombre": "{linea_atc}", "descripcion": "Línea de atención al cliente configurada abajo.", "ejemplo": "614900, opción 5"},
+    {"nombre": "{linea_atc}", "descripcion": "Línea de atención al cliente configurada abajo.", "ejemplo": "6149000, opción 5"},
     {"nombre": "{negocio}", "descripcion": "Nombre del negocio que sale en el texto.", "ejemplo": t.NOMBRE_NEGOCIO_POR_DEFECTO},
     {"nombre": "{linea_emergencia}", "descripcion": "Línea de emergencias configurada abajo.", "ejemplo": "1808 (Emergencias 24/7)"},
     {"nombre": "{linea_ventas}", "descripcion": "Línea de ventas configurada abajo.", "ejemplo": "614-9002"},
@@ -77,7 +77,7 @@ def validar_texto(texto: str, etiqueta: str) -> str:
         raise ValueError(f"{etiqueta}: máximo {TEXTO_MAXIMO} caracteres.")
     if "?" in texto or "¿" in texto:
         raise ValueError(f"{etiqueta}: no puede llevar «?» ni «¿» (un «ok» del cliente reabriría el caso).")
-    if mem.saliente_deja_algo_pendiente(texto.replace("{nombre}", "").replace("{linea_atc}", "614900")):
+    if mem.saliente_deja_algo_pendiente(texto.replace("{nombre}", "").replace("{linea_atc}", "6149000")):
         raise ValueError(
             f"{etiqueta}: contiene una palabra que el cierre de cortesía lee como compromiso o petición pendiente "
             "(llamar, necesitar, enviar, avisar, contar, DNI, días de la semana, horas…). Reescríbelo con otras palabras.",

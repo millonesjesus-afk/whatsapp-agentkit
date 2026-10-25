@@ -61,7 +61,10 @@ async def test_por_defecto_el_contrato_no_cambia_ni_una_clave():
     await _sembrar_base(negocio, canal)
     inicio, fin = _hoy()
     assert await mem.calcular_embudo_comercial(negocio["id"], inicio, fin) == {"oportunidades": 4, "ventas": 1, "tasa_cierre": 0.25}
-    assert await mem.contar_flujo_periodo(negocio["id"], inicio, fin) == {"leads": 4, "conversaciones": 4, "oportunidades": 4, "ventas": 1}
+    assert await mem.contar_flujo_periodo(negocio["id"], inicio, fin) == {
+        "leads": 4, "conversaciones": 4, "oportunidades": 4, "ventas": 1,
+        "ventas_de_leads_del_periodo": 1, "ventas_de_periodos_anteriores": 0,
+    }
     assert await mem.obtener_politica_metricas(negocio["id"]) == {"excluir_consulta_atc": False, "desde": None}
 
 

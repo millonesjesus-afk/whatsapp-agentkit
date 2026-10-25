@@ -76,7 +76,7 @@ logger = logging.getLogger("agentkit")
 
 # ── Configuración (todas por negocio, tabla `configuracion`) ─────────────────────────────────────────────
 CLAVE_MODO = "triaje_atc_modo"                              # apagado (default) | sombra | activo
-CLAVE_LINEA = "triaje_atc_linea_texto"                      # SIN default: "614900, opción 5"
+CLAVE_LINEA = "triaje_atc_linea_texto"                      # SIN default: "6149000, opción 5"
 CLAVE_LINEA_EMERGENCIA = "triaje_atc_linea_emergencia_texto"  # SIN default: "1808 (Emergencias 24/7)"
 CLAVE_LINEA_VENTAS = "triaje_atc_linea_ventas_texto"        # SIN default: "614-9002" (informativa)
 CLAVE_CATEGORIAS = "triaje_atc_categorias_activas"          # lista separada por comas
