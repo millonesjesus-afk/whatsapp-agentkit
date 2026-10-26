@@ -311,7 +311,7 @@ def test_ningun_origen_del_asesor_ni_de_plantillas_esta_en_la_lista_de_limpieza(
     assert en_lista == {
         "gabi_respuesta", "gabi_aviso_derivacion", "gabi_aviso_no_legible", "gabi_respaldo_sin_ia",
         "reenganche_inactividad", "agradecimiento_cierre", "triaje_atc", "gabi_oferta_llamada", "triaje_emergencia_gas",
-        "gabi_confirma_llamada", "gabi_calificacion",
+        "gabi_confirma_llamada", "gabi_calificacion", "gabi_adjunto_derivado",
     }
     assert not [o for o in en_lista if o.startswith("asesor_") or o.startswith("plantilla_")]
     assert en_lista <= set(envios.ORIGENES)

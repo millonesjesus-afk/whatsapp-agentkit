@@ -99,6 +99,9 @@ ORIGENES: dict[str, dict] = {
     # propio cliente abrió (gratis dentro de la cuota), igual que `gabi_respuesta`: esenciales. Sin agrupar: «una pregunta por
     # paso» lo garantiza quien las envía (eventos `calificacion_pregunta`).
     "gabi_calificacion": {"esencial": True},
+    # Foto o documento del cliente sin asesor (2026-10-26): Gabi no lo puede leer, así que acusa recibo y deriva el caso a una
+    # persona. Esencial (es la respuesta dentro de la ventana que abrió el cliente) y agrupado: varias fotos seguidas = un aviso.
+    "gabi_adjunto_derivado": {"esencial": True, "agrupar_minutos": 10},
 }
 
 
@@ -107,7 +110,7 @@ ORIGENES: dict[str, dict] = {
 ORIGENES_CON_LIMPIEZA_DE_FORMATO = frozenset({
     "gabi_respuesta", "gabi_aviso_derivacion", "gabi_aviso_no_legible", "gabi_respaldo_sin_ia",
     "reenganche_inactividad", "agradecimiento_cierre", "triaje_atc", "gabi_oferta_llamada",
-    "triaje_emergencia_gas", "gabi_confirma_llamada", "gabi_calificacion",
+    "triaje_emergencia_gas", "gabi_confirma_llamada", "gabi_calificacion", "gabi_adjunto_derivado",
 })
 
 

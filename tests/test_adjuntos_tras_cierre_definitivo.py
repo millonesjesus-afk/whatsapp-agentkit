@@ -30,8 +30,10 @@ MEDIA_POR_TIPO = {
     "video": {"media_id": "M-vid", "mime_type": "video/mp4", "filename": "", "caption": ""},
 }
 TIPOS_CON_ARCHIVO = list(MEDIA_POR_TIPO)
-FRASE_AVISO = {"audio": "escuchar audios", "image": "fotos, videos ni stickers", "sticker": "fotos, videos ni stickers",
-               "video": "fotos, videos ni stickers", "document": "ese tipo de mensaje", "unknown": "ese tipo de mensaje"}
+FRASE_AVISO = {"audio": "escuchar audios", "image": "Recibí tu foto", "sticker": "fotos, videos ni stickers",
+               "video": "fotos, videos ni stickers", "document": "Recibí tu documento", "unknown": "ese tipo de mensaje"}
+# Foto y documento (2026-10-26): Gabi acusa recibo y deriva el caso a un asesor, en vez de pedir que lo escriba.
+TIPOS_QUE_DERIVAN = ("image", "document")
 
 
 @pytest.fixture(autouse=True)
@@ -160,10 +162,15 @@ async def _verificar_estado_coherente(negocio: dict, telefono: str, conv_vieja, 
     assert len(conversaciones) == 2 and conversaciones[0].id == conv_vieja.id
     vieja, nueva = conversaciones
     assert vieja.estado == "cerrada" and nueva.estado == "activa"
-    # Conversation nueva sin asesor, pausa ni cierre; el Lead coincide (ya no hay inconsistencia)
-    assert nueva.asesor_asignado_id is None and nueva.pausado_manual is False and nueva.cerrado_definitivamente_en is None
+    # Conversation nueva sin pausa ni cierre; el Lead coincide (ya no hay inconsistencia). Sin asesor, salvo foto/documento,
+    # que derivan el caso (puede quedar asignado automáticamente).
+    assert nueva.pausado_manual is False and nueva.cerrado_definitivamente_en is None
     lead = await mem.obtener_lead(telefono, negocio_id=negocio["id"])
-    assert lead["asesor_asignado"] is None and lead["pausado_manual"] is False
+    assert lead["pausado_manual"] is False
+    if tipo in TIPOS_QUE_DERIVAN:
+        assert lead["paso_flujo"] == "derivado_asesor"
+    else:
+        assert nueva.asesor_asignado_id is None and lead["asesor_asignado"] is None
     assert lead["cerrado_definitivamente_en"] is None and lead["resultado"] is None
     # Eventos: reapertura (DR-4) y liberación, una sola vez cada uno
     assert len(await _eventos(telefono, "reabierto_por_cliente")) == 1
@@ -360,8 +367,8 @@ async def test_un_error_al_liberar_nunca_impide_guardar_el_adjunto_ni_avisar(mon
         lead = await mem.obtener_lead(telefono, negocio_id=negocio["id"])
         assert lead["asesor_asignado"] == "asesor1" and lead["visto_asesor"] is False
     else:
-        # Se liberó de verdad aunque la relectura falló: el cliente sí recibe el aviso
-        assert len(proveedor.enviados) == 1 and "fotos, videos ni stickers" in proveedor.enviados[0]
+        # Se liberó de verdad aunque la relectura falló: el cliente sí recibe el aviso (foto: acuse de recibo y derivación)
+        assert len(proveedor.enviados) == 1 and "Recibí tu foto" in proveedor.enviados[0]
         monkeypatch.setattr(app_main, "obtener_lead", original_obtener_lead)
         lead = await mem.obtener_lead(telefono, negocio_id=negocio["id"])
-        assert lead["asesor_asignado"] is None and lead["cerrado_definitivamente_en"] is None
+        assert lead["cerrado_definitivamente_en"] is None and lead["paso_flujo"] == "derivado_asesor"

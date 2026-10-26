@@ -212,8 +212,8 @@ async def test_probable_cierre_etiqueta_pero_no_oculta_ni_cambia_el_lead():
     await _mensaje(negocio, "51910000011", "user", "Muchas gracias", _h(1))
     antes = await _estado_lead("51910000011")
 
-    lista = await _esperando(negocio)
-    assert len(lista) == 1 and lista[0]["probable_cierre"] is True
+    # 2026-10-26: una cortesía que es lo único sin respuesta ya no deja al cliente esperando (y no cambia el lead)
+    assert await _esperando(negocio) == []
     assert await _estado_lead("51910000011") == antes  # nunca cierra ni cambia nada
 
 
@@ -257,7 +257,8 @@ async def test_orden_abiertas_por_menor_tiempo_restante_luego_cerradas_recientes
         await _mensaje(negocio, tel, "user", texto, hace)
 
     orden = [c["telefono"] for c in await _esperando(negocio)]
-    assert orden == ["51910000021", "51910000020", "51910000024", "51910000022", "51910000023", "51910000025"]
+    # E y F (cortesía como único mensaje sin respuesta) ya no esperan desde 2026-10-26
+    assert orden == ["51910000021", "51910000020", "51910000022", "51910000023"]
     assert [c["telefono"] for c in await _esperando(negocio, limite=2)] == orden[:2]
 
 

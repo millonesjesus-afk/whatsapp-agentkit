@@ -511,3 +511,12 @@ async def test_anuncio_sin_pistas_ni_campana_pregunta_el_producto_con_la_lista(m
     negocio, proveedor, gabi = await _entrar(monkeypatch, _tel(23), "Hola", _referral("AD-CG4", "Financia tu artefacto"))
     assert gabi.llamadas == 0 and proveedor.interactivos[-1]["type"] == "list"
     assert _cuerpo(proveedor).endswith("¿Qué gasodoméstico te interesa?")
+
+
+def test_la_etapa_final_pide_un_mensaje_corto_sin_repetir_la_recomendacion():
+    estado = {"preguntas": [], "conteo": {}, "respuestas": {"gas": "si", "equipo": "ambos", "titular": "si", "tamano": "1", "dato": "dni"}}
+    b = cg.bloque_contexto(estado, va_la_primera_pregunta=False, tipo_producto="terma", pidio_el_precio=True)
+    assert "máximo unos 300 caracteres" in b and "UN solo aviso" in b
+    assert "como mucho dos plazos" in b.replace("\n", " ") or "Da como mucho dos" in b
+    assert "YA le diste la recomendación" in b and "NO la repitas" in b
+    assert "no es una aprobación" not in b                                  # el aviso extra que se repetía

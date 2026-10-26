@@ -630,6 +630,53 @@ async def _registrar_referral_seguro(msg, canal: dict | None, texto: str = "") -
         logger.error(f"No se pudo registrar la atribución del referral de {msg.telefono}: {e}")
 
 
+# Foto o documento del cliente (auditoría 2026-10-26): suele ser el recibo, el DNI, la foto del equipo o de un reclamo. Pedirle
+# que «lo escriba» lo frenaba; ahora Gabi acusa recibo y pasa el caso a un asesor, que sí puede verlo. Audios, videos y stickers
+# siguen con el aviso de siempre.
+TIPOS_ADJUNTO_QUE_DERIVAN = ("image", "document")
+_NOMBRE_ADJUNTO = {"image": "tu foto", "document": "tu documento"}
+
+
+async def _derivar_por_adjunto(msg, canal: dict | None, lead: dict, contenido: str, archivo_id: int) -> None:
+    """Guarda el adjunto, deriva el caso a un asesor (mismo criterio que la derivación normal de Gabi: asesor automático si hay,
+    aviso al equipo una vez por ciclo) y le dice al cliente que lo recibió y quién lo revisa. No llama a Claude."""
+    telefono = msg.telefono
+    negocio_id = canal.get("negocio_id") if canal else None
+    mensaje_cliente = await servicio_conversacion.guardar_mensaje(
+        telefono, "user", contenido, negocio_id=negocio_id, archivo_id=archivo_id, mensaje_id_meta=msg.mensaje_id or None,
+    )
+    await gestor_conexiones.emitir_mensaje_nuevo(mensaje_cliente["conversation_id"])
+
+    # La derivación nunca puede impedir el aviso al cliente: si algo falla se registra y el adjunto ya quedó guardado.
+    asesor = None
+    try:
+        ya_estaba_derivado = lead.get("paso_flujo") == "derivado_asesor"
+        await actualizar_lead(telefono, paso_flujo="derivado_asesor")
+        asesor = await servicio_comercial.elegir_asesor_automatico(lead.get("interes") or "", negocio_id)
+        if asesor:
+            await asignar_asesor_a_lead(telefono, asesor, automatico=True)
+        if not ya_estaba_derivado or asesor:
+            await notificar_lead_derivado(telefono, lead, contenido)
+    except Exception:
+        logger.exception(f"Adjunto de {telefono}: no se pudo completar la derivación")
+
+    estado = await obtener_estado_horario_atencion(negocio_id)
+    aviso = servicio_inteligencia.obtener_mensaje_derivacion(
+        estado["dentro_de_horario"], estado.get("proxima_apertura_texto") or None,
+        cal_negocio.describir_motivo(estado.get("motivo"), estado.get("nombre")) or None,
+    )
+    texto = f"¡Gracias! Recibí {_NOMBRE_ADJUNTO.get(msg.tipo, 'tu archivo')} 📎 {aviso}"
+    resultado = await envios.enviar_texto(proveedor, telefono, texto, origen="gabi_adjunto_derivado", canal=canal)
+    if resultado.bloqueado:
+        return  # varias fotos seguidas: ya se avisó hace un momento
+    _enviado, wamid = resultado
+    guardado = await servicio_conversacion.guardar_mensaje(
+        telefono, "assistant", texto, negocio_id=negocio_id, mensaje_id_meta=wamid, estado_envio=resultado.estado_envio,
+    )
+    await gestor_conexiones.emitir_mensaje_nuevo(guardado["conversation_id"])
+    logger.info(f"Adjunto ({msg.tipo}) de {telefono}: caso derivado a {asesor or 'sin asesor disponible'}")
+
+
 async def _atender_mensaje_no_legible(msg, canal: dict | None, contenido: str, archivo_id: int | None = None) -> None:
     """Un mensaje que Gabi no puede leer (nota de voz, imagen, sticker, video/GIF,
     documento, tipo desconocido). Siempre se guarda —con su archivo, si lo hay—
@@ -669,6 +716,9 @@ async def _atender_mensaje_no_legible(msg, canal: dict | None, contenido: str, a
         await respaldo_sin_ia.derivar_por_falla_ia(
             msg.telefono, canal, (await circuito_ia.obtener_estado()).get("motivo") or "circuito_abierto", proveedor=proveedor,
         )
+        return
+    if lead and archivo_id and msg.tipo in TIPOS_ADJUNTO_QUE_DERIVAN:
+        await _derivar_por_adjunto(msg, canal, lead, contenido, archivo_id)
         return
     respuesta = servicio_inteligencia.obtener_mensaje_no_soportado(msg.tipo)
     await servicio_conversacion.guardar_mensaje(

@@ -8404,8 +8404,8 @@ async def listar_clientes_esperando(
 
     Orden: primero ventana abierta (la que vence antes, primero); luego
     ventanas cerradas (la más reciente primero). Dentro de cada grupo los
-    `probable_cierre` van al final. `probable_cierre` solo etiqueta: nunca
-    oculta el ítem ni toca el estado del lead."""
+    `probable_cierre` van al final. `probable_cierre` no toca el estado del lead; desde 2026-10-26 sí oculta el ítem
+    cuando esa cortesía es lo único sin respuesta (ver abajo)."""
     ahora = ahora or datetime.utcnow()
     async with async_session() as session:
         conversaciones_activas = select(Conversation.id).where(
@@ -8492,6 +8492,14 @@ async def listar_clientes_esperando(
     )
     for it in items:
         it["esperando_desde"] = desde_por_conversacion.get(it["conversation_id"]) or it["ultimo_mensaje_cliente_en"]
+    if con_desde:
+        # 2026-10-26 (auditoría de 400 chats, pedido del dueño): un «gracias»/«ok»/👍 que llega DESPUÉS de una respuesta
+        # (es lo único sin contestar) no deja al cliente esperando. Si el cliente escribió algo más antes y sigue sin
+        # respuesta, el caso sigue apareciendo (con la etiqueta de probable cierre).
+        items = [
+            it for it in items
+            if not (it["probable_cierre"] and it["esperando_desde"] == it["ultimo_mensaje_cliente_en"])
+        ]
 
     def _clave(it: dict):
         ts = (it["ultimo_mensaje_cliente_en"] - datetime(1970, 1, 1)).total_seconds()

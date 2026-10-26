@@ -448,6 +448,15 @@ def obtener_mensaje_sin_ia(
     return re.sub(r"(?<!\.)\.\.(?!\.)", ".", texto)
 
 
+# Auditoría de 400 chats (2026-10-26): el 5 % de los mensajes de Gabi hacía dos o más preguntas a la vez, y lo que más hace
+# responder al cliente es cerrar con UNA pregunta clara. Va en los bloques dinámicos (no en el system prompt) para no romper
+# la caché del prompt.
+REGLA_FORMA_DEL_MENSAJE = (
+    "Forma de tu respuesta: haz como máximo UNA pregunta, al final del mensaje (si necesitas dos datos, pide uno y el otro "
+    "después). Frases cortas y sin repetir lo que ya dijiste en esta conversación."
+)
+
+
 async def _armar_bloques_contexto(
     mensaje: str, historial: list[dict], lead: dict | None, negocio_id: str | None,
 ) -> list[str]:
@@ -472,6 +481,7 @@ async def _armar_bloques_contexto(
         if estado_horario.get("proxima_apertura_texto"):
             bloque_horario += f" Los asesores humanos vuelven a atender {estado_horario['proxima_apertura_texto']}."
     bloques.append(bloque_horario)
+    bloques.append(REGLA_FORMA_DEL_MENSAJE)
 
     codigos_propios = set()
     hay_promo_de_campana = False

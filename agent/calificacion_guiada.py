@@ -501,8 +501,8 @@ def bloque_contexto(
     if etapa_consultiva(estado, tipo_producto):
         precio = (
             "El cliente pidió el precio: dáselo ahora si está en el contexto o el catálogo (si no está, dile que el asesor se lo confirma). "
-            "Si das cuotas, el plazo máximo es de 60 cuotas (meses): no digas que el máximo es 36 u otro plazo, y aclara que la cuota "
-            "exacta la confirma el asesor."
+            "Si das cuotas, el plazo máximo es de 60 cuotas (meses): no digas que el máximo es 36 u otro plazo. Da como mucho dos "
+            "plazos (por ejemplo 12 y 60), no la tabla completa."
             if pidio_el_precio else "No menciones precios ni cuotas: el cliente no los pidió; de eso se encarga el asesor."
         )
         faltantes = servicios_faltantes(tipo_producto, respuestas)
@@ -525,9 +525,15 @@ def bloque_contexto(
             f"(2) {precio} "
             + servicio +
             "(3) Pide su nombre (solo si no figura en los datos ya conocidos). " + regla_del_dato(respuestas.get(PASO_DATO)) + " "
-            "Aclara que ese dato solo sirve para que un asesor inicie la evaluación y no es una aprobación. "
             "(4) No hagas ninguna otra pregunta. En cuanto te dé esos datos, derívalo al asesor sin pedirle permiso; cuando te escriba un "
-            "número, da por hecho que es el dato que eligió."
+            "número, da por hecho que es el dato que eligió. "
+            "FORMA: máximo unos 300 caracteres, frases cortas y UN solo aviso en todo el mensaje (por ejemplo «el asesor te confirma "
+            "la cuota exacta»); no agregues más aclaraciones ni repitas lo que el cliente ya respondió con los botones."
+        )
+        partes.append(
+            "Si en esta conversación YA le diste la recomendación (producto, precio o cuotas), NO la repitas ni la resumas otra vez: "
+            "responde solo lo nuevo en una o dos frases (por ejemplo, al recibir sus datos: agradece y confirma que un asesor sigue "
+            "la evaluación por este chat)."
         )
     return "\n".join(partes) or None
 
