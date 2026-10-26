@@ -673,6 +673,10 @@ async def procesar_respuesta(telefono: str, canal: dict | None, lead: dict | Non
             return False
         paso, valor = parseado
         estado = await mem.obtener_estado_calificacion(telefono)
+        if paso in estado.get("respuestas", {}):
+            # Los botones de WhatsApp siguen tocables para siempre: un toque en una pregunta que ya respondió no repite el flujo
+            # (no se vuelve a mandar la pregunta siguiente); el turno sigue con Gabi como un mensaje de texto.
+            return False
         if paso == PASO_PRODUCTO and valor in _PRODUCTOS_ELEGIBLES:
             tipo = valor
         else:
