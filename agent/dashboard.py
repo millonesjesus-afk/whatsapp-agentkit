@@ -99,6 +99,7 @@ from agent import calendario_negocio as cal_negocio
 from agent import llamadas
 from agent import derivacion_automatica
 from agent import origen_conversacion
+from agent.analitica_tendencia import partir_periodo
 from agent import memory as mem
 from agent.memory import obtener_estado_ventana
 
@@ -8792,6 +8793,51 @@ async def analitica_ventas_json(
         "periodo": {"desde": desde, "hasta": hasta}, **datos,
         "ventas": [{**v, "fecha_cierre": iso_utc(v["fecha_cierre"])} for v in datos["ventas"]],
     })
+
+
+@router.get("/analitica/tendencia.json")
+async def analitica_tendencia_json(
+    usuario: dict = Depends(_usuario_actual),
+    desde: str = "",
+    hasta: str = "",
+    asesor: str = "",
+    campana_id: int | None = None,
+    empresa: str = "",
+    formato: str = "",
+    producto: str = "",
+):
+    """Tendencia del período (2026-10-26): clientes nuevos, casos comerciales, ventas y valor vendido por día, semana o
+    mes (según lo largo del período). Cada tramo usa EXACTAMENTE las mismas funciones que el Resumen de `analitica.json`
+    sobre su propio rango, y los tramos no se solapan ni dejan huecos: la suma de los tramos es el total del período.
+    Mismo alcance por rol y mismos filtros que `analitica.json`. Un tramo `parcial` es uno que el período recorta."""
+    vision_total = usuario["rol"] in ROLES_CON_VISION_TOTAL
+    asesor_scope = asesor if (vision_total and asesor) else (None if vision_total else usuario["username"])
+    if not desde or not hasta:
+        desde, hasta = _mes_actual_lima()
+    try:
+        granularidad, tramos = partir_periodo(desde, hasta)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    ids_conv = await ids_conversacion_de_segmento(usuario["negocio_id"], *_validar_segmento_anuncios(empresa, formato, producto))
+
+    puntos = []
+    for t in tramos:
+        inicio, fin = rango_periodo_utc(t["desde"], t["hasta"])
+        flujo = await contar_flujo_periodo(
+            usuario["negocio_id"], inicio, fin, asesor=asesor_scope, campana_id=campana_id, ids_conversacion=ids_conv,
+        )
+        valor = await resumen_ventas_periodo(
+            usuario["negocio_id"], inicio, fin, asesor=asesor_scope, campana_id=campana_id, ids_conversacion=ids_conv,
+        )
+        puntos.append({
+            **t,
+            "clientes": flujo["leads"],
+            "casos": flujo["oportunidades"],
+            "ventas": flujo["ventas"],
+            "valor": valor["monto"],
+            "ventas_excluidas": valor["ventas_excluidas"],
+        })
+    return JSONResponse({"periodo": {"desde": desde, "hasta": hasta}, "granularidad": granularidad, "puntos": puntos})
 
 
 @router.post("/analitica/anuncios/empresa.json")
