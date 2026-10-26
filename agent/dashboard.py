@@ -10673,6 +10673,17 @@ def _datos_producto_del_form(form: dict) -> dict:
     return datos
 
 
+CAMPOS_FEE_PRODUCTO = ("fee_prv", "fee_clda")
+
+
+def _sin_fee_si_no_es_admin(producto: dict, usuario: dict) -> dict:
+    """Los fee (proveedor y Cálidda) son de uso interno de la administración: los demás roles no los reciben
+    (ni en el listado, ni en la ficha), así no dependen de que el frontend los esconda."""
+    if usuario.get("rol") == "admin":
+        return producto
+    return {k: v for k, v in producto.items() if k not in CAMPOS_FEE_PRODUCTO}
+
+
 @router.get("/productos")
 async def listar_productos_ruta(
     q: str = "", canal: str = "", marca: str = "", tipo: str = "", activo: str = "",
@@ -10691,7 +10702,7 @@ async def listar_productos_ruta(
         pagina=pagina, por_pagina=por_pagina, negocio_id=usuario["negocio_id"],
     )
     return JSONResponse({
-        "productos": productos, "total": total,
+        "productos": [_sin_fee_si_no_es_admin(p, usuario) for p in productos], "total": total,
         "pagina": max(1, pagina), "por_pagina": por_pagina,
     })
 
@@ -10701,7 +10712,7 @@ async def obtener_producto_ruta(id: int, usuario: dict = Depends(_usuario_actual
     producto = await obtener_producto(id, usuario["negocio_id"])
     if producto is None:
         raise HTTPException(status_code=404, detail="Producto no encontrado")
-    return JSONResponse(producto)
+    return JSONResponse(_sin_fee_si_no_es_admin(producto, usuario))
 
 
 @router.get("/productos/{id}/historial")
@@ -10712,7 +10723,10 @@ async def historial_producto_ruta(id: int, usuario: dict = Depends(_usuario_actu
     (Explainability First)."""
     if await obtener_producto(id, usuario["negocio_id"]) is None:
         raise HTTPException(status_code=404, detail="Producto no encontrado")
-    return JSONResponse({"historial": await listar_historial_producto(id)})
+    historial = await listar_historial_producto(id)
+    if usuario.get("rol") != "admin":
+        historial = [h for h in historial if h["campo"] not in CAMPOS_FEE_PRODUCTO]
+    return JSONResponse({"historial": historial})
 
 
 def _version_del_body(body: dict) -> int:
