@@ -309,8 +309,10 @@ async def test_camino_con_gas_terma_hasta_la_etapa_consultiva(monkeypatch):
     final = [b for b in bloques if "ETAPA FINAL" in b]
     assert final and "No menciones precios ni cuotas: el cliente no los pidió" in final[0] and "2 baños" in final[0]
     # cliente que SÍ pidió el precio (aunque sea con el texto prellenado): la IA se lo da en esta etapa
-    historial = [{"role": "user", "content": "¿Cuánto cuesta y cómo lo pago?"}]
-    bloques = await brain._armar_bloques_contexto("2 baños", historial, lead, negocio["id"])
+    # (el contexto lee los mensajes guardados de ESTA conversación, no el historial que se le pase)
+    await mem.guardar_mensaje(tel, "user", "¿Cuánto cuesta y cómo lo pago?", negocio_id=negocio["id"])
+    await mem.guardar_mensaje(tel, "user", "2 baños", negocio_id=negocio["id"])
+    bloques = await brain._armar_bloques_contexto("2 baños", [], lead, negocio["id"])
     assert any("El cliente pidió el precio: dáselo ahora" in b for b in bloques)
 
 
