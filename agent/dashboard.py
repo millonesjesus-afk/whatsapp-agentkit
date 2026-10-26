@@ -66,6 +66,7 @@ from agent.memory import (
     rendimiento_por_anuncio, guardar_empresa_grupo, aplicar_empresas_sugeridas, ventas_detalle_periodo,
     ids_conversacion_de_segmento, listar_empresas_anuncio, FORMATOS_FILTRO_ANUNCIO, PRODUCTOS_FILTRO_ANUNCIO,
     listar_atribucion_sin_campana_periodo, cerrar_lead_definitivamente_via_conversation, reabrir_caso_cerrado, MOTIVO_REABRIR_MAXIMO, CIERRE_GRACIA_HORAS_POR_DEFECTO,
+    obtener_metas, guardar_metas,
     rango_periodo_utc, contar_flujo_periodo, calcular_embudo_comercial, contar_oportunidades_por_asesor,
     distribucion_resultados_periodo, resumen_ventas_periodo, productos_vendidos_periodo,
     cambiar_password, contar_conversations_activas_por_asesor, RESULTADOS_CERRADOS, listar_leads_agendados,
@@ -103,6 +104,7 @@ from agent import derivacion_automatica
 from agent import origen_conversacion
 from agent.analitica_tendencia import partir_periodo
 from agent import analitica_senales
+from agent import analitica_metas
 from agent import memory as mem
 from agent.calidad_catalogo import avisos_de_calidad_catalogo
 from agent.memory import FILAS_CATALOGO_EXCLUIDAS, _fila_csv_a_datos
@@ -8815,6 +8817,95 @@ async def analitica_tendencia_json(
             "ventas_excluidas": valor["ventas_excluidas"],
         })
     return JSONResponse({"periodo": {"desde": desde, "hasta": hasta}, "granularidad": granularidad, "puntos": puntos})
+
+
+def _hoy_lima() -> str:
+    return (datetime.utcnow() - timedelta(hours=5)).strftime("%Y-%m-%d")
+
+
+@router.get("/analitica/metas.json")
+async def analitica_metas_json(usuario: dict = Depends(_usuario_actual), mes: str = "", hasta: str = ""):
+    """Metas del mes (2026-10-27): la del negocio y la de cada asesor, con lo logrado, el ritmo y la proyección lineal al
+    cierre del mes. El mes es `mes` (AAAA-MM) o, si no llega, el del día `hasta` del período elegido, o el mes en curso.
+    Lo logrado son las ventas CERRADAS en el mes completo, con la misma definición que «Ventas», y NO cambia con los
+    filtros de empresa, formato o campaña. Alcance por rol: un Asesor solo ve su propia meta (ni la del negocio ni la de
+    otros); solo el admin puede editarlas (`puede_editar`)."""
+    try:
+        mes = analitica_metas.validar_mes(mes) if mes else analitica_metas.mes_de(hasta or _hoy_lima())
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    negocio_id = usuario["negocio_id"]
+    vision_total = usuario["rol"] in ROLES_CON_VISION_TOTAL
+    desde_mes, hasta_mes = analitica_metas.rango_del_mes(mes)
+    inicio, fin = rango_periodo_utc(desde_mes, hasta_mes)
+    hoy = _hoy_lima()
+    metas = await obtener_metas(negocio_id, mes)
+
+    asesores = await listar_asesores(negocio_id)
+    if not vision_total:
+        asesores = [a for a in asesores if a["username"] == usuario["username"]]
+    usernames = [a["username"] for a in asesores]
+    por_asesor = (
+        await contar_oportunidades_por_asesor(negocio_id, usernames, inicio, fin) if usernames else {}
+    )
+
+    def _con_avance(objetivo: float | None, logrado: int) -> dict:
+        base = {"objetivo": objetivo, "logrado": logrado}
+        return {**base, **analitica_metas.avance(objetivo, logrado, mes, hoy)} if objetivo else base
+
+    total = None
+    if vision_total:
+        logrado_total = (await contar_flujo_periodo(negocio_id, inicio, fin))["ventas"]
+        total = _con_avance(metas.get(""), logrado_total)
+    filas = [
+        {"username": a["username"], "nombre": a["nombre"],
+         **_con_avance(metas.get(a["username"]), por_asesor.get(a["username"], {}).get("ventas", 0))}
+        for a in asesores
+    ]
+    suma_asesores = sum(metas.get(a["username"], 0) for a in asesores)
+    return JSONResponse({
+        "mes": mes, "nombre_mes": analitica_metas.nombre_mes(mes), "tipo": "ventas",
+        "desde": desde_mes, "hasta": hasta_mes, "hoy": hoy,
+        "total": total, "asesores": filas,
+        "suma_asesores": suma_asesores if vision_total else None,
+        # La meta total es independiente: si no coincide con la suma de las de los asesores, la pantalla lo avisa.
+        "suma_distinta": bool(vision_total and total and total["objetivo"] and suma_asesores and suma_asesores != total["objetivo"]),
+        "puede_editar": usuario["rol"] == "admin",
+    })
+
+
+@router.post("/analitica/metas.json")
+async def analitica_metas_guardar_json(
+    request: Request,
+    usuario: dict = Depends(servicio_identidad.requiere_rol("admin")),
+    _csrf: None = Depends(verificar_csrf),
+):
+    """Admin. Pone o quita metas de un mes: `{mes, metas: [{asesor, objetivo}]}`; `asesor` vacío es la meta del negocio
+    y `objetivo` vacío o 0 la borra. Solo se aceptan asesores del negocio y objetivos enteros entre 0 y 100 000."""
+    cuerpo = await request.json()
+    if not isinstance(cuerpo, dict) or not isinstance(cuerpo.get("metas"), list):
+        raise HTTPException(status_code=400, detail="Se espera {mes, metas: [...]}.")
+    try:
+        mes = analitica_metas.validar_mes(str(cuerpo.get("mes") or ""))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    validos = {a["username"] for a in await listar_asesores(usuario["negocio_id"])} | {""}
+    metas: list[tuple[str, float | None]] = []
+    for m in cuerpo["metas"]:
+        if not isinstance(m, dict):
+            raise HTTPException(status_code=400, detail="Cada meta debe ser un objeto.")
+        asesor = str(m.get("asesor") or "")
+        if asesor not in validos:
+            raise HTTPException(status_code=400, detail=f"Asesor desconocido: {asesor}.")
+        crudo = m.get("objetivo")
+        if crudo in (None, ""):
+            metas.append((asesor, None))
+            continue
+        if isinstance(crudo, bool) or not isinstance(crudo, (int, float)) or crudo < 0 or crudo > 100_000 or int(crudo) != crudo:
+            raise HTTPException(status_code=400, detail="El objetivo debe ser un número entero entre 0 y 100 000.")
+        metas.append((asesor, float(crudo)))
+    vigentes = await guardar_metas(usuario["negocio_id"], mes, metas, autor=usuario.get("username"))
+    return JSONResponse({"ok": True, "mes": mes, "metas": vigentes})
 
 
 @router.post("/analitica/anuncios/empresa.json")

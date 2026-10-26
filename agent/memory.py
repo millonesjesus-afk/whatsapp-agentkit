@@ -2077,6 +2077,53 @@ async def listar_empresas_anuncio(negocio_id: str) -> list[str]:
     return sorted({*config, *etiquetadas})
 
 
+async def obtener_metas(negocio_id: str, mes: str, tipo: str = "ventas") -> dict[str, float]:
+    """{asesor: objetivo} del mes (`""` = meta total del negocio). Solo lectura."""
+    async with async_session() as session:
+        filas = (await session.execute(
+            select(MetaVentas.asesor, MetaVentas.objetivo).where(
+                MetaVentas.negocio_id == negocio_id, MetaVentas.mes == mes, MetaVentas.tipo == tipo,
+            )
+        )).all()
+    return {asesor: float(objetivo) for asesor, objetivo in filas}
+
+
+async def guardar_metas(
+    negocio_id: str, mes: str, metas: list[tuple[str, float | None]], tipo: str = "ventas", autor: str | None = None,
+) -> dict[str, float]:
+    """Pone o quita metas del mes: cada par es (asesor o `""` para el total, objetivo). Objetivo `None` o 0 la borra.
+    Queda en el registro de auditoría con lo que había antes y lo que quedó. Devuelve las metas vigentes del mes."""
+    antes = await obtener_metas(negocio_id, mes, tipo)
+    async with async_session() as session:
+        for asesor, objetivo in metas:
+            fila = (await session.execute(
+                select(MetaVentas).where(
+                    MetaVentas.negocio_id == negocio_id, MetaVentas.mes == mes, MetaVentas.asesor == asesor,
+                    MetaVentas.tipo == tipo,
+                )
+            )).scalars().first()
+            if not objetivo:
+                if fila is not None:
+                    await session.delete(fila)
+                continue
+            if fila is None:
+                session.add(MetaVentas(
+                    negocio_id=negocio_id, mes=mes, asesor=asesor, tipo=tipo, objetivo=float(objetivo), actualizado_por=autor,
+                ))
+            else:
+                fila.objetivo = float(objetivo)
+                fila.actualizado = datetime.utcnow()
+                fila.actualizado_por = autor
+        await session.commit()
+    despues = await obtener_metas(negocio_id, mes, tipo)
+    if despues != antes:
+        await registrar_auditoria(
+            "metas_actualizadas", actor=autor, negocio_id=negocio_id, entidad_tipo="metas_ventas", entidad_id=f"{mes}:{tipo}",
+            payload={"mes": mes, "tipo": tipo, "antes": antes, "despues": despues},
+        )
+    return despues
+
+
 async def guardar_empresa_grupo(negocio_id: str, clave_grupo: str, empresa: str, autor: str | None = None) -> str | None:
     """Pone (o, con texto vacío, quita) la empresa de un grupo. Devuelve la empresa guardada o None."""
     clave_grupo = (clave_grupo or "").strip()
@@ -4117,6 +4164,26 @@ class AnuncioCampana(Base):
 
     __table_args__ = (
         Index("ix_anuncio_campana_negocio_source", "negocio_id", "source_id", unique=True),
+    )
+
+
+class MetaVentas(Base):
+    """Meta mensual de Analítica (2026-10-27): la pone el admin para el negocio (`asesor` vacío) y para cada asesor. La
+    meta total es INDEPENDIENTE de la suma de las de los asesores (hay ventas sin asesor). `tipo` deja la tabla lista
+    para metas de valor vendido (S/); hoy la pantalla solo usa «ventas» (cantidad)."""
+    __tablename__ = "metas_ventas"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_generar_uuid)
+    negocio_id: Mapped[str] = mapped_column(String(36), ForeignKey("negocios.id"), nullable=False, index=True)
+    mes: Mapped[str] = mapped_column(String(7))  # AAAA-MM
+    asesor: Mapped[str] = mapped_column(String(50), default="")
+    tipo: Mapped[str] = mapped_column(String(10), default="ventas")
+    objetivo: Mapped[float] = mapped_column(Float)
+    actualizado: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    actualizado_por: Mapped[str | None] = mapped_column(String(50), nullable=True)
+
+    __table_args__ = (
+        Index("ix_metas_ventas_negocio_mes_asesor_tipo", "negocio_id", "mes", "asesor", "tipo", unique=True),
     )
 
 
