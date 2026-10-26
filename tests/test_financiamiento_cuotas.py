@@ -387,3 +387,12 @@ async def test_camino_lead_sin_opportunity_tambien_congela_el_pacto():
     async with mem.async_session() as session:
         lead = await session.get(mem.Lead, telefono)
     assert abs(float(lead.cuota_pactada) - 87.20) < 0.05 and lead.tea_pactada == "0.4"
+
+
+def test_formatear_producto_muestra_categoria_y_comentarios_pero_nunca_los_fee():
+    from agent.tools import formatear_producto
+    p = {"MARCA": "Mabe", "DESCRIPCIÓN": "SECADORA MABE X", "PRECIO": "2999", "CANAL": "CANALES PROPIOS", "TIPO": "SECADORA",
+         "SUB TIPO": "SECADORA A GAS", "COMENTARIOS": "PROMOCIONAL MES", "FEE PRV": "0.18", "FEE CLDA": "0.18"}
+    t = formatear_producto(p, 0.40, 0.18)
+    assert "Categoría: SECADORA / SECADORA A GAS" in t and "Comentarios del producto: PROMOCIONAL MES" in t
+    assert "0.18" not in t and "FEE" not in t.upper()

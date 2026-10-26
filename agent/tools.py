@@ -424,7 +424,17 @@ def formatear_producto(producto: dict, tea: float, igv: float) -> str:
         for plazo in PLAZOS_A_MOSTRAR
     ] if monto != float("inf") else []
 
+    tipo = (producto.get("TIPO") or "").strip()
+    sub_tipo = (producto.get("SUB TIPO") or "").strip()
+    comentarios = (producto.get("COMENTARIOS") or "").strip()
+
     lineas = [f"{marca} — {descripcion}", f"Precio: S/ {precio}", f"Canal: {canal}"]
+    # TIPO/SUB TIPO solo si aportan algo distinto de lo que ya dice la descripción; los FEE nunca salen (solo admin).
+    categoria = " / ".join(dict.fromkeys(t for t in (tipo, sub_tipo) if t))
+    if categoria and categoria.lower() not in descripcion.lower():
+        lineas.append(f"Categoría: {categoria}")
+    if comentarios:
+        lineas.append(f"Comentarios del producto: {comentarios}")
     if combo:
         lineas.append(f"Combo: incluye {combo}")
     if incluye_conexion:
