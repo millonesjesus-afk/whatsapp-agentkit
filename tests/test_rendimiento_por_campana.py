@@ -67,6 +67,11 @@ async def test_agrupa_por_campana_con_sin_asignar_y_organicos_y_cuadra_con_las_v
     assert r["resumen"]["ventas_periodo"] == r["resumen"]["ventas_en_filas"] == 3
     assert sum(c["conversaciones"] for c in r["campanas"]) == r["resumen"]["conversaciones"] == 8
     assert r["resumen"]["clientes"] == 8
+    # El detalle de ventas nombra la campaña igual que esta tabla (así el botón «ventas» de cada fila abre las mismas)
+    detalle = (await mem.ventas_detalle_periodo(negocio["id"], inicio, fin))["ventas"]
+    assert sorted(((v["origen"], v["campana"]) for v in detalle), key=lambda t: (t[0], t[1] or "")) == [
+        ("anuncio", None), ("anuncio", "Estratek - Reel Terma 1"), ("sin_origen", None),
+    ]
 
 
 async def test_un_cliente_que_vuelve_por_otra_campana_cuenta_como_cliente_en_cada_una():

@@ -1982,6 +1982,9 @@ async def ventas_detalle_periodo(
         campanas = {c.id: c.nombre for c in (await session.execute(
             select(Campana).where(Campana.negocio_id == negocio_id)
         )).scalars().all()}
+        regla_nombre = {src: campanas.get(cid) for src, cid in (await session.execute(
+            select(AnuncioCampana.source_id, AnuncioCampana.campana_id).where(AnuncioCampana.negocio_id == negocio_id)
+        )).all()}
         etiquetas = {e.clave_grupo: e.empresa for e in (await session.execute(
             select(EtiquetaGrupoAnuncio).where(EtiquetaGrupoAnuncio.negocio_id == negocio_id)
         )).scalars().all()}
@@ -2010,7 +2013,8 @@ async def ventas_detalle_periodo(
             "opportunity_id": opp_id, "fecha_cierre": cierre, "origen": origen, "productos": productos, "valor": valor_txt,
             "grupo_clave": clave, "grupo_titulo": (i["headline"] or "(sin título)") if i else None,
             "formato": formato_de_anuncio(i["media_type"]) if i else None, "empresa": etiquetas.get(clave) if clave else None,
-            "source_id": source_id if i else None, "url": i["url"] if i else None, "campana": nombre_campana,
+            "source_id": source_id if i else None, "url": i["url"] if i else None,
+            "campana": nombre_campana or (regla_nombre.get(source_id) if i else None),
             "red": red_conv.get(conversation_id, "otra") if i else None,
             "asesor": asesor_id, "telefono": "…" + (telefonos.get(contact_id) or "")[-4:],
         })
