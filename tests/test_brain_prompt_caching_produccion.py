@@ -52,7 +52,18 @@ async def test_modo_produccion_el_texto_del_system_no_cambia():
         await brain.generar_respuesta("Hola", historial=[], modo="produccion", negocio_id=None)
 
     system_enviado = mock_create.await_args.kwargs["system"]
-    assert system_enviado[0]["text"] == esperado
+    # 2026-10-26: al final va la guía fija de forma de los mensajes (también entra en la caché).
+    assert system_enviado[0]["text"] == f"{esperado}\n\n## Forma de los mensajes\n{brain.REGLA_FORMA_DEL_MENSAJE}"
+
+
+async def test_la_guia_de_forma_va_en_el_system_y_no_en_el_turno_del_cliente():
+    with patch.object(brain.client.messages, "create", new=AsyncMock(return_value=_respuesta_falsa())) as mock_create:
+        await brain.generar_respuesta("Hola", historial=[], modo="produccion", negocio_id=None)
+    kwargs = mock_create.await_args.kwargs
+    assert kwargs["system"][0]["text"].endswith(brain.REGLA_FORMA_DEL_MENSAJE)
+    assert brain.REGLA_FORMA_DEL_MENSAJE not in str(kwargs["messages"])
+    regla = brain.REGLA_FORMA_DEL_MENSAJE
+    assert "UNA pregunta" in regla and "SIN pregunta final" in regla and "UN producto" in regla
 
 
 async def test_historial_vacio_no_rompe_nada():

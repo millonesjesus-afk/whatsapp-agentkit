@@ -448,12 +448,19 @@ def obtener_mensaje_sin_ia(
     return re.sub(r"(?<!\.)\.\.(?!\.)", ".", texto)
 
 
-# Auditoría de 400 chats (2026-10-26): el 5 % de los mensajes de Gabi hacía dos o más preguntas a la vez, y lo que más hace
-# responder al cliente es cerrar con UNA pregunta clara. Va en los bloques dinámicos (no en el system prompt) para no romper
-# la caché del prompt.
+# Guía de forma del flujo Maiek (auditorías de 400 y 500 chats, 2026-10-26). Lo que más hace responder al cliente es cerrar
+# con UNA pregunta clara; el largo no lo hace responder más y sí lo hace leer más. Se medía: 40 % de los mensajes abría con
+# una muletilla («¡Perfecto, Ana!»), 25 % preguntaba «¿A o B?», 47 % de los de precio listaba 2+ productos, 29 % de las
+# derivaciones terminaba con una pregunta, y se repetían el horario, el teléfono y el aviso de «no es una aprobación».
+# Se agrega al FINAL del system prompt en `generar_respuesta` (texto fijo: entra en la caché del prompt y casi no cuesta).
 REGLA_FORMA_DEL_MENSAJE = (
-    "Forma de tu respuesta: haz como máximo UNA pregunta, al final del mensaje (si necesitas dos datos, pide uno y el otro "
-    "después). Frases cortas y sin repetir lo que ya dijiste en esta conversación."
+    "Forma de tu respuesta (WhatsApp, directo y amable): "
+    "1) Ve al grano: no abras repitiendo lo que dijo el cliente ni con «¡Perfecto!/¡Excelente!»; un saludo corto o su nombre "
+    "basta. 2) Una sola idea y como máximo UNA pregunta, al final, que se responda fácil (no «¿A o B, o quieres saber más?»). "
+    "3) Largo según el momento: respuesta a una duda hasta ~250 caracteres; recomendación con precio hasta ~300 (UN producto; "
+    "una alternativa solo si el cliente la pide o el primero no le sirve; sin describir características que no preguntó); "
+    "pedir datos hasta ~200; derivar al asesor hasta ~180, SIN pregunta final y sin ofrecer «algo más». "
+    "4) No repitas lo ya dicho en esta conversación (horario, teléfono, avisos, precio). Máximo un emoji."
 )
 
 
@@ -481,7 +488,6 @@ async def _armar_bloques_contexto(
         if estado_horario.get("proxima_apertura_texto"):
             bloque_horario += f" Los asesores humanos vuelven a atender {estado_horario['proxima_apertura_texto']}."
     bloques.append(bloque_horario)
-    bloques.append(REGLA_FORMA_DEL_MENSAJE)
 
     codigos_propios = set()
     hay_promo_de_campana = False
@@ -773,7 +779,8 @@ async def generar_respuesta(
     if not mensaje or not mensaje.strip():
         return obtener_mensaje_fallback(), False, None, None
 
-    system_prompt = await obtener_system_prompt(modo, negocio_id)
+    # La guía de forma va al final del system prompt: es fija entre llamadas, así entra en la caché y casi no cuesta.
+    system_prompt = f"{await obtener_system_prompt(modo, negocio_id)}\n\n## Forma de los mensajes\n{REGLA_FORMA_DEL_MENSAJE}"
     bloques_contexto = await _armar_bloques_contexto(mensaje, historial, lead, negocio_id)
 
     # Construir mensajes para la API. Claude solo acepta los roles "user" y
