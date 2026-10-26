@@ -281,8 +281,9 @@ def regla_sin_asesor(casos_sin_asesor: dict | None, casos_total: int) -> dict | 
         "casos_sin_asesor", PRIORIDAD_OPERACION,
         f"{n} casos ({_dec(n * 100 / casos_total, 0)}%) no tienen asesor asignado",
         f"{n} de {casos_total} casos comerciales del período no tienen asesor y registran {ventas} venta{'' if ventas == 1 else 's'}.",
-        f"Es más del {_dec(SIN_ASESOR_MIN_PORCENTAJE * 100, 0)}% de los casos del período y de ellos nadie se está ocupando.",
-        "Asígnalos o revisa el reparto automático.", "alta",
+        f"Es más del {_dec(SIN_ASESOR_MIN_PORCENTAJE * 100, 0)}% de los casos del período. Sin asesor no hay una persona "
+        "responsable de darles seguimiento (pueden estar con Gabi o sin derivar todavía).",
+        "Revisa cuáles siguen con Gabi y cuáles hay que derivar a un asesor, y el reparto automático.", "alta",
     )
 
 
