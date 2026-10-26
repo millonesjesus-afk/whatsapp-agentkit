@@ -212,8 +212,8 @@ async def test_probable_cierre_etiqueta_pero_no_oculta_ni_cambia_el_lead():
     await _mensaje(negocio, "51910000011", "user", "Muchas gracias", _h(1))
     antes = await _estado_lead("51910000011")
 
-    # 2026-10-26: una cortesía que es lo único sin respuesta ya no deja al cliente esperando (y no cambia el lead)
-    assert await _esperando(negocio) == []
+    lista = await _esperando(negocio)
+    assert len(lista) == 1 and lista[0]["probable_cierre"] is True
     assert await _estado_lead("51910000011") == antes  # nunca cierra ni cambia nada
 
 
@@ -257,8 +257,7 @@ async def test_orden_abiertas_por_menor_tiempo_restante_luego_cerradas_recientes
         await _mensaje(negocio, tel, "user", texto, hace)
 
     orden = [c["telefono"] for c in await _esperando(negocio)]
-    # E y F (cortesía como único mensaje sin respuesta) ya no esperan desde 2026-10-26
-    assert orden == ["51910000021", "51910000020", "51910000022", "51910000023"]
+    assert orden == ["51910000021", "51910000020", "51910000024", "51910000022", "51910000023", "51910000025"]
     assert [c["telefono"] for c in await _esperando(negocio, limite=2)] == orden[:2]
 
 
@@ -810,3 +809,25 @@ async def test_llamadas_activo_solo_con_el_modulo_encendido_y_en_modo_activo():
     await ll.aceptar_responsabilidad(negocio["id"], "admin1", ll.VERSION_TEXTO_RESPONSABILIDAD)
     z = (await _inicio(asesor))["zona_accion"]
     assert z["totales"]["llamadas_activo"] is True and z["totales"]["llamadas_pendientes"] == 0
+
+
+async def test_un_gracias_despues_de_una_respuesta_ya_no_deja_esperando():
+    """2026-10-26: la cortesía que llega tras una respuesta, siendo lo único sin contestar, no espera."""
+    negocio, canal = await _negocio_con_canal("iv2-cort", "40100000099")
+    await _lead(negocio, canal, "51910000098", asesor="asesor1")
+    await _mensaje(negocio, "51910000098", "user", "¿Cuánto cuesta la terma?", _h(3))
+    await _mensaje(negocio, "51910000098", "asesor", "Cuesta S/ 699, te envío la proforma", _h(2))
+    await _mensaje(negocio, "51910000098", "user", "Muchas gracias", _h(1))
+    assert await _esperando(negocio) == []
+    # si después escribe algo que no es cortesía, vuelve a esperar
+    await _mensaje(negocio, "51910000098", "user", "¿y la instalación cuándo sería?", _h(0.5))
+    assert [c["telefono"] for c in await _esperando(negocio)] == ["51910000098"]
+
+
+async def test_una_pregunta_sin_responder_seguida_de_gracias_sigue_esperando():
+    negocio, canal = await _negocio_con_canal("iv2-cort2", "40100000098")
+    await _lead(negocio, canal, "51910000097", asesor="asesor1")
+    await _mensaje(negocio, "51910000097", "asesor", "Hola, soy tu asesora", _h(5))
+    await _mensaje(negocio, "51910000097", "user", "¿Tienen cocinas empotrables?", _h(2))
+    await _mensaje(negocio, "51910000097", "user", "gracias", _h(1))
+    assert [c["telefono"] for c in await _esperando(negocio)] == ["51910000097"]

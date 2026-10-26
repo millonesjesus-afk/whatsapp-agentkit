@@ -8492,14 +8492,21 @@ async def listar_clientes_esperando(
     )
     for it in items:
         it["esperando_desde"] = desde_por_conversacion.get(it["conversation_id"]) or it["ultimo_mensaje_cliente_en"]
-    if con_desde:
+    candidatas = [
+        it["conversation_id"] for it in items
+        if con_desde and it["probable_cierre"] and it["esperando_desde"] == it["ultimo_mensaje_cliente_en"]
+    ]
+    if candidatas:
         # 2026-10-26 (auditoría de 400 chats, pedido del dueño): un «gracias»/«ok»/👍 que llega DESPUÉS de una respuesta
-        # (es lo único sin contestar) no deja al cliente esperando. Si el cliente escribió algo más antes y sigue sin
-        # respuesta, el caso sigue apareciendo (con la etiqueta de probable cierre).
-        items = [
-            it for it in items
-            if not (it["probable_cierre"] and it["esperando_desde"] == it["ultimo_mensaje_cliente_en"])
-        ]
+        # (de Gabi o de una persona) y es lo único sin contestar no deja al cliente esperando. Si nadie le respondió nunca,
+        # o si escribió algo más antes que sigue sin respuesta, el caso sigue apareciendo (con la etiqueta de probable cierre).
+        async with async_session() as session:
+            con_respuesta = set((await session.execute(
+                select(Mensaje.conversation_id).where(
+                    Mensaje.negocio_id == negocio_id, Mensaje.conversation_id.in_(candidatas), Mensaje.role != "user",
+                ).distinct()
+            )).scalars().all())
+        items = [it for it in items if it["conversation_id"] not in con_respuesta or it["conversation_id"] not in candidatas]
 
     def _clave(it: dict):
         ts = (it["ultimo_mensaje_cliente_en"] - datetime(1970, 1, 1)).total_seconds()

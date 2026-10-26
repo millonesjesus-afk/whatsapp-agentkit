@@ -113,7 +113,7 @@ async def test_vendido_cerrado_despues_del_gracias_ya_no_espera():
     negocio, canal = await _negocio_con_canal("ig-a", "50100000001")
     await _lead(negocio, canal, "51920000001", asesor="asesor1", resultado="vendido")
     await _mensaje(negocio, "51920000001", "user", "Muchas gracias", _h(30))
-    assert await _esperando(negocio) == set()                # 2026-10-26: un «gracias» solo ya no espera
+    assert await _esperando(negocio) == {"51920000001"}      # sin cierre: espera (como siempre)
     await _cerrar("51920000001", _h(10))                      # cierre DESPUÉS del último mensaje
     assert await _esperando(negocio) == set()
 
