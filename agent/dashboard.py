@@ -23,6 +23,8 @@ sin tocar main.py/brain.py.
 """
 
 import asyncio
+import csv
+import io
 import html
 import json
 import logging
@@ -102,6 +104,8 @@ from agent import origen_conversacion
 from agent.analitica_tendencia import partir_periodo
 from agent import analitica_senales
 from agent import memory as mem
+from agent.calidad_catalogo import avisos_de_calidad_catalogo
+from agent.memory import FILAS_CATALOGO_EXCLUIDAS, _fila_csv_a_datos
 from agent.memory import obtener_estado_ventana
 
 # Paleta de colores para distinguir canales de WhatsApp en el panel — se
@@ -10860,4 +10864,8 @@ async def importar_productos_ruta(
         os.unlink(ruta_tmp)
 
     logger.info("Importación de catálogo por %s: %s", usuario["username"], resumen)
-    return JSONResponse({"ok": True, "resumen": resumen})
+    # Avisos NO bloqueantes: filas que dejarían a Gabi sin un dato que necesita (capacidad, precio...). La
+    # importación ya se hizo; esto solo le dice al admin qué corregir.
+    filas = [_fila_csv_a_datos(f) for f in csv.DictReader(io.StringIO(contenido.decode("utf-8-sig")))]
+    calidad = avisos_de_calidad_catalogo(filas, excluidas=FILAS_CATALOGO_EXCLUIDAS)
+    return JSONResponse({"ok": True, "resumen": resumen, "calidad": calidad})
