@@ -100,6 +100,7 @@ from agent import llamadas
 from agent import derivacion_automatica
 from agent import origen_conversacion
 from agent.analitica_tendencia import partir_periodo
+from agent import analitica_senales
 from agent import memory as mem
 from agent.memory import obtener_estado_ventana
 
@@ -8683,46 +8684,13 @@ def _mes_actual_lima() -> tuple[str, str]:
 
 
 def _senales_analitica_p0(flujo_periodo: dict, valor_vendido: dict) -> list[dict]:
-    """Máximo 3 señales deterministas — reglas fijas sobre números ya
-    calculados arriba, sin ningún umbral de negocio inventado (ej. "tasa de
-    cierre baja si < X%") porque ese tipo de definición requiere la misma
-    decisión explícita que ya cerró el umbral de "estancado" en rondas
-    anteriores del Gate, y no fue parte de lo aprobado para este cierre.
-    Nunca lenguaje causal ni de IA — Copiloto es un módulo aparte, sin
-    integración con Analítica en P0.
-
-    `brecha_periodo` (`oportunidades - ventas` del período) se evaluó y se
-    descartó como señal (Gate Analítica P0, revisión final): compara
-    universos temporales distintos (creado vs. fecha_cierre) y por eso es
-    positiva de forma habitual — como señal binaria no discrimina una
-    situación problemática de una normal, solo generaría ruido. El dato
-    sigue disponible en `fugas.sin_cierre` ("Brecha del período"), fuera de
-    `senales`."""
-    senales = []
-    if flujo_periodo["oportunidades"] == 0:
-        # Con la exclusión de consultas ATC activa, `oportunidades` es la cifra comercial: puede ser 0 habiendo
-        # contactos (todos fueron consultas de atención al cliente). Se dice tal cual, sin sugerir que no hubo nadie.
-        consultas = ((flujo_periodo.get("consultas_no_comerciales") or {}).get("cantidad")) or 0
-        if consultas > 0:
-            senales.append({
-                "tipo": "sin_oportunidades",
-                "texto": (
-                    "No se registraron oportunidades comerciales en este período: "
-                    + ("el único contacto fue una consulta de atención al cliente." if consultas == 1
-                       else f"los {consultas} contactos fueron consultas de atención al cliente.")
-                ),
-            })
-        else:
-            senales.append({
-                "tipo": "sin_oportunidades",
-                "texto": "No se registraron oportunidades en este período.",
-            })
-    if valor_vendido["ventas_excluidas"] > 0:
-        senales.append({
-            "tipo": "ventas_excluidas",
-            "texto": f"{valor_vendido['ventas_excluidas']} venta(s) del período con un precio no numérico — excluidas del monto total.",
-        })
-    return senales[:3]
+    """Las dos señales clásicas de Analítica (sin oportunidades y ventas con precio no numérico), con su forma de
+    siempre `{tipo, texto}`. Las reglas viven en `agent/analitica_senales.py`; `analitica.json` usa el conjunto completo
+    (con qué se vio, por qué ahora, qué hacer y confianza) vía `analitica_senales.evaluar_senales`."""
+    reglas = analitica_senales.reglas_sin_oportunidades(flujo_periodo) + analitica_senales.reglas_datos_incompletos(
+        valor_vendido, None, 0, None,
+    )
+    return [{"tipo": r["tipo"], "texto": r["texto"]} for r in reglas][:3]
 
 
 def _validar_segmento_anuncios(empresa: str, formato: str, producto: str) -> tuple[str | None, str | None, str | None]:
@@ -8876,8 +8844,12 @@ async def analitica_json(
     empresa: str = "",
     formato: str = "",
     producto: str = "",
+    sin_senales: bool = False,
 ):
     """GATE ANALÍTICA P0 — Analítica para la Nueva Experiencia.
+
+    `sin_senales` (2026-10-26) omite las señales (`senales` queda vacío): las usa el período anterior que el frontend pide
+    solo para comparar números, donde evaluarlas sería trabajo perdido.
 
     `empresa`/`formato`/`producto` (2026-10-21) acotan TODA la pantalla (menos «Pulso», que es una foto del momento) a los
     clientes que entraron por anuncios de ese segmento: el grupo de anuncios del primer aviso de cada conversación.
@@ -8964,7 +8936,7 @@ async def analitica_json(
         "productos": productos,
         "valor_vendido": valor_vendido,
         "puede_ver_equipo": vision_total,
-        "senales": _senales_analitica_p0(flujo_periodo, valor_vendido),
+        "senales": [],
         # Opciones de los filtros por anuncio (aditivo): el selector de empresa se arma con las empresas del negocio.
         "opciones_filtro": {
             "empresas": await listar_empresas_anuncio(usuario["negocio_id"]),
@@ -8998,7 +8970,54 @@ async def analitica_json(
                 **sin_asesor,
             })
 
+    if not sin_senales:
+        respuesta["senales"] = await _evaluar_senales_analitica(
+            usuario=usuario, desde=desde, hasta=hasta, inicio=inicio, fin=fin, asesor_scope=asesor_scope,
+            campana_id=campana_id, ids_conv=ids_conv, vision_total=vision_total, flujo=flujo_periodo, embudo=embudo,
+            distribucion=distribucion, valor_vendido=valor_vendido,
+            casos_sin_asesor=(resultados_asesor.get("") if vision_total else None),
+        )
+
     return JSONResponse(respuesta)
+
+
+async def _evaluar_senales_analitica(
+    *, usuario: dict, desde: str, hasta: str, inicio, fin, asesor_scope, campana_id, ids_conv, vision_total: bool,
+    flujo: dict, embudo: dict, distribucion: list, valor_vendido: dict, casos_sin_asesor: dict | None,
+) -> list[dict]:
+    """Junta lo que necesitan las reglas de `agent/analitica_senales.py` (grupos de anuncios, origen de las ventas y el
+    período anterior) y las evalúa. Alcance por rol: un Asesor solo recibe las señales de datos incompletos y de «sin
+    oportunidades» sobre lo suyo, nunca comparativas ni cambios frente al período anterior. Con un filtro de campaña no se
+    comparan anuncios (ese filtro no acota los grupos)."""
+    negocio_id = usuario["negocio_id"]
+    comparativas = vision_total and campana_id is None
+    grupos = None
+    if comparativas:
+        grupos = (await rendimiento_por_anuncio(negocio_id, inicio, fin, asesor=asesor_scope, ids_conversacion=ids_conv))["grupos"]
+    ventas_total, sin_origen = 0, None
+    if campana_id is None:
+        detalle = (await ventas_detalle_periodo(negocio_id, inicio, fin, asesor=asesor_scope, ids_conversacion=ids_conv))["resumen"]
+        ventas_total, sin_origen = int(detalle["total"]), int(detalle["por_origen"]["sin_origen"])
+
+    anterior, rotulo = None, ""
+    previo = analitica_senales.periodo_anterior(desde, hasta)
+    if vision_total and previo and not previo["base_corta"] and previo["dias"] >= analitica_senales.MIN_DIAS_COMPARACION:
+        ini_prev, fin_prev = rango_periodo_utc(previo["desde"], previo["hasta"])
+        anterior = {
+            "flujo": await contar_flujo_periodo(
+                negocio_id, ini_prev, fin_prev, asesor=asesor_scope, campana_id=campana_id, ids_conversacion=ids_conv,
+            ),
+            "distribucion": await distribucion_resultados_periodo(
+                negocio_id, ini_prev, fin_prev, asesor=asesor_scope, campana_id=campana_id, ids_conversacion=ids_conv,
+            ),
+        }
+        rotulo = f"{previo['desde'][8:10]}/{previo['desde'][5:7]} – {previo['hasta'][8:10]}/{previo['hasta'][5:7]}"
+
+    return analitica_senales.evaluar_senales(
+        flujo=flujo, valor_vendido=valor_vendido, embudo=embudo, distribucion=distribucion, grupos=grupos,
+        ventas_total=ventas_total, ventas_sin_origen=sin_origen, casos_sin_asesor=casos_sin_asesor, anterior=anterior,
+        rotulo_anterior=rotulo, comparativas=comparativas,
+    )
 
 
 # ── Canales de WhatsApp (admin) ─────────────────────────────────────
