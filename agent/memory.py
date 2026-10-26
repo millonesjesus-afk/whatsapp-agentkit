@@ -1838,6 +1838,115 @@ async def rendimiento_por_anuncio(
     }
 
 
+async def rendimiento_por_campana(
+    negocio_id: str, desde: datetime, hasta: datetime, asesor: str | None = None,
+    ids_conversacion: set[str] | None = None,
+) -> dict:
+    """Solo lectura. Lo mismo que `rendimiento_por_anuncio` pero agrupado por CAMPAÑA (2026-10-26), en CLIENTES (contactos
+    distintos) además de conversaciones, para hablar de lo mismo que las demás agrupaciones. Cubre TODAS las conversaciones
+    creadas en [desde, hasta) y las ventas CERRADAS en el período (misma definición que «Ventas»):
+
+    - La campaña de una conversación es la que tiene asignada (`campana_origen_id`) o, si no, la regla vigente de su
+      PRIMER anuncio. Cada anuncio tiene una sola regla, así que nunca cuenta en dos campañas.
+    - `sin_asignar`: entró por un anuncio pero ninguna campaña lo reconoce. `organico`: sin rastro de anuncio ni campaña.
+    - Un cliente que vuelve por otro anuncio cuenta como cliente en cada campaña por la que entró: la suma de filas puede
+      superar los clientes distintos del total (`resumen.clientes`).
+    - Cada fila trae su desglose por red (ESTIMADA, deducida del enlace del anuncio) y sus anuncios con enlace."""
+    async with async_session() as session:
+        info, primer, red_conv = await _cargar_info_anuncios(session, negocio_id)
+
+        consulta = select(Conversation.id, Conversation.contact_id, Conversation.campana_origen_id).where(
+            Conversation.negocio_id == negocio_id, Conversation.creado >= desde, Conversation.creado < hasta,
+        )
+        if asesor is not None:
+            consulta = consulta.where(Conversation.asesor_asignado_id == asesor)
+        conversaciones = list((await session.execute(consulta)).all())
+        if ids_conversacion is not None:
+            conversaciones = [c for c in conversaciones if c[0] in ids_conversacion]
+        origen_de: dict[str, int | None] = {c[0]: c[2] for c in conversaciones}
+
+        ventas = await _ventas_cerradas_en_periodo(session, negocio_id, desde, hasta, asesor, ids_conversacion)
+        # La campaña de una venta es la de SU conversación, aunque el cliente haya entrado antes del período.
+        for lote in _por_lotes(list({cv for _o, cv, _c in ventas} - set(origen_de))):
+            for conv_id, campana_id in (await session.execute(
+                select(Conversation.id, Conversation.campana_origen_id).where(Conversation.id.in_(lote))
+            )).all():
+                origen_de[conv_id] = campana_id
+
+        campanas = {c.id: c for c in (await session.execute(
+            select(Campana).where(Campana.negocio_id == negocio_id)
+        )).scalars().all()}
+        regla = {src: cid for src, cid in (await session.execute(
+            select(AnuncioCampana.source_id, AnuncioCampana.campana_id).where(AnuncioCampana.negocio_id == negocio_id)
+        )).all()}
+
+    def _clave(conversation_id: str) -> tuple[str, int | None]:
+        source_id = primer.get(conversation_id)
+        cid = origen_de.get(conversation_id) or (regla.get(source_id) if source_id else None)
+        if cid in campanas:
+            return ("campana", cid)
+        return ("sin_asignar", None) if source_id else ("organico", None)
+
+    filas: dict[tuple[str, int | None], dict] = {}
+
+    def _fila(clave: tuple[str, int | None]) -> dict:
+        return filas.setdefault(clave, {
+            "contactos": set(), "conversaciones": 0, "ventas": 0, "anuncios": {},
+            "redes": {k: {"leads": set(), "conversaciones": 0, "ventas": 0} for k in ("facebook", "instagram", "otra")},
+        })
+
+    def _anuncio(fila: dict, source_id: str) -> dict:
+        i = info[source_id]
+        return fila["anuncios"].setdefault(source_id, {
+            "source_id": source_id, "titulo": i["headline"] or "(sin título)",
+            "formato": formato_de_anuncio(i["media_type"]), "conversaciones": 0, "ventas": 0, "url": i["url"],
+            "ultimo": i["ultimo"],
+        })
+
+    todos_los_contactos: set[str] = set()
+    for conversation_id, contact_id, _campana in conversaciones:
+        fila = _fila(_clave(conversation_id))
+        fila["conversaciones"] += 1
+        fila["contactos"].add(contact_id)
+        todos_los_contactos.add(contact_id)
+        red = fila["redes"][red_conv.get(conversation_id, "otra")]
+        red["conversaciones"] += 1
+        red["leads"].add(contact_id)
+        source_id = primer.get(conversation_id)
+        if source_id:
+            _anuncio(fila, source_id)["conversaciones"] += 1
+
+    for _opportunity_id, conversation_id, _cierre in ventas:
+        fila = _fila(_clave(conversation_id))
+        fila["ventas"] += 1
+        fila["redes"][red_conv.get(conversation_id, "otra")]["ventas"] += 1
+        source_id = primer.get(conversation_id)
+        if source_id:
+            _anuncio(fila, source_id)["ventas"] += 1
+
+    salida = []
+    for (tipo, campana_id), fila in filas.items():
+        anuncios = sorted(fila["anuncios"].values(), key=lambda x: (-x["conversaciones"], -x["ventas"]))
+        c = campanas.get(campana_id) if tipo == "campana" else None
+        salida.append({
+            "tipo": tipo, "id": campana_id,
+            "nombre": c.nombre if c else ("Sin campaña asignada" if tipo == "sin_asignar" else "Orgánicos"),
+            "activa": bool(c.activa) if c else None,
+            "clientes": len(fila["contactos"]), "conversaciones": fila["conversaciones"], "ventas": fila["ventas"],
+            "redes": {k: {"leads": len(v["leads"]), "conversaciones": v["conversaciones"], "ventas": v["ventas"]} for k, v in fila["redes"].items()},
+            "anuncios_total": len(anuncios), "anuncios": anuncios[:50],
+        })
+    orden = {"campana": 0, "sin_asignar": 1, "organico": 2}
+    salida.sort(key=lambda x: (orden[x["tipo"]], -x["clientes"], -x["ventas"], x["nombre"]))
+    return {
+        "campanas": salida,
+        "resumen": {
+            "clientes": len(todos_los_contactos), "conversaciones": len(conversaciones), "ventas_periodo": len(ventas),
+            "ventas_en_filas": sum(f["ventas"] for f in salida),
+        },
+    }
+
+
 async def ventas_detalle_periodo(
     negocio_id: str, desde: datetime, hasta: datetime, asesor: str | None = None,
     ids_conversacion: set[str] | None = None,

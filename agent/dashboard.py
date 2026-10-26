@@ -8725,8 +8725,13 @@ async def analitica_anuncios_json(
         raise HTTPException(status_code=400, detail="Fechas inválidas.")
     ids_conv = await ids_conversacion_de_segmento(usuario["negocio_id"], *_validar_segmento_anuncios(empresa, formato, producto))
     datos = await rendimiento_por_anuncio(usuario["negocio_id"], inicio, fin, asesor=asesor_scope, ids_conversacion=ids_conv)
+    por_campana = await mem.rendimiento_por_campana(usuario["negocio_id"], inicio, fin, asesor=asesor_scope, ids_conversacion=ids_conv)
     return JSONResponse({
         "periodo": {"desde": desde, "hasta": hasta},
+        # Agrupación «Campaña» (2026-10-26, aditivo): clientes, conversaciones y ventas por campaña, con sus anuncios.
+        "por_campana": {**por_campana, "campanas": [
+            {**c, "anuncios": [{**a, "ultimo": iso_utc(a["ultimo"])} for a in c["anuncios"]]} for c in por_campana["campanas"]
+        ]},
         **{**datos, "grupos": [
             {**g, "anuncios": [{**a, "ultimo": iso_utc(a["ultimo"])} for a in g["anuncios"]]} for g in datos["grupos"]
         ]},
