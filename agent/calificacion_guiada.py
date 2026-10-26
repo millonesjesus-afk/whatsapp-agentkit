@@ -540,6 +540,20 @@ async def enviar_texto_fijo(telefono: str, canal: dict | None, proveedor, texto:
     return True
 
 
+async def historial_de_la_conversacion(telefono: str, negocio_id: str | None) -> list[dict] | None:
+    """Los mensajes de la Conversation ACTIVA (no los del teléfono entero). Un cliente que vuelve tras un cierre abre una conversación
+    NUEVA pero su teléfono arrastra los mensajes de las anteriores: contar o mirar ese historial hace creer que ya lo atendimos y
+    el flujo guiado no arranca. None si no se pudo leer (quien llama decide el respaldo)."""
+    try:
+        conversation = await mem.obtener_conversation_activa_de_telefono(telefono, negocio_id) if negocio_id else None
+        if not conversation:
+            return None
+        return await servicio_conversacion.obtener_historial_de_conversation(conversation["id"], negocio_id, limite=200)
+    except Exception:
+        logger.exception("calificación guiada: no se pudo leer el historial de la conversación")
+        return None
+
+
 async def _textos_del_producto(telefono: str, lead: dict | None, negocio_id: str | None) -> list[str]:
     """Lo que dice qué producto busca el cliente: interés, campaña (nombre y producto), anuncio y sus primeros mensajes."""
     textos = [(lead or {}).get("interes"), (lead or {}).get("producto_tipo"), (lead or {}).get("campana_origen")]
@@ -553,7 +567,9 @@ async def _textos_del_producto(telefono: str, lead: dict | None, negocio_id: str
     except Exception:
         logger.exception("calificación guiada: no se pudo leer el anuncio")
     try:
-        historial = await servicio_conversacion.obtener_historial(telefono)
+        historial = await historial_de_la_conversacion(telefono, negocio_id)
+        if historial is None:
+            historial = await servicio_conversacion.obtener_historial(telefono)
         textos += [m["content"] for m in historial if m.get("role") == "user"][:3]
     except Exception:
         logger.exception("calificación guiada: no se pudo leer el historial")
@@ -585,6 +601,10 @@ async def primer_mensaje_fijo(telefono: str, canal: dict | None, lead: dict | No
         negocio_id = (canal or {}).get("negocio_id")
         if await obtener_modo(negocio_id) != MODO_ACTIVO or not lead_elegible(lead):
             return False
+        # Solo cuenta lo que pasó en ESTA conversación: un cliente que vuelve tras un cierre es un primer mensaje de nuevo.
+        en_conversacion = await historial_de_la_conversacion(telefono, negocio_id)
+        if en_conversacion is not None:
+            historial = en_conversacion
         if any(m.get("role") in ("assistant", "asesor") for m in historial):
             return False
         del_cliente = [m["content"] for m in historial if m.get("role") == "user"]
@@ -615,6 +635,9 @@ async def continuar_flujo(
         if modo != MODO_ACTIVO or not lead_elegible(lead, derivado):
             return False
         estado = await mem.obtener_estado_calificacion(telefono)
+        en_conversacion = await historial_de_la_conversacion(telefono, negocio_id)
+        if en_conversacion is not None:       # los mensajes de ESTA conversación, no los del teléfono entero
+            mensajes_cliente = sum(1 for m in en_conversacion if m.get("role") == "user")
         if lleva_pregunta_de_gas(lead, estado, mensajes_cliente, modo, derivado):
             tipo = await tipo_del_lead(telefono, lead, negocio_id, estado)
             salio = await enviar_pregunta(telefono, canal, proveedor, pregunta(PASO_GAS if tipo != PRODUCTO_OTRO else PASO_PRODUCTO))

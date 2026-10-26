@@ -558,6 +558,21 @@ async def _armar_bloques_contexto(
     return bloques
 
 
+async def _textos_del_cliente_en_la_conversacion(
+    telefono: str, negocio_id: str | None, historial: list[dict], mensaje: str,
+) -> list[str]:
+    """Lo que el cliente dijo ANTES del mensaje actual, solo en la conversación ACTIVA. El `historial` que llega es el del teléfono
+    entero (arrastra las conversaciones anteriores de un cliente que volvió tras un cierre), así que sirve de respaldo únicamente
+    si la conversación activa aún no tiene mensajes guardados del cliente."""
+    en_conversacion = await calificacion_guiada.historial_de_la_conversacion(telefono, negocio_id)
+    guardados = [m["content"] for m in (en_conversacion or []) if m.get("role") == "user"]
+    if guardados:
+        # el mensaje actual ya está guardado y es el último: se quita para devolver solo lo anterior
+        es_el_actual = (not mensaje) or guardados[-1] == mensaje
+        return guardados[:-1] if es_el_actual else guardados
+    return [m["content"] for m in historial if m.get("role") == "user"]
+
+
 async def _agregar_bloque_calificacion(
     bloques: list[str], lead: dict | None, historial: list[dict], negocio_id: str | None, mensaje: str = "",
 ) -> None:
@@ -571,10 +586,10 @@ async def _agregar_bloque_calificacion(
         if modo != calificacion_guiada.MODO_ACTIVO:
             return
         estado = await obtener_estado_calificacion(lead["telefono"])
-        mensajes_cliente = sum(1 for m in historial if m.get("role") == "user") + 1
+        dichos = await _textos_del_cliente_en_la_conversacion(lead["telefono"], negocio_id, historial, mensaje)
+        mensajes_cliente = len(dichos) + 1
         va_la_primera = calificacion_guiada.lleva_pregunta_de_gas(lead, estado, mensajes_cliente, modo)
         tipo = await calificacion_guiada.tipo_del_lead(lead["telefono"], lead, negocio_id, estado)
-        dichos = [m["content"] for m in historial if m.get("role") == "user"]
         bloque = calificacion_guiada.bloque_contexto(
             estado, va_la_primera_pregunta=va_la_primera, tipo_producto=tipo,
             pidio_el_precio=calificacion_guiada.pidio_precio(mensaje, *dichos),
@@ -601,7 +616,8 @@ async def _agregar_bloques_anuncio(
         )
         if modo == contexto_anuncio.MODO_APAGADO:
             return
-        mensajes_cliente = sum(1 for m in historial if m.get("role") == "user") + 1
+        dichos = await _textos_del_cliente_en_la_conversacion(lead["telefono"], negocio_id, historial, "")
+        mensajes_cliente = len(dichos) + 1
         if mensajes_cliente > contexto_anuncio.MAXIMO_MENSAJES_CLIENTE:
             return
         conversation = await obtener_conversation_activa_de_telefono(lead["telefono"], negocio_id)
