@@ -94,3 +94,25 @@ async def test_la_ruta_de_importar_devuelve_los_avisos_sin_bloquear():
     assert cuerpo["ok"] and cuerpo["resumen"]["nuevos"] == 3                    # se importó todo: los avisos no bloquean
     assert cuerpo["calidad"]["por_tipo"] == {"sin_capacidad": 1}
     assert cuerpo["calidad"]["avisos"][0]["codigo"] == "4506068"
+
+
+def test_cilindro_quemador_y_campana_no_cuentan_como_cocina():
+    accesorios = [
+        {**fila("CILINDRO PARRILLERO A GAS SUPER GRILLS", "COCINA"), "sub_tipo": "CILINDRO"},
+        {**fila("QUEMADOR WOK PARRILLERO A GAS", "COCINA"), "sub_tipo": "QUEMADOR"},
+    ]
+    r = avisar([fila("TERMA SOLE 10 LT", "TERMA"), fila("SECADORA MABE 22 KG", "SECADORA")] + accesorios)
+    assert [a["descripcion"] for a in r["avisos"] if a["tipo"] == "categoria_vacia"] == ["cocina"]
+
+
+def test_cocinas_cocinetas_y_centros_de_lavado_reales_del_catalogo_no_generan_avisos():
+    reales = [
+        {**fila("COCINETA SURGE 1H", "COCINA"), "sub_tipo": "COCINETA"},
+        {**fila("COCINA EMPOTRABLE SOLE 5Q VIDRIO SOLCO033GN", "COCINA"), "sub_tipo": "COCINA"},
+        {**fila("ENCIMERA SOLE 4Q", "COCINA"), "sub_tipo": "ENCIMERA"},
+        {**fila("CENTRO DE LAVADO MABE 20 KG MCLP2440PSDG0 DIAMOND GRAY", "EQUIPO"), "sub_tipo": "CENTRO DE LAVADO"},
+        {**fila("CENTRO DE LAVADO MABE DE 24 KG GAS BLANCO MCLP2440PSBB0", "EQUIPO"), "sub_tipo": "CENTRO DE LAVADO"},
+    ]
+    assert avisar(base() + reales)["total"] == 0
+    sin_kg = {**fila("CENTRO DE LAVADO MABE GAS BLANCO", "EQUIPO"), "sub_tipo": "CENTRO DE LAVADO"}
+    assert tipos(base() + [sin_kg]) == ["sin_capacidad"]

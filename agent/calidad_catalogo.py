@@ -22,7 +22,9 @@ _TIPOS_CON_CAPACIDAD = (
 )
 _CON_CONEXION = ("terma", "secadora", "centro de lavado", "cocina")
 _TIPOS_QUE_EL_FLUJO_OFRECE = ("terma", "secadora", "cocina")
-_COCINA = re.compile(r"cocina|encimera", re.I)
+_COCINA = re.compile(r"cocina|encimera|cocineta", re.I)
+# Accesorios que el catálogo guarda bajo tipo COCINA pero no son una cocina (cilindro y quemador parrilleros, campana).
+_NO_ES_COCINA = re.compile(r"cilindro|quemador|parrill|campana", re.I)
 _TRABAJO = re.compile(r"trabajos?|punto adicional|ducter[ií]a|instalaci[oó]n", re.I)
 
 
@@ -33,7 +35,7 @@ def _categoria(datos: dict) -> str | None:
     for nombre, patron, _capacidad, _unidad in _TIPOS_CON_CAPACIDAD:
         if patron.search(texto):
             return nombre
-    if _COCINA.search(texto):
+    if _COCINA.search(texto) and not _NO_ES_COCINA.search(" ".join(datos.get(c) or "" for c in ("sub_tipo", "descripcion"))):
         return "cocina"
     return None
 
