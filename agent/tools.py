@@ -27,7 +27,7 @@ TZ_LIMA = ZoneInfo("America/Lima")
 DIAS_ES = ["lunes", "martes", "miércoles", "jueves", "viernes", "sábado", "domingo"]
 
 KNOWLEDGE_DIR = "knowledge"
-PLAZOS_A_MOSTRAR = ("12", "24", "36")
+PLAZOS_A_MOSTRAR = ("12", "24", "36", "60")      # 60 = plazo máximo que financia Cálidda (CUOTAS_MAX)
 
 # Gate 2026-09-23 (pedido explícito del usuario, tras compartir la plantilla
 # real de cálculo) — la cuota YA NO viene de 9 columnas fijas y
@@ -419,7 +419,8 @@ def formatear_producto(producto: dict, tea: float, igv: float) -> str:
 
     monto = _precio_float(producto)
     cuotas = [
-        f"{plazo} meses: S/ {_calcular_amortizacion(monto, tea, igv, int(plazo))['cuota_inicial']:.2f}"
+        f"{plazo} meses{' (plazo máximo)' if int(plazo) == CUOTAS_MAX else ''}: "
+        f"S/ {_calcular_amortizacion(monto, tea, igv, int(plazo))['cuota_inicial']:.2f}"
         for plazo in PLAZOS_A_MOSTRAR
     ] if monto != float("inf") else []
 
@@ -427,7 +428,12 @@ def formatear_producto(producto: dict, tea: float, igv: float) -> str:
     if combo:
         lineas.append(f"Combo: incluye {combo}")
     if incluye_conexion:
-        lineas.append(f"Incluye conexión de gas: {incluye_conexion}")
+        # «Con conexión» = el equipo viene con su conexión (elastómero) al punto de gas que el cliente YA tiene.
+        # NO es un punto de gas nuevo: el punto adicional es un servicio aparte (o un combo que lo diga).
+        if incluye_conexion.strip().upper() in ("SI", "SÍ"):
+            lineas.append("Incluye la conexión del equipo al punto de gas existente (con elastómero): SÍ — no incluye punto de gas nuevo")
+        else:
+            lineas.append(f"Incluye la conexión del equipo al punto de gas existente: {incluye_conexion}")
     if cuotas:
         lineas.append("Cuotas: " + " | ".join(cuotas))
     return "\n".join(lineas)

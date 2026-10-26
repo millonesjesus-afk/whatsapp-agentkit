@@ -48,8 +48,10 @@ ORIGEN_ENVIO = "gabi_calificacion"
 
 PREFIJO = "cal:"
 PASO_PRODUCTO, PASO_GAS, PASO_EQUIPO, PASO_TITULAR, PASO_TAMANO = "producto", "gas", "equipo", "titular", "tamano"
-PASO_COCINA, PASO_COMPLEMENTO, PASO_SINGAS = "cocina", "complemento", "singas"
-PASOS_CON_BOTONES = (PASO_PRODUCTO, PASO_GAS, PASO_EQUIPO, PASO_TITULAR, PASO_TAMANO, PASO_COCINA, PASO_COMPLEMENTO, PASO_SINGAS)
+PASO_COCINA, PASO_COMPLEMENTO, PASO_SINGAS, PASO_DATO = "cocina", "complemento", "singas", "dato"
+PASOS_CON_BOTONES = (
+    PASO_PRODUCTO, PASO_GAS, PASO_EQUIPO, PASO_TITULAR, PASO_TAMANO, PASO_COCINA, PASO_COMPLEMENTO, PASO_SINGAS, PASO_DATO,
+)
 
 # Cuántas veces se retoma un paso pendiente después de que el cliente escribió a mano (además de la pregunta original).
 MAXIMO_REINTENTOS = 2
@@ -192,6 +194,12 @@ def pregunta(paso: str, tipo_producto: str = PRODUCTO_OTRO) -> dict | None:
                 _op("ambos", "Horno y campana"),
             ],
         }
+    if paso == PASO_DATO:
+        return {
+            "paso": paso, "tipo": "botones",
+            "cuerpo": "Para que un asesor inicie tu evaluación necesito un dato del titular del suministro. ¿Con cuál prefieres continuar?",
+            "opciones": [_op("dni", "DNI del titular"), _op("cliente", "Número de cliente"), _op("luego", "Más tarde")],
+        }
     if paso == PASO_SINGAS:
         return {"paso": paso, "tipo": "botones", "cuerpo": "Gracias por contarme. ¿Qué prefieres?", "opciones": [
             _op("contratar", "Contratar el gas"), _op("equipo", "Comprar el equipo"),
@@ -311,13 +319,13 @@ def lleva_pregunta_de_gas(
 def pasos_requeridos(tipo: str, respuestas: dict) -> list[str]:
     """Los pasos que debe contestar el cliente antes de la etapa consultiva (camino «con gas»)."""
     if tipo in _NECESITAN_PUNTO:
-        return [PASO_GAS, PASO_EQUIPO, PASO_TITULAR, PASO_TAMANO]
+        return [PASO_GAS, PASO_EQUIPO, PASO_TITULAR, PASO_TAMANO, PASO_DATO]
     if tipo == PRODUCTO_COCINA:
         pasos = [PASO_GAS, PASO_TITULAR, PASO_COCINA]
         if respuestas.get(PASO_COCINA) == "empotrable":
             pasos.append(PASO_COMPLEMENTO)
-        return pasos
-    return [PASO_GAS, PASO_TITULAR]
+        return pasos + [PASO_DATO]
+    return [PASO_GAS, PASO_TITULAR, PASO_DATO]
 
 
 def etapa_consultiva(estado: dict, tipo: str) -> bool:
@@ -369,15 +377,17 @@ def siguiente(paso: str, valor: str, tipo_producto: str, nombre: str | None, tel
             return {**vacio, "pregunta": pregunta(PASO_TAMANO, tipo_producto)}
         if tipo_producto == PRODUCTO_COCINA:
             return {**vacio, "pregunta": pregunta(PASO_COCINA)}
-        return {**vacio, "revisar_etapa": True}
+        return {**vacio, "pregunta": pregunta(PASO_DATO)}
     elif paso == PASO_TAMANO and valor in ("1", "2", "3", "pequena", "grande", "ns"):
-        return {**vacio, "revisar_etapa": True}
+        return {**vacio, "pregunta": pregunta(PASO_DATO)}
     elif paso == PASO_COCINA:
         if valor == "empotrable":
             return {**vacio, "pregunta": pregunta(PASO_COMPLEMENTO)}
         if valor == "pie":
-            return {**vacio, "revisar_etapa": True}
+            return {**vacio, "pregunta": pregunta(PASO_DATO)}
     elif paso == PASO_COMPLEMENTO and valor in ("solo", "campana", "horno", "ambos"):
+        return {**vacio, "pregunta": pregunta(PASO_DATO)}
+    elif paso == PASO_DATO and valor in ("dni", "cliente", "luego"):
         return {**vacio, "revisar_etapa": True}
     elif paso == PASO_SINGAS:
         if valor == "contratar":
@@ -390,7 +400,7 @@ def siguiente(paso: str, valor: str, tipo_producto: str, nombre: str | None, tel
 _ETIQUETAS_PASO = {
     PASO_PRODUCTO: "producto", PASO_GAS: "gas natural de Cálidda", PASO_EQUIPO: "punto de gas y ductería",
     PASO_TITULAR: "titular del suministro", PASO_TAMANO: "tamaño (baños o personas)", PASO_COCINA: "tipo de cocina",
-    PASO_COMPLEMENTO: "complemento de la encimera", PASO_SINGAS: "sin gas: qué prefiere",
+    PASO_COMPLEMENTO: "complemento de la encimera", PASO_SINGAS: "sin gas: qué prefiere", PASO_DATO: "dato para la evaluación",
 }
 _ETIQUETAS_VALOR = {
     (PASO_PRODUCTO, "terma"): "terma", (PASO_PRODUCTO, "cocina"): "cocina o encimera", (PASO_PRODUCTO, "secadora"): "secadora",
@@ -406,6 +416,8 @@ _ETIQUETAS_VALOR = {
     (PASO_COMPLEMENTO, "solo"): "solo la encimera", (PASO_COMPLEMENTO, "campana"): "con campana",
     (PASO_COMPLEMENTO, "horno"): "con horno empotrable", (PASO_COMPLEMENTO, "ambos"): "con horno y campana",
     (PASO_SINGAS, "contratar"): "quiere contratar el gas", (PASO_SINGAS, "equipo"): "comprará el equipo igual",
+    (PASO_DATO, "dni"): "dará el DNI del titular", (PASO_DATO, "cliente"): "dará el número de cliente",
+    (PASO_DATO, "luego"): "dará el dato más tarde",
 }
 
 
@@ -436,6 +448,34 @@ def regla_de_producto(tipo: str, respuestas: dict) -> str:
     return ""
 
 
+def servicios_faltantes(tipo: str, respuestas: dict) -> list[str]:
+    """Lo que el cliente NO tiene en casa y se ofrece como SERVICIO APARTE (punto de gas adicional, ductería), según lo que respondió.
+    Terma: punto de gas y ductería; secadora y centro de lavado: punto de gas; cocina: ninguno."""
+    equipo = respuestas.get(PASO_EQUIPO)
+    if tipo == PRODUCTO_TERMA:
+        return {
+            "ambos": [], "punto": ["ductería"], "ducteria": ["punto de gas adicional"],
+            "ninguno": ["punto de gas adicional", "ductería"], "ns": ["punto de gas y ductería (a confirmar con el asesor)"],
+        }.get(equipo, [])
+    if tipo in (PRODUCTO_SECADORA, PRODUCTO_LAVADO):
+        return {"punto": [], "ninguno": ["punto de gas adicional"], "ns": ["punto de gas (a confirmar con el asesor)"]}.get(equipo, [])
+    return []
+
+
+def regla_del_dato(dato: str | None) -> str:
+    """Qué dato del titular se le pide, según el botón que eligió el cliente."""
+    if dato == "dni":
+        return "El cliente eligió dar el DNI del titular del suministro: pídele ese DNI (8 dígitos)."
+    if dato == "cliente":
+        return "El cliente eligió dar el número de cliente (el que figura en su recibo de Cálidda): pídele ese número."
+    if dato == "luego":
+        return (
+            "El cliente prefirió dar el dato más tarde: NO se lo vuelvas a pedir; dile que cuando lo tenga lo escriba por aquí y que un "
+            "asesor se comunicará con él."
+        )
+    return "Pídele el DNI del titular o su número de cliente, el que prefiera."
+
+
 def bloque_contexto(
     estado: dict, *, va_la_primera_pregunta: bool, tipo_producto: str = PRODUCTO_OTRO, pidio_el_precio: bool = False,
     derivado: bool = False,
@@ -460,18 +500,34 @@ def bloque_contexto(
         partes.append(f"Respuestas del cliente a preguntas con botones — {dichas}. No repitas esas preguntas ni las cambies de palabras.")
     if etapa_consultiva(estado, tipo_producto):
         precio = (
-            "El cliente pidió el precio: dáselo ahora si está en el contexto o el catálogo (si no está, dile que el asesor se lo confirma)."
+            "El cliente pidió el precio: dáselo ahora si está en el contexto o el catálogo (si no está, dile que el asesor se lo confirma). "
+            "Si das cuotas, el plazo máximo es de 60 cuotas (meses): no digas que el máximo es 36 u otro plazo, y aclara que la cuota "
+            "exacta la confirma el asesor."
             if pidio_el_precio else "No menciones precios ni cuotas: el cliente no los pidió; de eso se encarga el asesor."
         )
+        faltantes = servicios_faltantes(tipo_producto, respuestas)
+        servicio = ""
+        if faltantes:
+            servicio = (
+                f"El cliente NO cuenta con: {', '.join(faltantes)}. Ofrécelo como SERVICIO APARTE del equipo (punto adicional o ductería); "
+                "si en el catálogo hay un producto cuyo combo ya lo incluye, prefiérelo. NO des el precio de ese servicio ni de otros extras: "
+                "dile que el asesor lo cotiza, salvo que el cliente lo pida explícitamente. La «conexión» que traen algunos productos es "
+                "solo el empalme del equipo (con elastómero) a un punto de gas que el cliente YA tiene: NO es un punto de gas nuevo, no la "
+                "presentes como si resolviera la falta de punto. "
+            )
         partes.append(
             "ETAPA FINAL de la calificación. En UN solo mensaje: "
             "(1) confirma en una frase que el producto que le interesó (el del anuncio o el que dijo) le sirve según sus respuestas; "
             "solo si no alcanza propón UNA alternativa del catálogo, nunca varias opciones. "
             + regla_de_producto(tipo_producto, respuestas) + " "
+            "Menciona solo productos y capacidades (kg, litros, hornillas) tal como figuran en la descripción del catálogo de este "
+            "contexto: si una descripción no trae la capacidad, no la menciones ni la supongas. "
             f"(2) {precio} "
-            "(3) Pide su nombre (solo si no figura en los datos ya conocidos) y el DNI del titular del suministro o su número de suministro "
-            "de Cálidda, aclarando que ese dato solo sirve para que un asesor inicie la evaluación y no es una aprobación. "
-            "(4) No hagas ninguna otra pregunta. En cuanto te dé esos datos, derívalo al asesor sin pedirle permiso."
+            + servicio +
+            "(3) Pide su nombre (solo si no figura en los datos ya conocidos). " + regla_del_dato(respuestas.get(PASO_DATO)) + " "
+            "Aclara que ese dato solo sirve para que un asesor inicie la evaluación y no es una aprobación. "
+            "(4) No hagas ninguna otra pregunta. En cuanto te dé esos datos, derívalo al asesor sin pedirle permiso; cuando te escriba un "
+            "número, da por hecho que es el dato que eligió."
         )
     return "\n".join(partes) or None
 

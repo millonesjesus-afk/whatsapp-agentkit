@@ -108,11 +108,13 @@ def test_transiciones():
     assert s("titular", "si")["pregunta"]["paso"] == "tamano" and "baños" in s("titular", "si")["pregunta"]["cuerpo"]
     assert "personas" in s("titular", "familiar", "secadora")["pregunta"]["cuerpo"]
     assert s("titular", "otro", "cocina")["pregunta"]["paso"] == "cocina"
-    assert s("titular", "si", "otro")["revisar_etapa"]
-    assert s("tamano", "2")["revisar_etapa"] and s("tamano", "grande", "secadora")["revisar_etapa"]
-    assert s("cocina", "pie", "cocina")["revisar_etapa"]
+    assert s("titular", "si", "otro")["pregunta"]["paso"] == "dato"
+    assert s("tamano", "2")["pregunta"]["paso"] == "dato" and s("tamano", "grande", "secadora")["pregunta"]["paso"] == "dato"
+    assert s("cocina", "pie", "cocina")["pregunta"]["paso"] == "dato"
     assert s("cocina", "empotrable", "cocina")["pregunta"]["paso"] == "complemento"
-    assert s("complemento", "ambos", "cocina")["revisar_etapa"]
+    assert s("complemento", "ambos", "cocina")["pregunta"]["paso"] == "dato"
+    # elegir el dato cierra la calificación: sigue la IA
+    assert all(s("dato", v)["revisar_etapa"] for v in ("dni", "cliente", "luego")) and not s("dato", "otro")["revisar_etapa"]
     c = s("singas", "contratar")
     assert c["cerrar_sin_gas"] and "614 9000, opción 5" in c["texto"] and "terma" in c["texto"]
     e = s("singas", "equipo")
@@ -131,7 +133,7 @@ def test_la_guia_de_tamano_sigue_los_kilos_del_catalogo():
 
 
 def test_etapa_consultiva_segun_el_producto():
-    base = {"gas": "si", "titular": "si"}
+    base = {"gas": "si", "titular": "si", "dato": "dni"}
     assert not cg.etapa_consultiva({"respuestas": base}, "terma")
     assert cg.etapa_consultiva({"respuestas": {**base, "equipo": "ambos", "tamano": "2"}}, "terma")
     assert cg.etapa_consultiva({"respuestas": {**base, "equipo": "punto", "tamano": "pequena"}}, "secadora")
@@ -139,7 +141,10 @@ def test_etapa_consultiva_segun_el_producto():
     assert cg.etapa_consultiva({"respuestas": {**base, "cocina": "empotrable", "complemento": "horno"}}, "cocina")
     assert cg.etapa_consultiva({"respuestas": {**base, "cocina": "pie"}}, "cocina")
     assert cg.etapa_consultiva({"respuestas": base}, "otro")
-    assert not cg.etapa_consultiva({"respuestas": {"gas": "no", "titular": "si"}}, "otro")
+    assert not cg.etapa_consultiva({"respuestas": {"gas": "no", "titular": "si", "dato": "dni"}}, "otro")
+    # sin haber elegido el dato todavía no es la etapa final
+    sin_dato = {k: v for k, v in {**base, "equipo": "ambos", "tamano": "2"}.items() if k != "dato"}
+    assert not cg.etapa_consultiva({"respuestas": sin_dato}, "terma")
 
 
 def test_paso_pendiente_y_reintentos():
@@ -173,14 +178,44 @@ def test_bloque_de_contexto_para_claude():
     con_precio = cg.bloque_contexto(vacio, va_la_primera_pregunta=True, pidio_el_precio=True)
     assert "No menciones precios" not in con_precio
     final = {
-        "preguntas": ["gas", "equipo", "titular", "tamano"], "conteo": {}, "respuestas": {"gas": "si", "equipo": "ambos", "titular": "si", "tamano": "2"},
+        "preguntas": ["gas", "equipo", "titular", "tamano", "dato"], "conteo": {},
+        "respuestas": {"gas": "si", "equipo": "ambos", "titular": "si", "tamano": "2", "dato": "dni"},
     }
     sin_precio = cg.bloque_contexto(final, va_la_primera_pregunta=False, tipo_producto="terma")
     assert "ETAPA FINAL" in sin_precio and "2 baños" in sin_precio and "UNA alternativa" in sin_precio
-    assert "No menciones precios ni cuotas: el cliente no los pidió" in sin_precio and "DNI del titular" in sin_precio
+    assert "No menciones precios ni cuotas: el cliente no los pidió" in sin_precio and "pídele ese DNI" in sin_precio
+    assert "servicio aparte" not in sin_precio.lower()                      # tiene punto y ductería: nada que ofrecer aparte
     con = cg.bloque_contexto(final, va_la_primera_pregunta=False, tipo_producto="terma", pidio_el_precio=True)
-    assert "El cliente pidió el precio: dáselo ahora" in con
+    assert "El cliente pidió el precio: dáselo ahora" in con and "60 cuotas" in con and "36" in con
     assert cg.bloque_contexto(final, va_la_primera_pregunta=False, tipo_producto="terma", derivado=True) is None
+
+
+def test_la_ia_no_inventa_capacidades_y_el_servicio_que_falta_se_ofrece_aparte():
+    estado = {"preguntas": [], "conteo": {}, "respuestas": {"gas": "si", "equipo": "ninguno", "titular": "si", "tamano": "pequena", "dato": "cliente"}}
+    b = cg.bloque_contexto(estado, va_la_primera_pregunta=False, tipo_producto="secadora")
+    assert "si una descripción no trae la capacidad, no la menciones ni la supongas" in b
+    assert "NO cuenta con: punto de gas adicional" in b and "SERVICIO APARTE" in b
+    assert "NO des el precio de ese servicio" in b and "salvo que el cliente lo pida explícitamente" in b
+    assert "NO es un punto de gas nuevo" in b                               # la «conexión» no resuelve la falta de punto
+    assert "número de cliente" in b
+
+
+def test_servicios_faltantes_por_producto():
+    f = cg.servicios_faltantes
+    assert f("terma", {"equipo": "ambos"}) == [] and f("terma", {"equipo": "punto"}) == ["ductería"]
+    assert f("terma", {"equipo": "ducteria"}) == ["punto de gas adicional"]
+    assert f("terma", {"equipo": "ninguno"}) == ["punto de gas adicional", "ductería"]
+    assert "a confirmar con el asesor" in f("terma", {"equipo": "ns"})[0]
+    assert f("secadora", {"equipo": "punto"}) == [] and f("secadora", {"equipo": "ninguno"}) == ["punto de gas adicional"]
+    assert f("lavado", {"equipo": "ninguno"}) == ["punto de gas adicional"]
+    assert f("cocina", {"equipo": "ninguno"}) == [] and f("otro", {}) == []         # la cocina no pregunta punto ni ductería
+
+
+def test_el_dato_que_se_pide_es_el_que_eligio_el_cliente():
+    assert "DNI" in cg.regla_del_dato("dni") and "número de cliente" in cg.regla_del_dato("cliente")
+    assert "NO se lo vuelvas a pedir" in cg.regla_del_dato("luego")
+    assert [o["titulo"] for o in cg.pregunta("dato")["opciones"]] == ["DNI del titular", "Número de cliente", "Más tarde"]
+    assert cg.validar_pregunta(cg.pregunta("dato")) == []
 
 
 # ── De punta a punta por el webhook ─────────────────────────────────────────
@@ -296,12 +331,14 @@ async def test_camino_con_gas_terma_hasta_la_etapa_consultiva(monkeypatch):
     await _tocar(proveedor, canal, tel, "cal:titular:si", "Sí, soy el titular")
     assert "cuántos baños" in _cuerpo(proveedor) and gabi.llamadas == 0     # hasta acá ningún paso llamó a Claude: cero tokens
 
-    await _tocar(proveedor, canal, tel, "cal:tamano:2", "2 baños")          # la última respuesta completa la calificación
+    await _tocar(proveedor, canal, tel, "cal:tamano:2", "2 baños")
+    assert "un dato del titular" in _cuerpo(proveedor) and gabi.llamadas == 0   # el cliente elige qué dato pasa
+    await _tocar(proveedor, canal, tel, "cal:dato:dni", "DNI del titular")     # la última respuesta completa la calificación
     assert gabi.llamadas == 1                                               # recién ahora habla la IA (etapa consultiva)
     estado = await mem.obtener_estado_calificacion(tel)
-    assert estado["respuestas"] == {"gas": "si", "equipo": "ambos", "titular": "si", "tamano": "2"}
+    assert estado["respuestas"] == {"gas": "si", "equipo": "ambos", "titular": "si", "tamano": "2", "dato": "dni"}
     visibles = [e["descripcion"] for e in await mem.listar_eventos_lead(tel) if e["tipo"] == "calificacion_respuesta"]
-    assert len(visibles) == 4 and any("2 baños" in d for d in visibles)
+    assert len(visibles) == 5 and any("2 baños" in d for d in visibles)
 
     lead = await mem.obtener_lead(tel, negocio_id=negocio["id"])
     historial = [{"role": "user", "content": "Estoy interesado en financiar una Terma"}]
@@ -326,6 +363,8 @@ async def test_secadora_pregunta_solo_el_punto_y_el_tamano_por_personas(monkeypa
     await _tocar(proveedor, canal, tel, "cal:titular:familiar", "Es de un familiar")
     assert "cuántas personas" in _cuerpo(proveedor)
     await _tocar(proveedor, canal, tel, "cal:tamano:grande", "5 o más personas")
+    assert gabi.llamadas == 0
+    await _tocar(proveedor, canal, tel, "cal:dato:cliente", "Número de cliente")
     assert gabi.llamadas == 1
 
 
@@ -341,6 +380,8 @@ async def test_cocina_no_pregunta_punto_y_pide_tipo_y_complemento(monkeypatch):
     assert proveedor.interactivos[-1]["type"] == "list" and "encimera" in _cuerpo(proveedor)
     assert gabi.llamadas == 0
     await _tocar(proveedor, canal, tel, "cal:complemento:horno", "Con horno empotrable")
+    assert gabi.llamadas == 0
+    await _tocar(proveedor, canal, tel, "cal:dato:luego", "Más tarde")
     assert gabi.llamadas == 1
 
 
@@ -351,6 +392,8 @@ async def test_cocina_de_pie_pasa_directo_a_la_etapa_consultiva(monkeypatch):
     await _tocar(proveedor, canal, tel, "cal:gas:si", "Sí, ya tengo")
     await _tocar(proveedor, canal, tel, "cal:titular:si", "Sí, soy el titular")
     await _tocar(proveedor, canal, tel, "cal:cocina:pie", "De pie (con horno)")
+    assert gabi.llamadas == 0
+    await _tocar(proveedor, canal, tel, "cal:dato:dni", "DNI del titular")
     assert gabi.llamadas == 1
 
 
