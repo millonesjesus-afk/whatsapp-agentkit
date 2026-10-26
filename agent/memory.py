@@ -11899,18 +11899,23 @@ async def importar_catalogo_desde_csv(ruta_csv: str, negocio_id: str, autor: str
 
 async def listar_productos(filtros: dict, pagina: int, por_pagina: int, negocio_id: str) -> tuple[list[dict], int]:
     """Página de productos DE UN NEGOCIO + total de coincidencias (para la
-    paginación de la pantalla de catálogo). Filtros soportados: `q` (texto
-    libre sobre marca y descripción), `canal`, `marca`, `tipo` (coincidencia
+    paginación de la pantalla de catálogo). Filtros soportados: `q` (palabras
+    sueltas sobre marca, descripción, código, tipo, subtipo, combo, comentarios y canal), `canal`, `marca`, `tipo` (coincidencia
     exacta) y `activo` (bool; si no viene, devuelve activos e inactivos).
 
     `negocio_id` (Gate 4.4) es obligatorio y se filtra en el WHERE."""
     filtros = filtros or {}
     condiciones = [Producto.negocio_id == negocio_id]
 
-    texto = (filtros.get("q") or "").strip()
-    if texto:
-        patron = f"%{texto}%"
-        condiciones.append(Producto.marca.ilike(patron) | Producto.descripcion.ilike(patron))
+    # Búsqueda por palabra, como la de los chats: cada palabra tiene que aparecer en ALGUNO de estos campos (en
+    # cualquier orden). Los fee no se buscan a propósito: solo el admin los ve y buscar por ellos los revelaría.
+    for palabra in (filtros.get("q") or "").split():
+        patron = f"%{palabra}%"
+        condiciones.append(
+            Producto.marca.ilike(patron) | Producto.descripcion.ilike(patron) | Producto.codigo_hana.ilike(patron)
+            | Producto.tipo.ilike(patron) | Producto.sub_tipo.ilike(patron) | Producto.combo.ilike(patron)
+            | Producto.comentarios.ilike(patron) | Producto.canal.ilike(patron)
+        )
     for campo in ("canal", "marca", "tipo"):
         valor = (filtros.get(campo) or "").strip()
         if valor:
