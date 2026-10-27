@@ -1425,21 +1425,29 @@ def _crear_cliente_haiku():
 
 async def _llamar_haiku(texto: str, ahora_lima: datetime) -> str:
     """El texto crudo que devuelve Haiku (≈ 250 tokens de entrada y 40 de salida: del orden de US$ 0.0004 por llamada)."""
-    from agent.brain import MODELO_EXTRACCION        # import tardío: brain importa a medio sistema
+    from anthropic import BadRequestError, NotFoundError, PermissionDeniedError
+    from agent.brain import MODELO_EXTRACCION, MODELO_EXTRACCION_RESPALDO, SIN_RAZONAMIENTO, texto_de_respuesta  # import tardío
 
     cliente = _crear_cliente_haiku()
+    mensajes = [{"role": "user", "content": (
+        f"Ahora en Lima: {ahora_lima:%Y-%m-%dT%H:%M} ({_DIAS_SEMANA[ahora_lima.weekday()]}).\n"
+        f"Respuesta del cliente:\n<respuesta>{texto}</respuesta>"
+    )}]
     try:
-        respuesta = await asyncio.wait_for(
-            cliente.messages.create(
-                model=MODELO_EXTRACCION, max_tokens=80, system=_PROMPT_HAIKU,
-                messages=[{"role": "user", "content": (
-                    f"Ahora en Lima: {ahora_lima:%Y-%m-%dT%H:%M} ({_DIAS_SEMANA[ahora_lima.weekday()]}).\n"
-                    f"Respuesta del cliente:\n<respuesta>{texto}</respuesta>"
-                )}],
-            ),
-            timeout=HAIKU_TIMEOUT_SEG + 0.5,
-        )
-        return respuesta.content[0].text
+        try:
+            respuesta = await asyncio.wait_for(
+                cliente.messages.create(
+                    model=MODELO_EXTRACCION, max_tokens=80, thinking=SIN_RAZONAMIENTO, system=_PROMPT_HAIKU, messages=mensajes,
+                ),
+                timeout=HAIKU_TIMEOUT_SEG + 0.5,
+            )
+        except (NotFoundError, PermissionDeniedError, BadRequestError):
+            # Modelo nuevo no disponible para la cuenta: mismo pedido con el de respaldo (ver brain.crear_con_modelo_economico).
+            respuesta = await asyncio.wait_for(
+                cliente.messages.create(model=MODELO_EXTRACCION_RESPALDO, max_tokens=80, system=_PROMPT_HAIKU, messages=mensajes),
+                timeout=HAIKU_TIMEOUT_SEG + 0.5,
+            )
+        return texto_de_respuesta(respuesta)
     finally:
         try:
             await cliente.close()

@@ -22,7 +22,7 @@ import json
 import time
 import yaml
 import logging
-from anthropic import AsyncAnthropic
+from anthropic import AsyncAnthropic, BadRequestError, NotFoundError, PermissionDeniedError
 from dotenv import load_dotenv
 
 from agent.tools import (
@@ -34,7 +34,7 @@ from agent.memory import (
     obtener_conversation_activa_de_telefono, obtener_estado_calificacion,
 )
 from agent.campanas import resolver_promo, resolver_familia_promo, obtener_codigos_promocionales_activos
-from agent import circuito_ia, formato_whatsapp, contexto_anuncio, calificacion_guiada
+from agent import circuito_ia, formato_whatsapp, contexto_anuncio, calificacion_guiada, sombra_modelo
 from agent.origen_conversacion import origen_de_conversacion
 from agent import calendario_negocio as cal_negocio
 
@@ -49,7 +49,35 @@ logger = logging.getLogger("agentkit")
 client = AsyncAnthropic(api_key=os.getenv("ANTHROPIC_API_KEY"), timeout=30.0, max_retries=2)
 
 MODELO_PRINCIPAL = "claude-sonnet-4-6"
-MODELO_EXTRACCION = "claude-haiku-4-5-20251001"
+MODELO_EXTRACCION = "claude-haiku-5-5"
+# Haiku 5.5 (2026-10-26, auditoría de tokens): ~10 veces más barato que Haiku 4.5. Piensa por defecto y eso cuenta en
+# max_tokens; en extracción, resumen y clasificación no hace falta, así que se apaga (vale con el esfuerzo por defecto).
+SIN_RAZONAMIENTO = {"type": "disabled"}
+# Las instrucciones fijas de Gabi se escriben en caché por 1 hora (no 5 min): en 3 de cada 10 respuestas pasaban más de
+# 5 minutos desde la anterior y se volvían a escribir completas. Con 1 h se reescriben solo tras una pausa larga.
+CACHE_INSTRUCCIONES = {"type": "ephemeral", "ttl": "1h"}
+
+
+# Si la cuenta aún no tuviera Haiku 5.5 (o lo rechazara), las tareas cortas vuelven solas a Haiku 4.5: de la extracción
+# depende detectar la derivación al asesor, y un error de modelo no debe abrir el circuito de la IA.
+MODELO_EXTRACCION_RESPALDO = "claude-haiku-4-5-20251001"
+
+
+async def crear_con_modelo_economico(**kwargs):
+    """`client.messages.create` con MODELO_EXTRACCION y, si ese modelo no está disponible para la cuenta, con el de
+    respaldo (sin el parámetro de razonamiento, que Haiku 4.5 no usa así)."""
+    try:
+        return await client.messages.create(model=MODELO_EXTRACCION, **kwargs)
+    except (NotFoundError, PermissionDeniedError, BadRequestError) as e:
+        logger.warning(f"{MODELO_EXTRACCION} no disponible ({e.__class__.__name__}); se usa {MODELO_EXTRACCION_RESPALDO}")
+        kwargs.pop("thinking", None)
+        return await client.messages.create(model=MODELO_EXTRACCION_RESPALDO, **kwargs)
+
+
+def texto_de_respuesta(response) -> str:
+    """El texto de la respuesta, leyendo los bloques por tipo: los modelos nuevos pueden devolver antes bloques de
+    razonamiento (`thinking`), así que el primer bloque no siempre es el texto. Vacío si no hay texto."""
+    return next((b.text for b in response.content if getattr(b, "type", "text") == "text"), "")
 
 # Vocabulario del protocolo de confianza — MPX Cap. 2, heredado sin
 # redefinir por Backend/AI Architecture. AI Architecture Sec.6: si el
@@ -680,7 +708,7 @@ async def _generar_respuesta_protocolo_confianza(
         response = await client.messages.create(
             model=MODELO_PRINCIPAL,
             max_tokens=1024,
-            system=[{"type": "text", "text": system_prompt, "cache_control": {"type": "ephemeral"}}],
+            system=[{"type": "text", "text": system_prompt, "cache_control": CACHE_INSTRUCCIONES}],
             messages=mensajes,
             tools=[_HERRAMIENTA_PROTOCOLO_CONFIANZA],
             tool_choice={"type": "tool", "name": _HERRAMIENTA_PROTOCOLO_CONFIANZA["name"]},
@@ -859,13 +887,13 @@ async def generar_respuesta(
         response = await client.messages.create(
             model=MODELO_PRINCIPAL,
             max_tokens=1024,
-            system=[{"type": "text", "text": system_prompt, "cache_control": {"type": "ephemeral"}}],
+            system=[{"type": "text", "text": system_prompt, "cache_control": CACHE_INSTRUCCIONES}],
             messages=mensajes
         )
 
         # Se limpia el markdown AQUÍ (en el origen) para que lo que se envía, lo que se guarda en el chat y lo
         # que lee extraer_datos_lead sea el mismo texto (agent/formato_whatsapp.py). Nunca lanza.
-        respuesta = await formato_whatsapp.limpiar_salida_gabi(response.content[0].text)
+        respuesta = await formato_whatsapp.limpiar_salida_gabi(texto_de_respuesta(response))
         # cache_read/cache_creation en el log (no solo in/out) — es la única
         # forma de confirmar que el caching de arriba realmente está
         # pegando en producción, no solo que el código no rompió nada.
@@ -875,6 +903,7 @@ async def generar_respuesta(
             f" / {getattr(response.usage, 'cache_creation_input_tokens', None)} cache_write)"
         )
         circuito_ia.registrar_exito()
+        sombra_modelo.lanzar(system_prompt, mensajes, respuesta, lead, negocio_id)
         return respuesta, False, None, None
 
     except Exception as e:
@@ -914,12 +943,12 @@ async def extraer_datos_lead(mensaje_cliente: str, respuesta_gabi: str, lead_act
         "cambia ni se menciona, repite el valor actual (o null si sigue desconocido)."
     )
     try:
-        response = await client.messages.create(
-            model=MODELO_EXTRACCION,
+        response = await crear_con_modelo_economico(
             max_tokens=200,
+            thinking=SIN_RAZONAMIENTO,
             messages=[{"role": "user", "content": prompt}],
         )
-        texto = response.content[0].text.strip()
+        texto = texto_de_respuesta(response).strip()
         texto = texto.removeprefix("```json").removeprefix("```").removesuffix("```").strip()
         datos = json.loads(texto)
         producto_tipo = datos.get("producto_tipo") or None
@@ -979,12 +1008,12 @@ async def generar_resumen_conversacion(historial: list[dict]) -> str:
         f"Conversación:\n{texto_historial}"
     )
     try:
-        response = await client.messages.create(
-            model=MODELO_EXTRACCION,
+        response = await crear_con_modelo_economico(
             max_tokens=300,
+            thinking=SIN_RAZONAMIENTO,
             messages=[{"role": "user", "content": prompt}],
         )
-        resumen = response.content[0].text.strip()
+        resumen = texto_de_respuesta(response).strip()
         latencia_ms = round((time.monotonic() - inicio) * 1000)
         logger.info(
             "resumen_ia "

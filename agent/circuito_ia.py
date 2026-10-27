@@ -284,12 +284,14 @@ def _crear_cliente_sondeo():
 
 
 async def _llamada_de_sondeo() -> bool:
-    from agent.brain import MODELO_EXTRACCION  # import tardío: brain importa este módulo
+    # El sondeo solo comprueba que la cuenta responde (clave y saldo): usa el modelo económico de respaldo, que siempre está
+    # disponible, para que la falta de un modelo nuevo nunca deje el circuito abierto.
+    from agent.brain import MODELO_EXTRACCION_RESPALDO  # import tardío: brain importa este módulo
 
     cliente = _crear_cliente_sondeo()
     try:
         await cliente.messages.create(
-            model=MODELO_EXTRACCION, max_tokens=1, messages=[{"role": "user", "content": "ok"}],
+            model=MODELO_EXTRACCION_RESPALDO, max_tokens=1, messages=[{"role": "user", "content": "ok"}],
         )
         return True
     except Exception as e:

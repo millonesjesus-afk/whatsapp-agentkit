@@ -577,7 +577,8 @@ async def test_el_sondeo_hace_una_llamada_de_un_token_y_cierra_el_circuito_si_re
 
     llamadas.assert_awaited_once()
     argumentos = llamadas.await_args.kwargs
-    assert argumentos["max_tokens"] == 1 and argumentos["model"] == brain.MODELO_EXTRACCION
+    # 2026-10-26: el sondeo usa el modelo económico de respaldo (siempre disponible), no el nuevo Haiku 5.5
+    assert argumentos["max_tokens"] == 1 and argumentos["model"] == brain.MODELO_EXTRACCION_RESPALDO
     assert not await circuito_ia.esta_abierto()
     assert json.loads(await mem.obtener_configuracion("ia_circuito", "")) == {"estado": "cerrado"}
     await circuito_ia.esperar_tareas_en_segundo_plano()

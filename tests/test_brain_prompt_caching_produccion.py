@@ -40,7 +40,7 @@ async def test_modo_produccion_manda_system_con_cache_control():
     assert isinstance(system_enviado, list), "system debe ser una lista de bloques, no un string plano, para poder cachear"
     assert len(system_enviado) == 1
     assert system_enviado[0]["type"] == "text"
-    assert system_enviado[0]["cache_control"] == {"type": "ephemeral"}
+    assert system_enviado[0]["cache_control"] == {"type": "ephemeral", "ttl": "1h"}  # 2026-10-26: caché de 1 h
 
 
 async def test_modo_produccion_el_texto_del_system_no_cambia():

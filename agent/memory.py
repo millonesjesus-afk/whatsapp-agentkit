@@ -663,8 +663,10 @@ TIPOS_EVENTO_EXP_SOLO_CLIC = (EVENTO_EXP_SOLO_CLIC_SOMBRA, EVENTO_EXP_SOLO_CLIC_
 # Calificación guiada con botones (2026-10-23, agent/calificacion_guiada.py): la PREGUNTA enviada es interna (el mensaje de Gabi ya
 # la muestra en el chat; el evento solo evita repetirla) y la RESPUESTA es visible: le sirve al asesor («Titular: sí»).
 EVENTO_CALIFICACION_PREGUNTA = "calificacion_pregunta"
+# Respuesta generada con otro modelo para comparar (agent/sombra_modelo.py): nunca se envía ni se muestra en el Timeline.
+EVENTO_SOMBRA_MODELO = "sombra_modelo"
 EVENTO_CALIFICACION_RESPUESTA = "calificacion_respuesta"
-TIPOS_EVENTO_INTERNOS = (EVENTO_TRIAJE_ATC_SOMBRA, EVENTO_TRIAJE_ATC_FALLIDO) + TIPOS_EVENTO_LLAMADA_INTERNOS + TIPOS_EVENTO_EXP_SOLO_CLIC + (EVENTO_CALIFICACION_PREGUNTA,)
+TIPOS_EVENTO_INTERNOS = (EVENTO_TRIAJE_ATC_SOMBRA, EVENTO_TRIAJE_ATC_FALLIDO) + TIPOS_EVENTO_LLAMADA_INTERNOS + TIPOS_EVENTO_EXP_SOLO_CLIC + (EVENTO_CALIFICACION_PREGUNTA, EVENTO_SOMBRA_MODELO)
 
 
 class EventoLead(Base):
