@@ -393,7 +393,7 @@ async def obtener_familia_producto(codigo_material: str, negocio_id: str | None)
     return familia
 
 
-def formatear_producto(producto: dict, tea: float, igv: float) -> str:
+def formatear_producto(producto: dict, tea: float, igv: float, con_cuotas: bool = True) -> str:
     """Da formato legible a un producto del catálogo.
 
     Combo/Incluye conexión (2026-09-16, pedido explícito: "cuando a Gabi le
@@ -444,7 +444,9 @@ def formatear_producto(producto: dict, tea: float, igv: float) -> str:
             lineas.append("Incluye la conexión del equipo al punto de gas existente (con elastómero): SÍ — no incluye punto de gas nuevo")
         else:
             lineas.append(f"Incluye la conexión del equipo al punto de gas existente: {incluye_conexion}")
-    if cuotas:
+    # `con_cuotas=False` (2026-10-26, auditoría de tokens): la tabla de cuotas solo cuando el cliente habló de precio o de
+    # pagos; si no, Gabi no las menciona y eran ~30 tokens por producto en cada turno.
+    if cuotas and con_cuotas:
         lineas.append("Cuotas: " + " | ".join(cuotas))
     return "\n".join(lineas)
 
@@ -632,7 +634,7 @@ async def obtener_proxima_apertura(negocio_id: str | None, ahora: datetime | Non
 
 async def obtener_contexto_relevante(
     mensaje: str, negocio_id: str | None = None, negocio_codigo: str | None = None,
-    excluir_codigos: set[str] | None = None,
+    excluir_codigos: set[str] | None = None, con_cuotas: bool = True, limite_conocimiento: int = 7,
 ) -> str:
     """
     Punto de entrada usado por brain.py: combina resultados del catálogo de
@@ -662,7 +664,7 @@ async def obtener_contexto_relevante(
         # es porque negocio_id era real.
         tea, igv = await obtener_tasas_financiamiento(negocio_id)
         productos_texto = "\n\n".join(
-            f"{i}. {formatear_producto(p, tea, igv)}" for i, p in enumerate(productos, 1)
+            f"{i}. {formatear_producto(p, tea, igv, con_cuotas=con_cuotas)}" for i, p in enumerate(productos, 1)
         )
         secciones.append(
             "Productos del catálogo relacionados (numerados y ordenados de menor a "
@@ -687,7 +689,7 @@ async def obtener_contexto_relevante(
                     f"sería S/ {calculo['cuota_inicial']:.2f} al mes."
                 )
 
-    conocimiento = buscar_en_knowledge(mensaje, negocio_codigo)
+    conocimiento = buscar_en_knowledge(mensaje, negocio_codigo, limite=limite_conocimiento)
     if conocimiento:
         secciones.append(f"Información de la base de conocimiento:\n{conocimiento}")
 

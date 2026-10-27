@@ -31,7 +31,7 @@ from agent.tools import (
 )
 from agent.memory import (
     obtener_campana_por_nombre, obtener_configuracion, obtener_identidad_agente, obtener_negocio,
-    obtener_conversation_activa_de_telefono, obtener_estado_calificacion,
+    obtener_conversation_activa_de_telefono, obtener_estado_calificacion, es_probable_cierre,
 )
 from agent.campanas import resolver_promo, resolver_familia_promo, obtener_codigos_promocionales_activos
 from agent import circuito_ia, formato_whatsapp, contexto_anuncio, calificacion_guiada, sombra_modelo
@@ -492,6 +492,17 @@ REGLA_FORMA_DEL_MENSAJE = (
 )
 
 
+FRAGMENTOS_CONOCIMIENTO_POR_TURNO = 4
+_SOLO_UN_NUMERO = re.compile(r"^[\d\s.\-]{6,}$")
+
+
+def turno_sin_catalogo(mensaje: str) -> bool:
+    """El cliente solo pasa un número (DNI, número de cliente, teléfono) o cierra con una cortesía («gracias», «ok», 👍):
+    Gabi no necesita el catálogo para responder. Un «sí»/«no» NO cuenta: puede ser «sí, cuéntame cómo pagarla»."""
+    texto = (mensaje or "").strip()
+    return bool(_SOLO_UN_NUMERO.match(texto)) or es_probable_cierre(texto)
+
+
 async def _armar_bloques_contexto(
     mensaje: str, historial: list[dict], lead: dict | None, negocio_id: str | None,
 ) -> list[str]:
@@ -592,10 +603,16 @@ async def _armar_bloques_contexto(
     # no resolvió Negocio — fail-safe, sin contexto en vez de adivinar.
     negocio = await obtener_negocio(negocio_id) if negocio_id is not None else None
     negocio_codigo = negocio["codigo"] if negocio else None
-    contexto = await obtener_contexto_relevante(
-        " ".join(interes_lead + mensajes_previos + [mensaje]), negocio_id, negocio_codigo,
-        excluir_codigos=codigos_a_excluir,
-    )
+    # Auditoría de tokens (2026-10-26): el catálogo y la base de conocimiento son la parte más grande del turno que no se
+    # cachea. No van cuando el cliente solo pasa un dato (DNI, número de cliente) o cierra con una cortesía; las cuotas
+    # de cada producto, solo si habló de precio o de pagos; y 4 fragmentos de conocimiento en vez de 7.
+    contexto = None
+    if not turno_sin_catalogo(mensaje):
+        contexto = await obtener_contexto_relevante(
+            " ".join(interes_lead + mensajes_previos + [mensaje]), negocio_id, negocio_codigo,
+            excluir_codigos=codigos_a_excluir, limite_conocimiento=FRAGMENTOS_CONOCIMIENTO_POR_TURNO,
+            con_cuotas=calificacion_guiada.pidio_precio(*mensajes_previos, mensaje),
+        )
     if contexto:
         bloques.append(f"Contexto relevante del catálogo/base de conocimiento:\n{contexto}")
 

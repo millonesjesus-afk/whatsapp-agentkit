@@ -1,11 +1,12 @@
-# agent/sombra_modelo.py — Respuesta "en sombra" con otro modelo (2026-10-26, auditoría de tokens).
+# agent/sombra_modelo.py — Respuesta "en sombra" con otros modelos (2026-10-26, auditoría de tokens).
 #
-# Para decidir si Gabi puede responder con un modelo mucho más barato (Haiku 5.5 cuesta ~20 veces menos que Sonnet 5.5),
-# cada respuesta real se genera también con ese modelo, con EXACTAMENTE el mismo pedido (instrucciones, historial y
-# contexto del turno), pero esa segunda respuesta NUNCA se envía al cliente ni entra al chat: se guarda como evento
-# interno `sombra_modelo` para compararla después (scripts/comparar_sombra_modelo.py).
+# Para decidir con qué modelo conviene que responda Gabi (Haiku 5.5 cuesta ~20 veces menos que Sonnet 5.5, y Sonnet 5.5 un
+# tercio menos por token que el actual Sonnet 4.6), cada respuesta real se genera también con esos modelos, con EXACTAMENTE
+# el mismo pedido (instrucciones, historial y contexto del turno), pero esas respuestas NUNCA se envían al cliente ni entran
+# al chat: se guardan como evento interno `sombra_modelo` para compararlas después (scripts/sombra_modelo.py).
 #
-# Se enciende con la configuración `gabi_sombra_modelo` = id del modelo (p. ej. "claude-haiku-5-5"); vacía = apagada.
+# Se enciende con la configuración `gabi_sombra_modelo` = uno o varios ids separados por coma
+# (p. ej. "claude-haiku-5-5,claude-sonnet-5-5"); vacía = apagada.
 # Corre en segundo plano: nunca demora ni rompe la respuesta real, y cualquier error se registra y se ignora.
 
 import asyncio
@@ -18,27 +19,35 @@ logger = logging.getLogger("agentkit")
 
 CLAVE_MODELO_SOMBRA = "gabi_sombra_modelo"
 
+# Cómo se apaga el razonamiento en cada familia (se cobra y en una respuesta de chat no hace falta):
+# Haiku 5.5 acepta "disabled"; Sonnet 5.5 lo rechaza con un 400 y usa "between_tools".
+RAZONAMIENTO_POR_MODELO = {
+    "claude-sonnet-5-5": {"type": "between_tools"},
+}
+RAZONAMIENTO_POR_DEFECTO = {"type": "disabled"}
+
 # Referencias vivas a las tareas en curso: asyncio solo guarda referencias débiles y una tarea sin referencia puede
 # desaparecer antes de terminar.
 _tareas: set[asyncio.Task] = set()
 
 
-async def modelo_configurado(negocio_id: str | None) -> str:
+async def modelos_configurados(negocio_id: str | None) -> list[str]:
     from agent.memory import obtener_configuracion
 
     try:
-        return (await obtener_configuracion(CLAVE_MODELO_SOMBRA, "", negocio_id=negocio_id) or "").strip()
+        valor = await obtener_configuracion(CLAVE_MODELO_SOMBRA, "", negocio_id=negocio_id) or ""
     except Exception:
-        return ""
+        return []
+    return [m.strip() for m in valor.split(",") if m.strip()]
 
 
 def lanzar(system_prompt: str, mensajes: list[dict], respuesta_real: str, lead: dict | None, negocio_id: str | None) -> None:
-    """Agenda la respuesta en sombra sin esperarla. Sin lead (sin teléfono donde guardar el evento) no hace nada."""
+    """Agenda las respuestas en sombra sin esperarlas. Sin lead (sin teléfono donde guardar el evento) no hace nada."""
     if not lead or not lead.get("telefono"):
         return
     try:
         tarea = asyncio.get_running_loop().create_task(
-            _generar_y_guardar(system_prompt, mensajes, respuesta_real, lead["telefono"], negocio_id)
+            _generar_todas(system_prompt, mensajes, respuesta_real, lead["telefono"], negocio_id)
         )
     except RuntimeError:
         return
@@ -46,21 +55,27 @@ def lanzar(system_prompt: str, mensajes: list[dict], respuesta_real: str, lead: 
     tarea.add_done_callback(_tareas.discard)
 
 
-async def _generar_y_guardar(
+async def _generar_todas(
     system_prompt: str, mensajes: list[dict], respuesta_real: str, telefono: str, negocio_id: str | None,
+) -> None:
+    modelos = await modelos_configurados(negocio_id)
+    await asyncio.gather(*(
+        _generar_y_guardar(modelo, system_prompt, mensajes, respuesta_real, telefono) for modelo in modelos
+    ))
+
+
+async def _generar_y_guardar(
+    modelo: str, system_prompt: str, mensajes: list[dict], respuesta_real: str, telefono: str,
 ) -> None:
     from agent import brain
     from agent.memory import registrar_evento_lead
 
     try:
-        modelo = await modelo_configurado(negocio_id)
-        if not modelo:
-            return
         inicio = time.monotonic()
         response = await brain.client.messages.create(
             model=modelo,
             max_tokens=1024,
-            thinking=brain.SIN_RAZONAMIENTO,
+            thinking=RAZONAMIENTO_POR_MODELO.get(modelo, RAZONAMIENTO_POR_DEFECTO),
             system=[{"type": "text", "text": system_prompt, "cache_control": brain.CACHE_INSTRUCCIONES}],
             messages=mensajes,
         )
@@ -82,4 +97,4 @@ async def _generar_y_guardar(
             },
         )
     except Exception:
-        logger.exception("Respuesta en sombra: no se pudo generar o guardar (la respuesta real no se ve afectada)")
+        logger.exception(f"Respuesta en sombra con {modelo}: no se pudo generar o guardar (la respuesta real no se ve afectada)")

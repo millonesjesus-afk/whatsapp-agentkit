@@ -133,3 +133,39 @@ async def test_si_haiku_5_5_no_esta_disponible_la_extraccion_vuelve_a_haiku_4_5(
     assert [c.kwargs["model"] for c in mock.await_args_list] == ["claude-haiku-5-5", brain.MODELO_EXTRACCION_RESPALDO]
     assert "thinking" not in mock.await_args_list[1].kwargs
     assert datos["paso_flujo"] == "derivado_asesor"        # la derivación se sigue detectando
+
+
+def test_turnos_que_no_necesitan_catalogo():
+    t = brain.turno_sin_catalogo
+    assert t("12345678") and t("  4501 2345 ") and t("Muchas gracias") and t("ok") and t("👍")
+    assert not t("sí") and not t("no") and not t("¿cuánto cuesta?") and not t("quiero la de 10 litros")
+    assert not t("Juan") and not t("123")           # un nombre o un número corto (capacidad, cuotas) sí puede necesitarlo
+
+
+def test_las_cuotas_por_producto_solo_si_el_cliente_hablo_de_precio():
+    from agent.tools import formatear_producto
+    p = {"MARCA": "SOLE", "DESCRIPCIÓN": "TERMA SOLE 10 LT", "PRECIO": "699", "CANAL": "ALOC"}
+    con = formatear_producto(p, 0.40, 0.18)
+    sin = formatear_producto(p, 0.40, 0.18, con_cuotas=False)
+    assert "Cuotas:" in con and "Cuotas:" not in sin and "S/ 699" in sin
+
+
+async def test_sombra_con_dos_modelos_usa_el_razonamiento_que_acepta_cada_uno(monkeypatch):
+    negocio = await mem.crear_negocio("Negocio Sombra 3", "sombra3")
+    await mem.guardar_configuracion(
+        sombra_modelo.CLAVE_MODELO_SOMBRA, "claude-haiku-5-5, claude-sonnet-5-5", negocio_id=negocio["id"],
+    )
+    guardados = []
+
+    async def registrar(telefono, tipo, descripcion, autor, payload=None):
+        guardados.append(payload["modelo"])
+    monkeypatch.setattr(mem, "registrar_evento_lead", registrar)
+
+    with patch.object(brain.client.messages, "create", new=AsyncMock(return_value=_respuesta("x"))) as mock:
+        await brain.generar_respuesta("Hola", historial=[], lead={"telefono": "51900000004"}, modo="produccion",
+                                      negocio_id=negocio["id"])
+        await _esperar_sombras()
+    razonamiento = {c.kwargs["model"]: c.kwargs.get("thinking") for c in mock.await_args_list}
+    assert razonamiento["claude-haiku-5-5"] == {"type": "disabled"}
+    assert razonamiento["claude-sonnet-5-5"] == {"type": "between_tools"}
+    assert brain.MODELO_PRINCIPAL in razonamiento and sorted(guardados) == ["claude-haiku-5-5", "claude-sonnet-5-5"]

@@ -1,4 +1,4 @@
-"""Enciende, apaga y compara la respuesta de Gabi «en sombra» con otro modelo (agent/sombra_modelo.py) — 2026-10-26.
+"""Enciende, apaga y compara la respuesta de Gabi «en sombra» con otros modelos (agent/sombra_modelo.py) — 2026-10-26.
 
 Con la sombra encendida, cada respuesta real de Gabi se genera también con el modelo indicado (mismas instrucciones,
 historial y contexto) y se guarda como evento interno `sombra_modelo`: NUNCA se envía al cliente. Cuesta poco (con
@@ -10,7 +10,7 @@ para revisarlos a ojo.
 
 Uso (la base sale de DATABASE_URL, como en los demás scripts):
     python scripts/sombra_modelo.py                          # estado + comparación de lo acumulado
-    python scripts/sombra_modelo.py --activar claude-haiku-5-5
+    python scripts/sombra_modelo.py --activar claude-haiku-5-5,claude-sonnet-5-5   # uno o varios, separados por coma
     python scripts/sombra_modelo.py --apagar
     python scripts/sombra_modelo.py --muestra 20 --desde 2026-10-27
     añadir --negocio-id <id> si hay más de un negocio activo.
@@ -97,15 +97,21 @@ async def main(argv=None) -> dict:
         await mem.guardar_configuracion(sm.CLAVE_MODELO_SOMBRA, args.activar.strip(), negocio_id=negocio_id)
     elif args.apagar:
         await mem.guardar_configuracion(sm.CLAVE_MODELO_SOMBRA, "", negocio_id=negocio_id)
-    modelo = await sm.modelo_configurado(negocio_id)
-    print(f"Sombra: {'encendida con ' + modelo if modelo else 'apagada'}")
+    modelos = await sm.modelos_configurados(negocio_id)
+    print(f"Sombra: {'encendida con ' + ', '.join(modelos) if modelos else 'apagada'}")
     desde = datetime.fromisoformat(args.desde.replace("Z", "+00:00")).replace(tzinfo=None) if args.desde else None
     payloads = await cargar(negocio_id, desde)
-    resumen = resumir(payloads)
-    print("Comparación: " + ", ".join(f"{k}={v}" for k, v in resumen.items()))
+    por_modelo: dict[str, list[dict]] = {}
+    for par in payloads:
+        por_modelo.setdefault(par.get("modelo") or "?", []).append(par)
+    resumenes = {m: resumir(ps) for m, ps in sorted(por_modelo.items())}
+    if not resumenes:
+        print("Comparación: respuestas=0")
+    for m, r in resumenes.items():
+        print(f"Comparación {m}: " + ", ".join(f"{k}={v}" for k, v in r.items()))
     for par in payloads[-args.muestra:] if args.muestra else []:
-        print("\n--- REAL ---\n" + (par.get("respuesta_real") or "") + "\n--- SOMBRA ---\n" + (par.get("respuesta_sombra") or ""))
-    return {"modelo": modelo, "resumen": resumen}
+        print(f"\n--- REAL ---\n{par.get('respuesta_real') or ''}\n--- SOMBRA {par.get('modelo')} ---\n{par.get('respuesta_sombra') or ''}")
+    return {"modelos": modelos, "resumen": resumenes}
 
 
 if __name__ == "__main__":
