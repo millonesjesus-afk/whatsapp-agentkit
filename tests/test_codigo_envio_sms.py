@@ -71,6 +71,16 @@ def test_el_codigo_corto_solo_se_reconoce_como_palabra_suelta():
         assert campanas.campana_por_codigo(lista, texto) is None, texto
 
 
+@pytest.mark.parametrize("tipo,subtipo,esperado", [
+    ("Terma", "Terma", "Terma"),
+    ("Termas", "Termas a gas", "Termas a gas"),
+    ("Termas", "Tiro natural", "Termas · Tiro natural"),
+])
+def test_el_grupo_no_repite_el_tipo_en_el_subtipo(tipo, subtipo, esperado):
+    campana = {"alcance": "producto", "nivel_producto": "subtipo", "tipo_producto": tipo, "subtipo_producto": subtipo}
+    assert campanas.descripcion_del_grupo(campana) == esperado
+
+
 def test_ter29_y_ter29b_son_envios_distintos():
     lista = [
         {"tipo_deteccion": "codigo_envio", "patron": "TER29", "nombre": "primero"},

@@ -134,9 +134,12 @@ def descripcion_del_grupo(campana: dict) -> str | None:
     """"Termas · Tiro natural" / "Termas" para un envío por tipo o subtipo de producto; None en cualquier otro caso."""
     if campana.get("alcance") != "producto" or campana.get("nivel_producto") not in ("tipo", "subtipo"):
         return None
-    partes = [campana.get("tipo_producto")] + ([campana.get("subtipo_producto")] if campana.get("nivel_producto") == "subtipo" else [])
-    partes = [p.strip() for p in partes if p and p.strip()]
-    return " · ".join(partes) or None
+    tipo = (campana.get("tipo_producto") or "").strip()
+    subtipo = (campana.get("subtipo_producto") or "").strip() if campana.get("nivel_producto") == "subtipo" else ""
+    # Sin repetir: tipo «Terma» + subtipo «Terma» es «Terma»; «Termas» + «Termas a gas» es «Termas a gas».
+    if tipo and subtipo and (tipo.lower() in subtipo.lower() or subtipo.lower() in tipo.lower()):
+        return subtipo if len(subtipo) >= len(tipo) else tipo
+    return " · ".join(p for p in (tipo, subtipo) if p) or None
 
 
 async def resolver_promo(campana: dict, negocio_id: str | None) -> dict | None:
