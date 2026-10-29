@@ -115,7 +115,7 @@ def _tipo_de(conv: dict, lead: dict | None, primero: dict | None, campana: dict 
     if campana:
         # Sin evidencia (conversaciones anteriores a Attribution V2): la forma de detección de la
         # campaña dice cómo llegó.
-        return "enlace_wa" if campana.get("tipo_deteccion") == "texto_saludo" else "anuncio_meta"
+        return "enlace_wa" if campana.get("tipo_deteccion") in ("texto_saludo", "codigo_envio") else "anuncio_meta"
     return "organico"
 
 

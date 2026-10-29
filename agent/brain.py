@@ -33,7 +33,9 @@ from agent.memory import (
     obtener_campana_por_nombre, obtener_configuracion, obtener_identidad_agente, obtener_negocio,
     obtener_conversation_activa_de_telefono, obtener_estado_calificacion, es_probable_cierre,
 )
-from agent.campanas import resolver_promo, resolver_familia_promo, obtener_codigos_promocionales_activos
+from agent.campanas import (
+    resolver_promo, resolver_familia_promo, obtener_codigos_promocionales_activos, descripcion_del_grupo,
+)
 from agent import circuito_ia, formato_whatsapp, contexto_anuncio, calificacion_guiada, sombra_modelo
 from agent.origen_conversacion import origen_de_conversacion
 from agent import calendario_negocio as cal_negocio
@@ -531,6 +533,7 @@ async def _armar_bloques_contexto(
     codigos_propios = set()
     hay_promo_de_campana = False
     campana_sin_precio = None   # nombre de una campaña cuyo material ya no está en el catálogo
+    interes_campana: list[str] = []   # tipo/subtipo de un SMS por grupo de productos: suma a la búsqueda del catálogo
     if lead:
         campos_relevantes = ("nombre", "interes", "paso_flujo")
         datos_lead = ", ".join(f"{campo}: {lead[campo]}" for campo in campos_relevantes if lead.get(campo))
@@ -545,6 +548,17 @@ async def _armar_bloques_contexto(
             promo = await resolver_promo(campana, negocio_id) if campana else None
             if campana and not promo and campana.get("codigo_material"):
                 campana_sin_precio = campana["nombre"]
+            # Envío de SMS por tipo o subtipo (2026-10-29): no hay un producto en promoción, pero sí se sabe qué grupo
+            # vio el cliente; Gabi arranca por ahí en vez de preguntar desde cero. El precio «desde» es el del SMS.
+            grupo = descripcion_del_grupo(campana) if campana and not promo else None
+            if grupo:
+                desde = f" desde {campana['precio_promocional']}" if campana.get("precio_promocional") else ""
+                bloques.append(
+                    f"Este cliente llegó por el SMS \"{campana['nombre']}\", que promocionaba {grupo}{desde}. "
+                    f"Empieza recomendando productos de ese grupo del catálogo, con sus precios reales, "
+                    f"salvo que el cliente pida otra cosa."
+                )
+                interes_campana = [grupo.replace(" · ", " ")]
             if promo:
                 hay_promo_de_campana = True
                 detalle = f"Producto: {promo['producto']}"
@@ -609,7 +623,7 @@ async def _armar_bloques_contexto(
     contexto = None
     if not turno_sin_catalogo(mensaje):
         contexto = await obtener_contexto_relevante(
-            " ".join(interes_lead + mensajes_previos + [mensaje]), negocio_id, negocio_codigo,
+            " ".join(interes_campana + interes_lead + mensajes_previos + [mensaje]), negocio_id, negocio_codigo,
             excluir_codigos=codigos_a_excluir, limite_conocimiento=FRAGMENTOS_CONOCIMIENTO_POR_TURNO,
             con_cuotas=calificacion_guiada.pidio_precio(*mensajes_previos, mensaje),
         )

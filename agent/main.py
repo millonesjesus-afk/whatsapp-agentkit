@@ -630,6 +630,18 @@ async def _registrar_referral_seguro(msg, canal: dict | None, texto: str = "") -
         logger.error(f"No se pudo registrar la atribución del referral de {msg.telefono}: {e}")
 
 
+async def _registrar_codigo_envio_seguro(msg, canal: dict | None) -> None:
+    """Código de un envío de SMS en el mensaje de un lead que ya tenía campaña
+    (ver campanas.registrar_codigo_envio_entrante). Falla segura, igual que
+    `_registrar_referral_seguro`: nunca impide guardar el mensaje ni responder."""
+    if not canal or not canal.get("negocio_id"):
+        return
+    try:
+        await servicio_canales.registrar_codigo_envio_entrante(msg.telefono, msg.texto, canal["negocio_id"])
+    except Exception as e:
+        logger.error(f"No se pudo registrar el código de envío de {msg.telefono}: {e}")
+
+
 # Foto o documento del cliente (auditoría 2026-10-26): suele ser el recibo, el DNI, la foto del equipo o de un reclamo. Pedirle
 # que «lo escriba» lo frenaba; ahora Gabi acusa recibo y pasa el caso a un asesor, que sí puede verlo. Audios, videos y stickers
 # siguen con el aviso de siempre.
@@ -1320,6 +1332,9 @@ async def webhook_handler(request: Request):
                 # El lead ya tenía campaña (first-touch intacto): un referral
                 # nuevo solo deja evidencia (evento con first_touch=False).
                 await _registrar_referral_seguro(msg, canal, msg.texto)
+            else:
+                # Mismo criterio para el código de un envío de SMS.
+                await _registrar_codigo_envio_seguro(msg, canal)
 
             # Cierre automático por inactividad del CLIENTE (2026-09-17,
             # pedido explícito del usuario) — scripts/procesar_inactividad_

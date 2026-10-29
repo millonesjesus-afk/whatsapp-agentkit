@@ -11,6 +11,12 @@ tabla `campanas` (administrable desde el panel):
   - "texto_saludo": el cliente llega por un wa.link con un mensaje de saludo
     pre-armado (SMS, catálogo web, CrediChat, etc.). Se compara el primer
     mensaje del cliente contra un fragmento distintivo (patron) de ese saludo.
+  - "codigo_envio" (2026-10-29): igual que "texto_saludo", pero cada envío
+    de SMS lleva un código único al final del saludo, p. ej.
+    "(Cód. SMS-TER-29OCT)" — patron guarda el código. Distingue envíos que
+    comparten el mismo saludo y sigue funcionando si el cliente cambia el
+    resto del texto. Se busca ANTES que la frase: si el cliente borra el
+    código, la frase de la campaña general (texto_saludo) sigue sirviendo.
   - "referral_meta": el cliente llega por un anuncio de Click-to-WhatsApp de
     Meta (Facebook/Instagram). Meta manda un objeto "referral" en el webhook
     con datos del anuncio (source_id, headline, etc.) — se compara patron
@@ -18,11 +24,15 @@ tabla `campanas` (administrable desde el panel):
 
 Solo se evalúa en el PRIMER contacto del lead (cuando aún no tiene
 campana_origen asignada) — la campaña de origen no cambia durante la
-conversación.
+conversación. Excepción, igual que con los anuncios de Meta: un lead que ya
+tenía campaña y vuelve con el código de un envío deja evidencia y su
+conversación activa cuenta para ese envío (registrar_codigo_envio_entrante).
 """
 
 import os
 import logging
+import re
+import unicodedata
 import urllib.parse
 
 from agent import envios
@@ -31,7 +41,7 @@ from agent.memory import (
     listar_campanas, asignar_campana_origen, obtener_campana_por_nombre,
     obtener_lead, actualizar_lead, registrar_attribution_event,
     registrar_attribution_event_adicional, existe_attribution_event_reciente, obtener_reglas_anuncio,
-    asignar_campana_a_conversation_activa,
+    asignar_campana_a_conversation_activa, existe_attribution_event_de_campana_en_conversacion_activa,
 )
 from agent.tools import obtener_producto_por_codigo, obtener_familia_producto, formatear_producto
 
@@ -45,6 +55,88 @@ WHATSAPP_NUMERO_PUBLICO = os.getenv("WHATSAPP_NUMERO_PUBLICO", "51998317970")
 
 def _normalizar(texto: str) -> str:
     return (texto or "").strip().lower()
+
+
+# ── Código por envío (tipo "codigo_envio") ──────────────────────────────────
+
+TIPO_CODIGO_ENVIO = "codigo_envio"
+PREFIJO_CODIGO_ENVIO = "Cód."
+LARGO_MINIMO_CODIGO = 4   # sin guiones ni espacios, p. ej. TER29
+LARGO_MAXIMO_CODIGO = 24
+_FORMATO_CODIGO = re.compile(r"^[A-Z0-9]+(?:-[A-Z0-9]+)*$")
+# Un lead que YA tiene campaña solo se revisa si su mensaje menciona un código: evita leer las campañas en cada mensaje.
+_MENCIONA_CODIGO = re.compile(r"\b(?:c[oó]d(?:igo)?|ref)\b", re.IGNORECASE)
+ALCANCES_ENVIO = ("negocio", "producto")
+NIVELES_PRODUCTO = ("tipo", "subtipo", "producto")
+
+
+def _sin_tildes(texto: str | None) -> str:
+    return unicodedata.normalize("NFKD", texto or "").encode("ascii", "ignore").decode("ascii")
+
+
+def normalizar_codigo(texto: str | None) -> str:
+    """Mayúsculas, sin tildes y solo letras y números: "Cód. sms-ter 29oct" y "SMS-TER-29OCT" quedan iguales."""
+    return re.sub(r"[^A-Z0-9]", "", _sin_tildes(texto).upper())
+
+
+def _palabras(texto: str | None) -> str:
+    """" TER29 " / " SMS TER 29OCT ": el texto en mayúsculas, sin tildes, con cualquier signo convertido en un espacio y
+    rodeado de espacios. Buscar el código así exige que aparezca como palabra suelta: un código corto como TER29 no se
+    confunde con un pedazo de lo que escribe el cliente ("tengo 29 años" no contiene la palabra TER29)."""
+    return f" {' '.join(re.sub(r'[^A-Z0-9]+', ' ', _sin_tildes(texto).upper()).split())} "
+
+
+def codigos_se_cruzan(uno: str, otro: str) -> bool:
+    """Dos códigos que el sistema no podría distinguir: iguales sin signos (TER-29 y TER29) o uno contiene al otro como
+    palabras (TER 29OCT dentro de SMS TER 29OCT)."""
+    a, b = _palabras(uno), _palabras(otro)
+    return bool(a.strip() and b.strip()) and (normalizar_codigo(uno) == normalizar_codigo(otro) or a in b or b in a)
+
+
+def validar_codigo_envio(codigo: str) -> str | None:
+    """Mensaje de error, o None si el código sirve: letras, números y guiones, con al menos una letra y un número
+    (así nunca coincide con una palabra o un número sueltos del cliente)."""
+    limpio = (codigo or "").strip().upper()
+    normalizado = normalizar_codigo(limpio)
+    if not _FORMATO_CODIGO.match(limpio):
+        return "El código solo puede tener letras, números y guiones (p. ej. TER29)."
+    if not (LARGO_MINIMO_CODIGO <= len(normalizado) <= LARGO_MAXIMO_CODIGO):
+        return f"El código debe tener entre {LARGO_MINIMO_CODIGO} y {LARGO_MAXIMO_CODIGO} letras o números."
+    if not (re.search(r"[A-Z]", normalizado) and re.search(r"[0-9]", normalizado)):
+        return "El código debe tener al menos una letra y un número (p. ej. TER29)."
+    return None
+
+
+def saludo_con_codigo(saludo: str, codigo: str) -> str:
+    """El saludo que se pone en el enlace: el del usuario con "(Cód. XXX)" al final, salvo que ya lo traiga."""
+    saludo = (saludo or "").strip()
+    if _palabras(codigo).strip() and _palabras(codigo) in _palabras(saludo):
+        return saludo
+    return f"{saludo} ({PREFIJO_CODIGO_ENVIO} {codigo.strip().upper()})".strip()
+
+
+def campana_por_codigo(campanas: list[dict], texto_mensaje: str) -> dict | None:
+    """Campaña de envío cuyo código aparece en el mensaje como palabra suelta (sin importar mayúsculas, tildes ni
+    signos: "cód. ter29", "(COD TER29)"). Si coinciden varias, gana la del código más largo."""
+    texto = _palabras(texto_mensaje)
+    if not texto.strip():
+        return None
+    candidatas = [
+        (len(codigo), c) for c in campanas
+        if c.get("tipo_deteccion") == TIPO_CODIGO_ENVIO
+        and len(normalizar_codigo(c.get("patron"))) >= LARGO_MINIMO_CODIGO
+        and (codigo := _palabras(c.get("patron"))) in texto
+    ]
+    return max(candidatas, key=lambda par: par[0])[1] if candidatas else None
+
+
+def descripcion_del_grupo(campana: dict) -> str | None:
+    """"Termas · Tiro natural" / "Termas" para un envío por tipo o subtipo de producto; None en cualquier otro caso."""
+    if campana.get("alcance") != "producto" or campana.get("nivel_producto") not in ("tipo", "subtipo"):
+        return None
+    partes = [campana.get("tipo_producto")] + ([campana.get("subtipo_producto")] if campana.get("nivel_producto") == "subtipo" else [])
+    partes = [p.strip() for p in partes if p and p.strip()]
+    return " · ".join(partes) or None
 
 
 async def resolver_promo(campana: dict, negocio_id: str | None) -> dict | None:
@@ -111,7 +203,9 @@ async def obtener_codigos_promocionales_activos(negocio_id: str | None) -> set[s
     campanas = await listar_campanas(negocio_id, solo_activas=True)
     codigos = set()
     for c in campanas:
-        if not c.get("codigo_material"):
+        # Un envío de SMS por producto usa el precio normal del catálogo, no uno reservado (2026-10-29): si lo
+        # reservara, cada envío escondería ese producto a todos los demás clientes de Gabi.
+        if not c.get("codigo_material") or c.get("tipo_deteccion") == TIPO_CODIGO_ENVIO:
             continue
         codigos.add(c["codigo_material"])
         familia = await obtener_familia_producto(c["codigo_material"], negocio_id)
@@ -252,7 +346,18 @@ async def detectar_y_asignar_campana(
         await registrar_attribution_event(telefono, "meta_ads_no_resuelto", referral=referral)
         referral_sin_resolver = True
 
-    # 2. Saludo pre-armado de wa.link (SMS, catálogo web, CrediChat, etc.) —
+    # 2. Código de un envío de SMS — más específico que la frase: si el
+    # cliente lo dejó, se sabe el envío exacto aunque haya cambiado el resto.
+    if texto_normalizado:
+        campana = campana_por_codigo(campanas, texto_mensaje)
+        if campana:
+            await asignar_campana_origen(telefono, campana["nombre"])
+            logger.info(f"Campaña detectada (código de envío) para {telefono}: {campana['nombre']}")
+            if not referral_sin_resolver:
+                await registrar_attribution_event(telefono, "wa_link", campana_nombre=campana["nombre"])
+            return campana
+
+    # 3. Saludo pre-armado de wa.link (SMS, catálogo web, CrediChat, etc.) —
     # Lead.campana_origen sigue funcionando exactamente igual que antes de
     # Attribution V2, incluso si ya hubo un referral sin resolver arriba.
     if texto_normalizado:
@@ -265,6 +370,27 @@ async def detectar_y_asignar_campana(
                 return campana
 
     return None
+
+
+async def registrar_codigo_envio_entrante(telefono: str, texto_mensaje: str, negocio_id: str | None) -> dict | None:
+    """Lead que YA tenía campaña y escribe con el código de un envío de SMS
+    (vuelve por otro SMS): mismo trato que un referral nuevo de Meta en
+    `registrar_referral_entrante` — `Lead.campana_origen` (first-touch) no se
+    toca; queda evidencia con first_touch=False y la conversación activa
+    cuenta para ese envío si aún no tenía campaña. Una sola vez por
+    conversación: el cliente puede repetir el código sin duplicar nada.
+    Retorna la campaña cuando deja evidencia nueva."""
+    if negocio_id is None or not texto_mensaje or not _MENCIONA_CODIGO.search(texto_mensaje):
+        return None
+    campana = campana_por_codigo(await listar_campanas(negocio_id, solo_activas=True), texto_mensaje)
+    if campana is None:
+        return None
+    if await existe_attribution_event_de_campana_en_conversacion_activa(telefono, negocio_id, campana["nombre"]):
+        return None
+    await registrar_attribution_event_adicional(telefono, "wa_link", campana_nombre=campana["nombre"])
+    await asignar_campana_a_conversation_activa(telefono, campana["id"])
+    logger.info(f"Código de envío de un lead con campaña previa ({telefono}): {campana['nombre']}")
+    return campana
 
 
 def _normalizar_telefono(telefono: str) -> str:
@@ -524,6 +650,13 @@ async def corregir_patrones_desalineados(negocio_id: str | None):
 
     for nombre, patron_correcto in PATRONES_CORREGIDOS.items():
         campana = await obtener_campana_por_nombre(nombre, negocio_id)
-        if campana and campana.get("patron") != patron_correcto:
-            await actualizar_campana(campana["id"], patron=patron_correcto)
-            logger.info(f"Patrón corregido para la campaña '{nombre}'")
+        if not campana or campana.get("patron") == patron_correcto:
+            continue
+        # Si la campaña tiene su saludo guardado, ese saludo manda (2026-10-29): un patrón que ya aparece en él no se
+        # toca, y el de este mapa solo se aplica si de verdad aparece. Antes el mapa pisaba en cada arranque la
+        # corrección hecha a mano de «SMS Clientes que ya tienen gas», cuyo saludo real dice «cuento con gas natural».
+        saludo = _normalizar(campana.get("texto_saludo"))
+        if saludo and (_normalizar(campana.get("patron")) in saludo or _normalizar(patron_correcto) not in saludo):
+            continue
+        await actualizar_campana(campana["id"], patron=patron_correcto)
+        logger.info(f"Patrón corregido para la campaña '{nombre}'")

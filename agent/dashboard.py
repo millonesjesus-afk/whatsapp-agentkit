@@ -58,6 +58,7 @@ from agent.memory import (
     asignar_asesor_a_lead, marcar_lead_visto, limpiar_revision_prioritaria, actualizar_disponibilidad, actualizar_nivel_asesor,
     toggle_usuario_activo, eliminar_usuario,
     listar_campanas, crear_campana, actualizar_campana, contar_opportunities_por_campana, eliminar_campana,
+    listar_unidades_de_negocio, listar_productos_activos,
     obtener_campana, obtener_canal_whatsapp, listar_anuncios_detectados, asignar_anuncio_a_campana,
     diagnostico_anuncios_sin_campana, plan_migrar_comodines, aplicar_migrar_comodines, obtener_reglas_anuncio, guardar_regla_anuncio,
     historico_rellenar_conversaciones, historico_corregir_anuncios, historico_revertir,
@@ -7704,6 +7705,9 @@ TIPOS_DETECCION = {
     "por_anuncio": "Anuncio de Meta (regla por anuncio)",
     "leadgen_meta": "Formulario de Meta (Lead Ads)",
 }
+# La Nueva Experiencia suma el envío de SMS con código (2026-10-29); el panel Legacy no lo ofrece (no sabe armar el
+# saludo con el código) pero sí lo muestra con su nombre.
+TIPOS_DETECCION_JSON = {**TIPOS_DETECCION, "codigo_envio": "Envío SMS (código)"}
 
 
 async def _preparar_deteccion_meta(tipo_deteccion: str, patron: str, negocio_id: str) -> tuple[str, str]:
@@ -7738,6 +7742,14 @@ def _campana_a_json(c: dict) -> dict:
         "producto_promocional": c["producto_promocional"],
         "precio_promocional": c["precio_promocional"],
         "texto_saludo": c["texto_saludo"],
+        # Enlace de WhatsApp con el saludo ya escrito, listo para pegar en el SMS (2026-10-29).
+        "link_whatsapp": servicio_canales.generar_link_whatsapp(c["texto_saludo"]) if c.get("texto_saludo") else None,
+        # Envío de SMS: qué promociona y el texto del SMS (None en el resto de campañas).
+        "alcance": c.get("alcance"),
+        "nivel_producto": c.get("nivel_producto"),
+        "tipo_producto": c.get("tipo_producto"),
+        "subtipo_producto": c.get("subtipo_producto"),
+        "texto_sms": c.get("texto_sms"),
         "activa": c["activa"],
         "creado": iso_utc(c["creado"]),
     }
@@ -7764,7 +7776,114 @@ async def campanas_json(usuario: dict = Depends(servicio_identidad.requiere_rol(
             for c in campanas
         ],
         "puede_gestionar": usuario["rol"] == "admin",
+        # Para el formulario «Envío SMS» (2026-10-29): el nombre del negocio y su rubro rellenan las plantillas del SMS
+        # ({negocio}, {rubro}); las unidades, si las hay, permiten un SMS de una sola unidad.
+        "negocio": await _negocio_para_sms(usuario["negocio_id"]),
     })
+
+
+CLAVE_RUBRO_NEGOCIO = "negocio_rubro"
+RUBRO_POR_DEFECTO = "nuestros productos"
+LARGO_MAXIMO_RUBRO = 60
+LARGO_MAXIMO_TEXTO_SMS = 500
+MARCA_ENLACE_SMS = "[enlace]"
+
+
+async def _negocio_para_sms(negocio_id: str) -> dict:
+    negocio = await obtener_negocio(negocio_id)
+    unidades = await listar_unidades_de_negocio(negocio_id, solo_activas=True)
+    return {
+        "nombre": (negocio or {}).get("nombre") or "",
+        "rubro": await obtener_configuracion(CLAVE_RUBRO_NEGOCIO, "", negocio_id=negocio_id) or "",
+        "rubro_por_defecto": RUBRO_POR_DEFECTO,
+        "unidades": [{"id": u["id"], "nombre": u["nombre"]} for u in unidades],
+    }
+
+
+def _precio_a_numero(precio) -> float | None:
+    texto = re.sub(r"[^\d.,]", "", str(precio or "")).replace(",", "")
+    try:
+        valor = float(texto)
+    except ValueError:
+        return None
+    return valor if valor > 0 else None
+
+
+def categorias_del_catalogo(productos: list[dict]) -> list[dict]:
+    """Tipos y subtipos del catálogo activo con cuántos productos tienen y el precio más bajo — para elegir el grupo de
+    un envío de SMS y proponer su precio «desde». Puro: recibe las filas de `listar_productos_activos`."""
+    grupos: dict[str, dict] = {}
+    for p in productos:
+        tipo = (p.get("TIPO") or "").strip()
+        if not tipo:
+            continue
+        subtipo = (p.get("SUB TIPO") or "").strip()
+        precio = _precio_a_numero(p.get("PRECIO"))
+        grupo = grupos.setdefault(tipo, {"tipo": tipo, "cantidad": 0, "precio_min": None, "subtipos": {}})
+        destinos = [grupo] + ([grupo["subtipos"].setdefault(subtipo, {"subtipo": subtipo, "cantidad": 0, "precio_min": None})] if subtipo else [])
+        for destino in destinos:
+            destino["cantidad"] += 1
+            if precio is not None and (destino["precio_min"] is None or precio < destino["precio_min"]):
+                destino["precio_min"] = precio
+    return [
+        {**g, "subtipos": sorted(g["subtipos"].values(), key=lambda s: s["subtipo"].lower())}
+        for g in sorted(grupos.values(), key=lambda g: g["tipo"].lower())
+    ]
+
+
+@router.get("/campanas/categorias.json")
+async def campanas_categorias_json(usuario: dict = Depends(servicio_identidad.requiere_rol("admin", "supervisor"))):
+    """Tipos y subtipos del catálogo del negocio (con cantidad y precio más bajo) para el envío de SMS por grupo."""
+    return JSONResponse({"categorias": categorias_del_catalogo(await listar_productos_activos(usuario["negocio_id"]))})
+
+
+@router.post("/campanas/rubro.json")
+async def guardar_rubro_negocio_json(
+    request: Request,
+    usuario: dict = Depends(servicio_identidad.requiere_rol("admin")),
+    _csrf: None = Depends(verificar_csrf),
+):
+    """Rubro del negocio ("gasodomésticos", "muebles y colchones"): rellena {rubro} en el SMS de alcance «Negocio».
+    Uno por negocio, así Maiek sirve igual a cualquier empresa sin textos propios de Cálidda."""
+    body = await request.json()
+    rubro = " ".join((body.get("rubro") or "").split())
+    if len(rubro) > LARGO_MAXIMO_RUBRO:
+        raise HTTPException(status_code=400, detail=f"El rubro admite hasta {LARGO_MAXIMO_RUBRO} caracteres.")
+    await guardar_configuracion(CLAVE_RUBRO_NEGOCIO, rubro, negocio_id=usuario["negocio_id"])
+    return JSONResponse({"ok": True, "rubro": rubro})
+
+
+async def _validar_alcance_envio(body: dict, negocio_id: str, codigo_material: str) -> dict:
+    """Campos de qué promociona un envío de SMS, ya validados contra el catálogo del negocio."""
+    alcance = (body.get("alcance") or "").strip()
+    if alcance not in servicio_canales.ALCANCES_ENVIO:
+        raise HTTPException(status_code=400, detail="Elige qué promociona el SMS: el negocio o un producto.")
+    campos = {"alcance": alcance, "nivel_producto": None, "tipo_producto": None, "subtipo_producto": None, "unidad_id": None}
+    if alcance == "negocio":
+        unidad_id = (body.get("unidad_id") or "").strip() or None
+        if unidad_id and unidad_id not in {u["id"] for u in await listar_unidades_de_negocio(negocio_id, solo_activas=True)}:
+            raise HTTPException(status_code=400, detail="Esa unidad de negocio no existe o está inactiva.")
+        campos["unidad_id"] = unidad_id
+        return campos
+    nivel = (body.get("nivel_producto") or "").strip()
+    if nivel not in servicio_canales.NIVELES_PRODUCTO:
+        raise HTTPException(status_code=400, detail="Elige si el SMS es de un tipo, un subtipo o un producto.")
+    campos["nivel_producto"] = nivel
+    if nivel == "producto":
+        if not codigo_material:
+            raise HTTPException(status_code=400, detail="Elige el producto del catálogo.")
+        return campos
+    categorias = {c["tipo"]: c for c in categorias_del_catalogo(await listar_productos_activos(negocio_id))}
+    tipo = (body.get("tipo_producto") or "").strip()
+    if tipo not in categorias:
+        raise HTTPException(status_code=400, detail="Ese tipo no está en el catálogo vigente.")
+    campos["tipo_producto"] = tipo
+    if nivel == "subtipo":
+        subtipo = (body.get("subtipo_producto") or "").strip()
+        if subtipo not in {s["subtipo"] for s in categorias[tipo]["subtipos"]}:
+            raise HTTPException(status_code=400, detail="Ese subtipo no está en el catálogo vigente.")
+        campos["subtipo_producto"] = subtipo
+    return campos
 
 
 @router.post("/campanas/nueva.json")
@@ -7789,12 +7908,34 @@ async def crear_campana_nueva_json(
 
     if not nombre:
         raise HTTPException(status_code=400, detail="El nombre es obligatorio")
-    if tipo_deteccion not in TIPOS_DETECCION:
+    if tipo_deteccion not in TIPOS_DETECCION_JSON:
         raise HTTPException(status_code=400, detail="Tipo de detección inválido")
     if not patron:
         raise HTTPException(status_code=400, detail="El patrón de detección es obligatorio")
     if codigo_material and await obtener_producto_por_codigo(codigo_material, usuario["negocio_id"]) is None:
         raise HTTPException(status_code=400, detail=f"El código de material '{codigo_material}' no existe en la lista de precios vigente")
+    envio = {}
+    if tipo_deteccion == servicio_canales.TIPO_CODIGO_ENVIO:
+        # Envío de SMS: el patrón es el código; el saludo del enlace es el del usuario con el código al final.
+        patron = patron.upper()
+        error = servicio_canales.validar_codigo_envio(patron)
+        if error:
+            raise HTTPException(status_code=400, detail=error)
+        if not texto_saludo:
+            raise HTTPException(status_code=400, detail="Escribe el saludo de WhatsApp: el código se agrega al final.")
+        for otra in await listar_campanas(usuario["negocio_id"]):
+            if otra["tipo_deteccion"] == servicio_canales.TIPO_CODIGO_ENVIO and servicio_canales.codigos_se_cruzan(patron, otra["patron"]):
+                raise HTTPException(status_code=400, detail=f"El código se cruza con el de «{otra['nombre']}» ({otra['patron']}). Usa uno distinto.")
+        texto_saludo = servicio_canales.saludo_con_codigo(texto_saludo, patron)
+        if len(texto_saludo) > 500:
+            raise HTTPException(status_code=400, detail="El saludo con el código supera los 500 caracteres. Acórtalo.")
+        envio = await _validar_alcance_envio(body, usuario["negocio_id"], codigo_material)
+        texto_sms = (body.get("texto_sms") or "").strip()
+        if texto_sms and MARCA_ENLACE_SMS not in texto_sms:
+            raise HTTPException(status_code=400, detail=f"El texto del SMS debe incluir {MARCA_ENLACE_SMS}, donde va el enlace de WhatsApp.")
+        if len(texto_sms) > LARGO_MAXIMO_TEXTO_SMS:
+            raise HTTPException(status_code=400, detail=f"El texto del SMS admite hasta {LARGO_MAXIMO_TEXTO_SMS} caracteres.")
+        envio["texto_sms"] = texto_sms or None
     if tipo_deteccion == "texto_saludo" and texto_saludo:
         if patron.lower() not in texto_saludo.lower():
             raise HTTPException(
@@ -7804,10 +7945,12 @@ async def crear_campana_nueva_json(
 
     tipo_deteccion, patron = await _preparar_deteccion_meta(tipo_deteccion, patron, usuario["negocio_id"])
     campana_creada = await crear_campana(
-        nombre=nombre, tipo_deteccion=tipo_deteccion, patron=patron.lower(),
+        nombre=nombre, tipo_deteccion=tipo_deteccion,
+        # El código de envío se guarda tal cual se ve en el saludo (mayúsculas); la detección no distingue mayúsculas.
+        patron=patron if tipo_deteccion == servicio_canales.TIPO_CODIGO_ENVIO else patron.lower(),
         texto_saludo=texto_saludo, codigo_material=codigo_material,
         producto_promocional=producto_promocional, precio_promocional=precio_promocional,
-        negocio_id=usuario["negocio_id"],
+        negocio_id=usuario["negocio_id"], **envio,
     )
     if tipo_deteccion == "por_anuncio":
         await guardar_regla_anuncio(usuario["negocio_id"], patron, campana_creada["id"], autor=usuario.get("username"))
@@ -7822,22 +7965,42 @@ async def editar_promo_campana_json(
     _csrf: None = Depends(verificar_csrf),
 ):
     """Variante JSON de `editar_promo_campana` (Gate Campañas P0) — mismos
-    campos editables que el Legacy (producto/precio/código de material), sin
-    ampliar la capacidad de edición: `nombre`/`patron`/`tipo_deteccion` no
-    viajan porque `actualizar_campana` nunca los recibe desde esta ruta."""
-    await _verificar_ownership_campana(usuario, campana_id)
+    campos editables que el Legacy (producto/precio/código de material).
+    `nombre`/`tipo_deteccion` no viajan. Desde 2026-10-29 también `patron`,
+    SOLO en campañas de saludo ("texto_saludo") y solo si aparece en su
+    saludo: antes corregir un patrón mal escrito exigía la consola. El código
+    de un envío de SMS no se edita: los enlaces ya enviados lo llevan."""
+    campana = await _verificar_ownership_campana(usuario, campana_id)
     body = await request.json()
     codigo_material = (body.get("codigo_material") or "").strip()
     producto_promocional = (body.get("producto_promocional") or "").strip()
     precio_promocional = (body.get("precio_promocional") or "").strip()
     if codigo_material and await obtener_producto_por_codigo(codigo_material, usuario["negocio_id"]) is None:
         raise HTTPException(status_code=400, detail=f"El código de material '{codigo_material}' no existe en la lista de precios vigente")
+    cambios = {}
+    if "patron" in body:
+        patron = (body.get("patron") or "").strip().lower()
+        if campana["tipo_deteccion"] != "texto_saludo":
+            if patron != (campana["patron"] or "").lower():
+                raise HTTPException(status_code=400, detail="Solo se puede editar el texto que se busca en campañas de saludo.")
+        elif patron != campana["patron"]:
+            if len(patron) < 8:
+                raise HTTPException(status_code=400, detail="El texto que se busca debe tener al menos 8 caracteres para no confundirse con otros mensajes.")
+            if campana.get("texto_saludo") and patron not in campana["texto_saludo"].lower():
+                raise HTTPException(
+                    status_code=400,
+                    detail="Ese texto no aparece en el saludo de la campaña: así nunca se detectaría. Copia un fragmento del saludo.",
+                )
+            cambios["patron"] = patron
     await actualizar_campana(
         campana_id,
         codigo_material=codigo_material or None,
         producto_promocional=producto_promocional,
         precio_promocional=precio_promocional,
+        **cambios,
     )
+    if cambios:
+        logger.info(f"Campaña {campana_id}: texto que se busca cambiado por {usuario.get('username')}")
     campana_actualizada = await obtener_campana(campana_id)
     return JSONResponse({"ok": True, "campana": _campana_a_json(campana_actualizada)})
 
@@ -8341,7 +8504,7 @@ async def gestionar_campanas(request: Request, usuario: dict = Depends(servicio_
         filas.append(f"""<tr>
             <td class="ps-3">
                 <div class="fw-semibold">{html.escape(c['nombre'])}</div>
-                <div class="text-muted" style="font-size:.75rem">{html.escape(TIPOS_DETECCION.get(c['tipo_deteccion'], c['tipo_deteccion']))} &middot; patrón: &ldquo;{html.escape(c['patron'])}&rdquo;</div>
+                <div class="text-muted" style="font-size:.75rem">{html.escape(TIPOS_DETECCION_JSON.get(c['tipo_deteccion'], c['tipo_deteccion']))} &middot; patrón: &ldquo;{html.escape(c['patron'])}&rdquo;</div>
                 {link_html}
             </td>
             <td class="text-muted">{conteos.get(c['nombre'], {}).get('total', 0)} leads / {conteos.get(c['nombre'], {}).get('vendidos', 0)} vendidos</td>

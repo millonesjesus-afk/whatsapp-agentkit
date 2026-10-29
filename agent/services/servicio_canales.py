@@ -46,6 +46,11 @@ class ServicioCanales:
     ) -> dict | None:
         return await campanas.registrar_referral_entrante(telefono, texto_mensaje, referral, negocio_id)
 
+    async def registrar_codigo_envio_entrante(
+        self, telefono: str, texto_mensaje: str, negocio_id: str | None,
+    ) -> dict | None:
+        return await campanas.registrar_codigo_envio_entrante(telefono, texto_mensaje, negocio_id)
+
     async def sembrar_campanas_iniciales(self, negocio_id: str | None):
         return await campanas.sembrar_campanas_iniciales(negocio_id)
 
@@ -60,6 +65,23 @@ class ServicioCanales:
 
     def generar_link_whatsapp(self, texto_saludo: str) -> str:
         return campanas.generar_link_whatsapp(texto_saludo)
+
+    # Código por envío de SMS (2026-10-29) — reglas puras que el panel usa al crear la campaña.
+    TIPO_CODIGO_ENVIO = campanas.TIPO_CODIGO_ENVIO
+    ALCANCES_ENVIO = campanas.ALCANCES_ENVIO
+    NIVELES_PRODUCTO = campanas.NIVELES_PRODUCTO
+
+    def codigos_se_cruzan(self, uno: str, otro: str) -> bool:
+        return campanas.codigos_se_cruzan(uno, otro)
+
+    def validar_codigo_envio(self, codigo: str) -> str | None:
+        return campanas.validar_codigo_envio(codigo)
+
+    def normalizar_codigo(self, texto: str | None) -> str:
+        return campanas.normalizar_codigo(texto)
+
+    def saludo_con_codigo(self, saludo: str, codigo: str) -> str:
+        return campanas.saludo_con_codigo(saludo, codigo)
 
 
 # Instancia compartida por todo el proceso — mismo patrón que

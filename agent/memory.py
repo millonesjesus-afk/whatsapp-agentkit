@@ -997,6 +997,24 @@ async def existe_attribution_event_reciente(
         return encontrado.scalars().first() is not None
 
 
+async def existe_attribution_event_de_campana_en_conversacion_activa(
+    telefono: str, negocio_id: str, campana_nombre: str,
+) -> bool:
+    """¿La conversación ACTIVA del lead ya tiene evidencia de esta campaña? Evita que un cliente que repite el código de
+    un envío de SMS en varios mensajes duplique el evento. Sin conversación activa: False (quien registra no inventa)."""
+    async with async_session() as session:
+        conversation = await _obtener_conversation_activa_por_telefono(session, telefono)
+        if conversation is None or conversation.negocio_id != negocio_id:
+            return False
+        encontrado = await session.execute(
+            select(AttributionEvent.id).where(
+                AttributionEvent.negocio_id == negocio_id, AttributionEvent.conversation_id == conversation.id,
+                AttributionEvent.campana_nombre == campana_nombre,
+            ).limit(1)
+        )
+        return encontrado.scalars().first() is not None
+
+
 _TIPOS_ORIGEN_ANUNCIO = ("meta_ads", "meta_ads_no_resuelto")
 
 
@@ -4133,6 +4151,18 @@ class Campana(Base):
     # Texto de saludo completo (wa.link/SMS) que originó esta campaña — se
     # guarda para poder regenerar el enlace de WhatsApp si hace falta.
     texto_saludo: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    # Envío de SMS (tipo "codigo_envio", 2026-10-29): qué promociona el SMS y su texto.
+    #   alcance: "negocio" (todo el negocio) o "producto".
+    #   nivel_producto (con alcance "producto"): "tipo", "subtipo" o "producto"
+    #     (este último usa codigo_material). tipo_producto/subtipo_producto: los
+    #     valores de TIPO / SUB TIPO del catálogo.
+    #   texto_sms: el SMS tal como se envía, con "[enlace]" donde va el enlace de WhatsApp.
+    # NULL en todas las campañas que no son envíos de SMS.
+    alcance: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    nivel_producto: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    tipo_producto: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    subtipo_producto: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    texto_sms: Mapped[str | None] = mapped_column(String(500), nullable=True)
     activa: Mapped[bool] = mapped_column(Boolean, default=True)
     creado: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     # Gate 5.2 — Master Data, aislamiento estructural directo en la fila.
@@ -10565,6 +10595,11 @@ def _campana_a_dict(c: Campana) -> dict:
         "producto_promocional": c.producto_promocional,
         "precio_promocional": c.precio_promocional,
         "texto_saludo": c.texto_saludo,
+        "alcance": c.alcance,
+        "nivel_producto": c.nivel_producto,
+        "tipo_producto": c.tipo_producto,
+        "subtipo_producto": c.subtipo_producto,
+        "texto_sms": c.texto_sms,
         "activa": c.activa,
         "creado": c.creado,
         "negocio_id": c.negocio_id,
@@ -10576,6 +10611,8 @@ async def crear_campana(
     nombre: str, tipo_deteccion: str, patron: str,
     codigo_material: str = "", producto_promocional: str = "", precio_promocional: str = "",
     texto_saludo: str = "", negocio_id: str | None = None, unidad_id: str | None = None,
+    alcance: str | None = None, nivel_producto: str | None = None, tipo_producto: str | None = None,
+    subtipo_producto: str | None = None, texto_sms: str | None = None,
 ) -> dict:
     """Crea una campaña nueva (ej. cuando cambia la promoción del mes).
 
@@ -10607,6 +10644,11 @@ async def crear_campana(
             texto_saludo=texto_saludo or None,
             negocio_id=negocio_id,
             unidad_id=unidad_id,
+            alcance=alcance or None,
+            nivel_producto=nivel_producto or None,
+            tipo_producto=tipo_producto or None,
+            subtipo_producto=subtipo_producto or None,
+            texto_sms=texto_sms or None,
         )
         session.add(campana)
         await session.commit()

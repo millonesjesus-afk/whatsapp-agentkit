@@ -624,7 +624,8 @@ async def _armar_contexto(
     if tiene_campana:
         campanas = await listar_campanas(negocio_id, solo_activas=True)
         patrones = tuple(
-            normalizar(c["patron"]) for c in campanas if c.get("tipo_deteccion") == "texto_saludo" and c.get("patron")
+            normalizar(c["patron"]) for c in campanas
+            if c.get("tipo_deteccion") in ("texto_saludo", "codigo_envio") and c.get("patron")
         )
 
     async with async_session() as session:
