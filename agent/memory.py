@@ -5027,6 +5027,31 @@ async def guardar_configuracion(clave: str, valor: str, negocio_id: str | None =
         await session.commit()
 
 
+async def listar_configuracion_por_prefijo(prefijo: str, negocio_id: str) -> dict[str, str]:
+    """Todas las configuraciones de UN negocio cuya clave empieza con `prefijo` (`{clave: valor}`). Sirve para listas de
+    elementos guardados uno por clave, porque `Configuracion.valor` admite 1000 caracteres y una lista no cabría."""
+    async with async_session() as session:
+        filas = (await session.execute(
+            select(Configuracion.clave, Configuracion.valor).where(
+                Configuracion.negocio_id == negocio_id, Configuracion.clave.like(f"{prefijo}%"),
+            )
+        )).all()
+    return {clave: valor for clave, valor in filas}
+
+
+async def borrar_configuracion(clave: str, negocio_id: str) -> bool:
+    """Borra la configuración `clave` de un negocio. True si existía."""
+    async with async_session() as session:
+        config = (await session.execute(
+            select(Configuracion).where(Configuracion.clave == clave, Configuracion.negocio_id == negocio_id)
+        )).scalar_one_or_none()
+        if config is None:
+            return False
+        await session.delete(config)
+        await session.commit()
+        return True
+
+
 def _identidad_a_dict(identidad: "IdentidadAgente") -> dict:
     return {
         "id": identidad.id,

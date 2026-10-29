@@ -102,6 +102,7 @@ from agent import atencion_atrasada
 from agent import calendario_negocio as cal_negocio
 from agent import llamadas
 from agent import derivacion_automatica
+from agent import plantillas_sms
 from agent import origen_conversacion
 from agent.analitica_tendencia import partir_periodo
 from agent import analitica_senales
@@ -7797,6 +7798,8 @@ async def _negocio_para_sms(negocio_id: str) -> dict:
         "rubro": await obtener_configuracion(CLAVE_RUBRO_NEGOCIO, "", negocio_id=negocio_id) or "",
         "rubro_por_defecto": RUBRO_POR_DEFECTO,
         "unidades": [{"id": u["id"], "nombre": u["nombre"]} for u in unidades],
+        # Plantillas propias de SMS del negocio y si su remitente ya muestra el nombre (parte 2, 2026-10-29).
+        "sms": await plantillas_sms.estado(negocio_id),
     }
 
 
@@ -7851,6 +7854,51 @@ async def guardar_rubro_negocio_json(
         raise HTTPException(status_code=400, detail=f"El rubro admite hasta {LARGO_MAXIMO_RUBRO} caracteres.")
     await guardar_configuracion(CLAVE_RUBRO_NEGOCIO, rubro, negocio_id=usuario["negocio_id"])
     return JSONResponse({"ok": True, "rubro": rubro})
+
+
+@router.get("/configuracion/sms.json")
+async def configuracion_sms_json(usuario: dict = Depends(servicio_identidad.requiere_rol("admin"))):
+    """Configuración de los SMS del negocio (solo Admin, como el resto de Configuración): `{negocio, rubro,
+    plantillas: [{id, alcance, texto, creado_por, creado, actualizado}], remitente_muestra_negocio}`."""
+    datos = await _negocio_para_sms(usuario["negocio_id"])
+    return JSONResponse({
+        "negocio": datos["nombre"], "rubro": datos["rubro"], "rubro_por_defecto": datos["rubro_por_defecto"], **datos["sms"],
+    })
+
+
+@router.post("/configuracion/sms.json")
+async def actualizar_configuracion_sms_json(
+    request: Request,
+    usuario: dict = Depends(servicio_identidad.requiere_rol("admin")),
+    _csrf: None = Depends(verificar_csrf),
+):
+    """Una acción por llamada, en el negocio de la sesión (nunca del cuerpo):
+    `{accion: "guardar", alcance, texto, id?}` crea o edita una plantilla · `{accion: "eliminar", id}` ·
+    `{accion: "remitente", muestra_negocio: bool}` · `{accion: "rubro", rubro}`. Responde el estado completo."""
+    cuerpo = await _cuerpo_objeto_json(request)
+    negocio_id, autor = usuario["negocio_id"], usuario.get("username")
+    accion = cuerpo.get("accion")
+    try:
+        if accion == "guardar":
+            await plantillas_sms.guardar(negocio_id, autor, cuerpo.get("alcance") or "", cuerpo.get("texto") or "", cuerpo.get("id") or None)
+        elif accion == "eliminar":
+            await plantillas_sms.eliminar(negocio_id, autor, str(cuerpo.get("id") or ""))
+        elif accion == "remitente":
+            if not isinstance(cuerpo.get("muestra_negocio"), bool):
+                raise ValueError("Indica si el remitente muestra el nombre del negocio (sí o no).")
+            await plantillas_sms.fijar_remitente(negocio_id, autor, cuerpo["muestra_negocio"])
+        elif accion == "rubro":
+            rubro = " ".join((cuerpo.get("rubro") or "").split())
+            if len(rubro) > LARGO_MAXIMO_RUBRO:
+                raise ValueError(f"El rubro admite hasta {LARGO_MAXIMO_RUBRO} caracteres.")
+            await guardar_configuracion(CLAVE_RUBRO_NEGOCIO, rubro, negocio_id=negocio_id)
+        else:
+            raise ValueError("Acción desconocida.")
+    except LookupError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return await configuracion_sms_json(usuario)
 
 
 async def _validar_alcance_envio(body: dict, negocio_id: str, codigo_material: str) -> dict:
