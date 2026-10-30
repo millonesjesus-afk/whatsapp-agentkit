@@ -8799,8 +8799,8 @@ async def _mirror_campos_lead_a_conversation_opportunity(session, lead: "Lead", 
 
 _MARCADORES_VACIOS = frozenset({
     "desconocido", "desconocida", "sin dato", "sin_dato", "sin datos", "no especificado", "no_especificado", "no especificada",
-    "no sabe", "no se sabe", "n/a", "na", "null", "none", "nil", "nan", "undefined", "unknown", "ninguno", "ninguna", "-", "--", "?",
-})
+    "no sabe", "no se sabe", "n/a", "null", "none", "undefined", "unknown", "ninguno", "ninguna", "-", "--", "?",
+})   # sin «na», «nan» ni «nil»: pueden ser nombres reales (Nan, Nil, Na); borrar uno verdadero pesa más que dejar un marcador raro
 
 
 def es_marcador_vacio(valor) -> bool:

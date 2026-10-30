@@ -5,7 +5,9 @@ guardaba COMO NOMBRE (y a veces como interés o marca). Efecto: la Bandeja mostr
 conocer el nombre. Desde el cambio del 2026-10-30 eso ya no se vuelve a guardar; este script limpia lo que quedó.
 
 Qué toca: SOLO pone en NULL el texto que es un marcador de «no sé» (desconocido, null, n/a, sin dato…), en `leads` (nombre, interes,
-producto_marca), `contacts` (nombre) y `opportunities` (interes, producto_marca). No toca ningún dato real ni ninguna otra tabla.
+producto_marca), `contacts` (nombre) y `opportunities` (interes, producto_marca). No toca ningún dato real ni ninguna otra tabla, y
+NO cambia la fecha `actualizado` de nadie: limpiar basura no es actividad del cliente y, si la moviera, esos clientes subirían al tope
+del Pipeline con «hace instantes».
 
 Uso (la base sale de DATABASE_URL, como en los demás scripts):
     python scripts/limpiar_marcadores_vacios.py             # solo cuenta lo que limpiaría (no cambia nada)
@@ -18,7 +20,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from sqlalchemy import select
+from sqlalchemy import inspect as sa_inspect, select, update
 
 from agent import memory as mem
 from agent.memory import esperar_base_de_datos
@@ -46,7 +48,13 @@ async def main(argv=None) -> dict:
                 resumen[f"{modelo.__tablename__}.{columna}"] = len(a_limpiar)
                 if args.aplicar:
                     for fila in a_limpiar:
-                        setattr(fila, columna, None)
+                        # UPDATE directo y NO setattr: `actualizado` tiene onupdate y el Pipeline ordena por ella; limpiar un texto basura
+                        # no es actividad del cliente. Al nombrar la columna en el SET, SQLAlchemy no le aplica el onupdate y queda igual.
+                        valores = {columna: None}
+                        if hasattr(modelo, "actualizado"):
+                            valores["actualizado"] = modelo.actualizado
+                        llave = [getattr(modelo, c.key) == getattr(fila, c.key) for c in sa_inspect(modelo).primary_key]
+                        await session.execute(update(modelo).where(*llave).values(**valores))
         if args.aplicar:
             await session.commit()
     total = sum(resumen.values())

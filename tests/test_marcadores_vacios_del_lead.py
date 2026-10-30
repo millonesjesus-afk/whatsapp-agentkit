@@ -22,7 +22,10 @@ def test_son_marcadores_vacios(texto):
     assert mem.es_marcador_vacio(texto) is True
 
 
-@pytest.mark.parametrize("valor", ["Jorge Luis", "Rheem", "terma para 2 baños", "Ana desconocida de la Cruz", "", None, 5, ["desconocido"]])
+@pytest.mark.parametrize("valor", [
+    "Jorge Luis", "Rheem", "terma para 2 baños", "Ana desconocida de la Cruz", "", None, 5, ["desconocido"],
+    "Nan", "Nil", "Na", "nan", "NIL",   # pueden ser nombres reales: nunca se tratan como marcador
+])
 def test_no_son_marcadores(valor):
     assert mem.es_marcador_vacio(valor) is False
 
@@ -109,3 +112,43 @@ async def test_el_script_por_defecto_solo_cuenta_y_con_aplicar_limpia_sin_tocar_
         assert (real.nombre, real.interes) == ("Rosa", "terma")
     # una segunda corrida ya no encuentra nada
     assert (await limpiar.main(["--aplicar"]))["total"] == 0
+
+
+async def test_la_limpieza_no_mueve_la_fecha_actualizado_en_ninguna_tabla():
+    """Revisión del bloque C: `actualizado` tiene onupdate y el Pipeline ordena por ella. Si el script usara setattr, los clientes limpiados
+    subirían al tope con «hace instantes» sin que el cliente hiciera nada."""
+    from datetime import datetime
+
+    from sqlalchemy import select, update
+
+    negocio = await _sembrar_sucios()
+    antigua = datetime(2026, 7, 15, 9, 30, 0)
+    async with mem.async_session() as session:
+        lead = await session.get(mem.Lead, "51900300010")
+        contacto = (await session.execute(select(mem.Contact).where(mem.Contact.telefono == "51900300010"))).scalars().first()
+        oportunidad = (await session.execute(
+            select(mem.Opportunity).join(mem.Conversation, mem.Opportunity.conversation_id == mem.Conversation.id)
+            .where(mem.Conversation.contact_id == contacto.id)
+        )).scalars().first()
+        # Se escriben con UPDATE directo (así quedaron en producción) y con una fecha vieja fija.
+        await session.execute(update(mem.Lead).where(mem.Lead.telefono == lead.telefono).values(actualizado=antigua))
+        await session.execute(update(mem.Contact).where(mem.Contact.id == contacto.id).values(nombre="(desconocido)", actualizado=antigua))
+        await session.execute(update(mem.Opportunity).where(mem.Opportunity.id == oportunidad.id).values(interes="Desconocido", actualizado=antigua))
+        await session.commit()
+
+    resultado = await limpiar.main(["--aplicar"])
+    assert resultado["detalle"]["leads.nombre"] >= 1 and resultado["detalle"]["contacts.nombre"] >= 1 and resultado["detalle"]["opportunities.interes"] >= 1
+
+    async with mem.async_session() as session:
+        lead = await session.get(mem.Lead, "51900300010")
+        contacto = await session.get(mem.Contact, contacto.id)
+        oportunidad = await session.get(mem.Opportunity, oportunidad.id)
+        assert (lead.nombre, contacto.nombre, oportunidad.interes) == (None, None, None)   # se limpió…
+        assert lead.actualizado == antigua                                                  # …y ninguna fecha se movió
+        assert contacto.actualizado == antigua
+        assert oportunidad.actualizado == antigua
+    # el cliente con nombre real no se tocó
+    async with mem.async_session() as session:
+        real = await session.get(mem.Lead, "51900300011")
+        assert real.nombre == "Rosa"
+    assert negocio["id"]
