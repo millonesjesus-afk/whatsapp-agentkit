@@ -8797,6 +8797,22 @@ async def _mirror_campos_lead_a_conversation_opportunity(session, lead: "Lead", 
         conversation.pausado_manual = True
 
 
+_MARCADORES_VACIOS = frozenset({
+    "desconocido", "desconocida", "sin dato", "sin_dato", "sin datos", "no especificado", "no_especificado", "no especificada",
+    "no sabe", "no se sabe", "n/a", "na", "null", "none", "nil", "nan", "undefined", "unknown", "ninguno", "ninguna", "-", "--", "?",
+})
+
+
+def es_marcador_vacio(valor) -> bool:
+    """¿Este texto es el «no sé» del modelo y no un dato real? Pasaba con «(desconocido)»: el prompt de extracción usaba ese marcador
+    para los datos que faltaban, el modelo lo devolvía tal cual y se guardaba COMO NOMBRE del cliente (25 de 47 conversaciones del flujo
+    guiado). Acepta paréntesis, comillas y mayúsculas: «(desconocido)», «Desconocido», «"null"»."""
+    if not isinstance(valor, str):
+        return False
+    limpio = re.sub(r"^[\s()\[\]\"'`]+|[\s()\[\]\"'`.]+$", "", valor).strip().lower()
+    return limpio in _MARCADORES_VACIOS
+
+
 def _filtrar_campos(campos: dict, campos_explicitos: tuple[str, ...]) -> dict:
     """Regla de "vacío significa bórralo" de actualizar_lead, extraída para
     que guardar_venta —que escribe los mismos campos del lead pero dentro de
@@ -8805,7 +8821,8 @@ def _filtrar_campos(campos: dict, campos_explicitos: tuple[str, ...]) -> dict:
     return {
         k: (v if v not in ("",) else None) if k in campos_explicitos else v
         for k, v in campos.items()
-        if v or k in campos_explicitos
+        # Lo que escribe Gabi (no explícito) nunca guarda un «(desconocido)» como dato; una persona sí puede escribir lo que quiera.
+        if (v and (k in campos_explicitos or not es_marcador_vacio(v))) or k in campos_explicitos
     }
 
 

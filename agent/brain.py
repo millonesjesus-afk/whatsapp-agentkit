@@ -30,7 +30,7 @@ from agent.tools import (
     obtener_tasas_financiamiento, reglas_del_negocio,
 )
 from agent.memory import (
-    obtener_campana_por_nombre, obtener_configuracion, obtener_identidad_agente, obtener_negocio,
+    es_marcador_vacio, obtener_campana_por_nombre, obtener_configuracion, obtener_identidad_agente, obtener_negocio,
     obtener_conversation_activa_de_telefono, obtener_estado_calificacion, es_probable_cierre,
 )
 from agent.campanas import (
@@ -971,12 +971,12 @@ async def extraer_datos_lead(mensaje_cliente: str, respuesta_gabi: str, lead_act
     actual = lead_actual or {}
     prompt = (
         "Datos ya conocidos del cliente (puede haber campos vacíos):\n"
-        f"nombre: {actual.get('nombre') or '(desconocido)'}\n"
-        f"interes: {actual.get('interes') or '(desconocido)'}\n"
-        f"producto_tipo: {actual.get('producto_tipo') or '(desconocido)'}\n"
-        f"producto_marca: {actual.get('producto_marca') or '(desconocido)'}\n"
-        f"producto_modalidad: {actual.get('producto_modalidad') or '(desconocido)'}\n"
-        f"paso_flujo: {actual.get('paso_flujo') or '(desconocido)'}\n\n"
+        f"nombre: {actual.get('nombre') or 'null'}\n"
+        f"interes: {actual.get('interes') or 'null'}\n"
+        f"producto_tipo: {actual.get('producto_tipo') or 'null'}\n"
+        f"producto_marca: {actual.get('producto_marca') or 'null'}\n"
+        f"producto_modalidad: {actual.get('producto_modalidad') or 'null'}\n"
+        f"paso_flujo: {actual.get('paso_flujo') or 'null'}\n\n"
         f"Último mensaje del cliente: {mensaje_cliente}\n"
         f"Respuesta de la asesora: {respuesta_gabi}\n\n"
         "Actualiza estos datos según este intercambio. paso_flujo debe ser uno de: "
@@ -988,7 +988,7 @@ async def extraer_datos_lead(mensaje_cliente: str, respuesta_gabi: str, lead_act
         "pregunta solo por el equipo, o null si aún no se sabe. "
         "Responde ÚNICAMENTE un JSON con las claves nombre, interes, producto_tipo, producto_marca, "
         "producto_modalidad, paso_flujo (sin texto adicional, sin bloque de código). Si un dato no "
-        "cambia ni se menciona, repite el valor actual (o null si sigue desconocido)."
+        "cambia ni se menciona, repite el valor actual (o null si todavía no se sabe; NUNCA escribas «desconocido» ni «(desconocido)»)."
     )
     try:
         response = await crear_con_modelo_economico(
@@ -1005,11 +1005,15 @@ async def extraer_datos_lead(mensaje_cliente: str, respuesta_gabi: str, lead_act
         producto_modalidad = datos.get("producto_modalidad") or None
         if producto_modalidad not in ("combo", "solo"):
             producto_modalidad = None
+        def _dato(clave):   # el modelo a veces devuelve «(desconocido)» o «null» como texto: eso no es un dato
+            valor = datos.get(clave)
+            return None if es_marcador_vacio(valor) else (valor or None)
+
         return {
-            "nombre": datos.get("nombre") or None,
-            "interes": datos.get("interes") or None,
+            "nombre": _dato("nombre"),
+            "interes": _dato("interes"),
             "producto_tipo": producto_tipo,
-            "producto_marca": datos.get("producto_marca") or None,
+            "producto_marca": _dato("producto_marca"),
             "producto_modalidad": producto_modalidad,
             "paso_flujo": datos.get("paso_flujo") or None,
         }
