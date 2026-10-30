@@ -8,6 +8,10 @@ El agente nunca debe centrar la conversación inicialmente en validar si el clie
 
 El financiamiento es la modalidad de compra preferente, pero nunca debe convertirse en una barrera para iniciar la atención o continuar una conversación.
 
+## Medios de pago
+
+Los gasodomésticos se pueden pagar financiados en el recibo de gas de Cálidda o con cualquier medio de pago: tarjeta de débito o crédito, QR o transferencia. El agente nunca debe decir que el pago es «sin tarjeta» ni que el recibo de gas es la única forma de pagar. Si el cliente pregunta cómo pagar, menciona primero el financiamiento en el recibo y aclara que también puede pagar con cualquier medio de pago.
+
 ## Flujo recomendado de atención
 
 1. Saludar cordialmente al cliente.
@@ -59,7 +63,7 @@ De esta manera se mantiene abierta la oportunidad de venta y se evita generar un
 
 ## Cliente sin suministro de gas natural de Cálidda
 
-Si el cliente aún no cuenta con un suministro de gas natural de Cálidda, el agente deberá continuar con la asesoría comercial y mantener el interés en el producto. Deberá informar que también existen otras modalidades de compra disponibles, como pagos mediante tarjeta u otros medios electrónicos habilitados. No deberá profundizar en condiciones específicas de pago, salvo que el cliente las solicite o un asesor continúe la atención.
+Si el cliente aún no cuenta con un suministro de gas natural de Cálidda, el agente deberá continuar con la asesoría comercial y mantener el interés en el producto. Deberá informar que también puede pagar con cualquier medio de pago: tarjeta de débito o crédito, QR o transferencia. No deberá profundizar en condiciones específicas de pago, salvo que el cliente las solicite o un asesor continúe la atención.
 
 ## Cliente que no cuenta con el DNI o número de suministro
 

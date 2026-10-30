@@ -27,7 +27,7 @@ from dotenv import load_dotenv
 
 from agent.tools import (
     obtener_contexto_relevante, obtener_estado_horario_atencion, formatear_producto,
-    obtener_tasas_financiamiento,
+    obtener_tasas_financiamiento, reglas_del_negocio,
 )
 from agent.memory import (
     obtener_campana_por_nombre, obtener_configuracion, obtener_identidad_agente, obtener_negocio,
@@ -490,8 +490,21 @@ REGLA_FORMA_DEL_MENSAJE = (
     "3) Largo según el momento: respuesta a una duda hasta ~250 caracteres; recomendación con precio hasta ~300 (UN producto; "
     "una alternativa solo si el cliente la pide o el primero no le sirve; sin describir características que no preguntó); "
     "pedir datos hasta ~200; derivar al asesor hasta ~180, SIN pregunta final y sin ofrecer «algo más». "
-    "4) No repitas lo ya dicho en esta conversación (horario, teléfono, avisos, precio). Máximo un emoji."
+    "4) No repitas lo ya dicho en esta conversación (horario, teléfono, avisos, precio). Máximo un emoji. "
+    "5) Tutea con español peruano (tú, tienes, puedes, cuéntame): NUNCA voseo («dejás», «contás», «tenés», «mirá»). "
+    "6) Atiende lo que el cliente pide ahora: si pide otro producto distinto al del anuncio, trabaja con ese; no insistas con el "
+    "del anuncio. 7) Nunca hables de lo que tienes o no cargado, de tu «catálogo disponible ahora» ni de tus datos internos; si no "
+    "encuentras lo que pide, dile que un asesor se lo confirma. 8) El precio lo das solo si el cliente lo pidió con sus palabras, y "
+    "cuando lo pidió y está en tu información, SIEMPRE va en tu respuesta (también fuera de horario); nunca respondas «¿cuánto "
+    "cuesta?» con otra pregunta, como su rango de precio."
 )
+
+
+def reglas_para_el_system_prompt(negocio_codigo: str | None) -> str:
+    """Sección final del system prompt con las reglas propias del negocio (`knowledge/<codigo>/_reglas_de_gabi.md`), si las tiene.
+    Es fija entre llamadas del mismo negocio, así entra en la caché del prompt."""
+    reglas = reglas_del_negocio(negocio_codigo)
+    return f"\n\n## Reglas de este negocio\n{reglas}" if reglas else ""
 
 
 FRAGMENTOS_CONOCIMIENTO_POR_TURNO = 4
@@ -839,7 +852,11 @@ async def generar_respuesta(
         return obtener_mensaje_fallback(), False, None, None
 
     # La guía de forma va al final del system prompt: es fija entre llamadas, así entra en la caché y casi no cuesta.
-    system_prompt = f"{await obtener_system_prompt(modo, negocio_id)}\n\n## Forma de los mensajes\n{REGLA_FORMA_DEL_MENSAJE}"
+    negocio_del_turno = await obtener_negocio(negocio_id) if negocio_id is not None else None
+    system_prompt = (
+        f"{await obtener_system_prompt(modo, negocio_id)}\n\n## Forma de los mensajes\n{REGLA_FORMA_DEL_MENSAJE}"
+        f"{reglas_para_el_system_prompt((negocio_del_turno or {}).get('codigo'))}"
+    )
     bloques_contexto = await _armar_bloques_contexto(mensaje, historial, lead, negocio_id)
 
     # Construir mensajes para la API. Claude solo acepta los roles "user" y

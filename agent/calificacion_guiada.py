@@ -78,13 +78,14 @@ def _sin_tildes(texto: str | None) -> str:
 
 def tipo_de_producto(*textos: str | None) -> str:
     """Terma, secadora, centro de lavado, cocina u otro, según las palabras que aparezcan en el interés del lead, la campaña, el
-    anuncio o lo que escribió el cliente. Una lavadora sola NO es un producto de gas (no pregunta por el punto de gas)."""
+    anuncio o lo que escribió el cliente. Lavadora, lavaseca y lavadora-secadora llevan al centro de lavado a gas (2026-10-30: antes una
+    «lavadora» sola caía en «otro» y a nadie se le ofrecía el centro de lavado)."""
     junto = _sin_tildes(" ".join(t for t in textos if t))
     if re.search(r"\bterma|calentador|\bfaucet", junto):
         return PRODUCTO_TERMA
     if "secadora" in junto and "lavaseca" not in junto:
         return PRODUCTO_SECADORA
-    if re.search(r"centro de lavado|lavaseca|lavasecadora", junto):
+    if re.search(r"centro de lavado|lavadora|lavaseca|lavasecadora|lava\s*(y|-)?\s*seca", junto):
         return PRODUCTO_LAVADO
     if re.search(r"cocina|encimera|\bhorno", junto):
         return PRODUCTO_COCINA
@@ -100,6 +101,7 @@ _PRELLENADOS = (
     re.compile(r"cuanto cuesta y como lo pago"),
     re.compile(r"quiero (mas )?informacion"),
 )
+_PRELLENADO_PRECIO = re.compile(r"cuanto cuesta y como lo pago")
 _PIDE_PRECIO = re.compile(r"cuanto (cuesta|sale|esta|es|vale|pago|seria|me sale|quedar)|precio|costo|cuota|a cuanto|como lo pago|cuanto pagar")
 
 
@@ -116,8 +118,15 @@ def es_prellenado_o_saludo(texto: str | None) -> bool:
 
 
 def pidio_precio(*textos: str | None) -> bool:
-    """¿El cliente pidió el precio o las cuotas en alguno de sus mensajes (incluido «¿Cuánto cuesta y cómo lo pago?»)?"""
-    return bool(_PIDE_PRECIO.search(re.sub(r"[^a-z0-9 ]+", " ", _sin_tildes(" ".join(t for t in textos if t)))))
+    """¿El cliente pidió el precio o las cuotas con sus palabras? El texto prellenado del anuncio «¿Cuánto cuesta y cómo lo pago?» NO
+    cuenta (decisión del dueño, 2026-10-30): es un mensaje predefinido, el cliente debe volver a pedirlo para recibirlo al final."""
+    plano = re.sub(r"[^a-z0-9 ]+", " ", _sin_tildes(" ".join(t for t in textos if t)))
+    return bool(_PIDE_PRECIO.search(_PRELLENADO_PRECIO.sub(" ", plano)))
+
+
+def pregunto_como_pagar(texto: str | None) -> bool:
+    """El texto prellenado pregunta «cómo lo pago»: el primer mensaje fijo le contesta los medios de pago (no el precio)."""
+    return bool(re.search(r"como lo pago|como pago|formas? de pago|medios? de pago", re.sub(r"[^a-z0-9 ]+", " ", _sin_tildes(texto))))
 
 
 # ── Las preguntas ───────────────────────────────────────────────────────────
@@ -250,13 +259,17 @@ def con_saludo(p: dict, saludo: str) -> dict:
 
 
 SALUDO_PRIMER_MENSAJE = "Hola 👋 Soy Gabi, asesora virtual de Cálidda Hogar. Gracias por escribirnos."
-AVISO_PRECIO_DESPUES = "El precio te lo cuento en un momento; primero unas consultas rápidas para orientarte mejor."
+AVISO_MEDIOS_DE_PAGO = (
+    "Puedes pagarlo financiado en tu recibo de gas o con cualquier medio de pago: tarjeta de débito o crédito, QR o transferencia. "
+    "Primero unas consultas rápidas para orientarte mejor."
+)
 
 
 def saludo_para(texto_del_cliente: str | None) -> str:
-    """Saludo del primer mensaje fijo: si el cliente preguntó por el precio, se le promete."""
-    if pidio_precio(texto_del_cliente):
-        return f"{SALUDO_PRIMER_MENSAJE} {AVISO_PRECIO_DESPUES}"
+    """Saludo del primer mensaje fijo: si el texto prellenado pregunta «cómo lo pago», se le contestan los medios de pago. El precio
+    NO se promete ni se da aquí: llega al final, cuando el cliente lo pida con sus palabras."""
+    if pregunto_como_pagar(texto_del_cliente):
+        return f"{SALUDO_PRIMER_MENSAJE} {AVISO_MEDIOS_DE_PAGO}"
     return SALUDO_PRIMER_MENSAJE
 
 
@@ -500,7 +513,9 @@ def bloque_contexto(
         partes.append(f"Respuestas del cliente a preguntas con botones — {dichas}. No repitas esas preguntas ni las cambies de palabras.")
     if etapa_consultiva(estado, tipo_producto):
         precio = (
-            "El cliente pidió el precio: dáselo ahora si está en el contexto o el catálogo (si no está, dile que el asesor se lo confirma). "
+            "El cliente pidió el precio con sus palabras: dáselo en ESTE mismo mensaje, también si estamos fuera de horario, si está en el "
+            "contexto o el catálogo (si no está, dile que el asesor se lo confirma). Si hay medio de pago que mencionar, di que puede ser "
+            "financiado en el recibo de gas o con cualquier medio de pago (tarjeta, QR o transferencia). "
             "Si das cuotas, el plazo máximo es de 60 cuotas (meses): no digas que el máximo es 36 u otro plazo. Da como mucho dos "
             "plazos (por ejemplo 12 y 60), no la tabla completa."
             if pidio_el_precio else "No menciones precios ni cuotas: el cliente no los pidió; de eso se encarga el asesor."

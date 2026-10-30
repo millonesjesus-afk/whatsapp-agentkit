@@ -19,7 +19,8 @@ from tests.test_triaje_atc_flujo import _filas, _hablar
 @pytest.mark.parametrize("textos,esperado", [
     (["Estoy interesado en financiar una Terma"], "terma"), (["quiero un calentador de agua"], "terma"),
     (["Secadora a gas Rinnai"], "secadora"), (["centro de lavado"], "lavado"), (["una lavasecadora"], "lavado"),
-    (["una lavadora"], "otro"),                           # una lavadora sola no es de gas
+    (["una lavadora"], "lavado"), (["Necesito lavadora"], "lavado"),   # lavadora, lavaseca y lava y seca → centro de lavado
+    (["quiero una lava y seca a gas"], "lavado"), (["una lavadora y una terma"], "terma"),
     (["cocina empotrable"], "cocina"), (["Renueva tu cocina ahora"], "cocina"), (["hola"], "otro"), ([None, ""], "otro"),
     (["terma", "secadora"], "terma"),
 ])
@@ -38,11 +39,18 @@ def test_es_prellenado_o_saludo(texto, esperado):
 
 
 @pytest.mark.parametrize("texto,esperado", [
-    ("¿Cuánto cuesta y cómo lo pago?", True), ("cual es el precio", True), ("en cuántas cuotas", True), ("cuánto sale la terma", True),
+    ("cual es el precio", True), ("en cuántas cuotas", True), ("cuánto sale la terma", True), ("¿Cuánto cuesta la secadora?", True),
+    # el texto prellenado del anuncio NO cuenta: es un mensaje predefinido, el cliente debe volver a pedir el precio (2026-10-30)
+    ("¿Cuánto cuesta y cómo lo pago?", False), ("¡Hola! ¿Cuánto cuesta y cómo lo pago?", False),
     ("Estoy interesado en financiar una Terma", False), ("hola", False), ("y la instalación?", False),
 ])
 def test_pidio_precio(texto, esperado):
     assert cg.pidio_precio(texto) is esperado
+
+
+def test_el_prellenado_no_cuenta_pero_pedirlo_despues_con_sus_palabras_si():
+    assert cg.pidio_precio("¿Cuánto cuesta y cómo lo pago?", "2 baños") is False
+    assert cg.pidio_precio("¿Cuánto cuesta y cómo lo pago?", "2 baños", "ok, y cuánto cuesta la Rheem?") is True
 
 
 @pytest.mark.parametrize("paso", ["producto", "gas", "equipo", "titular", "tamano", "cocina", "complemento", "singas"])
@@ -90,8 +98,11 @@ def test_el_primer_mensaje_fijo_no_habla_de_producto_ni_de_precio():
     p = cg.con_saludo(cg.pregunta("gas"), cg.saludo_para("Estoy interesado en financiar una Terma"))
     assert p["cuerpo"].startswith("Hola 👋 Soy Gabi, asesora virtual de Cálidda Hogar.") and "gas natural de Cálidda" in p["cuerpo"]
     assert "precio" not in p["cuerpo"].lower() and "S/" not in p["cuerpo"] and "terma" not in p["cuerpo"].lower()
-    con_precio = cg.con_saludo(cg.pregunta("gas"), cg.saludo_para("¿Cuánto cuesta y cómo lo pago?"))
-    assert "El precio te lo cuento en un momento" in con_precio["cuerpo"] and cg.validar_pregunta(con_precio) == []
+    # «¿Cuánto cuesta y cómo lo pago?»: se le contestan los medios de pago, NO se promete ni se da el precio
+    con_pago = cg.con_saludo(cg.pregunta("gas"), cg.saludo_para("¿Cuánto cuesta y cómo lo pago?"))
+    assert "financiado en tu recibo de gas o con cualquier medio de pago" in con_pago["cuerpo"]
+    assert "tarjeta de débito o crédito, QR o transferencia" in con_pago["cuerpo"] and cg.validar_pregunta(con_pago) == []
+    assert "precio te lo cuento" not in con_pago["cuerpo"] and "S/" not in con_pago["cuerpo"]
 
 
 def test_transiciones():
@@ -186,7 +197,8 @@ def test_bloque_de_contexto_para_claude():
     assert "No menciones precios ni cuotas: el cliente no los pidió" in sin_precio and "pídele ese DNI" in sin_precio
     assert "servicio aparte" not in sin_precio.lower()                      # tiene punto y ductería: nada que ofrecer aparte
     con = cg.bloque_contexto(final, va_la_primera_pregunta=False, tipo_producto="terma", pidio_el_precio=True)
-    assert "El cliente pidió el precio: dáselo ahora" in con and "60 cuotas" in con and "36" in con
+    assert "El cliente pidió el precio con sus palabras: dáselo en ESTE mismo mensaje, también si estamos fuera de horario" in con
+    assert "60 cuotas" in con and "36" in con and "cualquier medio de pago (tarjeta, QR o transferencia)" in con
     assert cg.bloque_contexto(final, va_la_primera_pregunta=False, tipo_producto="terma", derivado=True) is None
 
 
@@ -278,15 +290,16 @@ async def test_texto_prellenado_recibe_el_primer_mensaje_fijo_sin_ia_ni_producto
     assert estado["preguntas"] == ["gas"] and estado["conteo"] == {"gas": 1}
 
 
-async def test_precio_prellenado_promete_el_precio_despues_de_las_consultas(monkeypatch):
+async def test_precio_prellenado_contesta_los_medios_de_pago_y_no_promete_el_precio(monkeypatch):
     negocio, canal, canal_dict, proveedor, gabi = await _escenario(monkeypatch, "activo")
     tel = _tel(3)
     await _hablar(proveedor, canal, tel, "Estoy interesado en financiar una Secadora")
     assert gabi.llamadas == 0 and "precio" not in _cuerpo(proveedor).lower()
     tel2 = _tel(33)
     await _hablar(proveedor, canal, tel2, "¿Cuánto cuesta y cómo lo pago?")
-    # sin campaña ni anuncio ni producto en el mensaje → antes sale la lista de producto, con la promesa del precio
-    assert proveedor.interactivos[-1]["type"] == "list" and "El precio te lo cuento en un momento" in _cuerpo(proveedor)
+    # sin campaña ni anuncio ni producto en el mensaje → antes sale la lista de producto, con los medios de pago y SIN prometer el precio
+    assert proveedor.interactivos[-1]["type"] == "list" and "o con cualquier medio de pago: tarjeta de débito o crédito, QR o transferencia" in _cuerpo(proveedor)
+    assert "precio te lo cuento" not in _cuerpo(proveedor)
     assert _cuerpo(proveedor).endswith("¿Qué gasodoméstico te interesa?") and gabi.llamadas == 0
     await _tocar(proveedor, canal, tel2, "cal:producto:terma", "Terma a gas")
     assert _cuerpo(proveedor) == "¿Tu casa ya tiene gas natural de Cálidda?"
@@ -345,12 +358,17 @@ async def test_camino_con_gas_terma_hasta_la_etapa_consultiva(monkeypatch):
     bloques = await brain._armar_bloques_contexto("2 baños", historial, lead, negocio["id"])
     final = [b for b in bloques if "ETAPA FINAL" in b]
     assert final and "No menciones precios ni cuotas: el cliente no los pidió" in final[0] and "2 baños" in final[0]
-    # cliente que SÍ pidió el precio (aunque sea con el texto prellenado): la IA se lo da en esta etapa
+    # el texto prellenado NO cuenta como pedir el precio (2026-10-30): sigue sin darlo
     # (el contexto lee los mensajes guardados de ESTA conversación, no el historial que se le pase)
     await mem.guardar_mensaje(tel, "user", "¿Cuánto cuesta y cómo lo pago?", negocio_id=negocio["id"])
     await mem.guardar_mensaje(tel, "user", "2 baños", negocio_id=negocio["id"])
     bloques = await brain._armar_bloques_contexto("2 baños", [], lead, negocio["id"])
-    assert any("El cliente pidió el precio: dáselo ahora" in b for b in bloques)
+    assert not any("El cliente pidió el precio con sus palabras" in b for b in bloques)
+    # cliente que lo pide con SUS palabras: la IA se lo da en esta etapa
+    await mem.guardar_mensaje(tel, "user", "¿cuánto cuesta la que me recomiendas?", negocio_id=negocio["id"])
+    await mem.guardar_mensaje(tel, "user", "2 baños", negocio_id=negocio["id"])
+    bloques = await brain._armar_bloques_contexto("2 baños", [], lead, negocio["id"])
+    assert any("El cliente pidió el precio con sus palabras: dáselo en ESTE mismo mensaje" in b for b in bloques)
 
 
 async def test_secadora_pregunta_solo_el_punto_y_el_tamano_por_personas(monkeypatch):

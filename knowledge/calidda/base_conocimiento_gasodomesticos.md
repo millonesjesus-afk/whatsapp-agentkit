@@ -2,7 +2,7 @@
 
 ## ¿Quiénes somos?
 
-Gasodomésticos es la unidad comercial de Cálidda encargada de promover la venta de equipos que funcionan con gas natural para clientes residenciales de Lima Metropolitana y Callao.
+Cálidda Hogar es la línea comercial de Cálidda de productos y servicios para el hogar, que complementan el servicio de gas como una solución completa para todas las necesidades del hogar. Dentro de ella, los gasodomésticos son los equipos que funcionan con gas natural para clientes residenciales de Lima Metropolitana y Callao. Es una sola empresa: Cálidda.
 
 Nuestro objetivo es mejorar la calidad de vida de los clientes mediante soluciones eficientes, seguras y económicas que aprovechan el gas natural.
 
@@ -26,6 +26,7 @@ Estas permiten disponer de agua caliente de forma continua con un menor costo op
 
 ### Lavado y Secado
 - Secadoras a gas.
+- Centros de lavado a gas: lavan y secan en un mismo equipo (el cliente puede pedirlos como lavadora, lavaseca o lavadora-secadora).
 
 Este tipo de equipos reduce significativamente los tiempos de secado y el consumo energético comparado con una secadora eléctrica.
 

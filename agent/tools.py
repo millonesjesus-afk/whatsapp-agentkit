@@ -232,6 +232,19 @@ def _seleccionar_diversos_por_capacidad(candidatos: list[dict], limite: int) -> 
     return seleccionados
 
 
+# Cómo llama el cliente a un producto que en el catálogo se llama distinto (2026-10-30, auditoría de chats): pedían «lavadora» o
+# «lavaseca» y Gabi decía que no había, cuando el catálogo tiene el CENTRO DE LAVADO (lava y seca en un solo equipo, a gas).
+_SINONIMOS_DE_BUSQUEDA = (
+    (re.compile(r"lavadora|lavaseca|lavasecadora|lava\s*(y|-)?\s*seca|lavander[ií]a"), "centro de lavado"),
+)
+
+
+def con_sinonimos(mensaje: str) -> str:
+    """El mensaje del cliente más el nombre que el catálogo le da a lo que pidió («lavadora» → «centro de lavado»)."""
+    extra = [nombre for patron, nombre in _SINONIMOS_DE_BUSQUEDA if patron.search(mensaje) and nombre not in mensaje]
+    return f"{mensaje} {' '.join(extra)}" if extra else mensaje
+
+
 async def buscar_productos(
     mensaje: str, negocio_id: str | None, limite: int = 8, excluir_codigos: set[str] | None = None,
 ) -> list[dict]:
@@ -269,7 +282,7 @@ async def buscar_productos(
     """
     if negocio_id is None:
         return []
-    mensaje = mensaje.lower()
+    mensaje = con_sinonimos(mensaje.lower())
     excluir_codigos = excluir_codigos or set()
     # Gate 2026-09-23 — hallazgo real: un cliente que necesitaba una terma de
     # mayor capacidad (varios baños/personas) solo recibía opciones de 5.5L,
@@ -458,6 +471,24 @@ def _dividir_en_parrafos(contenido: str, min_len: int = 20) -> list[str]:
     return [linea.strip() for linea in contenido.split("\n") if len(linea.strip()) >= min_len]
 
 
+ARCHIVO_REGLAS_DEL_NEGOCIO = "_reglas_de_gabi.md"
+
+
+def reglas_del_negocio(negocio_codigo: str | None) -> str:
+    """Las reglas de Gabi propias de UN negocio (`knowledge/<codigo>/_reglas_de_gabi.md`): quién es, cómo habla de su empresa, qué
+    medios de pago existen, a dónde manda un trámite. Van SIEMPRE en el system prompt (el archivo es corto), a diferencia de la base
+    de conocimiento, que solo trae los párrafos parecidos a lo que dijo el cliente. Sin negocio, sin carpeta o sin archivo: vacío
+    (nunca se cae a las reglas de otro negocio)."""
+    if not negocio_codigo:
+        return ""
+    ruta = os.path.join(KNOWLEDGE_DIR, negocio_codigo, ARCHIVO_REGLAS_DEL_NEGOCIO)
+    try:
+        with open(ruta, "r", encoding="utf-8") as f:
+            return f.read().strip()
+    except (UnicodeDecodeError, OSError):
+        return ""
+
+
 def buscar_en_knowledge(mensaje: str, negocio_codigo: str | None, limite: int = 7) -> str:
     """
     Busca, a nivel de párrafo, los fragmentos de /knowledge/<negocio_codigo>
@@ -503,6 +534,8 @@ def buscar_en_knowledge(mensaje: str, negocio_codigo: str | None, limite: int = 
             except (UnicodeDecodeError, IOError):
                 continue
             nombre = os.path.basename(ruta)
+            if nombre.startswith("_"):
+                continue   # reglas siempre activas (reglas_del_negocio): no se buscan por palabras
             for parrafo in _dividir_en_parrafos(contenido):
                 score = sum(1 for palabra in palabras if palabra in parrafo.lower())
                 if score > 0:
