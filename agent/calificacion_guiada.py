@@ -30,6 +30,7 @@ import json
 import logging
 import re
 import unicodedata
+from datetime import datetime
 
 from agent import envios
 from agent import memory as mem
@@ -55,6 +56,9 @@ PASOS_CON_BOTONES = (
 
 # Cuántas veces se retoma un paso pendiente después de que el cliente escribió a mano (además de la pregunta original).
 MAXIMO_REINTENTOS = 2
+# Bloque B (2026-10-30): un segundo toque en la MISMA pregunta dentro de este lapso desde su última respuesta es una corrección y gana
+# («Número de cliente» y enseguida «Más tarde»). Pasado el lapso es un botón viejo: la primera respuesta se mantiene.
+VENTANA_CORRECCION_SEGUNDOS = 15
 # La primera pregunta de gas solo se hace en los primeros mensajes (después la conversación ya avanzó sola).
 MAXIMO_MENSAJES_CLIENTE_PRIMERA_PREGUNTA = 3
 
@@ -366,6 +370,17 @@ def puede_retomar(estado: dict) -> str | None:
     return paso if estado.get("conteo", {}).get(paso, 1) <= MAXIMO_REINTENTOS else None
 
 
+def pregunta_sin_hacer(estado: dict, tipo: str) -> dict | None:
+    """La pregunta que corresponde tras la última respuesta y que todavía no se hizo (None si no hay). Pasa cuando en la misma ráfaga el
+    cliente tocó un botón y además escribió algo que respondió Claude: tras su mensaje, el flujo sigue con esta pregunta."""
+    respuestas = estado.get("respuestas", {})
+    if not respuestas or pendiente(estado):
+        return None
+    paso = list(respuestas)[-1]
+    p = siguiente(paso, respuestas[paso], tipo, None, "")["pregunta"]
+    return p if p and p["paso"] not in estado.get("preguntas", []) else None
+
+
 def siguiente(paso: str, valor: str, tipo_producto: str, nombre: str | None, telefono_suministros: str) -> dict:
     """Qué hace el sistema tras la respuesta del cliente. Devuelve `{"pregunta": dict|None, "texto": str|None, "cerrar_sin_gas":
     bool, "revisar_etapa": bool}`. `revisar_etapa`: el paso no genera mensaje fijo propio; el turno sigue con Claude (etapa
@@ -408,6 +423,169 @@ def siguiente(paso: str, valor: str, tipo_producto: str, nombre: str | None, tel
         if valor == "equipo":
             return {**vacio, "texto": texto_comprar_equipo_igual(tipo_producto)}
     return vacio
+
+
+def es_respuesta_valida(paso: str, valor: str, tipo_producto: str) -> bool:
+    accion = siguiente(paso, valor, tipo_producto, None, "")
+    return bool(accion["pregunta"] or accion["texto"] or accion["revisar_etapa"])
+
+
+# ── Respuestas escritas (bloque B, 2026-10-30) ──────────────────────────────
+#
+# La auditoría del flujo guiado mostró que cuando el cliente ESCRIBE la respuesta («a nombre de mi esposo», «2 baños», «sí») el sistema
+# no la entendía y repetía la misma pregunta. Este intérprete es determinista (cero tokens) y CONSERVADOR: solo devuelve un valor cuando
+# la respuesta es clara; ante una pregunta, una negación rara, una frase larga o dos lecturas posibles devuelve None y todo sigue como
+# antes (Claude contesta y la pregunta se retoma). Mejor repetir una pregunta que guardar una respuesta equivocada.
+
+_MAXIMO_PALABRAS_RESPUESTA = 15
+_NO_SABE = re.compile(r"\bno (lo |la )?se\b|\bno estoy segur|\bno sabria|\bni idea\b|\bdesconozco\b|\bno recuerdo\b|\bno me acuerdo\b")
+_NUMEROS = {"un": 1, "uno": 1, "una": 1, "dos": 2, "tres": 3, "cuatro": 4, "cinco": 5, "seis": 6, "siete": 7, "ocho": 8, "nueve": 9, "diez": 10}
+_NUMERO = r"(\d{1,2}|un|uno|una|dos|tres|cuatro|cinco|seis|siete|ocho|nueve|diez)"
+_FAMILIARES = (
+    r"(esposo|esposa|marido|mujer|mama|mami|madre|papa|papi|padre|hijo|hija|hermano|hermana|suegro|suegra|abuelo|abuela|abuelito|"
+    r"abuelita|tio|tia|pareja|conviviente|primo|prima|cunado|cunada|nuera|yerno|sobrino|sobrina|novio|novia|enamorado|enamorada)"
+)
+_SI = re.compile(r"^(si+|sip|claro|correcto|exacto|efectivamente|asi es|afirmativo|por supuesto)\b")
+_NO = re.compile(r"^(no|nop|nel|negativo)\b")
+
+
+def _plano(texto: str | None) -> str:
+    return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9 ]+", " ", _sin_tildes(texto))).strip()
+
+
+def _numero(texto: str) -> int | None:
+    return int(texto) if texto.isdigit() else _NUMEROS.get(texto)
+
+
+def _interpretar_gas(t: str) -> str | None:
+    if _NO_SABE.search(t):
+        return "ns"
+    si = bool(_SI.search(t) or re.search(r"\b(ya|si) (tengo|tenemos|cuento|contamos)\b|\btengo gas\b|\bya (esta|me|nos) (instalad|instalaron)", t))
+    no = bool(_NO.search(t) or re.search(r"\bno (tengo|tenemos|cuento|contamos|hay)\b|\b(aun|todavia|pero) no\b|\bsin gas\b", t))
+    return "si" if si and not no else "no" if no and not si else None
+
+
+def _interpretar_titular(t: str) -> str | None:
+    if _NO_SABE.search(t) or re.search(r"\bno (es|esta) (a nombre )?de mis?\b", t):
+        return None
+    familiar = bool(re.search(r"\bmis? " + _FAMILIARES + r"\b", t) or re.search(r"\bfamiliar\b", t))
+    otro = bool(re.search(
+        r"\b(propietari[oa]|duen[oa]|caser[oa]|arrendador[a]?|inquilin[oa]|alquil\w*|vecin[oa]|anterior|otra persona|jefe|jefa|"
+        r"empresa|inmobiliaria|constructora)\b", t,
+    ))
+    si = bool(_SI.search(t) or re.search(r"\ba mi nombre\b|\bsoy (yo )?(el |la )?titular\b|\bsoy yo\b|^yo$|\bes mio\b", t))
+    if familiar and not otro:
+        return "familiar"                     # «sí, a nombre de mi esposo» → familiar: el «sí» suelto no pesa más que el parentesco
+    if otro and not familiar:
+        return "otro"
+    if si and not (familiar or otro) and not _NO.search(t):
+        return "si"
+    return None
+
+
+def _interpretar_tamano(t: str, tipo: str) -> str | None:
+    if tipo == PRODUCTO_TERMA:
+        m = re.search(_NUMERO + r" ?banos?\b", t) or re.fullmatch(r"(?:solo |son |tiene |tengo |hay |tenemos )?" + _NUMERO, t)
+        n = _numero(m.group(1)) if m else None
+        if not n or n > 10:
+            return None
+        return "1" if n == 1 else "2" if n == 2 else "3"
+    if tipo in (PRODUCTO_SECADORA, PRODUCTO_LAVADO):
+        if _NO_SABE.search(t):
+            return "ns"
+        m = (
+            re.search(_NUMERO + r" ?(personas?|integrantes|miembros)\b", t) or re.search(r"\bsomos " + _NUMERO + r"\b", t)
+            or re.fullmatch(r"(?:solo |son |somos )?" + _NUMERO, t)
+        )
+        n = _numero(m.group(1)) if m else None
+        if not n or n > 20:
+            return None
+        return "pequena" if n <= 4 else "grande"
+    return None
+
+
+def _interpretar_equipo(t: str, tipo: str) -> str | None:
+    if _NO_SABE.search(t):
+        return "ns"
+    ninguno = bool(re.search(r"\bninguno\b|\bninguna\b|\bni punto ni ducteria\b|^no tengo( nada)?$|^nada$", t))
+    if tipo in (PRODUCTO_SECADORA, PRODUCTO_LAVADO):
+        si = bool(_SI.search(t) or re.search(r"\b(ya |si )?tengo (el )?punto\b", t))
+        no = ninguno or bool(_NO.search(t) or re.search(r"\bno tengo\b", t))
+        return "punto" if si and not no else "ninguno" if no and not si else None
+    if tipo == PRODUCTO_TERMA:
+        if re.search(r"\bsin\b|\bpero no\b|\bno tengo (el |la )?(punto|ducteria)\b", t):
+            return "ninguno" if ninguno else None
+        if re.search(r"\bambos\b|\blos dos\b|\blas dos\b|\btengo todo\b|\bpunto (de gas )?y (la )?ducteria\b|\bducteria y (el )?punto\b", t):
+            return "ambos"
+        if ninguno:
+            return "ninguno"
+        if re.search(r"\bsolo (el )?punto\b", t):
+            return "punto"
+        if re.search(r"\bsolo (la )?ducteria\b", t):
+            return "ducteria"
+    return None
+
+
+def _interpretar_cocina(t: str) -> str | None:
+    empotrable = bool(re.search(r"\bempotr\w*|\bencimera\b", t))
+    pie = bool(re.search(r"\bde pie\b|\bcon horno\b|\bnormal\b|\bconvencional\b|\btradicional\b|\bde piso\b", t))
+    return "empotrable" if empotrable and not pie else "pie" if pie and not empotrable else None
+
+
+def _interpretar_complemento(t: str) -> str | None:
+    if re.search(r"\bsin (el |la )?(horno|campana)\b|\bno (quiero|necesito)\b", t):
+        return None
+    horno, campana = bool(re.search(r"\bhorno\b", t)), bool(re.search(r"\bcampana\b", t))
+    if re.search(r"\bambos\b|\blos dos\b|\blas dos\b", t) or (horno and campana):
+        return "ambos"
+    if horno or campana:
+        return "horno" if horno else "campana"
+    if re.search(r"\bsolo (la )?encimera\b|\bsolo eso\b|^nada( mas)?$|^ninguno$", t):
+        return "solo"
+    return None
+
+
+def _interpretar_dato(t: str) -> str | None:
+    if re.search(r"\bluego\b|\bdespues\b|\bmas tarde\b|\ben otro momento\b|\b(ahorita|ahora) no\b|\bno (lo )?tengo a la mano\b|\bmanana\b|\botro dia\b", t):
+        return "luego"
+    if re.fullmatch(r"[\d ]+", t):
+        digitos = t.replace(" ", "")
+        return "dni" if len(digitos) == 8 else "cliente" if 5 <= len(digitos) <= 12 else None
+    dni = bool(re.search(r"\bdni\b", t))
+    cliente = bool(re.search(r"\b(numero|codigo|nro) (de )?(cliente|suministro)\b|\bsuministro\b", t))
+    return "dni" if dni and not cliente else "cliente" if cliente and not dni else None
+
+
+def _interpretar_singas(t: str) -> str | None:
+    contratar = bool(re.search(r"\bcontratar\b|\binstal\w* (el )?gas\b|\bquiero (el |tener )?gas\b|\bponer (el )?gas\b", t))
+    equipo = bool(re.search(r"\bcomprar\b|\bel equipo\b|\bsolo (el|la) (equipo|terma|cocina|secadora)\b", t))
+    return "contratar" if contratar and not equipo else "equipo" if equipo and not contratar else None
+
+
+def interpretar_texto(paso: str, texto: str | None, tipo: str = PRODUCTO_OTRO) -> str | None:
+    """El valor del botón que el cliente quiso decir al ESCRIBIR su respuesta al paso `paso`, o None si no es claro. PURA."""
+    crudo = texto or ""
+    if "?" in crudo or "¿" in crudo:
+        return None                           # el cliente pregunta algo: lo atiende Claude
+    t = _plano(crudo)
+    if not t or len(t.split()) > _MAXIMO_PALABRAS_RESPUESTA:
+        return None
+    if paso == PASO_PRODUCTO:
+        valor = tipo_de_producto(t)
+        return valor if valor in _PRODUCTOS_ELEGIBLES else None
+    lector = {
+        PASO_GAS: _interpretar_gas, PASO_TITULAR: _interpretar_titular, PASO_COCINA: _interpretar_cocina,
+        PASO_COMPLEMENTO: _interpretar_complemento, PASO_DATO: _interpretar_dato, PASO_SINGAS: _interpretar_singas,
+    }.get(paso)
+    if lector:
+        valor = lector(t)
+    elif paso == PASO_TAMANO:
+        valor = _interpretar_tamano(t, tipo)
+    elif paso == PASO_EQUIPO:
+        valor = _interpretar_equipo(t, tipo)
+    else:
+        valor = None
+    return valor if valor and es_respuesta_valida(paso, valor, tipo) else None
 
 
 _ETIQUETAS_PASO = {
@@ -500,12 +678,21 @@ def bloque_contexto(
         return None
     respuestas = estado.get("respuestas", {})
     partes = []
-    if va_la_primera_pregunta or puede_retomar(estado):
+    sigue_con_botones = bool(puede_retomar(estado) or pregunta_sin_hacer(estado, tipo_producto))
+    if va_la_primera_pregunta:
         partes.append(
             "Después de tu mensaje el sistema le hará al cliente, con botones, una consulta rápida para orientarlo. En ESTE mensaje "
             "responde lo que el cliente necesita, NO hagas ninguna pregunta ni pidas su nombre o su DNI todavía, y cierra con una frase "
             "breve sin signos de pregunta (por ejemplo: «Te hago una consulta rápida para orientarte mejor»)."
         )
+    elif sigue_con_botones:
+        # Bloque B (2026-10-30): la muletilla «Te hago una consulta rápida» se repetía en cada reintento (hasta 4 veces en un chat).
+        partes.append(
+            "Después de tu mensaje el sistema le mostrará al cliente, con botones, la consulta que sigue. En ESTE mensaje responde solo "
+            "lo que el cliente necesita, NO hagas ninguna pregunta ni pidas su nombre o su DNI todavía, y NO anuncies la consulta: nada "
+            "de «Te hago una consulta rápida» ni frases parecidas (el cliente ya las leyó)."
+        )
+    if va_la_primera_pregunta or sigue_con_botones:
         if not pidio_el_precio:
             partes.append("No menciones precios ni cuotas: el cliente no los pidió.")
     if respuestas:
@@ -705,7 +892,8 @@ async def continuar_flujo(
     telefono: str, canal: dict | None, lead: dict | None, proveedor, mensajes_cliente: int, derivado: bool = False,
 ) -> bool:
     """Después de una respuesta libre de Claude: si falta la primera pregunta de gas la hace; si hay un paso pendiente (el cliente
-    escribió en vez de tocar) lo retoma, hasta 2 veces. No lanza."""
+    escribió en vez de tocar) lo retoma, hasta 2 veces; si en la misma ráfaga tocó un botón y escribió algo, hace la pregunta que
+    sigue a ese toque. No lanza."""
     try:
         negocio_id = (canal or {}).get("negocio_id")
         modo = await obtener_modo(negocio_id)
@@ -722,10 +910,8 @@ async def continuar_flujo(
                 await _fijar_interes_si_falta(telefono, lead, tipo)
             return salio
         paso = puede_retomar(estado)
-        if paso is None:
-            return False
         tipo = await tipo_del_lead(telefono, lead, negocio_id, estado)
-        p = pregunta(paso, tipo)
+        p = pregunta(paso, tipo) if paso else pregunta_sin_hacer(estado, tipo)
         if p is None:
             return False
         return await enviar_pregunta(telefono, canal, proveedor, p)
@@ -734,42 +920,162 @@ async def continuar_flujo(
         return False
 
 
-async def procesar_respuesta(telefono: str, canal: dict | None, lead: dict | None, interactivo_id: str | None, titulo: str, proveedor) -> bool:
-    """El cliente tocó un botón o una fila de la calificación. Registra su respuesta (visible para el asesor), manda lo siguiente
-    (pregunta o texto fijo) y devuelve True si el sistema ya respondió este turno (Gabi no escribe). Devuelve False —y el turno sigue con
-    Claude— si no es de esta calificación, el modo está apagado, el lead ya tiene dueño, falló algo o, con esta respuesta, se completó
-    la calificación (etapa consultiva). No lanza."""
+# ── Toques y ráfagas (bloque B, 2026-10-30) ─────────────────────────────────
+#
+# Antes cada toque se procesaba al instante, sin la espera de 3 s de los mensajes escritos: si el cliente tocaba dos botones seguidos
+# (o tocaba y escribía) salían dos respuestas, y un segundo toque en una pregunta ya respondida caía a Claude como texto (dos respuestas
+# de IA juntas; «Más tarde» perdía contra el «Número de cliente» tocado antes). Ahora:
+#   1. `registrar_toque` (en el webhook, al llegar): guarda la respuesta al instante (el asesor la ve en el Timeline). Un segundo toque
+#      en la MISMA pregunta dentro de `VENTANA_CORRECCION_SEGUNDOS` es una corrección y gana; el mismo botón dos veces no hace nada;
+#      pasado el lapso es un botón viejo y la primera respuesta se mantiene (el toque lo atiende Gabi como texto, como antes).
+#   2. La respuesta del sistema espera la MISMA ventana de 3 s que los mensajes escritos (agent/debounce.py, misma clave): una ráfaga
+#      de toques y textos recibe UNA sola respuesta, decidida con el estado final (`responder_rafaga`).
+# Los toques anotados viven en memoria, como el debounce (un solo proceso en Railway).
+
+TOQUE_REGISTRADO, TOQUE_REPETIDO, TOQUE_NO_ES_DEL_FLUJO = "registrado", "repetido", "no_es_del_flujo"
+_toques_en_espera: dict[str, list[dict]] = {}
+
+
+def clave_rafaga(negocio_id: str | None, telefono: str) -> str:
+    """La misma clave que usa el webhook para el debounce de la respuesta: `negocio_id:telefono`."""
+    return f"{negocio_id}:{telefono}"
+
+
+def descartar_toques(clave: str) -> None:
+    _toques_en_espera.pop(clave, None)
+
+
+def _segundos_desde(momento: datetime | None, ahora: datetime) -> float | None:
+    return None if momento is None else (ahora - momento).total_seconds()
+
+
+async def registrar_toque(
+    telefono: str, canal: dict | None, lead: dict | None, interactivo_id: str | None, titulo: str, ahora: datetime | None = None,
+) -> str:
+    """El cliente tocó un botón o una fila de la calificación. Guarda su respuesta y la anota para la respuesta de la ráfaga. Devuelve
+    `TOQUE_REGISTRADO` (el sistema responderá tras la ventana), `TOQUE_REPETIDO` (el mismo botón otra vez: no se responde nada) o
+    `TOQUE_NO_ES_DEL_FLUJO` (modo apagado, lead con dueño, botón viejo o inválido, o falló algo: el turno sigue con Gabi). No lanza."""
     try:
         parseado = parsear_id(interactivo_id)
         negocio_id = (canal or {}).get("negocio_id")
         if parseado is None or not negocio_id or not lead:
-            return False
+            return TOQUE_NO_ES_DEL_FLUJO
         if await obtener_modo(negocio_id) != MODO_ACTIVO:
+            return TOQUE_NO_ES_DEL_FLUJO
+        if lead.get("asesor_asignado") or lead.get("pausado_manual") or lead.get("escalado_supervision_en"):
+            return TOQUE_NO_ES_DEL_FLUJO
+        paso, valor = parseado
+        estado = await mem.obtener_estado_calificacion(telefono)
+        correccion = paso in estado.get("respuestas", {})
+        if correccion:
+            transcurrido = _segundos_desde(estado.get("respondido_en", {}).get(paso), ahora or datetime.utcnow())
+            if transcurrido is None or transcurrido > VENTANA_CORRECCION_SEGUNDOS:
+                # Los botones de WhatsApp siguen tocables para siempre: un botón viejo no reescribe la respuesta ni cambia el camino;
+                # el turno sigue con Gabi como un mensaje de texto.
+                return TOQUE_NO_ES_DEL_FLUJO
+            if estado["respuestas"][paso] == valor:
+                # Se anota igual (sin efecto) para que su título no cuente como texto escrito en la respuesta de la ráfaga.
+                _toques_en_espera.setdefault(clave_rafaga(negocio_id, telefono), []).append(
+                    {"paso": paso, "titulo": titulo or "", "repetido": True},
+                )
+                return TOQUE_REPETIDO
+        tipo = valor if paso == PASO_PRODUCTO and valor in _PRODUCTOS_ELEGIBLES else await tipo_del_lead(telefono, lead, negocio_id, estado)
+        if not es_respuesta_valida(paso, valor, tipo):
+            return TOQUE_NO_ES_DEL_FLUJO
+        await mem.registrar_evento_lead(
+            telefono, mem.EVENTO_CALIFICACION_RESPUESTA, descripcion_respuesta(paso, valor), None,
+            {"paso": paso, "valor": valor, "titulo": (titulo or "")[:60], **({"correccion": True} if correccion else {})},
+        )
+        if paso == PASO_PRODUCTO:
+            if correccion and tipo != PRODUCTO_OTRO:
+                await mem.actualizar_lead(telefono, interes=nombre_producto(tipo))
+            else:
+                await _fijar_interes_si_falta(telefono, lead, tipo)
+        _toques_en_espera.setdefault(clave_rafaga(negocio_id, telefono), []).append({"paso": paso, "titulo": titulo or ""})
+        return TOQUE_REGISTRADO
+    except Exception:
+        logger.exception("calificación guiada: no se pudo registrar el toque del cliente — sigue Gabi")
+        return TOQUE_NO_ES_DEL_FLUJO
+
+
+def _mensajes_de_la_rafaga(historial: list[dict]) -> list[str]:
+    """Lo que el cliente mandó desde la última respuesta (de Gabi o de un asesor), en orden."""
+    rafaga: list[str] = []
+    for m in reversed(historial):
+        if m.get("role") != "user":
+            break
+        rafaga.append(m.get("content") or "")
+    return list(reversed(rafaga))
+
+
+def _titulos_de_botones() -> set[str]:
+    return {
+        o["titulo"] for paso in PASOS_CON_BOTONES for tipo in _PRODUCTOS_ELEGIBLES + (PRODUCTO_OTRO,)
+        for o in (pregunta(paso, tipo) or {}).get("opciones", [])
+    }
+
+
+def _sin_los_toques(rafaga: list[str], toques: list[dict]) -> list[str]:
+    """Los mensajes ESCRITOS de la ráfaga: se quita un mensaje por cada toque anotado (el toque se guarda con el título del botón)."""
+    libres = list(rafaga)
+    for toque in toques:
+        if toque["titulo"] in libres:
+            libres.remove(toque["titulo"])
+    return [t for t in libres if t.strip()]
+
+
+async def responder_rafaga(telefono: str, canal: dict | None, lead: dict | None, proveedor) -> bool:
+    """Corre cuando pasó la ventana de espera, ANTES que todo lo demás del turno (triaje, IA). Con los toques anotados y lo que el
+    cliente escribió en la ráfaga decide UNA sola respuesta: si escribió la respuesta al paso pendiente la interpreta; si todo fueron
+    toques (o respuestas entendidas) manda lo que sigue según el estado final. True si el sistema ya respondió este turno (Gabi no
+    escribe); False si el turno sigue con Gabi: no hubo toques ni respuesta entendida, la ráfaga trae algo más que responder, o se
+    completó la calificación (etapa consultiva). No lanza."""
+    negocio_id = (canal or {}).get("negocio_id")
+    toques = _toques_en_espera.pop(clave_rafaga(negocio_id, telefono), [])
+    try:
+        if not negocio_id or not lead or await obtener_modo(negocio_id) != MODO_ACTIVO:
             return False
         if lead.get("asesor_asignado") or lead.get("pausado_manual") or lead.get("escalado_supervision_en"):
             return False
-        paso, valor = parseado
         estado = await mem.obtener_estado_calificacion(telefono)
-        if paso in estado.get("respuestas", {}):
-            # Los botones de WhatsApp siguen tocables para siempre: un toque en una pregunta que ya respondió no repite el flujo
-            # (no se vuelve a mandar la pregunta siguiente); el turno sigue con Gabi como un mensaje de texto.
-            return False
-        if paso == PASO_PRODUCTO and valor in _PRODUCTOS_ELEGIBLES:
-            tipo = valor
-        else:
+        historial = await historial_de_la_conversacion(telefono, negocio_id)
+        libres = _sin_los_toques(_mensajes_de_la_rafaga(historial or []), toques)
+        paso_pendiente = pendiente(estado)
+        if libres and paso_pendiente and lead_elegible(lead):
             tipo = await tipo_del_lead(telefono, lead, negocio_id, estado)
-        accion = siguiente(paso, valor, tipo, lead.get("nombre"), await _telefono_suministros(negocio_id))
-        if not (accion["pregunta"] or accion["texto"] or accion["revisar_etapa"]):
+            # Un botón viejo que no se registró llega como texto con su título: lo atiende Gabi, no se toma como respuesta de OTRO paso.
+            # (El título de una opción de la pregunta pendiente, escrito tal cual —«2 baños»—, sí vale.)
+            propios = {o["titulo"] for o in (pregunta(paso_pendiente, tipo) or {}).get("opciones", [])}
+            ajenos = _titulos_de_botones() - propios
+            escrito = " ".join(libres) if not any(t.strip() in ajenos for t in libres) else ""
+            valor = interpretar_texto(paso_pendiente, escrito, tipo) if escrito else None
+            if valor:
+                await mem.registrar_evento_lead(
+                    telefono, mem.EVENTO_CALIFICACION_RESPUESTA, descripcion_respuesta(paso_pendiente, valor), None,
+                    {"paso": paso_pendiente, "valor": valor, "titulo": escrito[:60], "origen": "texto"},
+                )
+                logger.info("calificacion_respuesta_escrita " + json.dumps({"paso": paso_pendiente, "valor": valor}))
+                if paso_pendiente == PASO_PRODUCTO:
+                    await _fijar_interes_si_falta(telefono, lead, valor)
+                toques.append({"paso": paso_pendiente, "titulo": escrito})
+                libres = []
+                estado = await mem.obtener_estado_calificacion(telefono)
+        if libres or not toques:
+            return False          # hay algo escrito que responder (o nada del flujo): Gabi; tras ella sigue la pregunta que falte
+        validos = [t for t in toques if not t.get("repetido")]
+        if not validos:
+            return True           # solo repitió un botón que ya había tocado: no hay nada nuevo que responder
+        paso = validos[-1]["paso"]
+        valor = estado.get("respuestas", {}).get(paso)
+        if valor is None:
             return False
-        await mem.registrar_evento_lead(
-            telefono, mem.EVENTO_CALIFICACION_RESPUESTA, descripcion_respuesta(paso, valor), None,
-            {"paso": paso, "valor": valor, "titulo": (titulo or "")[:60]},
-        )
-        if paso == PASO_PRODUCTO:
-            await _fijar_interes_si_falta(telefono, lead, tipo)
-        if accion["revisar_etapa"]:
-            return False      # etapa consultiva: el turno sigue con Claude, que recibe las respuestas como contexto
+        tipo = valor if paso == PASO_PRODUCTO and valor in _PRODUCTOS_ELEGIBLES else await tipo_del_lead(telefono, lead, negocio_id, estado)
+        accion = siguiente(paso, valor, tipo, lead.get("nombre"), await _telefono_suministros(negocio_id))
+        if accion["revisar_etapa"] or not (accion["pregunta"] or accion["texto"]):
+            return False          # etapa consultiva: el turno sigue con Claude, que recibe las respuestas como contexto
         if accion["pregunta"]:
+            if accion["pregunta"]["paso"] == pendiente(estado):
+                return True       # una corrección que lleva a la pregunta que el cliente ya tiene a la vista: no se repite
             salio = await enviar_pregunta(telefono, canal, proveedor, accion["pregunta"])
         else:
             salio = await enviar_texto_fijo(telefono, canal, proveedor, accion["texto"])
@@ -780,5 +1086,5 @@ async def procesar_respuesta(telefono: str, canal: dict | None, lead: dict | Non
             logger.info("calificacion_sin_gas " + json.dumps({"cerrado": cierre is not None}))
         return True
     except Exception:
-        logger.exception("calificación guiada: no se pudo procesar la respuesta del cliente — sigue Gabi")
+        logger.exception("calificación guiada: no se pudo responder la ráfaga del cliente — sigue Gabi")
         return False

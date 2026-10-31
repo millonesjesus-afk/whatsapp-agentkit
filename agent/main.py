@@ -822,7 +822,14 @@ async def _generar_y_enviar_respuesta_ia(telefono: str, canal: dict | None) -> N
     caso, esto se cancela solo en vez de que Gabi le pise la respuesta."""
     lead = await obtener_lead(telefono, negocio_id=canal.get("negocio_id") if canal else None)
     if _gabi_debe_pausarse(lead):
+        calificacion_guiada.descartar_toques(calificacion_guiada.clave_rafaga(canal.get("negocio_id") if canal else None, telefono))
         logger.info(f"Respuesta debounced de {telefono} cancelada — un humano tomó el caso mientras se esperaba")
+        return
+
+    # Calificación guiada (bloque B, 2026-10-30): la ráfaga de toques y respuestas escritas del flujo guiado recibe UNA sola respuesta
+    # fija (cero tokens), decidida con el estado final. Va primero porque no necesita la IA (funciona aunque el circuito esté abierto).
+    # Si no es del flujo, queda algo escrito que responder o se llegó a la etapa final, devuelve False y el turno sigue igual que antes.
+    if await calificacion_guiada.responder_rafaga(telefono, canal, lead, proveedor):
         return
 
     # Triaje de temas NO comerciales → Consulta ATC (2026-10-08, diseño D2; APAGADO por defecto). Va aquí, antes del
@@ -1446,14 +1453,24 @@ async def webhook_handler(request: Request):
                     logger.info(f"webhook_tiempos {cron.resumen()}")
                     return
 
+            clave_debounce = calificacion_guiada.clave_rafaga(canal.get("negocio_id") if canal else None, msg.telefono)
+
             # Calificación guiada con botones (2026-10-23, `calificacion_guiada_modo`, apagada por defecto): el cliente tocó un botón
-            # o una fila de la pregunta de gas / punto / titular. El sistema registra su respuesta y manda lo siguiente con textos
-            # fijos (cero tokens); Gabi NO conversa en este turno. Si no corresponde o algo falla, el turno sigue con Gabi.
+            # o una fila de la pregunta de gas / punto / titular. La respuesta se registra YA; lo siguiente (textos fijos, cero tokens)
+            # sale tras la MISMA ventana de espera que los mensajes escritos, para que una ráfaga de toques reciba UNA sola respuesta
+            # (bloque B, 2026-10-30; ver `calificacion_guiada.responder_rafaga`). Si no corresponde o algo falla, sigue con Gabi.
             if (
                 msg.interactivo_id and msg.interactivo_id.startswith(calificacion_guiada.PREFIJO)
                 and msg.tipo == "text" and msg.tipo_evento != "echo" and canal
             ):
-                if await calificacion_guiada.procesar_respuesta(msg.telefono, canal, lead, msg.interactivo_id, msg.texto, proveedor):
+                toque = await calificacion_guiada.registrar_toque(msg.telefono, canal, lead, msg.interactivo_id, msg.texto)
+                # REPETIDO (el mismo botón otra vez) también pasa por la ventana: no genera respuesta propia, pero así no queda como
+                # texto suelto dentro de la ráfaga.
+                if toque in (calificacion_guiada.TOQUE_REGISTRADO, calificacion_guiada.TOQUE_REPETIDO):
+                    gestor_debounce_respuestas.reprogramar(
+                        clave_debounce,
+                        lambda telefono=msg.telefono, canal=canal: _generar_y_enviar_respuesta_ia(telefono, canal),
+                    )
                     cron.marca("calificacion_guiada")
                     logger.info(f"webhook_tiempos {cron.resumen()}")
                     return
@@ -1469,7 +1486,6 @@ async def webhook_handler(request: Request):
             cron.marca("meta_escribiendo")
             logger.info(f"webhook_tiempos {cron.resumen()}")
 
-            clave_debounce = f"{canal.get('negocio_id') if canal else None}:{msg.telefono}"
             gestor_debounce_respuestas.reprogramar(
                 clave_debounce,
                 lambda telefono=msg.telefono, canal=canal: _generar_y_enviar_respuesta_ia(telefono, canal),

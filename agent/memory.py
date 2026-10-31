@@ -737,14 +737,14 @@ async def registrar_evento_lead(telefono: str, tipo: str, descripcion: str, auto
 
 async def obtener_estado_calificacion(telefono: str) -> dict:
     """Estado de la calificación guiada de la Conversation ACTIVA de este teléfono: `{"preguntas": [paso, ...] (orden de la primera
-    vez), "conteo": {paso: veces que se preguntó}, "respuestas": {paso: valor}}` (la última respuesta de cada paso gana). Vacío si no
-    hay conversación. Solo lectura."""
+    vez), "conteo": {paso: veces que se preguntó}, "respuestas": {paso: valor}, "respondido_en": {paso: hora UTC de su última
+    respuesta}}` (la última respuesta de cada paso gana). Vacío si no hay conversación. Solo lectura."""
     async with async_session() as session:
         conversation = await _obtener_conversation_activa_por_telefono(session, telefono)
         if conversation is None:
-            return {"preguntas": [], "conteo": {}, "respuestas": {}}
+            return {"preguntas": [], "conteo": {}, "respuestas": {}, "respondido_en": {}}
         filas = (await session.execute(
-            select(EventoLead.tipo, EventoLead.payload).where(
+            select(EventoLead.tipo, EventoLead.payload, EventoLead.creado).where(
                 EventoLead.conversation_id == conversation.id, EventoLead.negocio_id == conversation.negocio_id,
                 EventoLead.tipo.in_((EVENTO_CALIFICACION_PREGUNTA, EVENTO_CALIFICACION_RESPUESTA)),
             ).order_by(EventoLead.creado.asc(), EventoLead.id.asc())
@@ -752,7 +752,8 @@ async def obtener_estado_calificacion(telefono: str) -> dict:
     preguntas: list[str] = []
     conteo: dict[str, int] = {}
     respuestas: dict[str, str] = {}
-    for tipo, payload in filas:
+    respondido_en: dict[str, datetime] = {}
+    for tipo, payload, creado in filas:
         paso = (payload or {}).get("paso")
         if not paso:
             continue
@@ -762,7 +763,8 @@ async def obtener_estado_calificacion(telefono: str) -> dict:
                 preguntas.append(paso)
         else:
             respuestas[paso] = (payload or {}).get("valor") or ""
-    return {"preguntas": preguntas, "conteo": conteo, "respuestas": respuestas}
+            respondido_en[paso] = creado
+    return {"preguntas": preguntas, "conteo": conteo, "respuestas": respuestas, "respondido_en": respondido_en}
 
 
 async def listar_eventos_lead(telefono: str, limite: int | None = None) -> list[dict]:
