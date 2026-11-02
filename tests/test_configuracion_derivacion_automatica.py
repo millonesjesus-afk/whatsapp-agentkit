@@ -72,9 +72,9 @@ async def test_get_por_defecto_todo_apagado_y_no_escribe_nada():
     negocio, _ = await _negocio("da-a")
     r = await _get(negocio)
     assert (r["modo"], r["modo_efectivo"], r["emergencia_modo"], r["emergencia_modo_efectivo"]) == ("apagado",) * 4
-    assert [c["id"] for c in r["categorias"]] == ["recibo", "numero_cliente", "pago_deuda", "emergencia_gas"]
+    assert [c["id"] for c in r["categorias"]] == ["recibo", "numero_cliente", "pago_deuda", "reclamo", "emergencia_gas"]
     assert all(c["estado_efectivo"] == "apagado" for c in r["categorias"])
-    assert r["categorias_incluidas"] == ["recibo", "numero_cliente", "pago_deuda"]
+    assert r["categorias_incluidas"] == ["recibo", "numero_cliente", "pago_deuda", "reclamo"]
     assert r["lineas"] == {"atencion": "", "emergencia": "", "ventas": ""}
     assert r["resultado"] == "consulta_atc" and r["resultado_por_defecto"] == "consulta_atc"
     assert r["textos_originales"] == {"general": t.TEXTO_POR_DEFECTO, "emergencia": t.TEXTO_EMERGENCIA_POR_DEFECTO}
@@ -101,7 +101,7 @@ async def test_guardar_sin_cambiar_nada_no_escribe_ni_audita():
     r = await _post(negocio, {})
     assert r["ok"] is True and r["modificadas"] == []
     r = await _post(negocio, {
-        "modo": "apagado", "emergencia_modo": "apagado", "categorias": ["recibo", "numero_cliente", "pago_deuda"],
+        "modo": "apagado", "emergencia_modo": "apagado", "categorias": ["recibo", "numero_cliente", "pago_deuda", "reclamo"],
         "lineas": {"atencion": "", "emergencia": "", "ventas": ""}, "texto_general": "", "texto_emergencia": "", "resultado": "consulta_atc",
         "textos_categoria": {"recibo": "", "pago_deuda": ""}, "nombre_negocio": "",
     })
