@@ -20,7 +20,8 @@
 # campaña) impide cerrar. Ante la duda NO se cierra. Las guardas (ver `clasificar`) cubren asesor/pausa, caso ya cerrado,
 # flujo de financiamiento, DNI/suministro pedidos por Gabi, números largos, fotos, más de N mensajes, un triaje por ciclo.
 #
-# FASE 1 — categorías con regla: recibo, numero_cliente, pago_deuda.
+# FASE 1 — categorías con regla: recibo, numero_cliente, pago_deuda y reclamo (reclamos del servicio y cambio de titular o de
+# nombre; se sumó el 2026-10-31 tras el caso del +51 970 712 280: «Deseo hacer un reclamo» terminó derivado a un asesor comercial).
 #
 # EMERGENCIA DE GAS (2026-10-09, decisión del dueño). La línea es COMERCIAL (no atiende emergencias ni atención al
 # cliente) pero DEBE derivar: ante un cliente que reporta olor o fuga de gas se envía UN texto corto y fijo hacia
@@ -97,7 +98,7 @@ MODOS = (MODO_APAGADO, MODO_SOMBRA, MODO_ACTIVO)
 
 CATEGORIA_NINGUNA = "ninguna"
 CATEGORIA_EMERGENCIA = "emergencia_gas"
-CATEGORIAS_FASE_1 = ("recibo", "numero_cliente", "pago_deuda")
+CATEGORIAS_FASE_1 = ("recibo", "numero_cliente", "pago_deuda", "reclamo")
 CATEGORIAS_ATC = CATEGORIAS_FASE_1  # las que cierran; cuando existan más (fase 2) se suman acá
 ACCION_NINGUNA, ACCION_CERRAR, ACCION_ALERTA_EMERGENCIA = "ninguna", "cerrar", "alerta_emergencia"
 ACCION_DERIVAR_EMERGENCIA = "derivar_emergencia"  # la emergencia pasó las guardas: con el modo `activo` se avisa al cliente
@@ -111,7 +112,7 @@ UMBRAL_CANDIDATO = 0.60  # por debajo, la señal es demasiado débil (p. ej. sol
 NOMBRE_NEGOCIO_POR_DEFECTO = "Cálidda Hogar"
 
 TEXTO_POR_DEFECTO = (
-    "¡Hola{nombre}! 😊 Para consultas de tu recibo, número de cliente, pagos o el servicio de gas, la atención la da "
+    "¡Hola{nombre}! 😊 Para consultas de tu recibo, número de cliente, pagos, reclamos o el servicio de gas, la atención la da "
     "directamente Cálidda en su línea {linea_atc}. Aquí en {negocio} te ayudamos con la compra y el financiamiento de "
     "gasodomésticos. Si más adelante te interesa una cocina, terma, horno u otro, escríbenos por aquí y con gusto te asesoro."
 )
@@ -188,6 +189,16 @@ REGLAS_ATC: tuple[Regla, ...] = (
     _regla(
         "donde_ver_suministro", "numero_cliente", 0.60,
         regex=r"\b(?:cual es|donde (?:veo|encuentro|sale|esta|consigo|averiguo)|como (?:veo|saber|obtengo|consigo))\b.{0,25}\b(?:suministro|cliente)\b",
+    ),
+    # — reclamos y trámites del suministro (los atiende la línea de atención al cliente, no un asesor comercial) —
+    _regla("reclamo_palabra", "reclamo", 0.85, ("reclamo*", "reclamar*", "queja*", "quejar*", "denuncia*")),
+    _regla("reclamo_mal_servicio", "reclamo", 0.80, (
+        "mal servicio", "mala atencion", "pesimo servicio", "pesima atencion", "servicio deficiente", "servicio malo",
+        "no me atienden", "no me atendieron", "no me solucionan", "no me han solucionado", "nadie me ayuda",
+    )),
+    _regla(
+        "tramite_cambio_titular", "reclamo", 0.85,
+        regex=r"\b(?:cambio|cambiar|cambiarle|modificar|modificacion|transferir|transferencia)\s+(?:de\s+|del\s+|el\s+|la\s+|mi\s+)?(?:titular|titularidad|nombre)\b",
     ),
     # — pago / deuda —
     _regla("pago_deuda_palabra", "pago_deuda", 0.85, ("deuda*", "mora", "moroso*", "adeud*", "fraccionamiento*", "fraccionar*", "cuanto debo")),
@@ -499,7 +510,7 @@ def clasificar(mensajes_cliente: list[str], ctx: Contexto | None = None) -> Deci
     def _confianza(reglas: list[Regla]) -> float:
         return min(0.99, max(r.peso for r in reglas) + 0.05 * (len(reglas) - 1))
 
-    prioridad = {"pago_deuda": 0, "numero_cliente": 1, "recibo": 2}
+    prioridad = {"pago_deuda": 0, "numero_cliente": 1, "reclamo": 2, "recibo": 3}
     categoria = max(por_categoria, key=lambda c: (_confianza(por_categoria[c]), -prioridad.get(c, 9)))
     confianza = round(_confianza(por_categoria[categoria]), 2)
     if confianza < UMBRAL_CANDIDATO:

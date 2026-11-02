@@ -9591,7 +9591,9 @@ async def cerrar_lead_definitivamente_via_conversation(conversation_id: str, neg
     return telefono
 
 
-_ETIQUETAS_CATEGORIA_TRIAJE = {"recibo": "recibo", "numero_cliente": "número de cliente", "pago_deuda": "pago o deuda"}
+_ETIQUETAS_CATEGORIA_TRIAJE = {
+    "recibo": "recibo", "numero_cliente": "número de cliente", "pago_deuda": "pago o deuda", "reclamo": "reclamo o trámite",
+}
 _DESCRIPCION_CIERRE_SUMINISTRO = "Gabi derivó al cliente a Nuevos suministros (solicita suministro de gas) — caso cerrado"
 _DESCRIPCION_CIERRE_EMERGENCIA = "Triaje automático: emergencia de gas derivada a Emergencias de Cálidda — caso cerrado"
 

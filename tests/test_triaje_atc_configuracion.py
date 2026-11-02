@@ -33,7 +33,7 @@ async def test_sin_opciones_solo_muestra_y_no_escribe_nada(capsys):
     nid = await _negocio("cfg-a")
     r = await ct.main(["--negocio-id", nid])
     assert r["modo_configurado"] == "apagado" and r["modo_efectivo"] == "apagado"
-    assert r[t.CLAVE_LINEA] is None and r[t.CLAVE_CATEGORIAS] == "recibo,numero_cliente,pago_deuda" and r[t.CLAVE_MAX_MENSAJES] == "4"
+    assert r[t.CLAVE_LINEA] is None and r[t.CLAVE_CATEGORIAS] == "recibo,numero_cliente,pago_deuda,reclamo" and r[t.CLAVE_MAX_MENSAJES] == "4"
     assert r["metricas_excluir_consulta_atc"] is False
     assert "<FALTA --linea>" in r["vista_previa_texto"]
     assert "negocio_id" in capsys.readouterr().out

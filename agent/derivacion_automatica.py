@@ -32,7 +32,7 @@ MAX_EVENTOS_ACTIVIDAD = 20000
 
 CATEGORIA_EMERGENCIA = t.CATEGORIA_EMERGENCIA
 ETIQUETAS_CATEGORIA = {
-    "recibo": "Recibo", "numero_cliente": "Número de cliente", "pago_deuda": "Pago o deuda",
+    "recibo": "Recibo", "numero_cliente": "Número de cliente", "pago_deuda": "Pago o deuda", "reclamo": "Reclamo o trámite",
     CATEGORIA_EMERGENCIA: "Emergencia de gas",
 }
 

@@ -21,7 +21,7 @@ Uso (la base sale de DATABASE_URL, como en los demás scripts; sin ninguna opci�
     # Métrica del embudo: excluir las consultas ATC del denominador comercial (desde una fecha opcional):
     python scripts/configurar_triaje_atc.py --negocio-id <id> --excluir-consulta-atc 1 --excluir-desde 2026-10-09
 
-Otras opciones: --categorias recibo,numero_cliente,pago_deuda · --texto "…{nombre}…{linea_atc}…{negocio}" ·
+Otras opciones: --categorias recibo,numero_cliente,pago_deuda,reclamo · --texto "…{nombre}…{linea_atc}…{negocio}" ·
 --texto-categoria recibo="…" (repetible) · --max-mensajes 4 · --nombre-negocio "Gaso+" ·
 --telefonos-excluidos 51999…,51988… (equipo/pruebas) · --permitir-canal-pruebas 1 · "" en un valor texto lo borra.
 --emergencia-texto "…{linea_emergencia}…" (debe llevar {linea_emergencia}, sin «?» ni «¿»; vacío = texto por defecto del módulo).
