@@ -3185,6 +3185,13 @@ async def _registrar_reapertura_por_cliente(
         lead.derivado_en = None
         lead.minutos_espera_asesor = 0
         lead.veces_rotado_espera = 0
+        # 2026-11-02: la etapa del flujo también es del caso, no del cliente. Si se arrastraba «derivado_asesor» del caso cerrado, el caso
+        # nuevo nacía «ya derivado»: el triaje ATC lo bloqueaba (guarda `paso_flujo_derivado_asesor`) y el flujo guiado no arrancaba
+        # (caso real +51 982 777 008: «cobro excesivo de recibo» no se cerró como consulta ATC). El caso anterior conserva su rastro en
+        # su Conversation y en este evento.
+        if lead.paso_flujo:
+            payload["paso_flujo_anterior"] = lead.paso_flujo
+        lead.paso_flujo = None
         # 2026-10-08 (triaje ATC): el cierre definitivo del Lead también se consume. Hasta hoy solo lo
         # limpiaba `liberar_asignacion`, que el webhook llama únicamente cuando el Lead conserva asesor o
         # pausa (`_cierre_definitivo_pendiente_de_liberar`). Un caso cerrado SIN asesor (el que deja el

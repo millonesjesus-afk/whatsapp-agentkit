@@ -260,6 +260,16 @@ def texto_visible(p: dict) -> str:
     return f"{p['cuerpo']}\n(Opciones: {' · '.join(o['titulo'] for o in p['opciones'])})"
 
 
+FRASE_CONSULTA_RAPIDA = "Una consulta rápida para orientarte mejor:"
+
+
+def con_introduccion(p: dict) -> dict:
+    """La misma pregunta con «Una consulta rápida para orientarte mejor:» delante. La dice el SISTEMA, no la IA: antes se le pedía a
+    Claude que la anunciara al final de su respuesta y, si luego la pregunta no salía (el caso quedaba derivado), el cliente se quedaba
+    con una promesa en el aire (caso real +51 982 777 008, 2026-11-02)."""
+    return {**p, "cuerpo": f"{FRASE_CONSULTA_RAPIDA}\n\n{p['cuerpo']}"}
+
+
 def con_saludo(p: dict, saludo: str) -> dict:
     """La misma pregunta con el saludo delante (primer mensaje fijo: una sola burbuja)."""
     return {**p, "cuerpo": f"{saludo}\n\n{p['cuerpo']}"}
@@ -773,8 +783,8 @@ def bloque_contexto(
     if va_la_primera_pregunta:
         partes.append(
             "Después de tu mensaje el sistema le hará al cliente, con botones, una consulta rápida para orientarlo. En ESTE mensaje "
-            "responde lo que el cliente necesita, NO hagas ninguna pregunta ni pidas su nombre o su DNI todavía, y cierra con una frase "
-            "breve sin signos de pregunta (por ejemplo: «Te hago una consulta rápida para orientarte mejor»)."
+            "responde lo que el cliente necesita, NO hagas ninguna pregunta ni pidas su nombre o su DNI todavía, y NO anuncies la "
+            "consulta: nada de «Te hago una consulta rápida» ni frases parecidas (el sistema la presenta él mismo)."
         )
     elif sigue_con_botones:
         # Bloque B (2026-10-30): la muletilla «Te hago una consulta rápida» se repetía en cada reintento (hasta 4 veces en un chat).
@@ -1007,7 +1017,9 @@ async def continuar_flujo(
             mensajes_cliente = sum(1 for m in en_conversacion if m.get("role") == "user")
         if lleva_pregunta_de_gas(lead, estado, mensajes_cliente, modo, derivado):
             tipo = await tipo_del_lead(telefono, lead, negocio_id, estado)
-            salio = await enviar_pregunta(telefono, canal, proveedor, pregunta(PASO_GAS if tipo != PRODUCTO_OTRO else PASO_PRODUCTO))
+            salio = await enviar_pregunta(
+                telefono, canal, proveedor, con_introduccion(pregunta(PASO_GAS if tipo != PRODUCTO_OTRO else PASO_PRODUCTO)),
+            )
             if salio:
                 await _fijar_interes_si_falta(telefono, lead, tipo)
             return salio

@@ -164,7 +164,7 @@ async def test_respuesta_escrita_dudosa_sigue_como_antes(monkeypatch):
 async def test_la_muletilla_solo_va_en_la_primera_consulta():
     vacio = {"preguntas": [], "conteo": {}, "respuestas": {}}
     primera = cg.bloque_contexto(vacio, va_la_primera_pregunta=True)
-    assert "Te hago una consulta rápida" in primera
+    assert "NO anuncies la consulta" in primera and "por ejemplo: «Te hago una consulta rápida" not in primera   # la dice el sistema (2026-11-02)
     retomo = cg.bloque_contexto({"preguntas": ["gas"], "conteo": {"gas": 1}, "respuestas": {}}, va_la_primera_pregunta=False)
     assert "NO anuncies la consulta" in retomo and "NO hagas ninguna pregunta" in retomo
     assert "por ejemplo: «Te hago una consulta rápida" not in retomo

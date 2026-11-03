@@ -35,7 +35,7 @@ async def test_cliente_que_vuelve_con_el_texto_del_anuncio_recibe_el_primer_mens
 async def test_cliente_que_vuelve_con_una_pregunta_recibe_la_ia_y_despues_la_pregunta_de_gas(monkeypatch):
     negocio, proveedor, gabi = await _volver(monkeypatch, "g-cv-02", "51960010002", "¿Cuánto demora la instalación de una terma?")
     assert gabi.llamadas == 1 and len(proveedor.interactivos) == 1
-    assert proveedor.interactivos[0]["body"]["text"] == "¿Tu casa ya tiene gas natural de Cálidda?"
+    assert proveedor.interactivos[0]["body"]["text"] == f"{cg.FRASE_CONSULTA_RAPIDA}\n\n¿Tu casa ya tiene gas natural de Cálidda?"   # la frase la pone el sistema con la pregunta
 
 
 async def test_el_contexto_de_claude_cuenta_solo_la_conversacion_activa(monkeypatch):

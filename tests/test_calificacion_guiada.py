@@ -312,7 +312,9 @@ async def test_una_pregunta_real_la_responde_la_ia_y_despues_viene_la_pregunta_d
     tel = _tel(4)
     await _hablar(proveedor, canal, tel, "Hola, quiero financiar una terma para mi casa de dos baños")
     assert gabi.llamadas == 1
-    assert len(proveedor.interactivos) == 1 and _cuerpo(proveedor) == "¿Tu casa ya tiene gas natural de Cálidda?"
+    assert len(proveedor.interactivos) == 1
+    # la frase «una consulta rápida» la pone el sistema junto con la pregunta (no la IA: si la pregunta no sale, la frase tampoco)
+    assert _cuerpo(proveedor) == f"{cg.FRASE_CONSULTA_RAPIDA}\n\n¿Tu casa ya tiene gas natural de Cálidda?"
     # la pregunta es interna: no sale en el Timeline
     assert [e for e in await mem.listar_eventos_lead(tel) if e["tipo"] == "calificacion_pregunta"] == []
 
