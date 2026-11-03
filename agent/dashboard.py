@@ -36,7 +36,7 @@ import tempfile
 import uuid
 import bcrypt
 from datetime import datetime, timedelta, timezone, date as _date
-from urllib.parse import urlencode
+from urllib.parse import quote_plus, urlencode
 from fastapi import APIRouter, Depends, HTTPException, Form, Request, UploadFile, File, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse, Response, FileResponse
 from sqlalchemy.exc import IntegrityError
@@ -104,6 +104,7 @@ from agent import llamadas
 from agent import derivacion_automatica
 from agent import plantillas_sms
 from agent import origen_conversacion
+from agent.politica_password import validar_password
 from agent.analitica_tendencia import partir_periodo
 from agent import analitica_senales
 from agent import analitica_metas
@@ -10874,11 +10875,11 @@ async def mi_perfil(request: Request, usuario: dict = Depends(_usuario_actual), 
                 </div>
                 <div class="mb-2">
                     <label class="form-label small text-muted mb-0">Contraseña nueva</label>
-                    <input type="password" name="password_nueva" class="form-control form-control-sm" required minlength="8">
+                    <input type="password" name="password_nueva" class="form-control form-control-sm" required minlength="12" maxlength="128" autocomplete="new-password">
                 </div>
                 <div class="mb-3">
                     <label class="form-label small text-muted mb-0">Repetir contraseña nueva</label>
-                    <input type="password" name="password_nueva_repetir" class="form-control form-control-sm" required minlength="8">
+                    <input type="password" name="password_nueva_repetir" class="form-control form-control-sm" required minlength="12" maxlength="128" autocomplete="new-password">
                 </div>
                 <button type="submit" class="btn btn-sm btn-primary">Guardar contraseña</button>
             </form>
@@ -10899,10 +10900,11 @@ async def cambiar_password_propia(
 ):
     if not bcrypt.checkpw(password_actual.encode(), usuario["password_hash"].encode()):
         return RedirectResponse(url="/dashboard/perfil?error=La+contraseña+actual+no+es+correcta", status_code=303)
-    if len(password_nueva) < 8:
-        return RedirectResponse(url="/dashboard/perfil?error=La+contraseña+nueva+debe+tener+al+menos+8+caracteres", status_code=303)
     if password_nueva != password_nueva_repetir:
         return RedirectResponse(url="/dashboard/perfil?error=Las+contraseñas+nuevas+no+coinciden", status_code=303)
+    motivo = validar_password(password_nueva, username=usuario["username"], nombre=usuario.get("nombre"))
+    if motivo:
+        return RedirectResponse(url="/dashboard/perfil?error=" + quote_plus(motivo), status_code=303)
 
     await cambiar_password(usuario["username"], usuario["negocio_id"], password_nueva)
     return RedirectResponse(url="/dashboard/perfil?ok=Contraseña+actualizada+correctamente", status_code=303)
