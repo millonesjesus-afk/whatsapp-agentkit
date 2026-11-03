@@ -909,8 +909,9 @@ async def historial_de_la_conversacion(telefono: str, negocio_id: str | None) ->
         return None
 
 
-async def _textos_del_producto(telefono: str, lead: dict | None, negocio_id: str | None) -> list[str]:
-    """Lo que dice qué producto busca el cliente: interés, campaña (nombre y producto), anuncio y sus primeros mensajes."""
+async def _textos_del_producto(telefono: str, lead: dict | None, negocio_id: str | None) -> tuple[list[str], list[str]]:
+    """Lo que dice qué producto busca el cliente, en dos listas: (contexto: interés, campaña, anuncio; lo que el cliente escribió en sus
+    primeros mensajes)."""
     textos = [(lead or {}).get("interes"), (lead or {}).get("producto_tipo"), (lead or {}).get("campana_origen")]
     try:
         from agent.origen_conversacion import origen_de_conversacion
@@ -921,14 +922,15 @@ async def _textos_del_producto(telefono: str, lead: dict | None, negocio_id: str
         textos += [anuncio.get("titulo"), anuncio.get("cuerpo"), oferta.get("producto")]
     except Exception:
         logger.exception("calificación guiada: no se pudo leer el anuncio")
+    del_cliente: list[str] = []
     try:
         historial = await historial_de_la_conversacion(telefono, negocio_id)
         if historial is None:
             historial = await servicio_conversacion.obtener_historial(telefono)
-        textos += [m["content"] for m in historial if m.get("role") == "user"][:3]
+        del_cliente = [m["content"] for m in historial if m.get("role") == "user"][:3]
     except Exception:
         logger.exception("calificación guiada: no se pudo leer el historial")
-    return [t for t in textos if t]
+    return [t for t in textos if t], [t for t in del_cliente if t]
 
 
 async def tipo_del_lead(telefono: str, lead: dict | None, negocio_id: str | None, estado: dict | None = None) -> str:
@@ -936,7 +938,16 @@ async def tipo_del_lead(telefono: str, lead: dict | None, negocio_id: str | None
     elegido = ((estado or {}).get("respuestas") or {}).get(PASO_PRODUCTO)
     if elegido in _PRODUCTOS_ELEGIBLES:
         return elegido
-    return tipo_de_producto(*await _textos_del_producto(telefono, lead, negocio_id))
+    contexto, del_cliente = await _textos_del_producto(telefono, lead, negocio_id)
+    return tipo_con_prioridad_al_cliente(contexto, del_cliente)
+
+
+def tipo_con_prioridad_al_cliente(contexto: list[str], del_cliente: list[str]) -> str:
+    """Lo que el cliente ESCRIBIÓ pesa más que el anuncio o la campaña por los que llegó (2026-11-03, chat ff3ad16c: llegó por un anuncio de
+    secadora, escribió «cuentan con cocina» y el flujo siguió preguntando por el punto de gas «para tu secadora»). Si sus palabras no
+    nombran ningún producto («Sí, ya tengo», un saludo), vale lo que digan el interés, la campaña y el anuncio."""
+    propio = tipo_de_producto(*del_cliente)
+    return propio if propio != PRODUCTO_OTRO else tipo_de_producto(*contexto, *del_cliente)
 
 
 async def _fijar_interes_si_falta(telefono: str, lead: dict | None, tipo: str) -> None:
