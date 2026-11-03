@@ -137,6 +137,18 @@ async def _base_de_datos_limpia(request):
 
 
 @pytest.fixture(autouse=True)
+def _ia_de_respuestas_escritas_sin_red(monkeypatch):
+    """La red de seguridad con IA de la calificación guiada (calificacion_guiada._llamar_ia_interprete) no sale a internet en las pruebas:
+    por defecto «no pudo» (el flujo sigue como antes). Las pruebas de la red la reemplazan por un doble."""
+    from agent import calificacion_guiada
+
+    async def _sin_red(*args, **kwargs):
+        raise RuntimeError("sin red en las pruebas")
+
+    monkeypatch.setattr(calificacion_guiada, "_llamar_ia_interprete", _sin_red)
+
+
+@pytest.fixture(autouse=True)
 def _limitadores_de_tasa_limpios():
     """Los limitadores de agent.rate_limit (webhook: 60 por IP por minuto; login)
     son estado en MEMORIA del proceso, no de la base. Con la recreación del
