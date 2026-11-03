@@ -6322,13 +6322,28 @@ async def listar_cambios_configuracion(negocio_id: str, limite: int = 50) -> lis
     2026-10-12 incluye también los cambios del calendario de negocio (días
     especiales, feriados cargados y fecha de la medición hábil), con la misma
     forma `cambios: {accion: {antes, despues}}` (textos JSON, motivo dentro)."""
+    return (await listar_cambios_configuracion_pagina(negocio_id, limite))["items"]
+
+
+async def listar_cambios_configuracion_pagina(
+    negocio_id: str, limite: int = 50, antes_de: datetime | None = None,
+) -> dict:
+    """Misma lista que `listar_cambios_configuracion`, paginada hacia atrás (2026-11-03): `antes_de` (el `creado` UTC
+    sin zona del último ítem recibido) trae solo los más antiguos; `hay_mas` dice si queda historial por pedir. Pide
+    una fila de más para saberlo sin un segundo COUNT."""
+    limite = max(1, min(limite, 200))
     async with async_session() as session:
+        consulta = select(RegistroAuditoria).where(
+            RegistroAuditoria.negocio_id == negocio_id,
+            sa_or(RegistroAuditoria.entidad_tipo == "configuracion", _filtro_auditoria_calendario()),
+        )
+        if antes_de is not None:
+            consulta = consulta.where(RegistroAuditoria.creado < antes_de)
         filas = (await session.execute(
-            select(RegistroAuditoria).where(
-                RegistroAuditoria.negocio_id == negocio_id,
-                sa_or(RegistroAuditoria.entidad_tipo == "configuracion", _filtro_auditoria_calendario()),
-            ).order_by(RegistroAuditoria.creado.desc()).limit(max(1, min(limite, 200)))
+            consulta.order_by(RegistroAuditoria.creado.desc()).limit(limite + 1)
         )).scalars().all()
+    hay_mas = len(filas) > limite
+    filas = filas[:limite]
     resultado = []
     for f in filas:
         if f.entidad_tipo == "dia_especial" or f.accion == ACCION_CALENDARIO_HABIL_DESDE:
@@ -6336,7 +6351,7 @@ async def listar_cambios_configuracion(negocio_id: str, limite: int = 50) -> lis
         else:
             cambios, riesgo = (f.payload or {}).get("cambios", {}), bool((f.payload or {}).get("riesgo_confirmado"))
         resultado.append({"creado": f.creado, "actor": f.actor, "accion": f.accion, "cambios": cambios, "riesgo_confirmado": riesgo})
-    return resultado
+    return {"items": resultado, "hay_mas": hay_mas}
 
 
 async def obtener_configuracion_envios(negocio_id: str) -> dict:
@@ -10518,6 +10533,42 @@ async def listar_asesores(negocio_id: str) -> list[dict]:
             {"username": u.username, "nombre": u.nombre, "nivel": u.nivel, "disponible": u.disponible}
             for u in result.scalars().all()
         ]
+
+
+async def listar_usuarios_eliminados(negocio_id: str) -> list[dict]:
+    """Cuentas eliminadas (soft delete) del Negocio, la eliminada más recientemente primero — para que un admin
+    pueda restaurarlas desde Equipo. Nunca expone el hash de la contraseña."""
+    async with async_session() as session:
+        filas = (await session.execute(
+            select(Usuario)
+            .where(Usuario.negocio_id == negocio_id, Usuario.eliminado_en.is_not(None))
+            .order_by(Usuario.eliminado_en.desc())
+        )).scalars().all()
+        return [
+            {"username": u.username, "nombre": u.nombre, "rol": u.rol, "eliminado_en": u.eliminado_en, "eliminado_por": u.eliminado_por}
+            for u in filas
+        ]
+
+
+async def restaurar_usuario(username: str, negocio_id: str) -> str:
+    """Deshace `eliminar_usuario`: limpia `eliminado_en`/`eliminado_por`. Conserva contraseña, rol y nivel, pero la
+    cuenta vuelve DESACTIVADA y NO disponible: nadie recibe leads ni puede entrar hasta que un admin la active a
+    propósito (el toggle de Equipo), así que restaurar nunca reparte leads por sorpresa.
+
+    Retorna "restaurado" | "no_encontrado" | "no_eliminado"."""
+    async with async_session() as session:
+        usuario = await _obtener_usuario_orm(session, negocio_id, username)
+        if usuario is None:
+            return "no_encontrado"
+        if usuario.eliminado_en is None:
+            return "no_eliminado"
+        usuario.eliminado_en = None
+        usuario.eliminado_por = None
+        usuario.activo = False
+        if usuario.rol == "asesor":
+            usuario.disponible = False
+        await session.commit()
+        return "restaurado"
 
 
 async def listar_equipo(negocio_id: str) -> list[dict]:

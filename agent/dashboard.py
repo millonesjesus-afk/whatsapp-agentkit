@@ -35,7 +35,7 @@ import subprocess
 import tempfile
 import uuid
 import bcrypt
-from datetime import datetime, timedelta, date as _date
+from datetime import datetime, timedelta, timezone, date as _date
 from urllib.parse import urlencode
 from fastapi import APIRouter, Depends, HTTPException, Form, Request, UploadFile, File, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse, Response, FileResponse
@@ -7698,6 +7698,31 @@ async def eliminar_equipo_usuario(
     return JSONResponse({"ok": True})
 
 
+@router.get("/equipo/eliminados")
+async def listar_equipo_eliminados(usuario: dict = Depends(servicio_identidad.requiere_rol("admin"))):
+    """Cuentas eliminadas del Negocio, para poder restaurarlas (solo admin). Nunca incluye contraseñas."""
+    eliminados = await mem.listar_usuarios_eliminados(usuario["negocio_id"])
+    return JSONResponse({
+        "eliminados": [{**u, "eliminado_en": iso_utc(u["eliminado_en"])} for u in eliminados],
+    })
+
+
+@router.post("/equipo/{username}/restaurar")
+async def restaurar_equipo_usuario(
+    username: str,
+    usuario: dict = Depends(servicio_identidad.requiere_rol("admin")),
+    _csrf: None = Depends(verificar_csrf),
+):
+    """Deshace la eliminación de una cuenta (solo admin). La cuenta vuelve DESACTIVADA y no disponible: no recibe
+    leads ni puede entrar hasta que el admin la active con el toggle de Equipo (restaurar nunca reparte leads solo)."""
+    resultado = await mem.restaurar_usuario(username, usuario["negocio_id"])
+    if resultado == "no_encontrado":
+        raise HTTPException(status_code=404, detail="Cuenta no encontrada")
+    if resultado == "no_eliminado":
+        raise HTTPException(status_code=409, detail="Esa cuenta no está eliminada.")
+    return JSONResponse({"ok": True, "activo": False})
+
+
 # ── Gestión de campañas ────────────────────────────────────────────────
 
 TIPOS_DETECCION = {
@@ -8166,11 +8191,27 @@ async def uso_mensajes_configuracion_actual_json(usuario: dict = Depends(servici
 
 
 @router.get("/uso-mensajes/historial-cambios.json")
-async def uso_mensajes_historial_cambios_json(limite: int = 50, usuario: dict = Depends(servicio_identidad.requiere_rol("admin"))):
+async def uso_mensajes_historial_cambios_json(
+    limite: int = 50, antes_de: str | None = None,
+    usuario: dict = Depends(servicio_identidad.requiere_rol("admin")),
+):
     """Quién cambió qué de la configuración de uso y envíos, y cuándo (con el
-    valor anterior y el nuevo). Solo lectura; solo Admin."""
-    cambios = await listar_cambios_configuracion(usuario["negocio_id"], limite)
-    return JSONResponse({"cambios": [{**c, "creado": c["creado"].isoformat() + "Z"} for c in cambios]})
+    valor anterior y el nuevo). Solo lectura; solo Admin. Paginado hacia atrás (2026-11-03): `antes_de` (el `creado`
+    del último ítem recibido, ISO 8601) trae los más antiguos y `hay_mas` dice si queda historial. Sin `antes_de` la
+    respuesta es la de siempre más `hay_mas`."""
+    corte = None
+    if antes_de:
+        try:
+            corte = datetime.fromisoformat(antes_de.strip().replace("Z", "+00:00"))
+            if corte.tzinfo is not None:
+                corte = corte.astimezone(timezone.utc).replace(tzinfo=None)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="`antes_de` debe ser una fecha y hora ISO 8601 (el `creado` de un ítem).")
+    pagina = await mem.listar_cambios_configuracion_pagina(usuario["negocio_id"], limite, corte)
+    return JSONResponse({
+        "cambios": [{**c, "creado": c["creado"].isoformat() + "Z"} for c in pagina["items"]],
+        "hay_mas": pagina["hay_mas"],
+    })
 
 
 @router.post("/uso-mensajes/detectar-zona.json")
@@ -10044,6 +10085,35 @@ async def dias_especiales_historial_json(
         ],
         "hay_mas": r["hay_mas"],
     })
+
+
+MAX_DIAS_RANGO_CITAS = 62
+
+
+@router.get("/calendario/citas.json")
+async def calendario_citas_json(desde: str, hasta: str, usuario: dict = Depends(_usuario_actual)):
+    """Citas vivas (leads «agendado» no cerrados) cuyo DÍA en Lima cae entre `desde` y `hasta`, ambos inclusive
+    (`AAAA-MM-DD`), la más próxima primero — para la grilla del Calendario. Solo lectura. Alcance: el Asesor ve solo
+    las suyas; Admin y Supervisor ven las del negocio (con `asesor` en cada ítem). El negocio sale de la sesión.
+    Rango máximo `MAX_DIAS_RANGO_CITAS` días. Mismos ítems que las citas de Inicio (`_item_cita`)."""
+    try:
+        dia_desde, dia_hasta = _date.fromisoformat(desde.strip()), _date.fromisoformat(hasta.strip())
+    except ValueError:
+        raise HTTPException(status_code=400, detail="`desde` y `hasta` deben ser fechas AAAA-MM-DD.")
+    if dia_hasta < dia_desde:
+        raise HTTPException(status_code=400, detail="`hasta` no puede ser anterior a `desde`.")
+    if (dia_hasta - dia_desde).days + 1 > MAX_DIAS_RANGO_CITAS:
+        raise HTTPException(status_code=400, detail=f"El rango no puede superar {MAX_DIAS_RANGO_CITAS} días.")
+    vista_admin = usuario["rol"] in ROLES_CON_VISION_TOTAL
+    agendados = await mem.listar_leads_agendados(
+        usuario["negocio_id"], asesor_asignado=None if vista_admin else usuario["username"],
+    )
+    citas = [
+        _item_cita(l, _texto_cita(l, "Cita"), "cita", vista_admin)
+        for l in agendados
+        if l.get("fecha_agendada") and dia_desde <= l["fecha_agendada"].date() <= dia_hasta
+    ]
+    return JSONResponse({"desde": dia_desde.isoformat(), "hasta": dia_hasta.isoformat(), "citas": citas})
 
 
 @router.get("/canales-whatsapp", response_class=HTMLResponse)
