@@ -665,8 +665,10 @@ TIPOS_EVENTO_EXP_SOLO_CLIC = (EVENTO_EXP_SOLO_CLIC_SOMBRA, EVENTO_EXP_SOLO_CLIC_
 EVENTO_CALIFICACION_PREGUNTA = "calificacion_pregunta"
 # Respuesta generada con otro modelo para comparar (agent/sombra_modelo.py): nunca se envía ni se muestra en el Timeline.
 EVENTO_SOMBRA_MODELO = "sombra_modelo"
+# Observación del mix Haiku→modelo principal (agent/mix_haiku.py): lo que habría hecho el mix; nunca se envía ni se muestra.
+EVENTO_MIX_HAIKU = "mix_haiku"
 EVENTO_CALIFICACION_RESPUESTA = "calificacion_respuesta"
-TIPOS_EVENTO_INTERNOS = (EVENTO_TRIAJE_ATC_SOMBRA, EVENTO_TRIAJE_ATC_FALLIDO) + TIPOS_EVENTO_LLAMADA_INTERNOS + TIPOS_EVENTO_EXP_SOLO_CLIC + (EVENTO_CALIFICACION_PREGUNTA, EVENTO_SOMBRA_MODELO)
+TIPOS_EVENTO_INTERNOS = (EVENTO_TRIAJE_ATC_SOMBRA, EVENTO_TRIAJE_ATC_FALLIDO) + TIPOS_EVENTO_LLAMADA_INTERNOS + TIPOS_EVENTO_EXP_SOLO_CLIC + (EVENTO_CALIFICACION_PREGUNTA, EVENTO_SOMBRA_MODELO, EVENTO_MIX_HAIKU)
 
 
 class EventoLead(Base):

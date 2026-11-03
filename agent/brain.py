@@ -36,7 +36,7 @@ from agent.memory import (
 from agent.campanas import (
     resolver_promo, resolver_familia_promo, obtener_codigos_promocionales_activos, descripcion_del_grupo,
 )
-from agent import circuito_ia, formato_whatsapp, contexto_anuncio, calificacion_guiada, sombra_modelo
+from agent import circuito_ia, formato_whatsapp, contexto_anuncio, calificacion_guiada, mix_haiku, sombra_modelo
 from agent.origen_conversacion import origen_de_conversacion
 from agent import calendario_negocio as cal_negocio
 
@@ -50,7 +50,12 @@ logger = logging.getLogger("agentkit")
 # colgada más que eso bloquea el mensaje de WhatsApp que depende de ella.
 client = AsyncAnthropic(api_key=os.getenv("ANTHROPIC_API_KEY"), timeout=30.0, max_retries=2)
 
-MODELO_PRINCIPAL = "claude-sonnet-4-6"
+# Modelo principal de Gabi (2026-11-03: de Sonnet 4.6 a Sonnet 5.5 — un tercio menos por token y, en la sombra de 147 respuestas, sin errores de
+# reglas). Se puede volver al anterior SIN desplegar con la configuración `gabi_modelo_principal` (scripts/modelo_gabi.py --principal).
+MODELO_PRINCIPAL = "claude-sonnet-5-5"
+MODELO_PRINCIPAL_ANTERIOR = "claude-sonnet-4-6"
+CLAVE_MODELO_PRINCIPAL = "gabi_modelo_principal"
+MODELOS_PRINCIPALES_VALIDOS = (MODELO_PRINCIPAL, MODELO_PRINCIPAL_ANTERIOR)
 MODELO_EXTRACCION = "claude-haiku-5-5"
 # Haiku 5.5 (2026-10-26, auditoría de tokens): ~10 veces más barato que Haiku 4.5. Piensa por defecto y eso cuenta en
 # max_tokens; en extracción, resumen y clasificación no hace falta, así que se apaga (vale con el esfuerzo por defecto).
@@ -750,7 +755,7 @@ async def _generar_respuesta_protocolo_confianza(
     (Architectural Constraint, máximo 2 llamadas de IA por mensaje)."""
     try:
         response = await client.messages.create(
-            model=MODELO_PRINCIPAL,
+            model=MODELO_PRINCIPAL_ANTERIOR,   # modo «pruebas»: sin cambios (herramienta forzada); el cambio a 5.5 es solo para el canal real
             max_tokens=1024,
             system=[{"type": "text", "text": system_prompt, "cache_control": CACHE_INSTRUCCIONES}],
             messages=mensajes,
@@ -789,7 +794,7 @@ async def _generar_respuesta_protocolo_confianza(
             "inferencia_ia "
             + json.dumps(
                 {
-                    "modelo": MODELO_PRINCIPAL,
+                    "modelo": MODELO_PRINCIPAL_ANTERIOR,
                     "prompt_usuario": turno_user,
                     "confianza": confianza,
                     "razon": razon,
@@ -811,6 +816,58 @@ async def _generar_respuesta_protocolo_confianza(
         # técnico. La firma de 4 valores no cambia.
         await circuito_ia.registrar_error(e)
         return obtener_mensaje_error(), True, None, None
+
+
+async def modelo_principal(negocio_id: str | None) -> str:
+    """El modelo con que responde Gabi: la configuración `gabi_modelo_principal` si es uno válido; si no, `MODELO_PRINCIPAL`."""
+    try:
+        valor = (await obtener_configuracion(CLAVE_MODELO_PRINCIPAL, MODELO_PRINCIPAL, negocio_id=negocio_id) or "").strip()
+    except Exception:
+        return MODELO_PRINCIPAL
+    return valor if valor in MODELOS_PRINCIPALES_VALIDOS else MODELO_PRINCIPAL
+
+
+async def _crear_con_modelo_principal(modelo: str, system_prompt: str, mensajes: list[dict]):
+    """La llamada de la respuesta libre de Gabi. Sonnet 5.5 rechaza `thinking: disabled` y usa `between_tools` (sin herramientas no
+    razona ni cobra razonamiento); Sonnet 4.6 va sin ese parámetro, como siempre. Si el modelo no está disponible para la cuenta
+    (404 / 403) y no es el anterior, se responde con el anterior en vez de dejar al cliente sin respuesta."""
+    def _pedido(m: str) -> dict:
+        pedido = dict(
+            model=m, max_tokens=1024, messages=mensajes,
+            system=[{"type": "text", "text": system_prompt, "cache_control": CACHE_INSTRUCCIONES}],
+        )
+        razonamiento = sombra_modelo.RAZONAMIENTO_POR_MODELO.get(m)
+        if razonamiento:
+            pedido["thinking"] = razonamiento
+        return pedido
+
+    try:
+        return await client.messages.create(**_pedido(modelo)), modelo
+    except (NotFoundError, PermissionDeniedError) as e:
+        if modelo == MODELO_PRINCIPAL_ANTERIOR:
+            raise
+        logger.warning(f"{modelo} no disponible ({e.__class__.__name__}); responde {MODELO_PRINCIPAL_ANTERIOR}")
+        return await client.messages.create(**_pedido(MODELO_PRINCIPAL_ANTERIOR)), MODELO_PRINCIPAL_ANTERIOR
+
+
+async def _contexto_de_revision(
+    mensaje: str, historial: list[dict], lead: dict | None, negocio_id: str | None, mensajes: list[dict],
+) -> dict:
+    """Lo que la revisión del mix necesita saber del turno (ver agent/mix_haiku.py::revisar). Nunca lanza."""
+    try:
+        if lead and lead.get("telefono") and negocio_id is not None:
+            dichos = await _textos_del_cliente_en_la_conversacion(lead["telefono"], negocio_id, historial, mensaje)
+        else:
+            dichos = [m["content"] for m in historial if m.get("role") == "user"]
+        del_cliente = [*dichos, mensaje]
+        contexto = "\n".join(m["content"] if isinstance(m["content"], str) else " ".join(b.get("text", "") for b in m["content"]) for m in mensajes)
+        return {
+            "mensajes_cliente": del_cliente, "pidio_precio": calificacion_guiada.pidio_precio(mensaje, *dichos),
+            "tipo_producto": mix_haiku.tipo_de_producto_del_turno(lead, del_cliente), "contexto": contexto,
+        }
+    except Exception:
+        logger.exception("mix_haiku: no se pudo armar el contexto de la revisión")
+        return {"mensajes_cliente": [mensaje], "pidio_precio": True, "tipo_producto": calificacion_guiada.PRODUCTO_OTRO, "contexto": ""}
 
 
 async def generar_respuesta(
@@ -932,12 +989,19 @@ async def generar_respuesta(
     mensajes = mensajes_historial + [{"role": "user", "content": mensaje_para_claude}]
 
     try:
-        response = await client.messages.create(
-            model=MODELO_PRINCIPAL,
-            max_tokens=1024,
-            system=[{"type": "text", "text": system_prompt, "cache_control": CACHE_INSTRUCCIONES}],
-            messages=mensajes
-        )
+        # Mix Haiku → modelo principal (2026-11-03, agent/mix_haiku.py): en modo activo Haiku responde primero y solo se envía si la revisión
+        # (sin IA) lo aprueba; si no, responde el modelo principal. En modo observación responde el principal y se mide qué habría pasado.
+        modo_mix = await mix_haiku.modo(negocio_id)
+        contexto_revision = await _contexto_de_revision(mensaje, historial, lead, negocio_id, mensajes) if modo_mix != mix_haiku.MODO_APAGADO else {}
+        response, usado = None, MODELO_PRINCIPAL
+        if modo_mix == mix_haiku.MODO_ACTIVO:
+            response, motivos = await mix_haiku.intentar(system_prompt, mensajes, contexto_revision)
+            if response is not None:
+                usado = mix_haiku.MODELO_BARATO
+            else:
+                logger.info(f"mix_haiku: rechazada ({', '.join(motivos)}) — responde el modelo principal")
+        if response is None:
+            response, usado = await _crear_con_modelo_principal(await modelo_principal(negocio_id), system_prompt, mensajes)
 
         # Se limpia el markdown AQUÍ (en el origen) para que lo que se envía, lo que se guarda en el chat y lo
         # que lee extraer_datos_lead sea el mismo texto (agent/formato_whatsapp.py). Nunca lanza.
@@ -948,10 +1012,12 @@ async def generar_respuesta(
         logger.info(
             f"Respuesta generada ({response.usage.input_tokens} in / {response.usage.output_tokens} out"
             f" / {getattr(response.usage, 'cache_read_input_tokens', None)} cache_read"
-            f" / {getattr(response.usage, 'cache_creation_input_tokens', None)} cache_write)"
+            f" / {getattr(response.usage, 'cache_creation_input_tokens', None)} cache_write) modelo={usado}"
         )
         circuito_ia.registrar_exito()
         sombra_modelo.lanzar(system_prompt, mensajes, respuesta, lead, negocio_id)
+        if modo_mix == mix_haiku.MODO_OBSERVACION:
+            mix_haiku.lanzar_observacion(system_prompt, mensajes, respuesta, usado, lead, contexto_revision)
         return respuesta, False, None, None
 
     except Exception as e:
