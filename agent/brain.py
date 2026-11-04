@@ -1121,9 +1121,9 @@ async def generar_resumen_conversacion(historial: list[dict]) -> str:
         for m in historial if m.get("content")
     )
     prompt = (
-        "Resumí esta conversación entre un cliente y el equipo comercial (Gabi, la IA, o un asesor "
+        "Resume esta conversación entre un cliente y el equipo comercial (Gabi, la IA, o un asesor "
         "humano) para que un asesor que recién la abre entienda de un vistazo qué pasó, sin tener que "
-        "leer todos los mensajes. 3-5 líneas como máximo, en español, tono directo. Incluí: qué busca "
+        "leer todos los mensajes. 3-5 líneas como máximo, en español, tono directo y con tuteo peruano, nunca voseo. Incluye: qué busca "
         "el cliente, en qué quedó la conversación, y cualquier dato clave (producto, presupuesto, "
         "urgencia) si se mencionó.\n\n"
         f"Conversación:\n{texto_historial}"
@@ -1169,4 +1169,4 @@ async def generar_resumen_conversacion(historial: list[dict]) -> str:
                 ensure_ascii=False,
             )
         )
-        return "No se pudo generar el resumen — intentá de nuevo en un momento."
+        return "No se pudo generar el resumen — inténtalo de nuevo en un momento."
