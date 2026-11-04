@@ -38,17 +38,27 @@ COSTO_PRINCIPAL_REFERENCIA_USD = 0.0114
 def resumir_mix(payloads: list[dict], costo_principal: float = COSTO_PRINCIPAL_REFERENCIA_USD) -> dict:
     """Agregados de los eventos `mix_haiku`: porcentaje aprobado, motivos de rechazo y el costo/ahorro estimado del mix activo
     (Haiku siempre + el principal solo en lo rechazado)."""
+    total = len(payloads)
+    if not total:
+        return {"respuestas": 0}
+    # Los turnos delicados (etapa final, precio, atención al cliente, emergencia) responden SIEMPRE el principal: no cuentan para la tasa
+    # de aprobación de Haiku pero sí cuestan lo del principal en el costo del mix.
+    delicados = sum(1 for p in payloads if p.get("delicado"))
+    payloads = [p for p in payloads if not p.get("delicado")]
     n = len(payloads)
     if not n:
-        return {"respuestas": 0}
+        return {"respuestas": total, "delicados": delicados, "delicados_pct": 100.0}
     aprobadas = sum(1 for p in payloads if p.get("aprobada"))
     motivos = Counter("capacidad_sin_respaldo" if m.startswith("capacidad_sin_respaldo_") else m for p in payloads for m in (p.get("motivos") or []))
     costos = [c for c in (costo_estimado(p.get("modelo", mix_haiku.MODELO_BARATO), p) for p in payloads) if c is not None]
     haiku = sum(costos) / len(costos) if costos else 0.0
     tasa = aprobadas / n
-    mix = haiku + (1 - tasa) * costo_principal
+    simple = haiku + (1 - tasa) * costo_principal
+    fraccion_delicada = delicados / total
+    mix = (1 - fraccion_delicada) * simple + fraccion_delicada * costo_principal
     return {
-        "respuestas": n, "aprobadas": aprobadas, "aprobadas_pct": round(100 * tasa, 1),
+        "respuestas": total, "delicados": delicados, "delicados_pct": round(100 * fraccion_delicada, 1),
+        "revisadas": n, "aprobadas": aprobadas, "aprobadas_pct": round(100 * tasa, 1),
         "motivos_de_rechazo": dict(motivos.most_common()),
         "costo_haiku_promedio_usd": round(haiku, 5), "costo_principal_referencia_usd": costo_principal,
         "costo_mix_estimado_usd": round(mix, 5), "ahorro_estimado_pct": round(100 * (1 - mix / costo_principal), 1) if costo_principal else None,

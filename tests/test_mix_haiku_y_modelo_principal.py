@@ -229,3 +229,66 @@ async def test_el_script_cambia_y_muestra_la_configuracion():
     assert r["principal"] == "claude-sonnet-4-6" and r["mix"] == "observacion" and r["resumen"] == {"respuestas": 0}
     with pytest.raises(SystemExit):
         await modelo_gabi.main(["--negocio-id", negocio["id"], "--principal", "gpt-9"])
+
+
+# ── Turnos delicados: nunca los responde Haiku (2026-11-04) ─────────────────
+
+@pytest.mark.parametrize("mensajes,esperado", [
+    (["Hola", "somos 5 personas"], []),
+    (["Estoy interesado en financiar una Terma"], []),            # «interesado» no es una pregunta por intereses: casi todos los anuncios lo dicen
+    (["me interesa una cocina"], []),
+    (["quiero una terma de 2 baños"], []),
+    (["Deseo hacer un reclamo"], ["atencion_al_cliente"]),
+    (["no me llega el recibo"], ["atencion_al_cliente"]),
+    (["quiero cambiar el titular del suministro"], ["atencion_al_cliente"]),
+    (["en cuántas cuotas puedo pagar"], ["precio_o_cuotas"]),
+    (["¿cuál es el interés?"], ["precio_o_cuotas"]),
+    (["huele a gas en mi cocina"], ["emergencia_de_gas"]),
+])
+def test_turno_delicado_por_lo_que_escribio_el_cliente(mensajes, esperado):
+    r = mix_haiku.turno_delicado(mensajes_cliente=mensajes)
+    assert [m for m in esperado if m in r] == esperado and (not esperado or r) and (esperado or r == [])
+
+
+def test_turno_delicado_en_la_etapa_final_o_si_ya_pidio_precio():
+    assert mix_haiku.turno_delicado(mensajes_cliente=["2 baños"], contexto="... ETAPA FINAL de la calificación. En UN solo mensaje ...") == ["etapa_final"]
+    assert mix_haiku.turno_delicado(mensajes_cliente=["ok"], pidio_precio=True) == ["pidio_precio"]
+
+
+async def test_activo_en_un_turno_delicado_no_se_llama_a_haiku_y_responde_el_principal():
+    negocio = await _negocio_con_mix("mix-delicado", "activo")
+    with patch.object(brain.client.messages, "create", new=AsyncMock(return_value=_respuesta("Para reclamos llama al 614-9000 opción 5."))) as mock:
+        texto, error, _, _ = await brain.generar_respuesta("Deseo hacer un reclamo", historial=[], modo="produccion", negocio_id=negocio["id"])
+    assert texto == "Para reclamos llama al 614-9000 opción 5." and error is False
+    assert [c.kwargs["model"] for c in mock.await_args_list] == ["claude-sonnet-5-5"]        # Haiku ni se llamó
+
+
+async def test_observacion_marca_el_turno_delicado_en_el_evento(monkeypatch):
+    negocio = await _negocio_con_mix("mix-obs-del", "observacion")
+    guardados = []
+
+    async def registrar(telefono, tipo, descripcion, autor, payload=None):
+        guardados.append({"tipo": tipo, "payload": payload})
+    monkeypatch.setattr(mem, "registrar_evento_lead", registrar)
+    with patch.object(brain.client.messages, "create", new=AsyncMock(return_value=_respuesta("Pásame el DNI."))):
+        await brain.generar_respuesta(
+            "en cuántas cuotas puedo pagar", historial=[], lead={"telefono": "51900000088"}, modo="produccion", negocio_id=negocio["id"],
+        )
+        await _esperar_tareas()
+    [evento] = [g for g in guardados if g["tipo"] == "mix_haiku"]
+    assert evento["payload"]["delicado"] == ["pidio_precio"]       # «cuotas» cuenta como pedir precio (calificacion_guiada.pidio_precio)
+
+
+def test_el_resumen_separa_los_delicados_del_porcentaje_de_aprobacion_y_los_cobra_al_principal():
+    haiku = {"modelo": "claude-haiku-5-5", "tokens_in": 1000, "tokens_out": 100, "cache_read": 0, "cache_write": 0}
+    payloads = (
+        [{**haiku, "aprobada": True, "motivos": [], "delicado": []} for _ in range(3)]
+        + [{**haiku, "aprobada": False, "motivos": ["muy_larga"], "delicado": []}]
+        + [{**haiku, "aprobada": True, "motivos": [], "delicado": ["etapa_final"]} for _ in range(4)]
+    )
+    r = modelo_gabi.resumir_mix(payloads, costo_principal=0.0100)
+    assert r["respuestas"] == 8 and r["delicados"] == 4 and r["delicados_pct"] == 50.0
+    assert r["revisadas"] == 4 and r["aprobadas"] == 3 and r["aprobadas_pct"] == 75.0
+    # simples: 0.00015 + 25 % × 0.0100 = 0.00265; delicados: 0.0100 → mitad y mitad
+    assert r["costo_mix_estimado_usd"] == 0.00632 and r["ahorro_estimado_pct"] == 36.8
+    assert modelo_gabi.resumir_mix([{**haiku, "aprobada": True, "delicado": ["etapa_final"]}]) == {"respuestas": 1, "delicados": 1, "delicados_pct": 100.0}

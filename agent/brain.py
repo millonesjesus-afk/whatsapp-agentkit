@@ -999,7 +999,7 @@ async def generar_respuesta(
             if response is not None:
                 usado = mix_haiku.MODELO_BARATO
             else:
-                logger.info(f"mix_haiku: rechazada ({', '.join(motivos)}) — responde el modelo principal")
+                logger.info(f"mix_haiku: no responde Haiku ({', '.join(motivos)}) — responde el modelo principal")
         if response is None:
             response, usado = await _crear_con_modelo_principal(await modelo_principal(negocio_id), system_prompt, mensajes)
 

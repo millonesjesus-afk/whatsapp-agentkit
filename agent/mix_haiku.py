@@ -19,6 +19,7 @@ import re
 import time
 
 from agent import calificacion_guiada as cg
+from agent import triaje_atc
 from agent.memory import EVENTO_MIX_HAIKU
 
 logger = logging.getLogger("agentkit")
@@ -80,6 +81,30 @@ def revisar(
     return motivos
 
 
+_RE_PRECIO_O_CUOTAS = re.compile(r"\b(?:cuotas?|plazos?|tea|tcea|interes(?:es)?|cuanto (?:cuesta|sale|pago|seria)|precio\w*|costo\w*)\b")
+
+
+def turno_delicado(*, mensajes_cliente: list[str], pidio_precio: bool = False, contexto: str = "", **_) -> list[str]:
+    """Motivos por los que este turno NO se le deja a Haiku y responde siempre el modelo principal (lista vacía = Haiku puede intentarlo).
+    Son los turnos donde un error cuesta más: la etapa final de la calificación (recomendación del producto y datos del titular), cuando el
+    cliente ya pidió precio o cuotas, y los temas de atención al cliente o seguridad (reclamos, recibo, pagos, deuda, cambio de titular,
+    olor o fuga de gas). Haiku queda para lo simple: pedir nombre o DNI, cortesías y respuestas cortas. PURA, sin IA."""
+    motivos: list[str] = []
+    if "ETAPA FINAL" in (contexto or ""):
+        motivos.append("etapa_final")
+    if pidio_precio:
+        motivos.append("pidio_precio")
+    recientes = mensajes_cliente[-2:]
+    normalizados = [triaje_atc.normalizar(m) for m in recientes]
+    if triaje_atc.detectar_emergencia(recientes):
+        motivos.append("emergencia_de_gas")
+    if triaje_atc._coincidencias(triaje_atc.REGLAS_ATC, normalizados):
+        motivos.append("atencion_al_cliente")
+    if any(_RE_PRECIO_O_CUOTAS.search(n) for n in normalizados) and "pidio_precio" not in motivos:
+        motivos.append("precio_o_cuotas")
+    return motivos
+
+
 def tipo_de_producto_del_turno(lead: dict | None, mensajes_cliente: list[str]) -> str:
     return cg.tipo_de_producto((lead or {}).get("interes"), (lead or {}).get("producto_tipo"), *mensajes_cliente[:3])
 
@@ -108,6 +133,9 @@ async def intentar(system_prompt: str, mensajes: list[dict], contexto_revision: 
     (o si Haiku falló): quien llama regenera con el modelo principal. Nunca lanza."""
     from agent import brain
 
+    delicado = turno_delicado(**contexto_revision)
+    if delicado:
+        return None, [f"turno_delicado_{m}" for m in delicado]       # ni se llama a Haiku: responde el principal
     try:
         response = await _llamar_haiku(system_prompt, mensajes)
     except Exception as e:  # noqa: BLE001 — cualquier fallo cae al principal
@@ -147,7 +175,8 @@ async def _observar(system_prompt, mensajes, respuesta_real, modelo_real, telefo
             telefono, tipo=EVENTO_MIX_HAIKU,
             descripcion=f"Mix Haiku (observación): {'aprobada' if not motivos else 'rechazada: ' + ', '.join(motivos)}"[:300], autor=None,
             payload={
-                "aprobada": not motivos, "motivos": motivos, "modelo": MODELO_BARATO, "modelo_real": modelo_real,
+                "aprobada": not motivos, "motivos": motivos, "delicado": turno_delicado(**contexto_revision),
+                "modelo": MODELO_BARATO, "modelo_real": modelo_real,
                 "respuesta_real": respuesta_real, "respuesta_haiku": texto, "latencia_ms": round((time.monotonic() - inicio) * 1000),
                 "tokens_in": uso.input_tokens, "tokens_out": uso.output_tokens,
                 "cache_read": getattr(uso, "cache_read_input_tokens", None), "cache_write": getattr(uso, "cache_creation_input_tokens", None),
