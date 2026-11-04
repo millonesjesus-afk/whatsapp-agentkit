@@ -41,6 +41,8 @@ _RE_PRECIO = re.compile(r"\bs\s*/\s*\d|\b\d[\d.,]*\s*soles\b", re.IGNORECASE)
 _RE_CAPACIDAD = re.compile(r"(\d{1,2}(?:[.,]\d)?)\s?(?:kg|kilos?|l/min|litros)\b", re.IGNORECASE)
 _RE_NUMERO_DNI = re.compile(r"(?<!\d)\d{8}(?!\d)")
 _MULETILLA = "te hago una consulta rapida"
+# Llaves sin reemplazar tipo «{nombre}» (el repaso de la sombra encontró «Gracias por confirmar, {nombre}» en una respuesta de Haiku, 2026-11-04).
+_RE_LLAVES_SIN_REEMPLAZAR = re.compile(r"\{\{?\s*[A-Za-z_][A-Za-z0-9_]*\s*\}\}?")
 
 
 def _plano(texto: str | None) -> str:
@@ -71,6 +73,8 @@ def revisar(
         motivos.append("ducteria_sin_terma")
     if len(crudo) > LARGO_MAXIMO:
         motivos.append("muy_larga")
+    if _RE_LLAVES_SIN_REEMPLAZAR.search(crudo):
+        motivos.append("llaves_sin_reemplazar")
     if _MULETILLA in plano:
         motivos.append("anuncia_pregunta")          # esa frase la pone el sistema junto con la pregunta
     if contexto:

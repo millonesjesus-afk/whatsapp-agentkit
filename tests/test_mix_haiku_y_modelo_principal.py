@@ -292,3 +292,21 @@ def test_el_resumen_separa_los_delicados_del_porcentaje_de_aprobacion_y_los_cobr
     # simples: 0.00015 + 25 % × 0.0100 = 0.00265; delicados: 0.0100 → mitad y mitad
     assert r["costo_mix_estimado_usd"] == 0.00632 and r["ahorro_estimado_pct"] == 36.8
     assert modelo_gabi.resumir_mix([{**haiku, "aprobada": True, "delicado": ["etapa_final"]}]) == {"respuestas": 1, "delicados": 1, "delicados_pct": 100.0}
+
+
+# ── Llaves sin reemplazar (2026-11-04) ──────────────────────────────────────
+
+@pytest.mark.parametrize("texto", [
+    "Gracias por confirmar, {nombre}. Para tu casa te sirve la terma.",     # el caso real hallado en la sombra de Haiku
+    "Hola {{nombre}}, ¿me das tu DNI?", "Listo { nombre }", "Con {producto} cubres tu necesidad.",
+])
+def test_una_respuesta_con_llaves_sin_reemplazar_se_rechaza(texto):
+    assert "llaves_sin_reemplazar" in mix_haiku.revisar(texto, **PEDIDO_NORMAL)
+
+
+@pytest.mark.parametrize("texto", [
+    "Gracias, Oswaldo. ¿Me das el DNI del titular (8 dígitos)?", "Hasta 4 personas (secadora de 10 kg).",
+    "Opciones: [1] terma, [2] cocina", "Tu código es {} de ejemplo",       # llaves vacías o con otro contenido no son un campo sin reemplazar
+])
+def test_el_texto_normal_no_se_rechaza_por_llaves(texto):
+    assert "llaves_sin_reemplazar" not in mix_haiku.revisar(texto, **PEDIDO_NORMAL)
