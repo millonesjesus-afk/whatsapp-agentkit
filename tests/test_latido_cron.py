@@ -358,7 +358,9 @@ def test_hay_un_solo_head_y_la_migracion_cuelga_del_head_anterior():
     # 2026-10-19: las etiquetas de empresa por grupo de anuncios (b7e3c9a5d1f4) cuelgan de la regla anuncio→campaña.
     # 2026-10-27: las metas mensuales de Analítica (c5e1a7d3f9b2) cuelgan de las etiquetas por grupo de anuncios.
     # 2026-10-29: los campos del envío de SMS en campañas (d8b4f2a6c3e1) cuelgan de las metas mensuales.
-    assert guion.get_heads() == ["d8b4f2a6c3e1"]
+    # 2026-11-04: el borrado lógico de campañas (a7c3e9b15d42) cuelga de los campos del envío de SMS.
+    assert guion.get_heads() == ["a7c3e9b15d42"]
+    assert guion.get_revision("a7c3e9b15d42").down_revision == "d8b4f2a6c3e1"
     assert guion.get_revision("d8b4f2a6c3e1").down_revision == "c5e1a7d3f9b2"
     assert guion.get_revision("c5e1a7d3f9b2").down_revision == "b7e3c9a5d1f4"
     assert guion.get_revision("b7e3c9a5d1f4").down_revision == "a9c4e1d7b3f2"
