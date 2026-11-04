@@ -6,6 +6,7 @@ Sistema de memoria del agente. Guarda el historial de conversaciones
 por número de teléfono usando SQLite (local) o PostgreSQL (producción).
 """
 
+import json
 import os
 import csv
 import uuid
@@ -1898,7 +1899,7 @@ async def rendimiento_por_campana(
                 origen_de[conv_id] = campana_id
 
         campanas = {c.id: c for c in (await session.execute(
-            select(Campana).where(Campana.negocio_id == negocio_id)
+            select(Campana).where(Campana.negocio_id == negocio_id, Campana.eliminado_en.is_(None))
         )).scalars().all()}
         regla = {src: cid for src, cid in (await session.execute(
             select(AnuncioCampana.source_id, AnuncioCampana.campana_id).where(AnuncioCampana.negocio_id == negocio_id)
@@ -2389,7 +2390,7 @@ async def historico_rellenar_conversaciones(negocio_id: str, aplicar: bool, auto
     nunca `Lead.campana_origen`. Con `aplicar=False` solo cuenta."""
     async with async_session() as session:
         campanas = {c.nombre: c.id for c in (await session.execute(
-            select(Campana).where(Campana.negocio_id == negocio_id)
+            select(Campana).where(Campana.negocio_id == negocio_id, Campana.eliminado_en.is_(None))
         )).scalars().all()}
         eventos = (await session.execute(
             select(AttributionEvent.conversation_id, AttributionEvent.campana_nombre, AttributionEvent.source_id)
@@ -2444,7 +2445,7 @@ async def historico_corregir_anuncios(
     elegidos = set(source_ids)
     async with async_session() as session:
         campanas = {c.id: c for c in (await session.execute(
-            select(Campana).where(Campana.negocio_id == negocio_id)
+            select(Campana).where(Campana.negocio_id == negocio_id, Campana.eliminado_en.is_(None))
         )).scalars().all()}
         if campana_id is not None and campana_id not in campanas:
             raise LookupError("La campaña no existe.")
@@ -4187,6 +4188,11 @@ class Campana(Base):
     # inventa) — las campañas existentes no pueden backfillearse sin
     # inventar una Unidad, lo cual está expresamente prohibido.
     unidad_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("unidades_de_negocio.id"), nullable=True)
+    # Borrado lógico (2026-11-04, restaurar campañas): `eliminado_en` NULL = campaña viva. Al eliminar se guardan acá los
+    # `source_id` de los anuncios que tenía (JSON), porque sus reglas anuncio→campaña se liberan; restaurar los re-vincula.
+    eliminado_en: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    eliminado_por: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    reglas_anuncio_eliminadas: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class AnuncioCampana(Base):
@@ -10774,7 +10780,7 @@ async def crear_campana(
         return _campana_a_dict(campana)
 
 
-async def listar_campanas(negocio_id: str, solo_activas: bool = False) -> list[dict]:
+async def listar_campanas(negocio_id: str, solo_activas: bool = False, incluir_eliminadas: bool = False) -> list[dict]:
     """Recupera las campañas configuradas, más recientes primero.
 
     `negocio_id` (Gate 5.4, T2) obligatorio — esta consulta nunca filtraba
@@ -10782,6 +10788,8 @@ async def listar_campanas(negocio_id: str, solo_activas: bool = False) -> list[d
     cualquier Negocio a otro."""
     async with async_session() as session:
         query = select(Campana).where(Campana.negocio_id == negocio_id).order_by(Campana.creado.desc())
+        if not incluir_eliminadas:
+            query = query.where(Campana.eliminado_en.is_(None))  # borrado lógico: una eliminada no existe para nadie
         if solo_activas:
             query = query.where(Campana.activa.is_(True))
         result = await session.execute(query)
@@ -10793,7 +10801,9 @@ async def obtener_campana(campana_id: int) -> dict | None:
     — habilita el chequeo de ownership de negocio_id en editar/toggle/eliminar."""
     async with async_session() as session:
         campana = await session.get(Campana, campana_id)
-        return _campana_a_dict(campana) if campana else None
+        if campana is None or campana.eliminado_en is not None:
+            return None  # eliminada = no encontrada (editar/activar/eliminar de nuevo dan 404, como antes del borrado lógico)
+        return _campana_a_dict(campana)
 
 
 async def obtener_campana_por_nombre(nombre: str, negocio_id: str) -> dict | None:
@@ -10814,7 +10824,7 @@ async def obtener_campana_por_nombre(nombre: str, negocio_id: str) -> dict | Non
     async with async_session() as session:
         query = (
             select(Campana)
-            .where(Campana.nombre == nombre, Campana.negocio_id == negocio_id)
+            .where(Campana.nombre == nombre, Campana.negocio_id == negocio_id, Campana.eliminado_en.is_(None))
             .limit(1)
         )
         result = await session.execute(query)
@@ -10833,7 +10843,7 @@ async def actualizar_campana(campana_id: int, **campos):
         await session.commit()
 
 
-async def eliminar_campana(campana_id: int, negocio_id: str) -> bool:
+async def eliminar_campana(campana_id: int, negocio_id: str, eliminado_por: str | None = None) -> bool:
     """Borra una campaña por completo — SOLO si nunca tuvo ninguna
     Conversation atribuida (así no se pierde historial de conversión real).
     Si ya tiene al menos una, no la borra y retorna False; el camino normal
@@ -10851,7 +10861,7 @@ async def eliminar_campana(campana_id: int, negocio_id: str) -> bool:
     campana`)."""
     async with async_session() as session:
         campana = await session.get(Campana, campana_id)
-        if campana is None or campana.negocio_id != negocio_id:
+        if campana is None or campana.negocio_id != negocio_id or campana.eliminado_en is not None:
             return False
         query_conteo = select(func.count()).select_from(Conversation).where(
             Conversation.campana_origen_id == campana_id
@@ -10861,10 +10871,74 @@ async def eliminar_campana(campana_id: int, negocio_id: str) -> bool:
             return False
         # Las reglas anuncio→campaña apuntan a la campaña (FK): se borran antes; esos anuncios
         # quedan "Sin campaña" hasta que se asignen de nuevo.
+        # Borrado lógico (2026-11-04): la fila queda marcada y los anuncios que tenía se guardan para poder restaurarla;
+        # sus reglas se liberan igual que antes (esos anuncios quedan «Sin campaña» y pueden asignarse a otra).
+        anuncios = (await session.execute(
+            select(AnuncioCampana.source_id).where(AnuncioCampana.campana_id == campana_id)
+        )).scalars().all()
         await session.execute(delete(AnuncioCampana).where(AnuncioCampana.campana_id == campana_id))
-        await session.delete(campana)
+        campana.eliminado_en = datetime.utcnow()
+        campana.eliminado_por = (eliminado_por or "")[:50] or None
+        campana.reglas_anuncio_eliminadas = json.dumps(sorted(anuncios))
+        campana.activa = False
         await session.commit()
         return True
+
+
+async def listar_campanas_eliminadas(negocio_id: str) -> list[dict]:
+    """Campañas eliminadas (borrado lógico) del Negocio, la eliminada más recientemente primero, con los anuncios que
+    tenía y quién la eliminó — para que un admin pueda restaurarlas."""
+    async with async_session() as session:
+        filas = (await session.execute(
+            select(Campana).where(Campana.negocio_id == negocio_id, Campana.eliminado_en.is_not(None))
+            .order_by(Campana.eliminado_en.desc())
+        )).scalars().all()
+        return [
+            {**_campana_a_dict(c), "eliminado_en": c.eliminado_en, "eliminado_por": c.eliminado_por,
+             "anuncios": json.loads(c.reglas_anuncio_eliminadas or "[]")}
+            for c in filas
+        ]
+
+
+async def restaurar_campana(campana_id: int, negocio_id: str) -> dict:
+    """Deshace `eliminar_campana`. La campaña vuelve DESACTIVADA (no empieza a detectar leads hasta que un admin la
+    active a propósito) y sus anuncios se re-vinculan solo si siguen libres: si otra campaña ya se quedó con alguno,
+    ese NO se pisa y se informa en `anuncios_no_restaurados`.
+
+    Retorna {"resultado": "restaurada" | "no_encontrada" | "no_eliminada" | "nombre_en_uso", "anuncios_restaurados": [..],
+    "anuncios_no_restaurados": [..]}. `nombre_en_uso`: ya existe otra campaña viva con ese nombre (la creación exige
+    nombres distintos), así que restaurar la duplicaría."""
+    vacio = {"anuncios_restaurados": [], "anuncios_no_restaurados": []}
+    async with async_session() as session:
+        campana = await session.get(Campana, campana_id)
+        if campana is None or campana.negocio_id != negocio_id:
+            return {"resultado": "no_encontrada", **vacio}
+        if campana.eliminado_en is None:
+            return {"resultado": "no_eliminada", **vacio}
+        repetida = (await session.execute(
+            select(Campana.id).where(
+                Campana.negocio_id == negocio_id, Campana.eliminado_en.is_(None),
+                func.lower(Campana.nombre) == campana.nombre.lower(),
+            ).limit(1)
+        )).scalars().first()
+        if repetida is not None:
+            return {"resultado": "nombre_en_uso", **vacio}
+        ocupados = set((await session.execute(
+            select(AnuncioCampana.source_id).where(AnuncioCampana.negocio_id == negocio_id)
+        )).scalars().all())
+        restaurados, no_restaurados = [], []
+        for source_id in json.loads(campana.reglas_anuncio_eliminadas or "[]"):
+            if source_id in ocupados:
+                no_restaurados.append(source_id)
+                continue
+            session.add(AnuncioCampana(negocio_id=negocio_id, source_id=source_id, campana_id=campana.id, creado_por="restaurar"))
+            restaurados.append(source_id)
+        campana.eliminado_en = None
+        campana.eliminado_por = None
+        campana.reglas_anuncio_eliminadas = None
+        campana.activa = False
+        await session.commit()
+        return {"resultado": "restaurada", "anuncios_restaurados": restaurados, "anuncios_no_restaurados": no_restaurados}
 
 
 async def contar_opportunities_por_campana(

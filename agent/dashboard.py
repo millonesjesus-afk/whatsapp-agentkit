@@ -8244,12 +8244,47 @@ async def eliminar_campana_json(
     """Elimina una campaña SOLO si nunca tuvo conversaciones (así no se pierde historial). Con
     actividad, el camino es desactivarla. Sus reglas de anuncio se borran con ella."""
     campana = await _verificar_ownership_campana(usuario, campana_id)
-    if not await eliminar_campana(campana_id, usuario["negocio_id"]):
+    if not await eliminar_campana(campana_id, usuario["negocio_id"], eliminado_por=usuario["username"]):
         raise HTTPException(
             status_code=400,
             detail=f"«{campana['nombre']}» ya tiene conversaciones: no se puede eliminar sin perder su historial. Desactívala en su lugar.",
         )
     return JSONResponse({"ok": True})
+
+
+@router.get("/campanas/eliminadas.json")
+async def campanas_eliminadas_json(usuario: dict = Depends(servicio_identidad.requiere_rol("admin"))):
+    """Campañas eliminadas del Negocio (borrado lógico), para poder restaurarlas — solo admin, igual que eliminar.
+    Cada una trae los `anuncios` (source_id) que tenía vinculados."""
+    eliminadas = await mem.listar_campanas_eliminadas(usuario["negocio_id"])
+    return JSONResponse({
+        "eliminadas": [
+            {"id": c["id"], "nombre": c["nombre"], "tipo_deteccion": c["tipo_deteccion"],
+             "eliminado_en": iso_utc(c["eliminado_en"]), "eliminado_por": c["eliminado_por"], "anuncios": c["anuncios"]}
+            for c in eliminadas
+        ],
+    })
+
+
+@router.post("/campanas/{campana_id}/restaurar.json")
+async def restaurar_campana_json(
+    campana_id: int,
+    usuario: dict = Depends(servicio_identidad.requiere_rol("admin")),
+    _csrf: None = Depends(verificar_csrf),
+):
+    """Deshace la eliminación de una campaña (solo admin). Vuelve DESACTIVADA: no detecta leads hasta que un admin la
+    active. Re-vincula sus anuncios si siguen libres y devuelve cuáles no pudo (otra campaña ya los tiene)."""
+    r = await mem.restaurar_campana(campana_id, usuario["negocio_id"])
+    if r["resultado"] == "no_encontrada":
+        raise HTTPException(status_code=404, detail="Campaña no encontrada")
+    if r["resultado"] == "no_eliminada":
+        raise HTTPException(status_code=409, detail="Esa campaña no está eliminada.")
+    if r["resultado"] == "nombre_en_uso":
+        raise HTTPException(status_code=409, detail="Ya existe otra campaña con ese nombre: cámbiale el nombre a una de las dos antes de restaurar.")
+    return JSONResponse({
+        "ok": True, "activa": False,
+        "anuncios_restaurados": r["anuncios_restaurados"], "anuncios_no_restaurados": r["anuncios_no_restaurados"],
+    })
 
 
 @router.post("/campanas/{campana_id}/toggle.json")
@@ -9068,7 +9103,7 @@ async def toggle_campana(campana_id: int, usuario: dict = Depends(servicio_ident
 @router.post("/campanas/{campana_id}/eliminar")
 async def eliminar_campana_ruta(campana_id: int, usuario: dict = Depends(servicio_identidad.requiere_rol("admin")), _csrf: None = Depends(verificar_csrf)):
     await _verificar_ownership_campana(usuario, campana_id)
-    borrada = await eliminar_campana(campana_id, usuario["negocio_id"])
+    borrada = await eliminar_campana(campana_id, usuario["negocio_id"], eliminado_por=usuario["username"])
     if not borrada:
         raise HTTPException(
             status_code=400,
