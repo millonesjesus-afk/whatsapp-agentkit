@@ -150,7 +150,7 @@ def _badge_canal(numero_whatsapp_id: str | None, mapa_canales: dict, compacto: b
     bg, texto = canal["color"]
     return f'<span class="badge-suave" style="{extra}background-color:{bg};color:{texto}">{html.escape(canal["nombre"])}</span>'
 from agent.services.servicio_canales import servicio_canales
-from agent.brain import cargar_system_prompt, generar_resumen_conversacion
+from agent.brain import RESUMEN_FALLIDO, RESUMEN_SIN_SALDO, cargar_system_prompt, generar_resumen_conversacion
 from agent.tools import (
     obtener_producto_por_codigo, buscar_productos, CUOTAS_MIN, CUOTAS_MAX,
     calcular_cuota_producto, obtener_tasas_financiamiento,
@@ -6089,7 +6089,10 @@ async def generar_resumen_ia(telefono: str, usuario: dict = Depends(_usuario_act
     _verificar_acceso_lead(usuario, lead)
     historial = await servicio_conversacion.obtener_historial(telefono, limite=200)
     resumen = await generar_resumen_conversacion(historial)
-    return JSONResponse({"resumen": resumen})
+    # `error` (2026-11-04): «sin_saldo» o «fallo» cuando el texto es el aviso fijo y no un resumen. `resumen` se
+    # mantiene igual, porque el panel legacy solo lee ese campo.
+    error = "sin_saldo" if resumen == RESUMEN_SIN_SALDO else "fallo" if resumen == RESUMEN_FALLIDO else None
+    return JSONResponse({"resumen": resumen, "error": error})
 
 
 @router.get("/notificaciones.json")

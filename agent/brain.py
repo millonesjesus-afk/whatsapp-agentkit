@@ -1092,6 +1092,12 @@ async def extraer_datos_lead(mensaje_cliente: str, respuesta_gabi: str, lead_act
         return {}
 
 
+# Textos fijos del resumen cuando la IA falla (2026-11-04): el endpoint los reconoce y avisa con `error`, para que la
+# pestaña Copiloto muestre un aviso en vez de pintar el texto del fallo como si fuera el resumen.
+RESUMEN_FALLIDO = "No se pudo generar el resumen — inténtalo de nuevo en un momento."
+RESUMEN_SIN_SALDO = "No hay saldo de IA para hacer el resumen. Recarga los créditos e inténtalo de nuevo."
+
+
 async def generar_resumen_conversacion(historial: list[dict]) -> str:
     """Resumen IA bajo demanda (Copiloto — MAIEK_AI_PRODUCT_PATTERNS.md, Cap. 5,
     primera capacidad activa). Deliberadamente independiente del protocolo de
@@ -1169,4 +1175,6 @@ async def generar_resumen_conversacion(historial: list[dict]) -> str:
                 ensure_ascii=False,
             )
         )
-        return "No se pudo generar el resumen — inténtalo de nuevo en un momento."
+        from agent.errores_ia import CREDITO, TOPE_GASTO, clasificar_error  # import tardío, igual que en el resto del módulo
+
+        return RESUMEN_SIN_SALDO if clasificar_error(e) in (CREDITO, TOPE_GASTO) else RESUMEN_FALLIDO
