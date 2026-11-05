@@ -3920,6 +3920,17 @@ async def _avisos_campanas_sin_material(negocio_id: str) -> list[dict]:
         return []
 
 
+async def _avisos_anuncios_sin_clientes(negocio_id: str) -> list[dict]:
+    """Aviso SOLO para el admin (lo llama `_avisos_inicio`): los anuncios dejaron de traer clientes o un anuncio que
+    traía clientes se calló (ver `agent/alertas_anuncios.py`). Solo lee `attribution_events`. Nunca rompe Inicio."""
+    try:
+        from agent import alertas_anuncios
+        return await alertas_anuncios.avisos(negocio_id)
+    except Exception:
+        logger.exception("Inicio: no se pudo calcular el aviso de anuncios sin clientes")
+        return []
+
+
 async def _avisos_procesos_programados() -> list[dict]:
     """Avisos del latido de los procesos programados (Cron de Railway), solo para el admin (lo
     llama `_avisos_inicio`). Por cada script vigilado (`CRONES_ESPERADOS`) que haya corrido ALGUNA
@@ -3987,6 +3998,7 @@ async def _avisos_inicio(usuario: dict) -> list[dict]:
         avisos + await _avisos_procesos_programados() + await _avisos_uso_inicio(usuario) + avisos_llamadas
         + await _avisos_cambios_calendario_supervisor(usuario["negocio_id"])
         + await _avisos_campanas_sin_material(usuario["negocio_id"])
+        + await _avisos_anuncios_sin_clientes(usuario["negocio_id"])
     )
 
 
@@ -9559,6 +9571,23 @@ async def configuracion_json(usuario: dict = Depends(servicio_identidad.requiere
         # (pedido explícito) — por eso es editable acá, nunca hardcodeada.
         "financiamiento": {"tea": tea, "igv": igv, "cuotas_min": CUOTAS_MIN, "cuotas_max": CUOTAS_MAX},
     })
+
+
+@router.get("/canales-whatsapp/estado.json")
+async def canales_whatsapp_estado_json(
+    refrescar: bool = False,
+    usuario: dict = Depends(servicio_identidad.requiere_rol("admin")),
+):
+    """Estado de cada número de WhatsApp del Negocio para el panel Canales (mejora #2, 2026-11-05): número visible,
+    estado y calidad según Meta (consulta en vivo con el token del canal, guardada 60 s; `?refrescar=true` la salta),
+    unidad de negocio y último mensaje recibido de un cliente. Solo Admin; nunca devuelve credenciales."""
+    from agent import estado_canales
+    try:
+        canales = await estado_canales.estado(usuario["negocio_id"], iso_utc, usar_cache=not refrescar)
+    except Exception:
+        logger.exception("Canales: no se pudo calcular el estado")
+        raise HTTPException(status_code=500, detail="No se pudo calcular el estado de los canales.")
+    return JSONResponse({"canales": canales})
 
 
 # ── Configuración — escritura (Gate 4.5) ────────────────────────────────
