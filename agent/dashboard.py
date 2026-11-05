@@ -101,6 +101,7 @@ from agent import plantilla_retomar
 from agent import atencion_atrasada
 from agent import calendario_negocio as cal_negocio
 from agent import llamadas
+from agent import pipeline_etapas
 from agent import derivacion_automatica
 from agent import plantillas_sms
 from agent import origen_conversacion
@@ -2644,7 +2645,24 @@ def _dto_lead_pipeline(lead: dict) -> dict:
         "creado": iso_utc(lead.get("creado")),
         "fecha_agendada": _iso(lead.get("fecha_agendada")),
         "visto_asesor": lead.get("visto_asesor"),
+        # Etapa derivada (2026-11-05): dónde va el caso, calculada con resultado + asesora + derivación. Ver agent/pipeline_etapas.py.
+        "etapa": pipeline_etapas.etapa_de(lead.get("resultado"), lead.get("asesor_asignado"), lead.get("paso_flujo")),
     }
+
+
+async def _telefonos_de_vista_pipeline(vista: str, usuario: dict) -> list[str] | None:
+    """Teléfonos que forman una vista del Pipeline que sale de otra consulta, o None si `vista` no es una de ellas.
+
+    «sin_asesor» es la MISMA lista que muestra Inicio (`listar_leads_esperando_asesor`), solo para admin/supervisor; «para_llamar»
+    son las tareas abiertas de «Llamadas» que ve esta persona (`llamadas.listar_tareas`: respeta el modo del módulo y la cartera)."""
+    if vista == "sin_asesor":
+        if usuario["rol"] not in ROLES_CON_VISION_TOTAL:
+            return []
+        return [l["telefono"] for l in await listar_leads_esperando_asesor(usuario["negocio_id"])]
+    if vista == "para_llamar":
+        datos = await llamadas.listar_tareas(usuario["negocio_id"], usuario)
+        return sorted({t["telefono"] for t in datos.get("tareas", []) if t.get("telefono")})
+    return None
 
 
 # response_class=HTMLResponse sigue siendo obligatorio aunque esta ruta ahora
@@ -2665,6 +2683,8 @@ async def crm_pipeline(
     dir: str = "desc",
     pagina: int = 1,
     por_pagina: int = POR_PAGINA_PIPELINE,
+    etapa: str = "",
+    vista: str = "",
 ):
     """CRM / Pipeline — alcance por rol: admin/supervisor ven toda la
     cartera (con filtro opcional por asesor); asesor ve solo sus propios
@@ -2686,11 +2706,15 @@ async def crm_pipeline(
     # El panel HTML pagina siempre de a 20 (ver POR_PAGINA_PIPELINE); solo la
     # API deja elegir, con tope para que nadie pida la cartera entera.
     por_pagina = min(max(1, por_pagina), POR_PAGINA_PIPELINE_MAXIMO) if quiere_json else POR_PAGINA_PIPELINE
+    # 2026-11-05 — `etapa` y `vista` solo los manda la Nueva Experiencia; un valor desconocido se ignora, igual que `resultado`.
+    condicion_etapa = pipeline_etapas.condicion_etapa(etapa) if quiere_json else None
+    telefonos_vista = await _telefonos_de_vista_pipeline(vista, usuario) if quiere_json else None
     leads, total = await listar_leads_pipeline(
         negocio_id=usuario["negocio_id"],
         asesor_asignado=asesor_filtro, resultado=resultado or None, busqueda=q.strip(),
         interes=interes.strip() or None,
         orden=orden, direccion=dir, pagina=pagina, por_pagina=por_pagina,
+        condiciones=(condicion_etapa,) if condicion_etapa is not None else (), telefonos=telefonos_vista,
     )
     if quiere_json:
         # P1-A (UX-03 Fase 0/1): el frontend ya calculaba y mandaba `alcance`,
@@ -2713,6 +2737,28 @@ async def crm_pipeline(
     )
     cuerpo = f"""<div class="shell d-flex"><div class="main-pane flex-grow-1 p-4">{panel}</div></div>"""
     return _pagina("CRM / Pipeline", usuario, cuerpo, request=request)
+
+
+@router.get("/pipeline/conteos")
+async def crm_pipeline_conteos(request: Request, usuario: dict = Depends(_usuario_actual), alcance: str = "", asesor: str = ""):
+    """Conteos para la franja de etapas y las pestañas del Pipeline (2026-11-05). Mismo alcance por rol que `/pipeline`: un
+    Asesor cuenta solo su cartera. `vistas.sin_asesor` es `null` para quien no tiene visión total (esa vista no existe para él)."""
+    asesor_filtro, alcance_aplicado = _alcance_pipeline(usuario, alcance, asesor)
+    vision_total = usuario["rol"] in ROLES_CON_VISION_TOTAL
+    etapas = await pipeline_etapas.contar_por_etapa(usuario["negocio_id"], asesor_filtro)
+    sin_asesor = len(await _telefonos_de_vista_pipeline("sin_asesor", usuario) or []) if vision_total else None
+    para_llamar = len(await _telefonos_de_vista_pipeline("para_llamar", usuario) or [])
+    return JSONResponse({
+        "etapas": etapas,
+        "total": sum(etapas.values()),
+        "vistas": {
+            "mios": await pipeline_etapas.contar_asignados_a(usuario["negocio_id"], usuario["username"]),
+            "sin_asesor": sin_asesor,
+            "para_llamar": para_llamar,
+            "citas": etapas["agendado"],
+        },
+        "alcance_aplicado": alcance_aplicado,
+    })
 
 
 @router.get("/conversaciones")

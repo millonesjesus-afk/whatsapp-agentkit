@@ -7723,6 +7723,8 @@ async def listar_leads_pipeline(
     direccion: str = "desc",
     pagina: int = 1,
     por_pagina: int = 20,
+    condiciones: tuple = (),
+    telefonos: list[str] | None = None,
 ) -> tuple[list[dict], int]:
     """Consulta para CRM/Pipeline (MAIEK_AI_PRODUCT_PATTERNS.md, Cap. 6) — a
     diferencia de listar_leads (que siempre trae todo y deja orden/paginación
@@ -7744,14 +7746,24 @@ async def listar_leads_pipeline(
     admin/supervisor con `alcance=todos` veía el Pipeline de TODOS los
     Negocios, no solo el propio (`_alcance_pipeline` solo acota por asesor,
     nunca por negocio_id). Ahora es un parámetro obligatorio, resuelto
-    server-side por el router desde la sesión — nunca del cliente."""
+    server-side por el router desde la sesión — nunca del cliente.
+
+    `condiciones` y `telefonos` (2026-11-05, etapas del Pipeline): filtros extra que arma el router. `condiciones` son
+    condiciones SQL sobre `Lead` ya construidas (la etapa derivada, ver `agent/pipeline_etapas.py`) y `telefonos` acota a una
+    lista de teléfonos (las vistas «Sin asesor» y «Para llamar», que salen de otras consultas). Con la lista vacía no hay casos."""
     columna = COLUMNAS_ORDEN_PIPELINE.get(orden, Lead.actualizado)
+    if telefonos is not None and not telefonos:
+        return [], 0
     async with async_session() as session:
         query = select(Lead).where(Lead.negocio_id == negocio_id)
         if asesor_asignado:
             query = query.where(Lead.asesor_asignado == asesor_asignado)
         if resultado:
             query = query.where(Lead.resultado == resultado)
+        for condicion in condiciones:
+            query = query.where(condicion)
+        if telefonos is not None:
+            query = query.where(Lead.telefono.in_(telefonos))
         if interes:
             query = query.where(Lead.interes.ilike(f"%{interes}%"))
         if busqueda:
