@@ -3008,6 +3008,16 @@ async def conversation_detalle(conversation_id: str, usuario: dict = Depends(_us
     # el nombre vigente de la campaña: la ficha del lead lo muestra y este DTO nunca lo traía.
     dto["origen"] = await origen_conversacion.origen_de_conversacion(usuario["negocio_id"], conversation_id)
     dto["campana_origen"] = ((dto["origen"] or {}).get("campana") or {}).get("nombre")
+    # 2026-11-09 — etapa derivada del caso (la misma regla del Pipeline, `agent/pipeline_etapas.py`) para el recorrido de la ficha. Necesita
+    # `paso_flujo`, que vive en el Lead. ADITIVO: si no se puede calcular el detalle sigue (`null` = la pantalla no dibuja el recorrido).
+    try:
+        lead_de_etapa = await obtener_lead(conversation["telefono"], negocio_id=usuario["negocio_id"])
+        dto["etapa"] = pipeline_etapas.etapa_de(
+            conversation.get("resultado"), conversation.get("asesor_asignado"), (lead_de_etapa or {}).get("paso_flujo"),
+        )
+    except Exception:
+        logger.exception(f"No se pudo calcular la etapa de la conversación {conversation_id}")
+        dto["etapa"] = None
     return JSONResponse(dto)
 
 

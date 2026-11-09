@@ -3,6 +3,7 @@
 # Los 13 resultados no son etapas: la etapa se calcula con resultado + asesora asignada + derivación. La regla vive dos veces
 # (`etapa_de` para mostrarla y `condicion_etapa` para filtrar y contar en SQL) y estas pruebas la amarran: la etapa que se ve en una
 # fila es la misma por la que se filtra y se cuenta.
+import itertools
 import json
 import os
 
@@ -134,3 +135,53 @@ async def test_el_endpoint_de_conteos_responde_con_etapas_y_vistas(monkeypatch):
     cuerpo = json.loads((await dashboard.crm_pipeline_conteos(request=None, usuario=asesora, alcance="todos", asesor="")).body)
     assert cuerpo["alcance_aplicado"] == "mi_pipeline"
     assert cuerpo["total"] == 3 and cuerpo["vistas"]["sin_asesor"] is None
+
+
+# ── La etapa también llega en el detalle del lead (la ficha dibuja el recorrido) ──────────────────────────────────────────────
+
+_SECUENCIA = itertools.count(1)   # un negocio y un teléfono distintos por caso, sin depender del hash (que cambia entre corridas)
+
+
+async def _conversacion_con_lead(codigo: str, canal_tel: str, telefono: str, **campos_lead):
+    negocio = await mem.crear_negocio(f"Negocio {codigo}", codigo)
+    canal = await mem.crear_canal_whatsapp(nombre=f"Canal {codigo}", phone_number_id=canal_tel, negocio_id=negocio["id"])
+    conversacion, _ = await mem.resolver_conversation_activa(telefono, negocio["id"], canal["id"], unidad_id=canal.get("unidad_id"))
+    await mem.actualizar_lead(telefono, negocio_id=negocio["id"], nombre="Rosa", **campos_lead)
+    return negocio, conversacion
+
+
+@pytest.mark.parametrize("campos,esperada", [
+    ({}, "gabi"),
+    ({"paso_flujo": "derivado_asesor"}, "asesora"),
+    ({"asesor_asignado": "carla", "paso_flujo": "derivado_asesor"}, "asesora"),
+    ({"resultado": "agendado", "asesor_asignado": "carla"}, "agendado"),
+    ({"resultado": "vendido", "asesor_asignado": "carla"}, "vendido"),
+    ({"resultado": "no_interesado"}, "cerrado"),
+])
+async def test_el_detalle_del_lead_trae_la_etapa(campos, esperada, monkeypatch):
+    sufijo = f"{next(_SECUENCIA):04d}"
+    negocio, conversacion = await _conversacion_con_lead(f"etp7{sufijo}", f"2000000{sufijo}", f"5192000{sufijo}", **campos)
+
+    async def _sin_ventana(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(dashboard, "_dto_ventana_whatsapp", _sin_ventana)
+    admin = {"negocio_id": negocio["id"], "rol": "admin", "username": "jefa"}
+    respuesta = await dashboard.conversation_detalle(conversacion.id, usuario=admin)
+    assert json.loads(respuesta.body)["etapa"] == esperada
+
+
+async def test_si_no_se_puede_calcular_la_etapa_el_detalle_sigue(monkeypatch):
+    negocio, conversacion = await _conversacion_con_lead("etp8", "20000000508", "51920000508")
+
+    async def _sin_ventana(*args, **kwargs):
+        return None
+
+    async def _falla(*args, **kwargs):
+        raise RuntimeError("sin base")
+
+    monkeypatch.setattr(dashboard, "_dto_ventana_whatsapp", _sin_ventana)
+    monkeypatch.setattr(dashboard, "obtener_lead", _falla)
+    admin = {"negocio_id": negocio["id"], "rol": "admin", "username": "jefa"}
+    cuerpo = json.loads((await dashboard.conversation_detalle(conversacion.id, usuario=admin)).body)
+    assert cuerpo["etapa"] is None and cuerpo["telefono"] == "51920000508"
