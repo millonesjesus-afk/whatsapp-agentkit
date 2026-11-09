@@ -81,6 +81,21 @@ async def test_citas_excluye_cerradas_y_no_agendadas():
     assert [c["telefono"] for c in citas] == ["51900000023"]
 
 
+async def test_citas_traen_el_conversation_id_de_la_conversacion_activa():
+    # Regresión 2026-11-09: las citas salían con `conversation_id: null` y el Calendario no podía abrir el lead.
+    n = await _negocio("citas-6")
+    canal = await mem.crear_canal_whatsapp(nombre="Canal citas-6", phone_number_id="409100066", negocio_id=n["id"])
+    await _cita(n, "51900000041", "ase1_citas-6", datetime(2026, 11, 3, 10, 0))   # con conversación activa
+    await _cita(n, "51900000042", "ase1_citas-6", datetime(2026, 11, 3, 11, 0))   # sin conversación todavía
+    conversation, _ = await mem.resolver_conversation_activa("51900000041", n["id"], canal["id"])
+
+    citas = await _citas(_usuario(n, "admin_citas-6", "admin"), "2026-11-03", "2026-11-03")
+
+    por_telefono = {c["telefono"]: c for c in citas}
+    assert por_telefono["51900000041"]["conversation_id"] == conversation.id
+    assert por_telefono["51900000042"]["conversation_id"] is None  # sin conversación: el front deshabilita «Abrir lead»
+
+
 async def test_citas_no_mezcla_negocios():
     a = await _negocio("citas-4a")
     b = await _negocio("citas-4b")

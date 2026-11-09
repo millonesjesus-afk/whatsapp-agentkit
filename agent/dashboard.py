@@ -10202,6 +10202,15 @@ async def calendario_citas_json(desde: str, hasta: str, usuario: dict = Depends(
         for l in agendados
         if l.get("fecha_agendada") and dia_desde <= l["fecha_agendada"].date() <= dia_hasta
     ]
+    # 2026-11-09: `listar_leads_agendados` trae leads (por teléfono), no conversaciones: sin este paso cada cita salía con
+    # `conversation_id: null` y en el Calendario «Abrir lead» y «Reprogramar» no funcionaban. Se resuelve en bloque
+    # (no uno por uno), igual que la Zona de acción de Inicio; un teléfono sin conversación activa queda en null.
+    faltantes = [c["telefono"] for c in citas if not c["conversation_id"]]
+    if faltantes:
+        conversation_ids = await resolver_conversation_ids_por_telefono(usuario["negocio_id"], faltantes)
+        for c in citas:
+            if not c["conversation_id"]:
+                c["conversation_id"] = conversation_ids.get(c["telefono"])
     return JSONResponse({"desde": dia_desde.isoformat(), "hasta": dia_hasta.isoformat(), "citas": citas})
 
 
