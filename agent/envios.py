@@ -83,6 +83,10 @@ ORIGENES: dict[str, dict] = {
     # Es seguridad: esencial Y exento del tope (ni el interruptor, ni el tope mensual, ni la Opción B lo frenan). Sin
     # agrupar: "no repetir en 24 h" lo garantiza quien lo envía (agent/triaje_atc.py).
     "triaje_emergencia_gas": {"esencial": True, "exento_tope": True},
+    # Retiro de datos (2026-11-11, agent/retiro_datos.py, apagado por defecto con `retiro_datos_modo`): UN texto fijo, sin IA, cuando el cliente
+    # pide que se retire su número o que no se le escriba más. Es la respuesta que espera y lo gestiona una persona: esencial. Sin agrupar:
+    # tras enviarlo el caso pasa a supervisión y Gabi queda pausada, así que no se repite.
+    "retiro_datos": {"esencial": True},
     # Oferta de llamada de Gabi (2026-10-09, agent/llamadas.py, apagada por defecto): UN texto que reemplaza al
     # reenganche genérico para los leads de segmento A/B cuando `llamadas_oferta_activa` y la compuerta de
     # responsabilidad están encendidas. Texto libre dentro de la ventana de 24 h, igual que el reenganche: mismo
@@ -110,7 +114,7 @@ ORIGENES: dict[str, dict] = {
 ORIGENES_CON_LIMPIEZA_DE_FORMATO = frozenset({
     "gabi_respuesta", "gabi_aviso_derivacion", "gabi_aviso_no_legible", "gabi_respaldo_sin_ia",
     "reenganche_inactividad", "agradecimiento_cierre", "triaje_atc", "gabi_oferta_llamada",
-    "triaje_emergencia_gas", "gabi_confirma_llamada", "gabi_calificacion", "gabi_adjunto_derivado",
+    "triaje_emergencia_gas", "gabi_confirma_llamada", "gabi_calificacion", "gabi_adjunto_derivado", "retiro_datos",
 })
 
 

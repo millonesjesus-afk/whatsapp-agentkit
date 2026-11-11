@@ -38,7 +38,7 @@ from agent.memory import (
 )
 from agent.providers import obtener_proveedor
 from agent import envios
-from agent import circuito_ia, respaldo_sin_ia, calidad_gabi, formato_whatsapp, triaje_atc, llamadas, calificacion_guiada
+from agent import circuito_ia, respaldo_sin_ia, calidad_gabi, formato_whatsapp, triaje_atc, llamadas, calificacion_guiada, retiro_datos
 from agent.dashboard import (
     router as dashboard_router, NoAutenticado,
     ARCHIVOS_DIR, EXTENSIONES_ARCHIVO_PERMITIDAS, TAMANO_MAXIMO_ARCHIVO_MB, _guardar_archivo_en_disco,
@@ -842,6 +842,10 @@ async def _generar_y_enviar_respuesta_ia(telefono: str, canal: dict | None) -> N
     # Solo en modo activo, con una consulta de recibo / número de cliente / pago, envía un texto fijo hacia la línea
     # de atención de Cálidda y cierra el caso: entonces Gabi no responde este turno. No lanza.
     if await triaje_atc.procesar(telefono, canal, lead, proveedor):
+        return
+
+    # Retiro de datos / «no me escriban más» (2026-11-11, apagado por defecto): texto fijo + el caso pasa a supervisión. Sin IA.
+    if await retiro_datos.procesar(telefono, canal, lead, proveedor):
         return
 
     # Modo sin IA (Fase 1): con el circuito abierto NO se llama a Claude. Se dispara (en segundo

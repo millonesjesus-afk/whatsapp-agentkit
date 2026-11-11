@@ -633,6 +633,10 @@ EVENTO_TRIAJE_ATC_FALLIDO = "triaje_atc_fallido"
 # Emergencia de gas (2026-10-09): el cliente reportó olor o fuga de gas y se le derivó a Emergencias de Cálidda.
 # VISIBLE en el Timeline (deja al equipo enterado sin consumir asesor); también es la marca de "ya se avisó".
 EVENTO_EMERGENCIA_GAS_DERIVADA = "emergencia_gas_derivada"
+# Retiro de datos (2026-11-11, agent/retiro_datos.py): el cliente pidió que se retire su número o que no se le escriba más. VISIBLE en el Timeline
+# (el equipo debe enterarse y gestionarlo); el de la sombra es INTERNO (solo para medir).
+EVENTO_RETIRO_DATOS = "retiro_datos_solicitado"
+EVENTO_RETIRO_DATOS_SOMBRA = "retiro_datos_sombra"
 # "Para llamar" (2026-10-09, agent/llamadas.py): tarea de llamada para leads callados que mostraron interés.
 # Los eventos de GESTIÓN REAL quedan visibles en el Timeline (la llamada registrada, la tarea agotada, la oferta
 # de Gabi y la reprogramación que decidió una persona). Los de mecánica interna —crearla, asignarla, cancelarla
@@ -669,7 +673,7 @@ EVENTO_SOMBRA_MODELO = "sombra_modelo"
 # Observación del mix Haiku→modelo principal (agent/mix_haiku.py): lo que habría hecho el mix; nunca se envía ni se muestra.
 EVENTO_MIX_HAIKU = "mix_haiku"
 EVENTO_CALIFICACION_RESPUESTA = "calificacion_respuesta"
-TIPOS_EVENTO_INTERNOS = (EVENTO_TRIAJE_ATC_SOMBRA, EVENTO_TRIAJE_ATC_FALLIDO) + TIPOS_EVENTO_LLAMADA_INTERNOS + TIPOS_EVENTO_EXP_SOLO_CLIC + (EVENTO_CALIFICACION_PREGUNTA, EVENTO_SOMBRA_MODELO, EVENTO_MIX_HAIKU)
+TIPOS_EVENTO_INTERNOS = (EVENTO_TRIAJE_ATC_SOMBRA, EVENTO_TRIAJE_ATC_FALLIDO) + TIPOS_EVENTO_LLAMADA_INTERNOS + TIPOS_EVENTO_EXP_SOLO_CLIC + (EVENTO_CALIFICACION_PREGUNTA, EVENTO_SOMBRA_MODELO, EVENTO_MIX_HAIKU, EVENTO_RETIRO_DATOS_SOMBRA)
 
 
 class EventoLead(Base):
