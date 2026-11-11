@@ -33,9 +33,9 @@ def _entorno(monkeypatch):
     ("/dashboard/lead/51999999999", "/conversaciones"),
     ("/dashboard/asesores", "/equipo"),
     ("/dashboard/campanas", "/campanas"),
-    ("/dashboard/canales-whatsapp", "/configuracion"),
-    ("/dashboard/catalogos", "/configuracion"),
-    ("/dashboard/perfil", "/configuracion"),
+    ("/dashboard/canales-whatsapp", "/configuracion?s=whatsapp"),
+    ("/dashboard/catalogos", "/configuracion?s=biblioteca"),
+    ("/dashboard/perfil", "/configuracion?s=perfil"),
 ])
 def test_las_pantallas_del_panel_antiguo_redirigen_al_panel_nuevo(ruta, esperado):
     assert destino_panel_nuevo("GET", ruta, NAVEGADOR) == NUEVO + esperado

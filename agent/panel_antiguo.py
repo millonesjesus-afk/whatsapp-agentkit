@@ -27,9 +27,9 @@ _DESTINOS: list[tuple[re.Pattern, str]] = [
     (re.compile(r"^/dashboard/lead/[^/]+/?$"), "/conversaciones"),
     (re.compile(r"^/dashboard/asesores/?$"), "/equipo"),
     (re.compile(r"^/dashboard/campanas/?$"), "/campanas"),
-    (re.compile(r"^/dashboard/canales-whatsapp/?$"), "/configuracion"),
-    (re.compile(r"^/dashboard/catalogos/?$"), "/configuracion"),
-    (re.compile(r"^/dashboard/perfil/?$"), "/configuracion"),
+    (re.compile(r"^/dashboard/canales-whatsapp/?$"), "/configuracion?s=whatsapp"),
+    (re.compile(r"^/dashboard/catalogos/?$"), "/configuracion?s=biblioteca"),  # 2026-11-11: apartado propio
+    (re.compile(r"^/dashboard/perfil/?$"), "/configuracion?s=perfil"),  # 2026-11-11: apartado propio
 ]
 
 
