@@ -54,7 +54,7 @@ from agent.services.servicio_conversacion import servicio_conversacion
 from agent.rate_limit import limitador_webhook, ip_cliente
 from agent.http_utils import cerrar_cliente_http
 from agent.api_contrato import registrar_contrato_interno, FiltroRequestId
-from agent.panel_antiguo import registrar_redireccion_panel_antiguo
+from agent.panel_antiguo import registrar_redireccion_panel_antiguo, url_panel_nuevo
 
 load_dotenv()
 
@@ -423,7 +423,7 @@ async def no_autenticado_handler(request: Request, exc: NoAutenticado):
             },
             headers={"X-Request-Id": request_id},
         )
-    return RedirectResponse(url="/dashboard/login")
+    return RedirectResponse(url=f"{url_panel_nuevo()}/login")
 
 
 @app.get("/")

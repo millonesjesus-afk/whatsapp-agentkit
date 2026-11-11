@@ -44,6 +44,7 @@ from sqlalchemy.exc import IntegrityError
 
 from agent.tiempo_real import gestor_conexiones, emitir_ticket_ws, validar_y_consumir_ticket_ws
 from agent.rate_limit import limitador_login, bloqueo_login, ip_cliente
+from agent.panel_antiguo import url_panel_nuevo
 from agent.memory import (
     resumen_uso_mensual,
     guardar_configuracion_uso_meta,
@@ -2081,75 +2082,18 @@ def _barra_resumen(datos: dict, asesores: list[dict], estado_filtro: str) -> str
 
 # ── Login / Logout ────────────────────────────────────────────────────
 
-@router.get("/login", response_class=HTMLResponse)
-async def login_form(error: str = ""):
-    mensaje_error = f'<div class="alert alert-danger py-2 small">{html.escape(error)}</div>' if error else ""
-    cuerpo = f"""
-    <div class="login-shell d-flex align-items-center justify-content-center">
-        <div class="card login-card shadow p-4" style="width:380px;">
-            <div class="text-center mb-3">
-                <div class="avatar mx-auto mb-2" style="width:56px;height:56px;font-size:24px"><i class="bi bi-droplet-fill"></i></div>
-                <h4 class="mb-0">Gaso<span style="color:var(--gaso-secundario)">+</span></h4>
-                <div class="text-muted small">Commercial Operating System</div>
-                <div class="text-muted" style="font-size:.68rem;opacity:.7">Powered by Maiek <span style="font-weight:300">AI</span></div>
-            </div>
-            {mensaje_error}
-            <form method="post" action="/dashboard/login">
-                <div class="mb-3">
-                    <label class="form-label small text-muted">Usuario</label>
-                    <input type="text" name="username" class="form-control" required autofocus>
-                </div>
-                <div class="mb-3">
-                    <label class="form-label small text-muted">Contraseña</label>
-                    <input type="password" name="password" class="form-control" required>
-                </div>
-                <button type="submit" class="btn btn-primary w-100">Ingresar</button>
-            </form>
-            <div class="text-center mt-3">
-                <a href="/dashboard/recuperar" class="small text-muted text-decoration-none">¿Olvidaste tu contraseña?</a>
-            </div>
-        </div>
-    </div>
-    """
-    return _pagina("Ingresar", None, cuerpo)
+@router.get("/login")
+async def login_form():
+    """Ya no hay pantalla de login en el servidor (2026-11-11): el formulario vive en el panel nuevo (`/login`). Esta ruta solo manda
+    allá a quien entre por un favorito o un enlace viejo. El proceso de validar la clave sigue siendo `POST /login` (más abajo): el
+    intermediario del panel nuevo (`app/api/login`) lo llama y reenvía la cookie de sesión."""
+    return RedirectResponse(url=f"{url_panel_nuevo()}/login", status_code=302)
 
 
-@router.get("/recuperar", response_class=HTMLResponse)
-async def recuperar_form(enviado: str = ""):
-    if enviado:
-        cuerpo_mensaje = (
-            '<div class="alert alert-success py-2 small">'
-            'Si el usuario existe, ya avisamos a un administrador para que te ayude a restablecer tu contraseña.'
-            '</div>'
-        )
-        formulario = '<a href="/dashboard/login" class="btn btn-outline-secondary w-100">Volver a ingresar</a>'
-    else:
-        cuerpo_mensaje = '<p class="text-muted small">Escribe tu usuario del panel — le avisamos a un administrador para que te genere una contraseña nueva.</p>'
-        formulario = """
-            <form method="post" action="/dashboard/recuperar">
-                <div class="mb-3">
-                    <label class="form-label small text-muted">Usuario</label>
-                    <input type="text" name="username" class="form-control" required autofocus>
-                </div>
-                <button type="submit" class="btn btn-primary w-100">Avisar a un administrador</button>
-            </form>
-            """
-    cuerpo = f"""
-    <div class="login-shell d-flex align-items-center justify-content-center">
-        <div class="card login-card shadow p-4" style="width:380px;">
-            <div class="text-center mb-3">
-                <div class="avatar mx-auto mb-2" style="width:56px;height:56px;font-size:24px"><i class="bi bi-key-fill"></i></div>
-                <h4 class="mb-0">Recuperar acceso</h4>
-            </div>
-            {cuerpo_mensaje}
-            {formulario}
-            <div class="text-center mt-3">
-                <a href="/dashboard/login" class="small text-muted text-decoration-none">Volver a ingresar</a>
-            </div>
-        </div>
-    </div>
-    """
-    return _pagina("Recuperar contraseña", None, cuerpo)
+@router.get("/recuperar")
+async def recuperar_form():
+    """Igual que `/login`: la pantalla de recuperar contraseña vive en el panel nuevo (`/recuperar`); `POST /recuperar` sigue aquí."""
+    return RedirectResponse(url=f"{url_panel_nuevo()}/recuperar", status_code=302)
 
 
 @router.post("/recuperar")
