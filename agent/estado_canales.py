@@ -78,6 +78,50 @@ async def consultar_meta(canal: dict, *, usar_cache: bool = True) -> dict:
     return resultado
 
 
+def invalidar_cache(canal_id) -> None:
+    """Tras editar un canal (nombre o token), su estado se vuelve a pedir a Meta en la próxima consulta."""
+    _cache.pop(str(canal_id), None)
+
+
+def _motivo_verificacion(r, token: str) -> str:
+    """Por qué Meta rechazó un token nuevo, en una frase. Solo código y mensaje documentados; el token, si Meta lo
+    repitiera en su mensaje, se tapa."""
+    try:
+        err = (r.json() or {}).get("error") or {}
+    except Exception:
+        err = {}
+    codigo = err.get("code")
+    msg = str(err.get("message") or "").replace(token, "…").strip()[:140] if token else ""
+    if codigo in (190, 102):
+        return "Meta dice que este token no es válido, venció o fue revocado."
+    if codigo in (10, 200, 100):
+        return "Este token no tiene permiso sobre este número de WhatsApp."
+    return f"Meta respondió {r.status_code}" + (f" (código {codigo}: {msg})" if codigo else "")
+
+
+async def verificar_token(phone_number_id: str, token: str) -> dict:
+    """¿Sirve `token` para este número? Se pregunta a Meta ANTES de guardarlo (2026-11-11): un token mal copiado en
+    el número de producción cortaría la atención. Sin caché. Nunca lanza, nunca devuelve ni registra el token.
+
+    `{"ok": True, "numero": "+51 …"}` o `{"ok": False, "red": bool, "motivo": "…"}` (`red` = no se pudo preguntar)."""
+    try:
+        from agent.http_utils import get_con_reintentos
+        r = await get_con_reintentos(
+            f"https://graph.facebook.com/{API_VERSION}/{phone_number_id}",
+            params={"fields": "display_phone_number"}, headers={"Authorization": f"Bearer {token}"},
+        )
+    except Exception as e:
+        logger.warning("Verificar token de canal: no se pudo consultar a Meta (%s)", type(e).__name__)
+        return {"ok": False, "red": True, "motivo": "No se pudo contactar a Meta para comprobar el token."}
+    if r.status_code != 200:
+        return {"ok": False, "red": False, "motivo": _motivo_verificacion(r, token)}
+    try:
+        numero = (r.json() or {}).get("display_phone_number")
+    except Exception:
+        numero = None
+    return {"ok": True, "numero": numero}
+
+
 async def ultimos_mensajes_por_numero(negocio_id: str, ahora: datetime | None = None) -> dict[str, datetime]:
     """`{phone_number_id: momento del último mensaje de un cliente}` de los últimos 60 días. El número por el que
     habla cada cliente es `Lead.numero_whatsapp_id`; un cliente que cambió de número cuenta en el actual."""

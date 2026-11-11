@@ -103,6 +103,7 @@ from agent import plantilla_retomar
 from agent import atencion_atrasada
 from agent import calendario_negocio as cal_negocio
 from agent import llamadas
+from agent import estado_canales
 from agent import pipeline_etapas
 from agent import derivacion_automatica
 from agent import plantillas_sms
@@ -10911,6 +10912,112 @@ async def editar_canal_whatsapp_ruta(
         app_secret=app_secret.strip(), page_access_token=page_access_token.strip(),
     )
     return RedirectResponse(url="/dashboard/canales-whatsapp?editado=1", status_code=303)
+
+
+# ── Editar un número de WhatsApp desde el panel nuevo (2026-11-11) ──────────
+#
+# Reemplaza al formulario del panel antiguo (`/canales-whatsapp/{id}/editar`, arriba), que ya no tiene pantalla: es
+# como se renueva el token de acceso antes de que venza. Reglas de seguridad:
+#   - Solo administrador, solo canales de su negocio (`_verificar_ownership_canal`).
+#   - El cuerpo se lee a mano, sin modelo de FastAPI: un error de validación de FastAPI devuelve en la respuesta el
+#     valor recibido, y aquí ese valor sería un token. Ningún mensaje de error incluye lo que se mandó.
+#   - Un token de acceso nuevo se comprueba con Meta ANTES de guardarlo; si Meta no lo acepta, no se guarda y el
+#     token anterior sigue funcionando.
+#   - Nada de lo guardado vuelve: la respuesta trae solo nombre y fecha de renovación.
+#   - Queda en el historial de cambios con qué campos cambiaron, nunca sus valores.
+
+LARGO_MAXIMO_NOMBRE_CANAL = 100  # CanalWhatsApp.nombre es String(100)
+_CREDENCIALES_CANAL = {
+    "access_token": "token de acceso",
+    "app_secret": "App Secret",
+    "page_access_token": "token de la página",
+}
+
+
+def _credencial_valida(valor: str) -> bool:
+    """Forma mínima de una credencial de Meta: sin espacios ni saltos de línea, ni tan corta que sea un error de copia."""
+    return 16 <= len(valor) <= 4096 and not any(c.isspace() for c in valor)
+
+
+@router.post("/canales-whatsapp/{canal_id}/editar.json")
+async def editar_canal_whatsapp_json(
+    canal_id: int,
+    request: Request,
+    usuario: dict = Depends(servicio_identidad.requiere_rol("admin")),
+    _csrf: None = Depends(verificar_csrf),
+):
+    canal = await _verificar_ownership_canal(usuario, canal_id)
+    try:
+        body = await request.json()
+    except ValueError:
+        body = None
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=422, detail="No llegaron datos para guardar.")
+
+    campos: dict[str, str] = {}
+    cambios: dict[str, dict] = {}
+    nombre_actual = canal["nombre"]
+
+    nombre = body.get("nombre")
+    if nombre is not None:
+        if not isinstance(nombre, str):
+            raise HTTPException(status_code=422, detail="El nombre no es válido.")
+        nombre = nombre.strip()
+        if not nombre:
+            raise HTTPException(status_code=422, detail="El nombre no puede quedar vacío.")
+        if len(nombre) > LARGO_MAXIMO_NOMBRE_CANAL:
+            raise HTTPException(status_code=422, detail=f"El nombre no puede superar los {LARGO_MAXIMO_NOMBRE_CANAL} caracteres.")
+        if nombre != nombre_actual:
+            campos["nombre"] = nombre
+
+    for clave, etiqueta in _CREDENCIALES_CANAL.items():
+        valor = body.get(clave)
+        if valor is None or (isinstance(valor, str) and not valor.strip()):
+            continue  # vacío = no cambia
+        if not isinstance(valor, str) or not _credencial_valida(valor.strip()):
+            raise HTTPException(
+                status_code=422,
+                detail=f"El {etiqueta} no tiene un formato válido. Revisa que lo copiaste completo y sin espacios.",
+            )
+        campos[clave] = valor.strip()
+
+    if not campos:
+        raise HTTPException(status_code=422, detail="No hay cambios para guardar.")
+
+    if "access_token" in campos:
+        if not canal.get("phone_number_id"):
+            raise HTTPException(status_code=422, detail="Este número no tiene su identificador de Meta guardado; no se puede comprobar el token.")
+        verificacion = await estado_canales.verificar_token(canal["phone_number_id"], campos["access_token"])
+        if not verificacion["ok"]:
+            raise HTTPException(
+                status_code=502 if verificacion.get("red") else 422,
+                detail=f"{verificacion['motivo']} No se guardó nada: el token anterior sigue funcionando.",
+            )
+
+    await actualizar_canal_whatsapp(canal_id, **campos)
+    estado_canales.invalidar_cache(canal_id)
+
+    nombre_final = campos.get("nombre", nombre_actual)
+    prefijo = f"canal_whatsapp|{nombre_final}|"
+    if "nombre" in campos:
+        cambios[prefijo + "nombre"] = {"antes": nombre_actual, "despues": campos["nombre"]}
+    for clave in _CREDENCIALES_CANAL:
+        if clave in campos:
+            cambios[prefijo + clave] = {"antes": None, "despues": "cambiado"}
+    await mem.registrar_auditoria(
+        "canal_whatsapp_editado", actor=usuario["username"], negocio_id=usuario["negocio_id"],
+        entidad_tipo="configuracion", entidad_id=str(canal_id), payload={"cambios": cambios},
+    )
+
+    actualizado = await obtener_canal_whatsapp(canal_id)
+    return JSONResponse({
+        "ok": True,
+        "canal": {
+            "id": canal_id,
+            "nombre": actualizado["nombre"] if actualizado else nombre_final,
+            "token_renovado_en": iso_utc(actualizado["token_renovado_en"]) if actualizado and actualizado.get("token_renovado_en") else None,
+        },
+    })
 
 
 @router.post("/canales-whatsapp/{canal_id}/toggle")
