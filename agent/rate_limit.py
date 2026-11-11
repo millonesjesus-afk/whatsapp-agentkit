@@ -165,3 +165,5 @@ class BloqueoPorIntentos:
 limitador_login = LimitadorTasa()
 limitador_webhook = LimitadorTasa()
 bloqueo_login = BloqueoPorIntentos()
+# S2 (2026-11-11): intentos con la contraseña ACTUAL equivocada al cambiarla desde Mi perfil, por cuenta.
+bloqueo_cambio_password = BloqueoPorIntentos()

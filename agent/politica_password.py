@@ -12,7 +12,10 @@ cifradas y no se pueden evaluar: no se tocan; la regla vale al crear o cambiar u
 import unicodedata
 
 LARGO_MINIMO = 12
-LARGO_MAXIMO = 128
+# bcrypt solo trabaja con los primeros 72 BYTES y la versión 5 rechaza (error) cualquier cosa más larga: el tope se
+# alinea a eso. En caracteres es 72; en bytes también, porque una tilde o una ñ ocupan dos bytes.
+LARGO_MAXIMO = 72
+BYTES_MAXIMO = 72
 
 # Las más usadas en español e inglés, ya con 12 o más caracteres (las más cortas las frena el largo mínimo) más
 # variantes típicas. Se compara sin mayúsculas, espacios, guiones ni puntos.
@@ -43,12 +46,28 @@ def _es_secuencia(normalizada: str) -> bool:
     return pasos <= {1} or pasos <= {-1}
 
 
+def password_coincide(password: str, password_hash: str) -> bool:
+    """Compara sin romperse: bcrypt 5 lanza un error con más de 72 bytes, y una contraseña así nunca pudo guardarse,
+    así que simplemente no coincide."""
+    import bcrypt
+
+    datos = password.encode("utf-8")
+    if not datos or len(datos) > BYTES_MAXIMO:
+        return False
+    try:
+        return bcrypt.checkpw(datos, password_hash.encode())
+    except ValueError:
+        return False
+
+
 def validar_password(password: str, *, username: str | None = None, nombre: str | None = None) -> str | None:
     """None si la contraseña cumple; si no, el motivo en una frase lista para mostrar al usuario."""
     if len(password) < LARGO_MINIMO:
         return f"La contraseña nueva debe tener al menos {LARGO_MINIMO} caracteres. Una frase larga sirve."
     if len(password) > LARGO_MAXIMO:
         return f"La contraseña nueva no puede superar los {LARGO_MAXIMO} caracteres."
+    if len(password.encode("utf-8")) > BYTES_MAXIMO:
+        return "La contraseña nueva es demasiado larga: las letras con tilde y la ñ cuentan doble. Acórtala un poco."
     normalizada = _normalizar(password)
     if normalizada in _COMUNES or _es_secuencia(normalizada):
         return "Esa contraseña es muy común o muy fácil de adivinar. Elige otra."

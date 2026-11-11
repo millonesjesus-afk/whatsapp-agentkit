@@ -420,6 +420,8 @@ async def no_autenticado_handler(request: Request, exc: NoAutenticado):
                 "mensaje": "No hay una sesión activa. Inicia sesión para continuar.",
                 "detalle": None,
                 "request_id": request_id,
+                # 2026-11-11: "sesion_cerrada" (cambió la contraseña) o "cuenta_desactivada"; None si solo venció.
+                "motivo": getattr(exc, "motivo", None),
             },
             headers={"X-Request-Id": request_id},
         )

@@ -35,7 +35,7 @@ import secrets
 import subprocess
 import tempfile
 import uuid
-import bcrypt
+import math
 from datetime import datetime, timedelta, timezone, date as _date
 from urllib.parse import quote_plus, urlencode
 from fastapi import APIRouter, Depends, HTTPException, Form, Request, UploadFile, File, WebSocket, WebSocketDisconnect
@@ -43,7 +43,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse, Resp
 from sqlalchemy.exc import IntegrityError
 
 from agent.tiempo_real import gestor_conexiones, emitir_ticket_ws, validar_y_consumir_ticket_ws
-from agent.rate_limit import limitador_login, bloqueo_login, ip_cliente
+from agent.rate_limit import limitador_login, bloqueo_login, bloqueo_cambio_password, ip_cliente
 from agent.panel_antiguo import url_panel_nuevo
 from agent.memory import (
     resumen_uso_mensual,
@@ -107,7 +107,7 @@ from agent import pipeline_etapas
 from agent import derivacion_automatica
 from agent import plantillas_sms
 from agent import origen_conversacion
-from agent.politica_password import validar_password
+from agent.politica_password import password_coincide, validar_password
 from agent.analitica_tendencia import partir_periodo
 from agent import analitica_senales
 from agent import analitica_metas
@@ -164,7 +164,9 @@ from agent.asignacion import UMBRAL_SENIOR_DEFAULT, UMBRAL_INTERMEDIO_DEFAULT
 from agent.services.servicio_comercial import (
     servicio_comercial, MODALIDADES_PAGO, MEDIO_PAGO_FINANCIADO, MEDIOS_PAGO_CONTADO,
 )
-from agent.services.servicio_identidad import servicio_identidad, NoAutenticado
+from agent.services.servicio_identidad import (
+    servicio_identidad, NoAutenticado, fijar_huella, registrar_cambio_propio, sesion_vigente,
+)
 from agent.providers import obtener_proveedor
 
 logger = logging.getLogger("agentkit")
@@ -511,7 +513,7 @@ async def websocket_panel(websocket: WebSocket):
         # Camino legacy — cookie de sesión de Starlette, same-origin (panel
         # HTML servido por este mismo FastAPI). Sin cambios de comportamiento.
         usuario = await obtener_usuario(username_sesion)
-        if usuario is None:
+        if usuario is None or not sesion_vigente(websocket.session, usuario):
             await websocket.close(code=4401)
             return
         username = username_sesion
@@ -2162,14 +2164,17 @@ async def login_submit(request: Request, username: str = Form(...), password: st
     # loguearse si el username existe pero está apagado.
     credenciales_validas = (
         usuario is not None and usuario.get("activo", True)
-        and bcrypt.checkpw(password.encode(), usuario["password_hash"].encode())
+        and password_coincide(password, usuario["password_hash"])
     )
     if not credenciales_validas:
         bloqueo_login.registrar_fallo(clave_bloqueo, MAX_INTENTOS_LOGIN, BLOQUEO_LOGIN_SEGUNDOS)
         return RedirectResponse(url="/dashboard/login?error=Usuario+o+contraseña+incorrectos", status_code=303)
 
     bloqueo_login.registrar_exito(clave_bloqueo)
+    # Sesión nueva desde cero: borra el motivo de un cierre anterior y cualquier resto de otra sesión.
+    request.session.clear()
     request.session["username"] = usuario["username"]
+    fijar_huella(request.session, usuario["password_hash"])  # S1: la sesión queda atada a esta contraseña
     return RedirectResponse(url="/dashboard", status_code=303)
 
 
@@ -11051,24 +11056,77 @@ async def mi_perfil(request: Request, usuario: dict = Depends(_usuario_actual), 
     return _pagina("Mi perfil", usuario, cuerpo, request=request)
 
 
-@router.post("/perfil/password")
+# Cambio de la propia contraseña (Mi perfil, panel nuevo; 2026-11-11). Reemplaza al POST del formulario del panel viejo
+# (`/perfil/password`), que se quitó: no tenía límite de intentos y su pantalla ya redirige al panel nuevo.
+#
+# Seguridad aprobada por el dueño (S1 a S5): 5 intentos fallidos con la contraseña ACTUAL bloquean 15 minutos (S2); al
+# cambiarla, la huella de esta sesión se actualiza y el resto de sesiones de la cuenta se cierran en su siguiente pedido
+# (S1, ver `sesion_vigente`); el cambio queda en la auditoría, nunca la contraseña (S3).
+#
+# Códigos, para que el panel marque el campo correcto (el BFF solo conserva mensaje y código):
+#   400 → la contraseña actual no es correcta · 422 → la nueva no sirve (no coinciden, igual a la actual, política)
+#   429 → bloqueado, con `Retry-After` en segundos.
+MAX_INTENTOS_CAMBIO_PASSWORD = 5
+BLOQUEO_CAMBIO_PASSWORD_SEGUNDOS = 15 * 60
+
+
+def _error_bloqueo_cambio_password(restante: float) -> HTTPException:
+    minutos = max(1, math.ceil(restante / 60))
+    return HTTPException(
+        status_code=429,
+        detail=f"Demasiados intentos con la contraseña actual. Por seguridad, espera {minutos} minuto(s) y vuelve a intentarlo.",
+        headers={"Retry-After": str(math.ceil(restante))},
+    )
+
+
+@router.post("/perfil/password.json")
 async def cambiar_password_propia(
-    password_actual: str = Form(...),
-    password_nueva: str = Form(...),
-    password_nueva_repetir: str = Form(...),
+    request: Request,
     usuario: dict = Depends(_usuario_actual),
     _csrf: None = Depends(verificar_csrf),
 ):
-    if not bcrypt.checkpw(password_actual.encode(), usuario["password_hash"].encode()):
-        return RedirectResponse(url="/dashboard/perfil?error=La+contraseña+actual+no+es+correcta", status_code=303)
-    if password_nueva != password_nueva_repetir:
-        return RedirectResponse(url="/dashboard/perfil?error=Las+contraseñas+nuevas+no+coinciden", status_code=303)
-    motivo = validar_password(password_nueva, username=usuario["username"], nombre=usuario.get("nombre"))
-    if motivo:
-        return RedirectResponse(url="/dashboard/perfil?error=" + quote_plus(motivo), status_code=303)
+    try:
+        body = await request.json()
+    except ValueError:
+        body = None
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=422, detail="Faltan datos para cambiar la contraseña.")
+    actual, nueva, repetir = (body.get(k) for k in ("password_actual", "password_nueva", "password_nueva_repetir"))
+    if not all(isinstance(v, str) for v in (actual, nueva, repetir)):
+        raise HTTPException(status_code=422, detail="Faltan datos para cambiar la contraseña.")
 
-    await cambiar_password(usuario["username"], usuario["negocio_id"], password_nueva)
-    return RedirectResponse(url="/dashboard/perfil?ok=Contraseña+actualizada+correctamente", status_code=303)
+    clave = f"{usuario['negocio_id']}:{usuario['username']}"
+    restante = bloqueo_cambio_password.segundos_restantes(clave)
+    if restante is not None:
+        raise _error_bloqueo_cambio_password(restante)
+
+    if not password_coincide(actual, usuario["password_hash"]):
+        bloqueo_cambio_password.registrar_fallo(clave, MAX_INTENTOS_CAMBIO_PASSWORD, BLOQUEO_CAMBIO_PASSWORD_SEGUNDOS)
+        restante = bloqueo_cambio_password.segundos_restantes(clave)
+        if restante is not None:
+            raise _error_bloqueo_cambio_password(restante)
+        raise HTTPException(status_code=400, detail="La contraseña actual no es correcta.")
+    bloqueo_cambio_password.registrar_exito(clave)
+
+    if nueva != repetir:
+        raise HTTPException(status_code=422, detail="Las contraseñas nuevas no coinciden.")
+    if nueva == actual:
+        raise HTTPException(status_code=422, detail="La contraseña nueva tiene que ser distinta de la actual.")
+    motivo = validar_password(nueva, username=usuario["username"], nombre=usuario.get("nombre"))
+    if motivo:
+        raise HTTPException(status_code=422, detail=motivo)
+
+    # Antes de cambiarla: los pedidos que este mismo navegador tenga en vuelo con la cookie anterior no deben sacarlo.
+    registrar_cambio_propio(usuario["username"], usuario["password_hash"])
+    await cambiar_password(usuario["username"], usuario["negocio_id"], nueva)
+    actualizado = await obtener_usuario(usuario["username"], negocio_id=usuario["negocio_id"])
+    if actualizado is not None:
+        fijar_huella(request.session, actualizado["password_hash"])
+    await mem.registrar_auditoria(
+        "password_cambiada", actor=usuario["username"], negocio_id=usuario["negocio_id"],
+        entidad_tipo="usuario", entidad_id=usuario["username"], payload={"origen": "mi_perfil"},
+    )
+    return JSONResponse({"ok": True})
 
 
 # ── Catálogo de productos (API JSON del panel — sub-bloque b) ──────────────

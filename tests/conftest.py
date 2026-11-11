@@ -162,6 +162,10 @@ def _limitadores_de_tasa_limpios():
         limitador._eventos.clear()
     rate_limit.bloqueo_login._fallos.clear()
     rate_limit.bloqueo_login._bloqueado_hasta.clear()
+    rate_limit.bloqueo_cambio_password._fallos.clear()
+    rate_limit.bloqueo_cambio_password._bloqueado_hasta.clear()
+    from agent.services import servicio_identidad as identidad
+    identidad._cambios_recientes.clear()
     yield
 
 
