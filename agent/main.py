@@ -54,6 +54,7 @@ from agent.services.servicio_conversacion import servicio_conversacion
 from agent.rate_limit import limitador_webhook, ip_cliente
 from agent.http_utils import cerrar_cliente_http
 from agent.api_contrato import registrar_contrato_interno, FiltroRequestId
+from agent.panel_antiguo import registrar_redireccion_panel_antiguo
 
 load_dotenv()
 
@@ -383,6 +384,7 @@ app.add_middleware(
     https_only=(ENVIRONMENT == "production"),
 )
 registrar_contrato_interno(app)
+registrar_redireccion_panel_antiguo(app)   # las pantallas del panel antiguo mandan al panel nuevo (agent/panel_antiguo.py)
 app.include_router(dashboard_router)
 
 
