@@ -28,6 +28,7 @@ import io
 import html
 import json
 import logging
+import mimetypes
 import os
 import re
 import secrets
@@ -6916,6 +6917,90 @@ async def quitar_catalogo(archivo_id: int, usuario: dict = Depends(servicio_iden
     if not eliminado:
         raise HTTPException(status_code=404, detail="Catálogo no encontrado")
     return RedirectResponse(url="/dashboard/catalogos", status_code=303)
+
+
+# ── Biblioteca de archivos (API JSON del panel nuevo, Configuración v2) ─────
+#
+# Misma librería que `/catalogos` (archivos_adjuntos con reutilizable=True), pero con respuestas JSON para el BFF de
+# Next.js. Los permisos son los de siempre: los tres roles ven la lista; solo el administrador sube y quita. Nunca se
+# expone `ruta_disco`.
+
+TAMANO_MAXIMO_ETIQUETA = 150  # ArchivoAdjunto.etiqueta es String(150)
+TAMANO_MAXIMO_NOMBRE_ARCHIVO = 255  # ArchivoAdjunto.nombre_original es String(255)
+
+
+def _archivo_biblioteca_a_json(archivo: dict) -> dict:
+    return {
+        "id": archivo["id"],
+        "etiqueta": archivo["etiqueta"] or archivo["nombre_original"],
+        "nombre_original": archivo["nombre_original"],
+        "content_type": archivo["content_type"],
+        "tamano_bytes": archivo["tamano_bytes"],
+        "subido_por": archivo["subido_por"],
+        "creado": iso_utc(archivo["creado"]),
+    }
+
+
+@router.get("/biblioteca.json")
+async def listar_biblioteca(usuario: dict = Depends(_usuario_actual)):
+    archivos = await servicio_conversacion.listar_archivos_reutilizables(usuario["negocio_id"])
+    return JSONResponse({
+        "archivos": [_archivo_biblioteca_a_json(a) for a in archivos],
+        "puede_gestionar": usuario["rol"] == "admin",
+        "extensiones": sorted(EXTENSIONES_ARCHIVO_PERMITIDAS),
+        "tamano_maximo_mb": TAMANO_MAXIMO_ARCHIVO_MB,
+    })
+
+
+@router.post("/biblioteca/nuevo")
+async def subir_a_biblioteca(
+    etiqueta: str = Form(...),
+    archivo: UploadFile = File(...),
+    usuario: dict = Depends(servicio_identidad.requiere_rol("admin")),
+    _csrf: None = Depends(verificar_csrf),
+):
+    etiqueta = etiqueta.strip()
+    if not etiqueta:
+        raise HTTPException(status_code=400, detail="Ponle un nombre al archivo para identificarlo")
+    if len(etiqueta) > TAMANO_MAXIMO_ETIQUETA:
+        raise HTTPException(status_code=400, detail=f"El nombre no puede superar los {TAMANO_MAXIMO_ETIQUETA} caracteres")
+    nombre = os.path.basename((archivo.filename or "").replace("\\", "/"))
+    if not nombre:
+        raise HTTPException(status_code=400, detail="Elige un archivo")
+    if len(nombre) > TAMANO_MAXIMO_NOMBRE_ARCHIVO:
+        raise HTTPException(status_code=400, detail="El nombre del archivo es demasiado largo")
+    extension = os.path.splitext(nombre)[1].lower()
+    if extension not in EXTENSIONES_ARCHIVO_PERMITIDAS:
+        raise HTTPException(status_code=400, detail="Solo se aceptan PDF, Word, Excel, PowerPoint, texto (.txt), JPG o PNG")
+
+    limite = TAMANO_MAXIMO_ARCHIVO_MB * 1024 * 1024
+    contenido = await archivo.read(limite + 1)  # nunca carga en memoria más de lo permitido
+    if not contenido:
+        raise HTTPException(status_code=400, detail="El archivo está vacío")
+    if len(contenido) > limite:
+        raise HTTPException(status_code=400, detail=f"El archivo supera los {TAMANO_MAXIMO_ARCHIVO_MB}MB permitidos")
+
+    ruta_disco = _guardar_archivo_en_disco(nombre, contenido)
+    creado = await servicio_conversacion.crear_archivo_adjunto(
+        nombre_original=nombre, ruta_disco=ruta_disco,
+        # El tipo lo decide la extensión validada, no lo que declare el navegador (con él se elige imagen o documento al enviar por WhatsApp).
+        content_type=mimetypes.guess_type(nombre)[0] or "application/octet-stream",
+        tamano_bytes=len(contenido), subido_por=usuario["username"],
+        reutilizable=True, etiqueta=etiqueta, negocio_id=usuario["negocio_id"],
+    )
+    return JSONResponse({"ok": True, "archivo": _archivo_biblioteca_a_json(creado)}, status_code=201)
+
+
+@router.post("/biblioteca/{archivo_id}/eliminar")
+async def quitar_de_biblioteca(
+    archivo_id: int,
+    usuario: dict = Depends(servicio_identidad.requiere_rol("admin")),
+    _csrf: None = Depends(verificar_csrf),
+):
+    """Deja de ofrecer el archivo para envíos nuevos; no borra el archivo del disco (mensajes viejos pueden referenciarlo)."""
+    if not await servicio_conversacion.eliminar_archivo_reutilizable(archivo_id, usuario["negocio_id"]):
+        raise HTTPException(status_code=404, detail="Archivo no encontrado")
+    return JSONResponse({"ok": True})
 
 
 # response_class=HTMLResponse en las 3 escrituras del CRM: cuando detectan un
