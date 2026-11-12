@@ -39,6 +39,8 @@ RUTAS_SOLO_ADMIN = [
     ("POST", "/dashboard/canales-whatsapp/registrar"),
     ("POST", "/dashboard/canales-whatsapp/1/editar"),
     ("POST", "/dashboard/canales-whatsapp/1/editar.json"),               # editar y renovar el token desde el panel nuevo
+    ("POST", "/dashboard/canales-whatsapp/1/activo.json"),
+    ("POST", "/dashboard/canales-whatsapp/1/modo.json"),
     ("POST", "/dashboard/canales-whatsapp/1/toggle"),
     ("POST", "/dashboard/canales-whatsapp/1/modo"),
     ("POST", "/dashboard/canales-whatsapp/promover-prompt"),

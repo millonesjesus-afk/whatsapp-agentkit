@@ -11020,6 +11020,70 @@ async def editar_canal_whatsapp_json(
     })
 
 
+# ── Activar o desactivar un número y cambiar su modo, desde el panel nuevo (2026-11-11) ─────────────────────────────
+#
+# Reemplazan a `/canales-whatsapp/{id}/toggle` y `/modo` del panel antiguo, que invertían el valor actual: aquí el
+# cuerpo dice el valor deseado, así un doble clic o dos pantallas abiertas no lo dejan al revés. Si el canal ya está
+# como se pide, no pasa nada y no se registra. Solo administrador, solo canales de su negocio, y cada cambio queda en
+# el historial con el valor anterior y el nuevo.
+
+MODOS_CANAL = ("produccion", "pruebas")
+
+
+async def _cambiar_campo_canal(usuario: dict, canal_id: int, campo: str, nuevo, actual_texto, nuevo_texto) -> dict:
+    canal = await _verificar_ownership_canal(usuario, canal_id)
+    if canal.get(campo, "produccion" if campo == "modo" else None) == nuevo:
+        return {"ok": True, "cambio": False, "canal": {"id": canal_id, "nombre": canal["nombre"], campo: nuevo}}
+    await actualizar_canal_whatsapp(canal_id, **{campo: nuevo})
+    await mem.registrar_auditoria(
+        "canal_whatsapp_editado", actor=usuario["username"], negocio_id=usuario["negocio_id"],
+        entidad_tipo="configuracion", entidad_id=str(canal_id),
+        payload={"cambios": {f"canal_whatsapp|{canal['nombre']}|{campo}": {"antes": actual_texto, "despues": nuevo_texto}}},
+    )
+    return {"ok": True, "cambio": True, "canal": {"id": canal_id, "nombre": canal["nombre"], campo: nuevo}}
+
+
+async def _cuerpo_json_objeto(request: Request) -> dict:
+    try:
+        body = await request.json()
+    except ValueError:
+        body = None
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=422, detail="No llegaron datos para guardar.")
+    return body
+
+
+@router.post("/canales-whatsapp/{canal_id}/activo.json")
+async def canal_whatsapp_activo_json(
+    canal_id: int,
+    request: Request,
+    usuario: dict = Depends(servicio_identidad.requiere_rol("admin")),
+    _csrf: None = Depends(verificar_csrf),
+):
+    body = await _cuerpo_json_objeto(request)
+    activo = body.get("activo")
+    if not isinstance(activo, bool):
+        raise HTTPException(status_code=422, detail="Indica si el número debe quedar activo o inactivo.")
+    return JSONResponse(await _cambiar_campo_canal(
+        usuario, canal_id, "activo", activo, "inactivo" if activo else "activo", "activo" if activo else "inactivo",
+    ))
+
+
+@router.post("/canales-whatsapp/{canal_id}/modo.json")
+async def canal_whatsapp_modo_json(
+    canal_id: int,
+    request: Request,
+    usuario: dict = Depends(servicio_identidad.requiere_rol("admin")),
+    _csrf: None = Depends(verificar_csrf),
+):
+    body = await _cuerpo_json_objeto(request)
+    modo = body.get("modo")
+    if modo not in MODOS_CANAL:
+        raise HTTPException(status_code=422, detail="El modo tiene que ser «produccion» o «pruebas».")
+    otro = "pruebas" if modo == "produccion" else "produccion"
+    return JSONResponse(await _cambiar_campo_canal(usuario, canal_id, "modo", modo, otro, modo))
+
+
 @router.post("/canales-whatsapp/{canal_id}/toggle")
 async def toggle_canal_whatsapp(canal_id: int, usuario: dict = Depends(servicio_identidad.requiere_rol("admin")), _csrf: None = Depends(verificar_csrf)):
     actual = await _verificar_ownership_canal(usuario, canal_id)
