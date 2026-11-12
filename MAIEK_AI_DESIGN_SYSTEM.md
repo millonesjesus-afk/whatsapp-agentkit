@@ -1,16 +1,16 @@
 # Maiek AI — Design Language (MDL)
 
-**Versión 1.2 · Official Design Standard**
+**Versión 1.3 · Official Design Standard**
 
 | | |
 |---|---|
 | Documento | Maiek Design Language (MDL) |
 | Proyecto | Maiek AI |
-| Versión | 1.2 |
-| Estado | **Approved** |
+| Versión | 1.3 (borrador — decisiones D1 a D17 aprobadas; falta la aprobación del documento y su commit) |
+| Estado | **Approved** hasta v1.2; la Revisión v1.3 distingue decisiones «Aprobadas» de «Propuestas» |
 | Fecha de creación | 2026-07-26 |
 | Autor | Claude, a pedido de Jesús Millones |
-| Última actualización | 2026-09-14 |
+| Última actualización | 2026-11-12 |
 
 > Depende de [`MAIEK_AI_FRAMEWORK.md`](MAIEK_AI_FRAMEWORK.md) y
 > [`MAIEK_AI_PLATFORM_ARCHITECTURE.md`](MAIEK_AI_PLATFORM_ARCHITECTURE.md).
@@ -27,6 +27,7 @@
 | 1.0 | 2026-07-26 | Claude | Primera versión — Capítulos 0 a 7 (Filosofía, Personalidad, Foundations, Color System, Typography System, Iconography System, Motion Language). |
 | 1.1 | 2026-07-26 | Claude | Profesionalización documental (portada, control de versiones, objetivo, alcance, cómo utilizar el documento, glosario, convenciones, referencias, apéndices) + revisión técnica del Typography System. El contenido de los Capítulos 0–7 se mantiene intacto salvo la actualización puntual del Typography System (ver Revisión técnica más abajo). |
 | 1.2 | 2026-09-14 | Claude, a pedido de Jesús Millones | Revisión cromática **"MAIEK Flow Intelligence"** (Capítulo 4 — Color System): nueva paleta principal (Cyan Flow, Azul Primary, Azul Strong, Navy, Dorado Acento) con verificación de contraste WCAG AA, reemplazando los hex de "Colores principales"/"Colores secundarios"/escalas tonales de la v1.1 (que se conservan en el documento marcados como Superseded, por trazabilidad histórica — nunca se borran). La arquitectura de 3 capas (identidad/semántica/superficie) y los roles de token (primario/primario-sólido/secundario/semánticos) NO cambian, solo sus valores hex. Decidido en el marco del Gate UX-03 (auditoría + plan de Conversaciones/CRM-Pipeline/Lead Detail); **la aplicación real de estos valores a `tailwind.config.ts`/`globals.css` de `maiek-frontend` queda fuera de esta revisión documental** — es un paso de implementación posterior, sujeto a su propia aprobación. |
+| 1.3 | 2026-11-12 | Claude, a pedido de Jesús Millones | **Consolidación y dirección visual «E»** (ver «Revisión v1.3» abajo): una sola paleta vigente verificada con una matriz de contraste de 72 pares (claro y oscuro), registro de las decisiones del producto que el código ya aplicaba y el MDL no documentaba (tipografía, escala de texto, tamaño mínimo), y diecisiete decisiones aprobadas el 2026-11-12, D1 a D17 (tinta Navy, menú claro y desplegable, radios «Moderada», etiquetas y avatares, movimiento, enlaces, gris único, indicadores de estado, pila tipográfica, escala de texto, selector de densidad, táctil por puntero, base oscura «tinta neutra» y colores de etapa). Solo queda como «Propuesta» la definición de las escalas de 7 pasos de la paleta v1.2. **La aplicación a `tailwind.config.ts`/`globals.css` de `maiek-frontend` queda fuera de esta revisión documental** — paso posterior con su propia aprobación. |
 
 Cualquier modificación futura de fondo debe sumar una fila nueva a esta tabla — este documento
 no se edita en silencio.
@@ -102,6 +103,112 @@ convertidos en variables de código). Ver "Próximo Entregable" para el primero 
 todo cambio de fondo suma una fila nueva a la tabla de arriba, con fecha, autor y descripción
 del cambio. Un documento "Approved" puede seguir evolucionando; lo que no puede es cambiar sin
 que quede registrado por qué.
+
+---
+
+# Revisión v1.3 — Consolidación y dirección visual «E»
+
+*Fecha: 2026-11-12. Origen: auditoría de UX de `maiek-frontend`, matriz de contraste de los tokens
+reales y cuatro rondas de maquetas aprobadas por el dueño.*
+
+La arquitectura de tres capas (identidad / semántica / superficie) y los roles de token **no
+cambian**. Esta revisión hace tres cosas: (1) deja **una sola fuente de verdad** donde v1.1 y
+v1.2 se contradecían, (2) **registra** decisiones que el producto ya aplicaba y el documento no
+decía, y (3) **suma** la dirección visual «E» (calma, tinta oscura única, color solo en los
+datos). Las secciones antiguas no se borran: llevan una nota «v1.3» que apunta aquí.
+
+## Estado de cada decisión
+
+| Estado | Significado |
+|---|---|
+| **Aprobada** | Elegida por el dueño el 2026-11-12 sobre maqueta. Norma de este documento. |
+| **Registrada** | Ya vigente en el código; se documenta sin cambiarla. |
+| **Propuesta** | Presentada con evidencia, **sin aprobar**. No es norma hasta que el dueño la apruebe. |
+
+## Decisiones aprobadas (2026-11-12)
+
+| ID | Decisión | Detalle |
+|---|---|---|
+| D1 | Dirección «E» | Superficies casi blancas separadas por borde de 1 px; **sin sombra en reposo** (elevación 0 del Capítulo 3; hoy el código usa `elevation-card`, que se alinea al aplicar); una sola tinta de acción; color reservado a los datos; panel de contexto a la derecha con pestañas en cápsula. |
+| D2 | Tinta = **Navy `#102A56`** | Botón primario, ítem activo del menú, burbuja enviada y botón Enviar. Blanco sobre Navy = 14.12:1. En modo oscuro la tinta es `#E4ECFA` con texto `#0E1623` (15.27:1, ver D16). Azul Primary/Strong se conservan para enlaces, foco e indicadores; el rol `primary-solid` pasa a significar la tinta. |
+| D3 | Menú lateral **claro** | Fondo `surface-1`, borde derecho de 1 px, ítem activo en píldora de tinta. Reemplaza al Sidebar Navy. |
+| D4 | Menú **desplegable** | Barra de íconos de 48 px; un panel de casos (≈184 px, múltiplo de 8, a fijar al implementar) entra **por encima** del contenido, sin reacomodarlo: `translateX(-8px → 0)` y opacidad en `motion-base`, `ease-out-expo`. |
+| D5 | Radios «**Moderada**» | `radius-md` 10 → **8 px** (botones, campos, pestaña interna, ítems); `radius-lg` 14 → **12 px** (tarjetas, compositor, burbujas, pista de pestañas, popovers); `radius-sm` 6 px (etiquetas); `radius-xl` 20 px sin cambio (modales y hojas, no evaluados en maqueta); `radius-full` solo para avatares, interruptores, contadores y acciones rápidas. Las maquetas usaron 10/7 en las pestañas: se normalizan a 12/8 para no salir de la escala. |
+| D6 | Etiquetas **rectangulares** | `radius-sm` (6 px), fondo tinte suave + texto de la misma familia (pares verificados en la matriz). La píldora completa se reserva a contadores y acciones rápidas. |
+| D7 | Avatar **círculo** | `radius-full`, iniciales sobre tinte suave (mismos pares que las etiquetas). |
+| D8 | Reglas de **movimiento** | (a) Entrada escalonada solo en pantallas ocasionales (Copiloto, estados vacíos): `translateY(8px → 0)` + opacidad, `motion-base`, `ease-out-expo`, 70 ms entre elementos, máximo ~10. (b) Regla de frecuencia: lo que se usa decenas de veces al día (menú, lista de chats, filas de tabla) no se anima o dura como máximo `motion-instant`. (c) Botones: estado presionado `scale(0.97)` en `motion-instant`, solo `transform`. (d) `prefers-reduced-motion` desactiva a), b) y c). Las maquetas usaron 240/120 ms: se normalizan a los tokens 220/100 ms. |
+| D9 | **Enlaces** (antes P1, aprobada el 2026-11-12 sobre maqueta en contexto) | Rol nuevo `primary-text`: `#0057D9` en claro y `#7DB1FF` en oscuro. `#0072FF` queda para foco, relleno e íconos, donde no hay texto encima. Enlace hoy 4.33 sobre tarjeta, 3.59 sobre hover y 3.87 sobre fila activa; con D9: 6.24 / 5.17 / 5.57. En oscuro: 4.24 y 3.51 → 5.72 y 4.73. |
+| D10 | **Un solo gris de apoyo** (antes P2, aprobada el 2026-11-12 sobre maqueta en contexto) | El texto secundario y el atenuado se fusionan: `#5B6578` en claro y `#C3CCDA` en oscuro. La jerarquía la dan el tamaño y el peso (12 px frente a 13 px), no un gris más pálido. Claro: sobre hover 4.13 → 4.87 y sobre fila activa 4.44 → 5.24. Oscuro: el atenuado `#9AA3B2` daba 4.07 sobre la fila activa; `#C3CCDA` pasa en todos los fondos. |
+| D11 | **Indicadores de estado** (antes P3, ampliada y aprobada el 2026-11-12 sobre maqueta en contexto) | Todo indicador de estado lleva **ícono y palabra** además del color (el Capítulo 3 ya prohibía comunicar un estado solo por color). En modo claro los colores pasan a verde `#00853D`, ámbar `#9A6B00` y rojo `#D73939` (3.8 a 4.7 sobre tarjeta, hover y fila activa; umbral 3:1). Los puntos de hoy daban 1.84 (ámbar sobre blanco), 1.52 (ámbar sobre hover) y 2.75 (verde sobre hover). El modo oscuro no cambia (5.0 a 8.2). Frescura del Pipeline: ✓ «Al día», reloj «Atención», ⚠ «Atrasado». |
+| D12 | **Pila tipográfica** (antes P4, aprobada el 2026-11-12 sobre muestra comparativa) | Se documenta la pila que el código aplica desde el 2026-10-31: `"Segoe UI Variable Text"`, `"Segoe UI"`, Inter (cargada con `next/font`), `-apple-system`, Arial. En Windows se ve Segoe UI, más definida a 12–14 px por su ajuste fino (comprobado en la laptop del dueño); en los demás sistemas, Inter. Poppins solo en la marca, nunca en tablas ni párrafos. Reemplaza la frase «Producto: Inter» del Capítulo 5. |
+| D13 | **Escala de texto** (antes P5, aprobada el 2026-11-12 sobre ficha comparativa) | `text-caption` pasa de 11 a **12 px** (el código ya lo aplica). Roles: **12 px** metadato suelto (hora, etiqueta, chip, rótulo de campo); **13 px** frase que se lee (avisos, instrucciones, descripciones, filas densas de tabla); **14 px** cuerpo (mensajes, nombres, texto principal); 16 px formularios y cuerpo destacado; 18 a 28 px títulos, sin cambio. Un aviso de 12 px junto a burbujas de 14 se ve fuera de escala (hallazgo del 2026-11-02). **Prohibidos los tamaños sueltos** (`text-[Npx]`; hoy hay 0 en los componentes). Pesos sin cambio: 400, 500, 600 (700 solo en displays). Reemplaza el «mínimo de fuente 11px sin excepción» del Capítulo 3. |
+| D14 | **Selector de densidad** (antes P6, aprobada el 2026-11-12 sobre simulador) | Selector por usuario con tres opciones: **Automática** (por defecto; se comporta como la variante `corto:` de hoy: compacta con ventana de menos de 700 px de alto y puntero fino, nunca en pantalla táctil), **Cómoda** (fuerza filas amplias) y **Compacta** (fuerza filas apretadas). La compacta solo ajusta tamaños y espacios; nunca oculta ni reordena contenido; conserva el piso de 13 px en frases y 32 px de alto en controles con mouse. Las alturas de fila se miden en las pantallas reales antes de fijarlas. Implementación: se redefine la variante `corto:` para que responda también a un atributo del usuario, sin tocar sus usos actuales; dónde se guarda la preferencia (navegador o cuenta) se decide al implementar. Complementa las «dos densidades» del Capítulo 3: la elección deja de ser solo por contexto y pasa también al usuario. |
+| D15 | **Tamaño táctil por tipo de puntero** (antes P7, aprobada el 2026-11-12 sobre simulador de cinco dispositivos) | La decisión deja de depender del ancho de pantalla: **44 px con `pointer: coarse`** (táctil) en cualquier ancho y **32 px con `pointer: fine`** (mouse o touchpad). Piso absoluto de **24 px** con separación entre objetivos (WCAG 2.2, criterio 2.5.8), también en densidad Compacta. Los íconos pequeños (por ejemplo ⋯) conservan su dibujo, con un área de toque invisible de 44 px. Con pantalla táctil mandan los 44 px aunque la densidad sea Compacta. Antes: 44 px por debajo de 768 px y 32 px desde 768 px, de modo que una tablet horizontal táctil recibía 32 px y una ventana angosta con mouse recibía 44 px. Reemplaza «Área mínima de toque: 32px en desktop, 44px en mobile» del Capítulo 3. |
+| D16 | **Base del modo oscuro: «tinta neutra»** (antes parte de P8, aprobada el 2026-11-12 sobre tres opciones; se eligió la C) | Las superficies oscuras dejan la paleta v1.1 (azul profundo `#0B1D3A`) y pasan a un casi negro azulado: **página `#0E1623`, tarjeta `#141F31`, popover y hover `#1C2A41`, fila activa `#1D3557`**; divisor `#273650`; borde de control `#6A83A8` (4.69 / 4.27 / 3.72 sobre página / tarjeta / popover). El Navy de marca `#102A56` queda como acento (tinta y logo), no como superficie. El texto sobre la tinta clara `#E4ECFA` pasa a `#0E1623` (15.27:1). Todo el texto aprobado (texto `#F2F4F7`, gris `#C3CCDA`, enlace `#7DB1FF`) pasa 4.5:1 sobre las cuatro superficies; la separación visual entre tarjeta y página es baja (1.10:1) y se compensa con el borde fino. Reemplaza las tablas de superficies y de Dark Mode de la v1.1 en lo que toca a los fondos. |
+| D17 | **Colores de etapa del Pipeline** (antes P9, aprobada el 2026-11-12 sobre maqueta en claro y oscuro) | Las etapas se muestran como etiquetas rectangulares (D6), con fondo suave y texto de la misma familia, y siempre con su palabra: **Con Gabi** = Cian (el color reservado a la IA), **Con asesora** = Azul, **Agendado** = Navy, **Vendido** = Éxito, **Cerrado** = Neutro; **Sin asignar** o atrasado = Advertencia. La barra de proporción y la leyenda del Pipeline usan los mismos colores. Todos los pares pasan 4.5:1: claro 5.24 · 5.57 · 11.04 · 5.59 · 5.63 · 5.33; oscuro 6.94 · 5.78 · 7.74 · 4.61 · 7.56 · 7.41. Los colores de los roles de Equipo (Administrador, Supervisor, Asesor) no se definen en esta revisión. |
+
+## Decisiones propuestas (pendientes de aprobación)
+
+| ID | Propuesta | Evidencia |
+|---|---|---|
+| P8 | Escalas de 7 pasos de Azul Primary, Azul Strong, Cian, Navy y Dorado Acento (quedaron pendientes en v1.2). | No bloquea nada; se definen al aplicar, con verificación de contraste. |
+
+## Registrado: lo que el código ya aplicaba
+
+| Tema | Valor vigente en el código | Dónde |
+|---|---|---|
+| Texto atenuado | `#5B6578` (antes neutral 600 `#626C7E`) | `globals.css` |
+| Borde de controles (WCAG 1.4.11, 3:1) | `#858FA1` claro, `#5A7FB5` oscuro; los divisores `#E1E5EB` quedan decorativos | `globals.css` |
+| Fondo del botón destructivo | `#D73939` (blanco encima 4.63:1) | `globals.css` |
+| Cian como texto | `#07708F` claro, `#62D0FA` oscuro | `globals.css` |
+| Semánticos en oscuro | texto de Éxito `#00AC4F`, Error `#F57474`, Información `#4D96FF` | `globals.css` |
+| Tamaño mínimo de texto | 12 px (`text-caption` pasó de 11 a 12) | `tailwind.config.ts` |
+| Frases que se leen | 13 px mínimo; 12 px solo para metadatos sueltos | `CLAUDE.md` de `maiek-frontend` |
+| Foco, movimiento reducido, alto contraste, impresión | `:focus-visible` de 2 px, `prefers-reduced-motion`, `forced-colors`, `@media print` | `globals.css` |
+
+## Matriz de contraste verificada (2026-11-12)
+
+Fórmula WCAG 2.x sobre sRGB, valores exactos. Umbrales: 4.5:1 texto de cuerpo, 3:1 elementos
+de interfaz. «✗» = bajo el umbral. Se evaluaron 72 pares de los tokens reales; 20 quedan bajo
+el umbral: 7 son divisores decorativos (exentos), 2 son el borde de control sobre fondos de
+hover y de fila activa (2.70 y 2.91; candidato `#7A8498`, 3.12 sobre hover) y 11 se corrigen
+con D9–D11 (algunos pares comparten fondo y se cuentan dos veces en el oscuro).
+
+| Modo | Par | Hoy | v1.3 |
+|---|---|---|---|
+| Claro | Texto principal `#141A26` / página | 16.66 | sin cambio |
+| Claro | Texto secundario / tarjeta · hover · fila activa | 4.97 · **4.13 ✗** · **4.44 ✗** | D10: 5.87 · 4.87 · 5.24 |
+| Claro | Enlace / tarjeta · hover · fila activa | **4.33 ✗** · **3.59 ✗** · **3.87 ✗** | D9: 6.24 · 5.17 · 5.57 |
+| Claro | Blanco / Azul Strong · Navy (tinta) | 6.24 · 14.12 | sin cambio |
+| Claro | Borde de control / página · tarjeta · hover · fila activa | 3.12 · 3.26 · **2.70 ✗** · **2.91 ✗** | páginas y tarjetas sin cambio; hover y fila activa por definir (`#7A8498`: 3.12 sobre hover) |
+| Claro | Indicador de advertencia / tarjeta | **1.84 ✗** | D11: 4.69 (`#9A6B00`; verde `#00853D` 4.75 y rojo `#D73939` 4.63 sobre tarjeta) |
+| Claro | Etiquetas (texto / fondo): Con Gabi · Con asesora · Agendado · Vendido · Cerrado · Advertencia | — | 5.24 · 5.57 · 11.04 · 5.59 · 5.63 · 5.33 |
+| Oscuro | Enlace / tarjeta · popover · fila activa (hoy: base v1.1) | 5.13 · **4.24 ✗** · **3.51 ✗** | D9 sobre la base D16: 7.56 · 6.59 · 5.65 |
+| Oscuro | Texto atenuado `#9AA3B2` / fila activa (hoy: base v1.1) | **4.07 ✗** | D10, gris único `#C3CCDA` sobre la base D16: página 11.20 · tarjeta 10.21 · popover 8.90 · fila activa 7.63 |
+| Oscuro | Tinta `#E4ECFA` / página · tarjeta (base D16) | — | 15.27 · 13.92 |
+| Oscuro | Borde de control / página · tarjeta · popover | 4.11 · 3.70 · 3.06 | D16 `#6A83A8`: 4.69 · 4.27 · 3.72 |
+| Oscuro | Etiquetas: Con Gabi · Con asesora · Agendado · Vendido · Cerrado · Advertencia | — | 6.94 · 5.78 · 7.74 · 4.61 · 7.56 · 7.41 |
+
+Límites de esta matriz: usa los hex del código y de las maquetas, no mide píxeles renderizados;
+la verificación final en navegador (axe) se hace al aplicar.
+
+## Qué reemplaza esta revisión
+
+| Sección antigua | Qué pasa con ella |
+|---|---|
+| Capítulo 3 · Border radius | Valores `md` y `lg` reemplazados por D5. |
+| Capítulo 3 · Sombras | Tarjetas en reposo sin sombra (D1). Las sombras de nivel 2 a 4 siguen para elementos flotantes. |
+| Capítulo 3 · Accesibilidad | «11 px sin excepción» reemplazado por D13 y «área de toque» por D15. |
+| Capítulo 3 · Densidad de información | Complementada por D14 (selector por usuario). |
+| Capítulo 4 · Contraste, Estados, Fondos, Dark Mode | Los valores v1.1 de esas tablas son históricos; vale la matriz de arriba y D16 para los fondos oscuros. La promesa «ninguna combinación baja de 4.5:1» se cumple con D9–D11. |
+| Capítulo 5 · Familia y escala | Ver D12 y D13. |
+
+## Dependencias
+
+Al aplicar esta revisión deben alinearse los documentos derivados, que solo especializan este
+contrato: `MAIEK_AI_COMPONENT_SYSTEM.md` (Button, Badge/Tag, Avatar, Tabs, Sidebar, Card) y
+`MAIEK_AI_PRODUCT_PATTERNS.md` (Shell y navegación). No se tocan hasta que el dueño apruebe la
+aplicación.
 
 ---
 
@@ -308,6 +415,10 @@ permite que la única acción importante de la pantalla se note sin competencia.
 Nunca radios intermedios fuera de esta escala, y nunca radio en un solo lado sin justificar
 por qué.
 
+> **v1.3 (D5):** `radius-md` pasa a 8 px y `radius-lg` a 12 px; las etiquetas son
+> rectangulares (`radius-sm`) y `radius-full` queda para avatares, interruptores, contadores y
+> acciones rápidas. Ver «Revisión v1.3».
+
 ## Elevaciones
 
 | Nivel | Nombre | Uso |
@@ -364,6 +475,10 @@ Contraste mínimo AA (4.5:1 texto de cuerpo, 3:1 texto grande y elementos de UI)
 modos. Foco de teclado siempre visible con anillo de 2px en el color primario del modo activo.
 Ningún estado se comunica solo por color — siempre acompañado de ícono, texto o forma. Tamaño
 mínimo de fuente 11px sin excepción. Área mínima de toque: 32px en desktop, 44px en mobile.
+
+> **v1.3 (D13 y D15, aprobadas el 2026-11-12):** mínimo de fuente 12 px (el código ya lo
+> aplica) y área de toque según el tipo de puntero (44 px táctil, 32 px mouse, piso absoluto de
+> 24 px). Reemplazan la frase anterior; ver «Revisión v1.3».
 
 ## Densidad de información
 
@@ -548,6 +663,9 @@ encima del mínimo AA. Texto secundario: neutral `800` `#384152` — contraste 9
 el primario sólido (`#1677FF`): blanco `#FFFFFF` — contraste 4.6:1, cumple AA para texto de
 controles. Ninguna combinación de texto/fondo del sistema baja de 4.5:1 en texto de cuerpo.
 
+> **v1.3:** los valores de esta sección son los de v1.1 y la afirmación anterior no se cumplía
+> con la paleta v1.2 (ver la matriz verificada en «Revisión v1.3»). Vale la matriz.
+
 ## Dark Mode
 
 El modo oscuro no es el modo claro invertido — es su propio sistema de superficies, construido
@@ -610,6 +728,10 @@ Fallback del sistema en ambos roles: `-apple-system, "Segoe UI", Arial, sans-ser
 tercera familia en ninguna pantalla del producto, y nunca Poppins en párrafos largos o tablas
 densas (ver Buenas prácticas y Errores comunes más abajo).
 
+> **v1.3 (D12, aprobada el 2026-11-12):** el código aplica, desde el 2026-10-31, `"Segoe UI Variable Text"`,
+> `"Segoe UI"` e Inter, en ese orden. Se documenta en «Revisión v1.3»; Poppins sigue solo en la
+> marca.
+
 ## Escala tipográfica
 
 | Token | Tamaño | Peso | Interlineado | Uso |
@@ -625,6 +747,9 @@ densas (ver Buenas prácticas y Errores comunes más abajo).
 | `text-title-lg` | 28px | 600 | 1.2 | encabezados principales |
 | `text-display` | 36px | 700 | 1.15 | momentos hero, KPIs grandes |
 | `text-display-lg` | 48px | 700 | 1.1 | login, onboarding |
+
+> **v1.3 (D13, aprobada el 2026-11-12):** `text-caption` es de 12 px en el código desde que 11 px resultó
+> ilegible en móvil. Frases que se leen: 13 px mínimo; 12 px solo para metadatos sueltos.
 
 ## Pesos
 
