@@ -1,19 +1,24 @@
 # Maiek AI — Design Language (MDL)
 
-**Versión 1.1 · Official Design Standard**
+**Versión 1.2 · Official Design Standard**
 
 | | |
 |---|---|
 | Documento | Maiek Design Language (MDL) |
 | Proyecto | Maiek AI |
-| Versión | 1.1 |
+| Versión | 1.2 |
 | Estado | **Approved** |
 | Fecha de creación | 2026-07-26 |
 | Autor | Claude, a pedido de Jesús Millones |
-| Última actualización | 2026-07-26 |
+| Última actualización | 2026-09-14 |
 
 > Depende de [`MAIEK_AI_FRAMEWORK.md`](MAIEK_AI_FRAMEWORK.md) y
 > [`MAIEK_AI_PLATFORM_ARCHITECTURE.md`](MAIEK_AI_PLATFORM_ARCHITECTURE.md).
+>
+> Se relaciona con [`adr/0003-identidad-marca-unica-plataforma.md`](adr/0003-identidad-marca-unica-plataforma.md):
+> ese ADR fija que los colores de marca de Maiek son "los tokens de MDL ya definidos", sin
+> variación por tenant. La revisión v1.2 de este documento **actualiza cuáles son esos
+> tokens** — no crea una excepción a esa decisión ni la reabre.
 
 ## Control de versiones
 
@@ -21,6 +26,7 @@
 |---|---|---|---|
 | 1.0 | 2026-07-26 | Claude | Primera versión — Capítulos 0 a 7 (Filosofía, Personalidad, Foundations, Color System, Typography System, Iconography System, Motion Language). |
 | 1.1 | 2026-07-26 | Claude | Profesionalización documental (portada, control de versiones, objetivo, alcance, cómo utilizar el documento, glosario, convenciones, referencias, apéndices) + revisión técnica del Typography System. El contenido de los Capítulos 0–7 se mantiene intacto salvo la actualización puntual del Typography System (ver Revisión técnica más abajo). |
+| 1.2 | 2026-09-14 | Claude, a pedido de Jesús Millones | Revisión cromática **"MAIEK Flow Intelligence"** (Capítulo 4 — Color System): nueva paleta principal (Cyan Flow, Azul Primary, Azul Strong, Navy, Dorado Acento) con verificación de contraste WCAG AA, reemplazando los hex de "Colores principales"/"Colores secundarios"/escalas tonales de la v1.1 (que se conservan en el documento marcados como Superseded, por trazabilidad histórica — nunca se borran). La arquitectura de 3 capas (identidad/semántica/superficie) y los roles de token (primario/primario-sólido/secundario/semánticos) NO cambian, solo sus valores hex. Decidido en el marco del Gate UX-03 (auditoría + plan de Conversaciones/CRM-Pipeline/Lead Detail); **la aplicación real de estos valores a `tailwind.config.ts`/`globals.css` de `maiek-frontend` queda fuera de esta revisión documental** — es un paso de implementación posterior, sujeto a su propia aprobación. |
 
 Cualquier modificación futura de fondo debe sumar una fila nueva a esta tabla — este documento
 no se edita en silencio.
@@ -61,10 +67,18 @@ sistema de iconografía y lenguaje de movimiento.
 - No define comportamiento funcional (qué hace un control al activarse, reglas de validación,
   flujos de navegación).
 
-**Estado de aplicación:** guardado solo como referencia. Todavía NO está aplicado al panel de
-Gaso+ — el panel actual sigue usando su paleta propia (`#00A1DE` navbar/primario, `#075E85`
-oscuro, `#3CCBDA` secundario). No aplicar estos valores al CSS real hasta que se confirme
-explícitamente.
+**Estado de aplicación (corregido 2026-09-14 — Gate UX-03B, corrección documental puntual, sin
+cambio de código):** esta nota describía el estado de 2026-07-26, ya desactualizado. El MDL
+(v1.1, valores hex de esa versión) **sí está aplicado**, con rigor, en la Nueva Experiencia
+(`maiek-frontend`, Next.js/Vercel) — tokens de color/tipografía/espaciado/radio/elevación en
+`tailwind.config.ts` y `app/globals.css`, con auditoría de contraste AA documentada en el
+propio código, confirmado por auditoría independiente en la Fase 0 de UX-03. La revisión
+cromática v1.2 de este capítulo (arriba) todavía NO está aplicada a esos archivos — sigue
+pendiente de su propio Gate de implementación, ver la nota de alcance de la sección v1.2.
+
+El panel Legacy de Gaso+ (`agent/dashboard.py`, HTML server-rendered) es un sistema aparte:
+sigue con su paleta propia (`#00A1DE` navbar/primario, `#075E85` oscuro, `#3CCBDA` secundario)
+y no tiene planeada, por ahora, una migración al MDL.
 
 **Nota sobre arquitectura (no parte del documento original):** este documento define lenguaje
 visual, no arquitectura. Multi-tenant, modelo multiempresa e integraciones ya están
@@ -380,15 +394,89 @@ No es una paleta — es un sistema de tres capas: **identidad** (quién es Maiek
 (qué significa cada estado) y **superficie** (dónde vive cada cosa, en cada modo). Las tres
 capas nunca se mezclan entre sí: el azul de marca no se reutiliza para "información", el
 dorado no se usa para "advertencia", y ningún color de superficie carga significado semántico.
+Esta arquitectura de 3 capas no cambia con la revisión v1.2 — solo cambian los valores hex de
+la capa de identidad, documentados abajo.
 
-## Colores principales
+## Revisión v1.2 — MAIEK Flow Intelligence
+
+Paleta principal aprobada el 2026-09-14 en el marco del Gate UX-03, reemplazando los hex de
+"Colores principales"/"Colores secundarios"/escalas tonales de la v1.1 (conservados más abajo,
+marcados **Superseded**, por trazabilidad histórica). Es la **única** paleta principal vigente
+— ver nota de la v1.1 para evitar leer dos "paletas oficiales" activas a la vez.
+
+| Rol | Hex | Nombre | Semántica declarada |
+|---|---|---|---|
+| Interactivo (enlaces, foco, ítem activo) | `#0072FF` | Azul Primary | Conexión · acción |
+| Fondo sólido bajo texto blanco (botones, badges) | `#0057D9` | Azul Strong | Conexión · acción |
+| Superficie oscura / texto de marca | `#102A56` | Navy | Estructura · confianza · solidez |
+| Acento excepcional (isotipo, momentos de valor) | `#D9A441` | Dorado Acento | Valor · sofisticación · momentos clave |
+| Familia "información"/estados de IA | `#00C6FF` | Cyan Flow | Flujo · inteligencia · evolución |
+| Fondo suave de identidad | `#E6F4FF` | Azul Soft | — |
+| Fondo de página | `#F8FAFD` | Surface | Claridad · foco |
+| Texto principal | `#141A26` | — | Claridad · foco |
+| Texto secundario | `#667085` | — | Claridad · foco |
+| Borde | `#E1E5EB` | — | Claridad · foco |
+
+**Por qué Azul Primary y Azul Strong son dos colores, no uno:** mismo problema que ya resolvía
+la v1.1 con `#1677FF` — blanco sobre `#0072FF` mide 4.33:1, por debajo del 4.5:1 que este
+capítulo exige para texto de cuerpo. El sólido bajo texto blanco (botón primario, badge de
+conteo) usa `#0057D9` (6.24:1); el rol interactivo puro (enlace, foco, ítem activo de
+navegación, que nunca lleva texto blanco encima) usa `#0072FF`. Mismo patrón de dos roles que
+ya describía la sección de Contraste más abajo, valores nuevos.
+
+**Por qué Cyan Flow no reemplaza a "Secundario" en todos sus usos:** blanco sobre `#00C6FF`
+mide 2.0:1 — falla AA de lejos como fondo sólido con texto blanco. Cyan solo funciona como
+texto/ícono sobre Navy (8.76:1) o como fondo suave con texto oscuro encima (mismo patrón que
+ya usaba "Secundario" en la v1.1, foreground oscuro, nunca blanco). Su semántica declarada
+("flujo, inteligencia, evolución") lo asigna a la familia **Información**/estados de IA — no a
+un reemplazo genérico de "Secundario" en cualquier contexto.
+
+**Por qué Dorado Acento sigue sin fondo sólido:** blanco sobre `#D9A441` mide 2.25:1 — falla
+AA. Mismo rol que el dorado de la v1.1: texto/acento sobre Navy (6.28:1), nunca fondo de
+botón, navegación, selección, estado comercial, tabla o background general — la restricción
+de uso excepcional del dorado (ver más abajo) no cambia con esta revisión.
+
+**Verificación WCAG AA (2026-09-14, valores exactos, sin redondeo intermedio):**
+
+| Par | Contraste | Resultado |
+|---|---|---|
+| Blanco sobre Azul Primary `#0072FF` | 4.33:1 | Falla AA texto — no usar como fondo sólido con texto blanco |
+| Blanco sobre Azul Strong `#0057D9` | 6.24:1 | Pasa AA |
+| Blanco sobre Navy `#102A56` | 14.1:1 | Pasa AA |
+| Blanco sobre Cyan Flow `#00C6FF` | 2.0:1 | Falla AA — no usar como fondo sólido con texto blanco |
+| Texto oscuro (`#141A26`) sobre Cyan Flow | 8.76:1 | Pasa AA |
+| Dorado Acento `#D9A441` sobre Navy | 6.28:1 | Pasa AA (uso como texto/acento) |
+| Blanco sobre Dorado Acento | 2.25:1 | Falla AA — no usar como fondo sólido con texto blanco |
+| Texto secundario `#667085` sobre Surface `#F8FAFD` | 4.76:1 | Pasa AA (margen ajustado) |
+
+**Mapeo de rol (v1.1 → v1.2), para quien porte esto a tokens de implementación:**
+
+| Rol de token | v1.1 (Superseded) | v1.2 (vigente) |
+|---|---|---|
+| `primary` / interactivo | `#1677FF` (azul 600) | `#0072FF` (Azul Primary) |
+| `primary-solid` / fondo sólido | `#0F56BF` (azul 800) | `#0057D9` (Azul Strong) |
+| Superficie oscura / texto de marca | `#0B1D3A` (navy 900) | `#102A56` (Navy) |
+| Acento de marca | `#C6A66B` (dorado 600) | `#D9A441` (Dorado Acento) |
+| `primary-soft` | `#E9F1FF` | `#E6F4FF` (Azul Soft) |
+| `surface-0` (claro) | `#F2F4F7` | `#F8FAFD` (Surface) |
+| Texto secundario | `#384152` (neutral 800) | `#667085` |
+| Borde | `#E7EAEF` | `#E1E5EB` |
+| `info` / estados de IA | compartía valor con `primary-soft` (`#E9F1FF`) — colisión conocida | familia Cyan Flow, valor propio — resuelve la colisión |
+
+**Nota de alcance:** esta sección formaliza la DECISIÓN y su verificación de contraste. No
+implica que `tailwind.config.ts`/`globals.css` de `maiek-frontend` ya estén actualizados a
+estos valores — esa aplicación es un paso posterior, con su propia aprobación.
+
+---
+
+## Colores principales (v1.1 — Superseded por la revisión v1.2 de arriba)
 
 | Uso | Hex | Nombre |
 |---|---|---|
 | Primario (interactivo) | `#1677FF` | Azul tecnológico |
 | Texto / superficie oscura de marca | `#0B1D3A` | Azul navy |
 
-## Colores secundarios
+## Colores secundarios (v1.1 — Superseded por la revisión v1.2 de arriba)
 
 | Uso | Hex | Nombre |
 |---|---|---|
@@ -398,9 +486,10 @@ dorado no se usa para "advertencia", y ningún color de superficie carga signifi
 
 El dorado es el color menos usado de todo el sistema a propósito — reservado al isotipo y a
 momentos puntuales de reconocimiento de marca (splash, portada de login), nunca en un botón,
-badge o gráfico de datos.
+badge o gráfico de datos. Esta restricción de uso sigue vigente en v1.2 (ver arriba), solo
+cambió el hex.
 
-## Escalas tonales
+## Escalas tonales (v1.1 — Superseded por la revisión v1.2 de arriba)
 
 Cada color de marca se expande en 7 pasos (50 = tinte más claro, 900 = sombra más oscura).
 Valores indicativos, a afinar con herramienta de color en la implementación:
@@ -420,6 +509,11 @@ Valores indicativos, a afinar con herramienta de color en la implementación:
 **Neutral** (fondo, texto secundario, bordes — anclado al matiz navy para no leerse gris
 genérico)
 `0` `#FFFFFF` · `50` `#F2F4F7` · `100` `#E7EAEF` · `200` `#D2D7E0` · `400` `#9AA3B2` · `600` `#626C7E` · `800` `#384152` · `900` `#1B222E`
+
+**Nota:** las escalas tonales completas (7 pasos) de la paleta v1.2 no se redefinieron en esta
+revisión — solo los 8 valores de rol de la tabla de mapeo de arriba. Extender Azul
+Primary/Strong/Cyan Flow/Navy/Dorado Acento a una escala de 7 pasos cada uno queda pendiente
+para cuando se apruebe la aplicación real a tokens de implementación.
 
 ## Estados y alertas
 
