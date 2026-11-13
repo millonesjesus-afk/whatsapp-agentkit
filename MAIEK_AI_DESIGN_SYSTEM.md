@@ -1,12 +1,12 @@
 # Maiek AI — Design Language (MDL)
 
-**Versión 1.8 · Official Design Standard**
+**Versión 1.9 · Official Design Standard**
 
 | | |
 |---|---|
 | Documento | Maiek Design Language (MDL) |
 | Proyecto | Maiek AI |
-| Versión | 1.8 (borrador — decisiones D1 a D24 aprobadas) |
+| Versión | 1.9 (borrador — decisiones D1 a D26 aprobadas) |
 | Estado | **Approved** hasta v1.2; la Revisión v1.3 distingue decisiones «Aprobadas» de «Propuestas» |
 | Fecha de creación | 2026-07-26 |
 | Autor | Claude, a pedido de Jesús Millones |
@@ -33,6 +33,7 @@
 | 1.6 | 2026-11-12 | Claude, a pedido de Jesús Millones | **Estados del lead por valor comercial (D21).** El dueño pidió un código de color que permita identificar el estado de un vistazo en la vista de la asesora. Reemplaza los colores de etapa de D17. Se evaluaron 5 familias de color y 6 códigos de lectura sobre maqueta; se eligió la lógica «valor comercial» con anillo en el avatar y etiqueta. |
 | 1.7 | 2026-11-12 | Claude, a pedido de Jesús Millones | **Filtros con hilo y cola de Inicio de una línea (D22).** El dueño observó que los bordes de los filtros eran muy marcados y que las filas de la cola de Inicio ocupaban mucho espacio. Se compararon 8 bordes y 4 densidades sobre pantallas completas; se eligió el borde 6 y la fila R3. |
 | 1.8 | 2026-11-12 | Claude, a pedido de Jesús Millones | **Requisitos para vender con etiqueta y valor (D23) y el cian se mantiene.** El dueño observó que los requisitos cumplidos mostraban solo el valor y había que adivinar a qué dato correspondían. Se compararon 5 reordenamientos; se eligió «etiqueta y valor» con resumen y avance arriba. Además se confirmó mantener la paleta D21 tal cual (Cliente a futuro = cian) y distinguir la IA por forma. |
+| 1.9 | 2026-11-13 | Claude, a pedido de Jesús Millones | **El lenguaje de Pipeline en todo (D25, D26).** Tras ver la versión en producción, el dueño señaló que el recuadro del asesor era muy oscuro, que el panel Cliente ocupaba demasiado espacio y que Pipeline era lo mejor logrado y debía replicarse. Se aplicó a chat, Cliente, Copiloto, Inicio y Analítica. |
 
 Cualquier modificación futura de fondo debe sumar una fila nueva a esta tabla — este documento
 no se edita en silencio.
@@ -158,6 +159,8 @@ datos). Las secciones antiguas no se borran: llevan una nota «v1.3» que apunta
 | D22 | **Filtros con «hilo y borde al pasar el mouse» y cola de Inicio de una línea** (v1.7, aprobada el 2026-11-12 sobre pantallas completas) | **Borde:** la barra de búsqueda y los filtros de las listas (`aria-label` «Filtrar…» y los campos de búsqueda) llevan en reposo un hilo (#C9CFD9 en claro, #3F5373 en oscuro; 1.4 a 1.6:1) y al apuntar, enfocar o abrir vuelven al borde de control (#7A8498 / #6A83A8, 3:1). El hilo no cumple 3:1 por sí solo: el campo se identifica por su texto, su flecha y su foco. **Los campos de formularios conservan el borde completo.** **Cola de Inicio:** desde `sm` cada fila es de una línea (nombre, motivo truncado con ayuda al pasar el mouse, estado, acción), de ~84 a ~53 px; bajo `sm` conserva las líneas apiladas. |
 | D23 | **Requisitos para vender: etiqueta y valor, con resumen y avance** (v1.8, aprobada el 2026-11-12 sobre 5 reordenamientos) | Cada requisito se muestra como **«etiqueta: valor»** (p. ej. «Gas natural: Sí tiene»), con la fuente («botón», «escrito», «en el chat») debajo en tono tenue; el valor nunca se corta y se parte en líneas. **Arriba:** «Busca: …» con lo ya confirmado de lo que quiere el cliente y una barra de avance. **Orden:** primero lo que no cumple (rojo tenue), luego lo pendiente (ámbar tenue), al final lo cumplido con su check; cada fila lleva ícono y palabra. «Sin costo» del Copiloto va en gris y «Ya fue cliente» en el verde de venta. **El cian se mantiene** como «Cliente a futuro» (D21) y como color de la IA; se distinguen por forma: la IA siempre con tinte suave, ícono ✦ y borde fino; el estado siempre como recuadro sólido con anillo. Si en uso real se confunden, se reabre la paleta. |
 | D24 | **Equipo: roles en tinta de tres pesos y disponibilidad con punto** (v1.8, aprobada el 2026-11-12 sobre maqueta) | Los **roles son identidad, no estado**: no usan los colores de estado del lead. Administrador = tinta sólida; Supervisor = tinta suave (15 %); Asesor = hilo (`border-strong`) con texto de apoyo. La **disponibilidad** va con punto y palabra: punto verde de estado lleno («Disponible») o círculo gris hueco («No disponible»). |
+| D25 | **Mensaje del asesor en tinte azul** (v1.9, aprobada el 2026-11-13 sobre 5 colores) | El mensaje que envía el asesor deja la tinta sólida oscura (D2) y pasa a un **tinte de la familia azul de «Con asesora»** (azul al 10 %, borde al 25 %, texto principal). Así el chat usa las familias de Pipeline: azul = asesor, cian = Gabi (IA), superficie = cliente. |
+| D26 | **Lenguaje Pipeline replicado** (v1.9, aprobada el 2026-11-13) | Lo que hace funcionar a Pipeline: filas de una línea con divisor fino, estado de un vistazo (etiqueta y anillo), superficies sin cajas pesadas ni degradados, color solo en el dato. Aplicado a: **Cliente** (sin la franja de 3 cajas; «Próximo» como etiqueta; avatar redondo con anillo; requisitos de una línea con la fuente en la ayuda), **Copiloto** (sin degradado), **Inicio** (la cola no repite el caso de «Tu siguiente mejor acción»), **Analítica** (tarjetas compactas, variaciones tenues, etiquetas grises, selectores sin sombra). |
 
 ## Decisiones propuestas (pendientes de aprobación)
 
