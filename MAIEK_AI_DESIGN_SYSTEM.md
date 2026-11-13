@@ -6,7 +6,7 @@
 |---|---|
 | Documento | Maiek Design Language (MDL) |
 | Proyecto | Maiek AI |
-| Versión | 1.9 (borrador — decisiones D1 a D26 aprobadas) |
+| Versión | 1.9 (borrador — decisiones D1 a D27 aprobadas) |
 | Estado | **Approved** hasta v1.2; la Revisión v1.3 distingue decisiones «Aprobadas» de «Propuestas» |
 | Fecha de creación | 2026-07-26 |
 | Autor | Claude, a pedido de Jesús Millones |
@@ -161,6 +161,7 @@ datos). Las secciones antiguas no se borran: llevan una nota «v1.3» que apunta
 | D24 | **Equipo: roles en tinta de tres pesos y disponibilidad con punto** (v1.8, aprobada el 2026-11-12 sobre maqueta) | Los **roles son identidad, no estado**: no usan los colores de estado del lead. Administrador = tinta sólida; Supervisor = tinta suave (15 %); Asesor = hilo (`border-strong`) con texto de apoyo. La **disponibilidad** va con punto y palabra: punto verde de estado lleno («Disponible») o círculo gris hueco («No disponible»). |
 | D25 | **Mensaje del asesor en tinte azul** (v1.9, aprobada el 2026-11-13 sobre 5 colores) | El mensaje que envía el asesor deja la tinta sólida oscura (D2) y pasa a un **tinte de la familia azul de «Con asesora»** (azul al 10 %, borde al 25 %, texto principal). Así el chat usa las familias de Pipeline: azul = asesor, cian = Gabi (IA), superficie = cliente. |
 | D26 | **Lenguaje Pipeline replicado** (v1.9, aprobada el 2026-11-13) | Lo que hace funcionar a Pipeline: filas de una línea con divisor fino, estado de un vistazo (etiqueta y anillo), superficies sin cajas pesadas ni degradados, color solo en el dato. Aplicado a: **Cliente** (sin la franja de 3 cajas; «Próximo» como etiqueta; avatar redondo con anillo; requisitos de una línea con la fuente en la ayuda), **Copiloto** (sin degradado), **Inicio** (la cola no repite el caso de «Tu siguiente mejor acción»), **Analítica** (tarjetas compactas, variaciones tenues, etiquetas grises, selectores sin sombra). |
+| D27 | **Afinaciones del lenguaje Pipeline** (v1.9, aprobada el 2026-11-13) | **Catálogo:** descripción y combo en una línea (texto completo en la ayuda); «Con conexión» en tinta suave (variante `dato`), «Sin conexión» en gris. **Gestión:** la etiqueta del resultado solo aparece con un cambio sin guardar («Guardado: …»). **Campañas:** chips con hilo en reposo y selector de orden con el borde de reposo de los filtros (D22). |
 
 ## Decisiones propuestas (pendientes de aprobación)
 
